@@ -207,7 +207,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	}
 	switch d.style {
 	case sessionDir:
-		r.bridge, err = newPiRPCBridge(runCtx, cmd, spec.Prompt, spec.Harness == "omp")
+		r.bridge, err = newPiRPCBridge(runCtx, cmd, spec.Prompt, spec.Session.ID, spec.Harness == "omp")
 	case sessionID:
 		r.bridge, err = newClaudeStreamBridge(runCtx, cmd, spec.Prompt, spec.Session.ID)
 	case sessionThread:

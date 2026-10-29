@@ -33,6 +33,7 @@ type piRPCBridge struct {
 	omp, ended           bool
 	published            bool
 	failure, human       string
+	session              string // the session directory name
 	closed               chan struct{}
 	answer               string
 	pending              map[string]*pendingSteer
@@ -45,13 +46,13 @@ type pendingSteer struct {
 	result chan SteerOutcome
 }
 
-func newPiRPCBridge(ctx context.Context, cmd *exec.Cmd, prompt string, omp bool) (*piRPCBridge, error) {
+func newPiRPCBridge(ctx context.Context, cmd *exec.Cmd, prompt, session string, omp bool) (*piRPCBridge, error) {
 	cmd.Stdin = nil
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
 	}
-	b := &piRPCBridge{ctx: ctx, input: input, ready: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), omp: omp}
+	b := &piRPCBridge{ctx: ctx, input: input, ready: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), omp: omp, session: session}
 	b.writes.Add(1)
 	go func() {
 		defer b.writes.Done()
@@ -130,7 +131,12 @@ func (b *piRPCBridge) endLocked() {
 	}
 }
 
-func (b *piRPCBridge) settled() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.done }
+// settled reports a terminal native outcome; closing the bridge is not one.
+func (b *piRPCBridge) settled() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.published || b.failed
+}
 
 func (b *piRPCBridge) finish() {
 	b.mu.Lock()
@@ -143,7 +149,7 @@ func (b *piRPCBridge) finish() {
 func (b *piRPCBridge) outcome() outcome {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	o := outcome{failure: b.failure, human: b.human}
+	o := outcome{failure: b.failure, human: b.human, session: b.session}
 	if b.published {
 		o.answer = b.answer
 	}

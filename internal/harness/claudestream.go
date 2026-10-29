@@ -118,7 +118,12 @@ func (b *claudeStreamBridge) endLocked() {
 	}
 }
 
-func (b *claudeStreamBridge) settled() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.done }
+// settled reports a terminal native outcome; closing the bridge is not one.
+func (b *claudeStreamBridge) settled() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.published || b.failed
+}
 
 func (b *claudeStreamBridge) finish() {
 	b.mu.Lock()
