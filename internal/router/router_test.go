@@ -405,3 +405,21 @@ func TestFrameSanitizesDisplayName(t *testing.T) {
 		t.Fatalf("frame = %q", got)
 	}
 }
+
+func TestEmployeeRefusedWhenOSUserUnavailable(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root")
+	}
+	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+	r := e.opt.RunAs[core.RoleEmployee]
+	r.User = "root"
+	e.stop()
+	e.opt.RunAs = map[core.Role]core.RunAs{core.RoleOwner: e.opt.RunAs[core.RoleOwner], core.RoleEmployee: r}
+	e.start()
+	e.send(employee, "c1", "hi")
+	out := e.reply()
+	want(t, out, "No harness could take this turn", "not root")
+	if strings.Contains(out.Text, "codex") || strings.Contains(out.Text, "#1") {
+		t.Fatalf("employee turn ran or kept trying: %q", out.Text)
+	}
+}

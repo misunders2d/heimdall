@@ -528,6 +528,11 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 			break
 		}
 		launch, err := harness.Prepare(runAs, memory, harness.Binary(h))
+		var account *harness.AccountError
+		if errors.As(err, &account) {
+			notes = append(notes, err.Error())
+			break // every harness would fail the same way
+		}
 		if err != nil {
 			notes = append(notes, h+": "+err.Error())
 			continue

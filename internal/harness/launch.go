@@ -23,6 +23,16 @@ type Launch struct {
 	Cred *syscall.Credential // nil: Heimdall's own OS user
 }
 
+// AccountError means the run-as account itself is unusable, so every
+// harness would fail the same way.
+type AccountError struct{ msg string }
+
+func (e *AccountError) Error() string { return e.msg }
+
+func accountErr(format string, args ...any) error {
+	return &AccountError{msg: fmt.Sprintf(format, args...)}
+}
+
 // Prepare resolves the OS account a turn runs as and finds the harness
 // binary on that account's PATH.
 //
@@ -34,12 +44,12 @@ type Launch struct {
 func Prepare(r core.RunAs, memory bool, bin string) (Launch, error) {
 	u, err := user.Lookup(r.User)
 	if err != nil {
-		return Launch{}, fmt.Errorf("OS user %q: %w", r.User, err)
+		return Launch{}, accountErr("OS user %q: %v", r.User, err)
 	}
 	uid, err1 := strconv.ParseUint(u.Uid, 10, 32)
 	gid, err2 := strconv.ParseUint(u.Gid, 10, 32)
 	if err1 != nil || err2 != nil {
-		return Launch{}, fmt.Errorf("OS user %q has a non-numeric uid/gid", r.User)
+		return Launch{}, accountErr("OS user %q has a non-numeric uid/gid", r.User)
 	}
 	l := Launch{Home: u.HomeDir}
 	self := os.Getuid()
@@ -77,7 +87,7 @@ func Prepare(r core.RunAs, memory bool, bin string) (Launch, error) {
 			l.Env = append(l.Env, "XDG_RUNTIME_DIR="+dir)
 		}
 	default:
-		return Launch{}, fmt.Errorf("cannot run as OS user %q: Heimdall runs as uid %d, not root; the turn was refused rather than run as another user", r.User, self)
+		return Launch{}, accountErr("cannot run as OS user %q: Heimdall runs as uid %d, not root; the turn was refused rather than run as another user", r.User, self)
 	}
 	// With memory the native setup decides; Heimdall never force-enables it.
 	if !memory {
@@ -88,7 +98,7 @@ func Prepare(r core.RunAs, memory bool, bin string) (Launch, error) {
 		l.Dir = u.HomeDir
 	}
 	if !isDir(l.Dir) {
-		return Launch{}, fmt.Errorf("working directory %q for OS user %q does not exist", l.Dir, r.User)
+		return Launch{}, accountErr("working directory %q for OS user %q does not exist", l.Dir, r.User)
 	}
 	l.Path, err = lookPath(bin, envValue(l.Env, "PATH"))
 	if err != nil {
