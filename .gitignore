@@ -1,0 +1,19 @@
+# build output
+/heimdall
+/dist/
+*.test
+*.out
+
+# runtime state and local configuration (may hold private IDs)
+*.db
+*.db-wal
+*.db-shm
+/data/
+/state/
+heimdall.json
+*.local.json
+*.token
+.env
+
+# private context lives outside the repository
+CONTEXT.md

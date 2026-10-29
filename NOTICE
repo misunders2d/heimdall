@@ -1,0 +1,7 @@
+Heimdall
+Copyright 2026 the Heimdall authors
+
+This product includes software ported from AgentNet
+(https://github.com/misunders2d/agentnet, Apache License 2.0), in particular
+the native harness adapters under internal/harness. The source revision each
+adapter was ported from is recorded in its file header.
