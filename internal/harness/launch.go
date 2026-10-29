@@ -36,8 +36,8 @@ func accountErr(format string, args ...any) error {
 // Prepare resolves the OS account a turn runs as and finds the harness
 // binary on that account's PATH.
 //
-// Same account as Heimdall: Heimdall's environment minus its own HEIMDALL_*
-// variables. Another account: Heimdall must be root; the environment is
+// Same account as Heimdall: Heimdall's environment, home included, minus its
+// own HEIMDALL_* variables. Another account: Heimdall must be root; the environment is
 // rebuilt from that account so nothing of Heimdall's user (home, logins,
 // secrets) reaches it. Otherwise the turn is refused: it never runs as a
 // different user than its role's.
@@ -62,6 +62,9 @@ func Prepare(r core.RunAs, memory bool, bin string) (Launch, error) {
 		}
 		if r.Path != "" {
 			l.Env = setEnv(l.Env, "PATH", r.Path)
+		}
+		if h := envValue(l.Env, "HOME"); filepath.IsAbs(h) {
+			l.Home = h
 		}
 	case self == 0:
 		var groups []uint32
@@ -95,7 +98,7 @@ func Prepare(r core.RunAs, memory bool, bin string) (Launch, error) {
 	}
 	l.Dir = r.Dir
 	if l.Dir == "" {
-		l.Dir = u.HomeDir
+		l.Dir = l.Home
 	}
 	if !isDir(l.Dir) {
 		return Launch{}, accountErr("working directory %q for OS user %q does not exist", l.Dir, r.User)

@@ -91,6 +91,7 @@ func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *e
 		core.RoleEmployee: {User: u.Username, Dir: home, Path: bin},
 	}
 	t.Setenv("MEMENTO_PROCESSING", "")
+	t.Setenv("HOME", home) // native session directories stay inside the test
 	e := &env{t: t, dbPath: filepath.Join(t.TempDir(), "h.db"), opt: Options{
 		Access:      core.Access{Mode: mode, Owners: map[string]bool{owner: true}, Employees: map[string]bool{employee: true}},
 		Order:       order,
