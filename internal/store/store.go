@@ -415,13 +415,13 @@ func (s *Store) Undelivered() (int, error) {
 
 // Interrupted is a turn a restart cut off.
 type Interrupted struct {
-	Turn     int64
-	Conv     core.ConvKey
+	Turn      int64
+	Conv      core.ConvKey
 	Role      core.Role
 	Principal string
 	Harness   string
-	ReplyTo  string
-	Messages int
+	ReplyTo   string
+	Messages  int
 }
 
 // Recover runs once at startup, before any interface: every turn still
