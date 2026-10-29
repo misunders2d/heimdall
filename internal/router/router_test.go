@@ -62,6 +62,7 @@ func (f *fakeIface) Send(_ context.Context, out core.Outbound) error {
 const (
 	owner    = "fake:owner"
 	employee = "fake:employee"
+	coworker = "fake:coworker"
 	stranger = "fake:stranger"
 )
 
@@ -93,7 +94,7 @@ func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *e
 	t.Setenv("MEMENTO_PROCESSING", "")
 	t.Setenv("HOME", home) // native session directories stay inside the test
 	e := &env{t: t, dbPath: filepath.Join(t.TempDir(), "h.db"), opt: Options{
-		Access:      core.Access{Mode: mode, Owners: map[string]bool{owner: true}, Employees: map[string]bool{employee: true}},
+		Access:      core.Access{Mode: mode, Owners: map[string]bool{owner: true}, Employees: map[string]bool{employee: true, coworker: true}},
 		Order:       order,
 		MaxParallel: 4,
 		RunAs:       runAs,
@@ -181,7 +182,7 @@ func (e *env) waitReady(chat string) {
 }
 
 func countReady(e *env, chat string) int {
-	id, _, err := e.st.Session(core.ConvKey{Interface: "fake", Chat: chat}, core.RoleOwner, "omp")
+	id, _, err := e.st.Session(core.ConvKey{Interface: "fake", Chat: chat}, owner, "omp")
 	if err != nil || id == "" {
 		return 0
 	}
@@ -279,12 +280,26 @@ func TestEmployeeNeverSteersOwnerTurnAndSessionsStaySeparate(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	e.send(employee, "c1", "employee asks")
 	e.send(employee, "c1", "!stop")
-	want(t, e.reply(), "Only the owner can stop")
+	want(t, e.reply(), "Only the person who started this turn")
 	e.send(owner, "c1", "FINISH")
 	first := e.reply()
 	want(t, first, "omp#1", "steers=1", "role owner")
 	second := e.reply()
 	want(t, second, "omp#1 resumed=false", "role employee", "employee asks")
+}
+
+func TestEachCallerHasOwnSession(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(employee, "c1", "mine WAIT_STEER")
+	time.Sleep(300 * time.Millisecond)
+	e.send(coworker, "c1", "not yours")
+	e.send(coworker, "c1", "!stop")
+	want(t, e.reply(), "Only the person who started this turn")
+	e.send(employee, "c1", "FINISH")
+	want(t, e.reply(), "omp#1 resumed=false", "steers=1", `verified fake:employee`)
+	want(t, e.reply(), "omp#1 resumed=false", "steers=0", `verified fake:coworker`, "not yours")
+	e.send(employee, "c1", "again")
+	want(t, e.reply(), "omp#2 resumed=true", `verified fake:employee`)
 }
 
 func TestModesControlMemory(t *testing.T) {

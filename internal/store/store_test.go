@@ -35,14 +35,14 @@ func TestInboundDedupeAndPending(t *testing.T) {
 	if _, _, err = s.AddInbound(msg("2")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartTurn(conv, core.RoleOwner, "1", []int64{a.ID}); err != nil {
+	if _, err := s.StartTurn(conv, core.RoleOwner, "x:u", "1", []int64{a.ID}); err != nil {
 		t.Fatal(err)
 	}
 	p, err := s.Pending()
 	if err != nil || len(p) != 1 || p[0].MsgID != "2" {
 		t.Fatalf("pending = %+v, %v", p, err)
 	}
-	if _, err := s.StartTurn(conv, core.RoleOwner, "1", []int64{a.ID}); err == nil {
+	if _, err := s.StartTurn(conv, core.RoleOwner, "x:u", "1", []int64{a.ID}); err == nil {
 		t.Fatal("a running message joined a second turn")
 	}
 }
@@ -51,8 +51,8 @@ func TestRecoverInterruptsRunningTurnsOnce(t *testing.T) {
 	s := open(t)
 	a, _, _ := s.AddInbound(msg("1"))
 	b, _, _ := s.AddInbound(msg("2"))
-	turn, _ := s.StartTurn(conv, core.RoleOwner, "1", []int64{a.ID})
-	if err := s.CommitTurn(turn, conv, core.RoleOwner, "omp", "sess"); err != nil {
+	turn, _ := s.StartTurn(conv, core.RoleOwner, "x:u", "1", []int64{a.ID})
+	if err := s.CommitTurn(turn, conv, "x:u", "omp", "sess"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Steered(turn, b.ID); err != nil {
@@ -69,7 +69,7 @@ func TestRecoverInterruptsRunningTurnsOnce(t *testing.T) {
 	if err != nil || len(cut) != 1 || notices != 1 {
 		t.Fatalf("recover: %v %+v %d", err, cut, notices)
 	}
-	if id, clean, _ := s.Session(conv, core.RoleOwner, "omp"); id != "sess" || clean {
+	if id, clean, _ := s.Session(conv, "x:u", "omp"); id != "sess" || clean {
 		t.Fatalf("session after restart = %q clean=%v, want not resumable", id, clean)
 	}
 	if p, _ := s.Pending(); len(p) != 0 {

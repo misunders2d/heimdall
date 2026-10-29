@@ -260,6 +260,7 @@ type conv struct {
 type turn struct {
 	id         int64
 	role       core.Role
+	who        string // verified caller: the turn runs in their own session
 	candidates []string
 	explicit   bool
 	replyTo    string
@@ -403,13 +404,13 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 		return
 	case cmdStop:
 		c.command(row, "stop")
-		c.reply(row, c.stop(role)+"\n— heimdall")
+		c.reply(row, c.stop(role, row.From.Key())+"\n— heimdall")
 		return
 	}
 	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next, text: cmd.Text}
-	// Steer only a turn of the same role: an employee never steers an owner
-	// turn (and the reverse: the sessions stay separate).
-	if t := c.turn; t != nil && t.done == nil && !it.next && it.harness == "" && it.role == t.role {
+	// Steer only the sender's own turn: sessions are per verified caller, so
+	// nobody steers another person's turn.
+	if t := c.turn; t != nil && t.done == nil && !it.next && it.harness == "" && row.From.Key() == t.who {
 		t.steerQ = append(t.steerQ, it)
 		c.steerNext(ctx, t)
 		return
@@ -417,13 +418,13 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 	c.queue = append(c.queue, it)
 }
 
-func (c *conv) stop(role core.Role) string {
+func (c *conv) stop(role core.Role, who string) string {
 	t := c.turn
 	if t == nil || t.done != nil {
 		return "Nothing is running in this chat."
 	}
-	if role != core.RoleOwner && role != t.role {
-		return "Only the owner can stop the owner's turn."
+	if role != core.RoleOwner && who != t.who {
+		return "Only the person who started this turn, or the owner, can stop it."
 	}
 	t.stopped.Store(true)
 	t.mu.Lock()
@@ -464,7 +465,8 @@ func (c *conv) status() string {
 }
 
 // start begins a turn with the oldest queued message and the following ones
-// of the same role and harness choice. The caller holds a parallelism slot.
+// from the same caller with the same harness choice. The caller holds a
+// parallelism slot.
 func (c *conv) start(ctx context.Context) {
 	if c.turn != nil || len(c.queue) == 0 {
 		<-c.r.sem
@@ -472,7 +474,7 @@ func (c *conv) start(ctx context.Context) {
 	}
 	first := c.queue[0]
 	n := 1
-	for n < len(c.queue) && c.queue[n].role == first.role && c.queue[n].harness == first.harness {
+	for n < len(c.queue) && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
 		n++
 	}
 	batch := append([]item(nil), c.queue[:n]...)
@@ -480,7 +482,8 @@ func (c *conv) start(ctx context.Context) {
 	for i, it := range batch {
 		ids[i] = it.row.ID
 	}
-	id, err := c.r.store.StartTurn(c.key, first.role, first.row.MsgID, ids)
+	who := first.row.From.Key()
+	id, err := c.r.store.StartTurn(c.key, first.role, who, first.row.MsgID, ids)
 	if err != nil {
 		c.r.log.Printf("turn in %s not started: %v", c.key, err)
 		<-c.r.sem
@@ -492,7 +495,7 @@ func (c *conv) start(ctx context.Context) {
 		return
 	}
 	c.queue = c.queue[n:]
-	t := &turn{id: id, role: first.role, replyTo: first.row.MsgID, started: time.Now()}
+	t := &turn{id: id, role: first.role, who: who, replyTo: first.row.MsgID, started: time.Now()}
 	switch sticky, _ := c.r.store.ChatHarness(c.key); {
 	case first.harness != "":
 		t.candidates, t.explicit = []string{first.harness}, true
@@ -539,7 +542,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 			continue
 		}
 		sess := harness.Session{}
-		prev, clean, err := c.r.store.Session(c.key, t.role, h)
+		prev, clean, err := c.r.store.Session(c.key, t.who, h)
 		switch {
 		case err != nil:
 			notes = append(notes, h+": session lookup failed: "+err.Error())
@@ -569,7 +572,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 		}
 		select {
 		case <-run.Ready():
-			if err := c.r.store.CommitTurn(t.id, c.key, t.role, h, run.SessionID()); err != nil {
+			if err := c.r.store.CommitTurn(t.id, c.key, t.who, h, run.SessionID()); err != nil {
 				c.r.log.Printf("turn %d: session binding not recorded: %v", t.id, err)
 			}
 			c.send(ctx, readyEvent{t: t, harness: h})
@@ -683,7 +686,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		text = strings.TrimSpace(res.Answer)
 	}
 	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text + footer}
-	if _, err := c.r.store.EndTurn(t.id, c.key, t.role, e); err != nil {
+	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
 		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
 	}
 	c.r.wake(c.key.Interface)

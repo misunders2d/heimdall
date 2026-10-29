@@ -65,8 +65,9 @@ Commands work the same on every interface:
 !next <msg>        queue as follow-up instead of steering
 ```
 
-Messages sent while a turn runs steer it (same role only); everything else
-queues as a follow-up. Replies end with `— <harness>`.
+Each verified caller has their own native session per chat. A message sent
+while the sender's own turn runs steers it; everything else queues as a
+follow-up. Replies end with `— <harness>`.
 
 ## Try it locally
 

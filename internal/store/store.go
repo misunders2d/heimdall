@@ -78,6 +78,13 @@ CREATE TABLE outbound(
 	state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL, sent_at INTEGER, error TEXT NOT NULL DEFAULT '');
 CREATE INDEX outbound_queue ON outbound(iface, state, next_at);`,
+	// Native sessions belong to the verified caller, not to a role.
+	`DROP TABLE sessions;
+CREATE TABLE sessions(
+	iface TEXT NOT NULL, chat TEXT NOT NULL, thread TEXT NOT NULL, principal TEXT NOT NULL, harness TEXT NOT NULL,
+	native_id TEXT NOT NULL, clean INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+	PRIMARY KEY(iface, chat, thread, principal, harness));
+ALTER TABLE turns ADD COLUMN principal TEXT NOT NULL DEFAULT '';`,
 }
 
 type Store struct{ db *sql.DB }
@@ -191,14 +198,14 @@ func (s *Store) SetInbound(id int64, state, detail string) error {
 
 // StartTurn records a running turn for conv and moves its initial messages
 // from pending to running in one transaction.
-func (s *Store) StartTurn(conv core.ConvKey, role core.Role, replyTo string, items []int64) (int64, error) {
+func (s *Store) StartTurn(conv core.ConvKey, role core.Role, who, replyTo string, items []int64) (int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`INSERT INTO turns(iface,chat,thread,role,reply_to,started_at,state) VALUES(?,?,?,?,?,?,?)`,
-		conv.Interface, conv.Chat, conv.Thread, string(role), replyTo, now(), TurnRunning)
+	res, err := tx.Exec(`INSERT INTO turns(iface,chat,thread,role,principal,reply_to,started_at,state) VALUES(?,?,?,?,?,?,?,?)`,
+		conv.Interface, conv.Chat, conv.Thread, string(role), who, replyTo, now(), TurnRunning)
 	if err != nil {
 		return 0, err
 	}
@@ -220,7 +227,7 @@ func (s *Store) StartTurn(conv core.ConvKey, role core.Role, replyTo string, ite
 
 // CommitTurn records the harness whose turn became ready and marks its
 // native session in progress (not clean) until the turn ends.
-func (s *Store) CommitTurn(turn int64, conv core.ConvKey, role core.Role, harness, session string) error {
+func (s *Store) CommitTurn(turn int64, conv core.ConvKey, who, harness, session string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -229,7 +236,7 @@ func (s *Store) CommitTurn(turn int64, conv core.ConvKey, role core.Role, harnes
 	if _, err := tx.Exec(`UPDATE turns SET harness=? WHERE id=?`, harness, turn); err != nil {
 		return err
 	}
-	if err := saveSession(tx, conv, role, harness, session, false); err != nil {
+	if err := saveSession(tx, conv, who, harness, session, false); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -254,7 +261,7 @@ type TurnEnd struct {
 
 // EndTurn settles a turn, its messages, its session binding and its reply
 // in one transaction.
-func (s *Store) EndTurn(turn int64, conv core.ConvKey, role core.Role, e TurnEnd) (replyID int64, err error) {
+func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (replyID int64, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -267,7 +274,7 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, role core.Role, e TurnEnd
 		return 0, err
 	}
 	if e.Harness != "" {
-		if err = saveSession(tx, conv, role, e.Harness, e.Session, e.Clean && e.Session != ""); err != nil {
+		if err = saveSession(tx, conv, who, e.Harness, e.Session, e.Clean && e.Session != ""); err != nil {
 			return 0, err
 		}
 	}
@@ -279,18 +286,18 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, role core.Role, e TurnEnd
 	return replyID, tx.Commit()
 }
 
-func saveSession(tx *sql.Tx, conv core.ConvKey, role core.Role, harness, id string, clean bool) error {
-	_, err := tx.Exec(`INSERT INTO sessions(iface,chat,thread,role,harness,native_id,clean,updated_at) VALUES(?,?,?,?,?,?,?,?)
-ON CONFLICT(iface,chat,thread,role,harness) DO UPDATE SET native_id=excluded.native_id,clean=excluded.clean,updated_at=excluded.updated_at`,
-		conv.Interface, conv.Chat, conv.Thread, string(role), harness, id, clean, now())
+func saveSession(tx *sql.Tx, conv core.ConvKey, who, harness, id string, clean bool) error {
+	_, err := tx.Exec(`INSERT INTO sessions(iface,chat,thread,principal,harness,native_id,clean,updated_at) VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(iface,chat,thread,principal,harness) DO UPDATE SET native_id=excluded.native_id,clean=excluded.clean,updated_at=excluded.updated_at`,
+		conv.Interface, conv.Chat, conv.Thread, who, harness, id, clean, now())
 	return err
 }
 
-// Session returns the native session bound to (conv, role, harness) and
+// Session returns the native session bound to (conv, caller, harness) and
 // whether its last turn ended cleanly.
-func (s *Store) Session(conv core.ConvKey, role core.Role, harness string) (id string, clean bool, err error) {
-	err = s.db.QueryRow(`SELECT native_id,clean FROM sessions WHERE iface=? AND chat=? AND thread=? AND role=? AND harness=?`,
-		conv.Interface, conv.Chat, conv.Thread, string(role), harness).Scan(&id, &clean)
+func (s *Store) Session(conv core.ConvKey, who, harness string) (id string, clean bool, err error) {
+	err = s.db.QueryRow(`SELECT native_id,clean FROM sessions WHERE iface=? AND chat=? AND thread=? AND principal=? AND harness=?`,
+		conv.Interface, conv.Chat, conv.Thread, who, harness).Scan(&id, &clean)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -410,8 +417,9 @@ func (s *Store) Undelivered() (int, error) {
 type Interrupted struct {
 	Turn     int64
 	Conv     core.ConvKey
-	Role     core.Role
-	Harness  string
+	Role      core.Role
+	Principal string
+	Harness   string
 	ReplyTo  string
 	Messages int
 }
@@ -427,7 +435,7 @@ func (s *Store) Recover(notice func(Interrupted) core.Outbound) ([]Interrupted, 
 		return nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT t.id,t.iface,t.chat,t.thread,t.role,t.harness,t.reply_to,(SELECT count(*) FROM inbound i WHERE i.turn_id=t.id AND i.state IN (?,?)) FROM turns t WHERE t.state=? ORDER BY t.id`, InRunning, InSteered, TurnRunning)
+	rows, err := tx.Query(`SELECT t.id,t.iface,t.chat,t.thread,t.role,t.principal,t.harness,t.reply_to,(SELECT count(*) FROM inbound i WHERE i.turn_id=t.id AND i.state IN (?,?)) FROM turns t WHERE t.state=? ORDER BY t.id`, InRunning, InSteered, TurnRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +443,7 @@ func (s *Store) Recover(notice func(Interrupted) core.Outbound) ([]Interrupted, 
 	for rows.Next() {
 		var t Interrupted
 		var role string
-		if err := rows.Scan(&t.Turn, &t.Conv.Interface, &t.Conv.Chat, &t.Conv.Thread, &role, &t.Harness, &t.ReplyTo, &t.Messages); err != nil {
+		if err := rows.Scan(&t.Turn, &t.Conv.Interface, &t.Conv.Chat, &t.Conv.Thread, &role, &t.Principal, &t.Harness, &t.ReplyTo, &t.Messages); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -454,7 +462,7 @@ func (s *Store) Recover(notice func(Interrupted) core.Outbound) ([]Interrupted, 
 			return nil, err
 		}
 		if t.Harness != "" {
-			if _, err := tx.Exec(`UPDATE sessions SET clean=0 WHERE iface=? AND chat=? AND thread=? AND role=? AND harness=?`, t.Conv.Interface, t.Conv.Chat, t.Conv.Thread, string(t.Role), t.Harness); err != nil {
+			if _, err := tx.Exec(`UPDATE sessions SET clean=0 WHERE iface=? AND chat=? AND thread=? AND principal=? AND harness=?`, t.Conv.Interface, t.Conv.Chat, t.Conv.Thread, t.Principal, t.Harness); err != nil {
 				return nil, err
 			}
 		}

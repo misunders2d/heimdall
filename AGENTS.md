@@ -55,10 +55,12 @@ Its whole job, per message:
   which suppresses Memento's own hooks/extensions. Heimdall never enables
   memory the native setup lacks. Memento MCP tools configured natively for
   the employee user and native transcript storage are outside this switch.
-- **Separate sessions in mixed chats.** Native sessions are kept per
-  (conversation, role, harness). An employee message never steers an owner
-  turn; a mid-turn message steers only a turn of the same role, otherwise it
-  queues as a follow-up.
+- **Sessions per verified caller.** Native sessions are kept per
+  (conversation, verified caller, harness), as the Pi hub does. A harness
+  process serves exactly one caller: a mid-turn message steers only the
+  sender's own running turn, a turn batches only that caller's messages, and
+  anyone else's message queues. Only the turn's caller or an owner can
+  `!stop` it.
 - **Conversations.** Key = interface + chat + thread. Same key: one turn at a
   time. Different keys run in parallel up to `max_parallel`.
 - **Harness choice.** Default order `omp → codex → claude → pi`
