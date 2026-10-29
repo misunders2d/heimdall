@@ -12,7 +12,7 @@
 //	SLEEP          stay busy for 30 seconds
 //	ASK_HUMAN      request native approval/input
 //
-// The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV last="LINE".
+// The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" last="LAST LINE".
 package fakeharness
 
 import (
@@ -117,7 +117,7 @@ func (f *fake) failPost() {
 
 func (f *fake) answer() string {
 	lines := strings.Split(strings.TrimSpace(f.prompt), "\n")
-	return fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s last=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[len(lines)-1])
+	return fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s head=%q last=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[0], lines[len(lines)-1])
 }
 
 // session advances the turn counter stored at path; create says whether

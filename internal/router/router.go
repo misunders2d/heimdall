@@ -688,7 +688,7 @@ func frame(it item) string {
 	if it.row.Origin == core.OriginScheduled {
 		origin = " | scheduled job created by this caller"
 	}
-	return fmt.Sprintf("[Heimdall | from %s | role %s | verified %s | %s%s]\n%s", name, it.role, it.row.From.Key(), it.row.Conv, origin, it.text)
+	return fmt.Sprintf("[Heimdall | from %q | role %s | verified %s | %s%s]\n%s", name, it.role, it.row.From.Key(), it.row.Conv, origin, it.text)
 }
 
 func sanitizeName(s string) string {
