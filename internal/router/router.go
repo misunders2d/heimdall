@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -620,13 +621,24 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 		c.reply(ev.it.row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
 	default:
 		// Not handed over: run it as a follow-up turn.
-		c.queue = append(c.queue, ev.it)
+		c.requeue(ev.it)
 	}
 	if t.done != nil {
 		c.finish(ctx, t)
 		return
 	}
 	c.steerNext(ctx, t)
+}
+
+// requeue returns messages to the follow-up queue in arrival order.
+func (c *conv) requeue(items ...item) {
+	for _, it := range items {
+		i := len(c.queue)
+		for i > 0 && c.queue[i-1].row.ID > it.row.ID {
+			i--
+		}
+		c.queue = slices.Insert(c.queue, i, it)
+	}
 }
 
 // finish settles a turn: its messages, its session binding and its reply in
@@ -637,9 +649,8 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		// Shutdown: leave the turn recorded as running; the next start reports it.
 		return
 	}
-	followups := t.steerQ
+	c.requeue(t.steerQ...)
 	t.steerQ = nil
-	c.queue = append(followups, c.queue...)
 	res := d.res
 	tag := d.harness
 	if tag == "" {

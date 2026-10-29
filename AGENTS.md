@@ -127,8 +127,11 @@ thinking stream and live-session reply registration.
   message text or native output.
 - Keep it lean: standard library plus pure-Go SQLite (static binary,
   `CGO_ENABLED=0`). Add a dependency only when a requirement needs it.
-- Tests: `go vet ./...` and `go test ./...`. Live harness runs are opt-in
-  (`HEIMDALL_LIVE=1`) and use synthetic prompts.
+- Tests: `go vet ./...` and `go test -race ./...` (fake harnesses speak each
+  real protocol). Live harness checks are manual: `heimdall local` with a
+  scratch config and data dir outside the repo, synthetic prompts, and
+  `MEMENTO_PROCESSING=1` in the environment so test turns are not captured as
+  memory. Remove the scratch state afterwards.
 - Commit and push regularly; leave the tree clean. Credit participating
   coding agents in commit trailers.
 - Claims must match evidence: a fake-harness test is not a live harness run.
