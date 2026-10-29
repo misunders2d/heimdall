@@ -7,6 +7,13 @@ unit. It is one of three independent universal-install modules: Heimdall
 routes, AgentNet connects agents, Memento remembers. Anyone installs
 Heimdall, connects their own AgentNet and Memento, and goes.
 
+**Goal:** replace the Pi hub integration (today's always-on assistant) as the
+single interface for every agent installed on the server, so any compatible
+harness provides the current assistant's functionality. Tools on those agents
+are gated per user, so the core requirement is conveying the
+interface-verified caller identity to each harness process reliably, in the
+form those tools read, never only as prompt text.
+
 Its whole job, per message:
 
 1. receive it from an interface;
