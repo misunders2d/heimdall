@@ -8,5 +8,6 @@
     "owner": {"user": "root", "dir": "/root"},
     "employee": {"user": "heimdall-employee"}
   },
-  "telegram": {"bot_username": "example_heimdall_bot"}
+  "telegram": {"bot_username": "example_heimdall_bot"},
+  "prompt_guard": {"log_max_bytes": 1048576}
 }

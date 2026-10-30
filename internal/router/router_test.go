@@ -136,12 +136,13 @@ type env struct {
 	opt     Options
 	seq     atomic.Int64 // message IDs stay unique across restarts
 	uploads string       // the fake interface's upload directory
+	guard   string       // the prompt-injection log
 }
 
 func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *env {
 	t.Helper()
 	bin, state := fakeharness.Install(t, installed...)
-	e := &env{t: t, bin: bin, state: state, dbPath: filepath.Join(t.TempDir(), "h.db"), uploads: t.TempDir()}
+	e := &env{t: t, bin: bin, state: state, dbPath: filepath.Join(t.TempDir(), "h.db"), uploads: t.TempDir(), guard: filepath.Join(t.TempDir(), "prompt-guard.log")}
 	u, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +158,7 @@ func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *e
 		Accounts:    accounts,
 		Log:         log.New(io.Discard, "", 0),
 		OutboxDir:   filepath.Join(t.TempDir(), "outbox"),
+		GuardLog:    e.guard,
 	}
 	e.start()
 	return e

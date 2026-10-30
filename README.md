@@ -44,6 +44,12 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | `max_parallel` | conversations running a turn at once |
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
 | `telegram.bot_username` | the bot the token must belong to; checked with `getMe` before polling |
+| `prompt_guard.log_max_bytes` | optional: size of the prompt-injection log before it is rotated to one `.1` file (default 1 MiB, at least 4096) |
+
+Every admitted message is scored with the hub's prompt-injection patterns.
+A message the hub would have blocked (score 4 or more) runs unchanged; only
+its metadata (score, pattern names, interface, chat, thread, caller and
+message ID, never the text) is logged to `<data_dir>/prompt-guard.log`.
 
 Every other caller the interface verified is non-root: any Telegram user who
 is not an owner, any member of the bot's own Slack workspace whose email

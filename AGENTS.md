@@ -84,11 +84,13 @@ Its whole job, per message:
   which suppresses Memento's own hooks/extensions. Heimdall never enables
   memory the native setup lacks. Memento MCP tools configured natively for
   the employee user and native transcript storage are outside this switch.
-- **Prompt-injection scoring is log only** (owner, 2026-10-30; not built
-  yet). The hub's scoring of every admitted message, on every interface,
-  never blocks or alters a message. It logs the score, pattern names,
-  conversation, caller key and message ID, never the text, to its own file
-  in the data directory, rotated to one `.1` file at a configurable size.
+- **Prompt-injection scoring is log only** (owner, 2026-10-30;
+  `internal/router/guard.go`). The hub's scoring of every admitted message
+  (ambient ones included), on every interface, never blocks or alters a
+  message. A message at the hub's block score (4) is logged as one JSON
+  line: score, pattern names, interface, chat, thread, caller key and
+  message ID, never the text, to `<data_dir>/prompt-guard.log`, rotated to
+  one `.1` file at `prompt_guard.log_max_bytes` (default 1 MiB).
 - **Memento intake is a per-chat opt-in** (owner, 2026-10-30; not built:
   Memento has no intake contract yet, see `docs/HANDOFF.md`). Only chats
   listed in the config, none by default, independent of the memory mode;

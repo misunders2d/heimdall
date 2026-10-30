@@ -172,7 +172,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 | `deleteWebhook` | AGENTS.md: Heimdall never calls `deleteWebhook` or `setWebhook`; a webhook shows as a logged 409. |
 | Channel posts (`channel_post`) | A channel post has no verified user, and identity is per user (fail closed). `allowed_updates` is `["message"]`. |
 | Injection-line removal (`sanitizeUntrustedText`) | Untrusted text is wrapped as the hub wraps it, and Heimdall's own frame markers in it are defanged, but lines are not removed by pattern (see recommendation 1). |
-| Prompt-injection guard's block, Memento Telegram intake | Decided by the owner: see "Decisions" below. |
+| Prompt-injection guard's block, Memento Telegram intake | Decided by the owner: see "Decisions" below (the guard logs, never blocks). |
 
 ### Improved over the hub
 
@@ -202,7 +202,11 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
    interface gets it. Never block, never alter the message. Log score,
    pattern names, conversation, caller key and message ID, never text, to a
    dedicated file in the data directory, rotated to one `.1` at a
-   configurable cap (small default, about 1 MiB). Not built yet.
+   configurable cap (small default, about 1 MiB). Built:
+   `internal/router/guard.go`, `<data_dir>/prompt-guard.log`, config
+   `prompt_guard.log_max_bytes` (default 1 MiB). Scored as the hub does: the
+   message's text (else caption), ambient messages included, logged at the
+   hub's block score 4; JavaScript's Unicode `\s` is kept.
 2. **Memento intake: per chat, off by default.** A config list of enabled
    conversations, empty by default, independent of the memory mode; for
    those chats every admitted message (addressed and ambient) is written to

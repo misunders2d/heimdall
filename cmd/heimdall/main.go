@@ -103,12 +103,16 @@ func run(args []string) error {
 	defer st.Close()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox")}, st, tg)
+	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, tg)
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")
 	return err
 }
+
+// guardLog is the prompt-injection log: metadata of flagged messages, never
+// their text.
+func guardLog(cfg *config.Config) string { return filepath.Join(cfg.DataDir, "prompt-guard.log") }
 
 func runLocal(args []string) error {
 	fs := flag.NewFlagSet("local", flag.ExitOnError)
@@ -127,7 +131,7 @@ func runLocal(args []string) error {
 	defer cancel()
 	l := local.New(os.Stdin, os.Stdout, *as, *chat)
 	logger := log.New(os.Stderr, "heimdall: ", log.LstdFlags)
-	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger}, st, l)
+	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, l)
 	go func() {
 		select {
 		case <-l.EOF():

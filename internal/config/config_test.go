@@ -64,6 +64,9 @@ func TestParseRejects(t *testing.T) {
 		"telegram no bot":     `{` + base + `,"owners":["t:1"],"telegram":{}}`,
 		"telegram bad bot":    `{` + base + `,"owners":["t:1"],"telegram":{"bot_username":"my bot"}}`,
 		"telegram token":      `{` + base + `,"owners":["t:1"],"telegram":{"bot_username":"a_bot","token":"x"}}`,
+		"guard cap tiny":      `{` + base + `,"owners":["t:1"],"prompt_guard":{"log_max_bytes":1}}`,
+		"guard cap negative":  `{` + base + `,"owners":["t:1"],"prompt_guard":{"log_max_bytes":-5}}`,
+		"guard unknown key":   `{` + base + `,"owners":["t:1"],"prompt_guard":{"block":true}}`,
 	} {
 		if _, err := Parse([]byte(doc)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -82,5 +85,22 @@ func TestTelegramBlock(t *testing.T) {
 	}
 	if c, err = Parse([]byte(`{` + base + `}`)); err != nil || c.Telegram != nil {
 		t.Fatalf("no telegram block: %+v, %v", c, err)
+	}
+}
+
+func TestPromptGuardBlock(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"corporate","owners":["telegram:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
+	for doc, want := range map[string]int64{
+		`{` + base + `}`:                                        0,
+		`{` + base + `,"prompt_guard":{}}`:                      0,
+		`{` + base + `,"prompt_guard":{"log_max_bytes":65536}}`: 65536,
+	} {
+		c, err := Parse([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := c.GuardLogMax(); got != want {
+			t.Errorf("%s: cap %d, want %d", doc, got, want)
+		}
 	}
 }

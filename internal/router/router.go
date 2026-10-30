@@ -66,6 +66,8 @@ type Options struct {
 	AlbumWait   time.Duration // how long a grouped message's parts are held after the last; default 1.5s
 	OutboxDir   string        // Heimdall's copies of files to send; "" sends none
 	MaxAttempts int           // delivery attempts of one reply before it is failed; default 50 (about 3.6 h)
+	GuardLog    string        // the prompt-injection log (metadata only); "" logs nothing
+	GuardLogMax int64         // its size before rotation to GuardLog+".1"; default DefaultGuardLogMax
 }
 
 type Router struct {
@@ -74,6 +76,8 @@ type Router struct {
 	ifaces map[string]Interface
 	sem    chan struct{}
 	log    *log.Logger
+	// guardLog records messages the hub's prompt-injection scoring flags.
+	guardLog *guardLog
 
 	mu      sync.Mutex
 	ctx     context.Context
@@ -97,7 +101,13 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.MaxAttempts <= 0 {
 		opt.MaxAttempts = 50
 	}
+	if opt.GuardLogMax <= 0 {
+		opt.GuardLogMax = DefaultGuardLogMax
+	}
 	r := &Router{opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}}
+	if opt.GuardLog != "" {
+		r.guardLog = &guardLog{path: opt.GuardLog, max: opt.GuardLogMax}
+	}
 	for _, i := range ifaces {
 		r.ifaces[i.Name()] = i
 		r.wakeOut[i.Name()] = make(chan struct{}, 1)
@@ -183,6 +193,7 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 	}
 	if in.Ambient {
 		r.keepAmbient(in)
+		r.guard(in)
 		r.release(in)
 		return nil
 	}
@@ -193,6 +204,7 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 		r.release(in)
 		return err
 	}
+	r.guard(in)
 	if g, ok := r.ifaces[in.Conv.Interface].(GroupContext); ok && g.GroupContext() && !in.Private && in.Origin == core.OriginLive && parseCommand(in.Text).Kind == cmdMessage {
 		// Addressed group messages are context for later turns too, as
 		// in the hub; commands are not.

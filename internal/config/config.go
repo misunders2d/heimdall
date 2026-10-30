@@ -29,6 +29,24 @@ type Config struct {
 	MaxParallel  int                      `json:"max_parallel,omitempty"`
 	RunAs        map[core.Role]core.RunAs `json:"run_as"`
 	Telegram     *Telegram                `json:"telegram,omitempty"`
+	PromptGuard  *PromptGuard             `json:"prompt_guard,omitempty"`
+}
+
+// PromptGuard sizes the prompt-injection log, <data_dir>/prompt-guard.log:
+// the hub's scoring of every admitted message, logged as metadata only. It
+// never blocks or alters a message.
+type PromptGuard struct {
+	// LogMaxBytes is the log's size before it is rotated to a single ".1"
+	// file; 0 means the router's default, 1 MiB.
+	LogMaxBytes int64 `json:"log_max_bytes,omitempty"`
+}
+
+// GuardLogMax is the prompt-injection log's cap; 0 for the default.
+func (c *Config) GuardLogMax() int64 {
+	if c.PromptGuard == nil {
+		return 0
+	}
+	return c.PromptGuard.LogMaxBytes
 }
 
 // Telegram configures the Telegram interface. Its bot token is read from
@@ -106,6 +124,9 @@ func (c *Config) fill() error {
 		if !botUsername(c.Telegram.BotUsername) {
 			return errors.New("telegram.bot_username must be the bot's Telegram username (5-32 letters, digits or _)")
 		}
+	}
+	if g := c.PromptGuard; g != nil && g.LogMaxBytes != 0 && g.LogMaxBytes < 4096 {
+		return errors.New("prompt_guard.log_max_bytes must be at least 4096 (bytes)")
 	}
 	if c.MaxParallel == 0 {
 		c.MaxParallel = 4
