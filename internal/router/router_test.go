@@ -648,7 +648,11 @@ func TestInterfaceErrorDuringShutdownIsNotAFailure(t *testing.T) {
 
 func TestCommandReplyIsNeverLost(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
-	db, err := sql.Open("sqlite", e.dbPath)
+	// Only touch the database once the router is serving, past its startup
+	// recovery.
+	e.send(owner, "c0", "!help")
+	want(t, e.reply(), "!use")
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
