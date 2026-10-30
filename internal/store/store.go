@@ -124,19 +124,20 @@ func (x inExtra) apply(in *core.Inbound) {
 
 // outExtra is the outbound extra column: delivery details beyond the text.
 type outExtra struct {
-	Formatted bool `json:"formatted,omitempty"`
+	Formatted bool            `json:"formatted,omitempty"`
+	Reactions []core.Reaction `json:"reactions,omitempty"`
 }
 
 func outExtraOf(out core.Outbound) (string, error) {
-	x := outExtra{Formatted: out.Formatted}
-	if x == (outExtra{}) {
+	x := outExtra{Formatted: out.Formatted, Reactions: out.Reactions}
+	if !x.Formatted && len(x.Reactions) == 0 {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
 	return string(b), err
 }
 
-func (x outExtra) apply(out *core.Outbound) { out.Formatted = x.Formatted }
+func (x outExtra) apply(out *core.Outbound) { out.Formatted, out.Reactions = x.Formatted, x.Reactions }
 
 type Store struct{ db *sql.DB }
 

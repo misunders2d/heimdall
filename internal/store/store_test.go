@@ -261,9 +261,12 @@ func TestOutboundKeepsFormatted(t *testing.T) {
 	if _, err := s.Enqueue(core.Outbound{Conv: conv, Text: "*rich*", Formatted: true}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []bool{false, true} {
+	if _, err := s.Enqueue(core.Outbound{Conv: conv, Reactions: []core.Reaction{{MsgID: "7", Emoji: "👍"}}}); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []bool{false, true, false} {
 		r, ok, err := s.NextOutbound(conv.Interface)
-		if err != nil || !ok || r.Formatted != want {
+		if err != nil || !ok || r.Formatted != want || (i == 2) != (len(r.Reactions) == 1 && r.Reactions[0] == core.Reaction{MsgID: "7", Emoji: "👍"}) {
 			t.Fatalf("next = %+v %v %v, want formatted %v", r, ok, err, want)
 		}
 		if err := s.Sent(r.ID); err != nil {

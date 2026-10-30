@@ -10,6 +10,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,9 +36,22 @@ type fakeIface struct {
 	fails atomic.Int64 // transient Send failures still to report
 	typed atomic.Int64 // Typing calls
 	note  atomic.Value // PromptNote, a string
+	react atomic.Bool  // offer reactions
 }
 
 func (f *fakeIface) Typing(context.Context, core.ConvKey) { f.typed.Add(1) }
+
+func (f *fakeIface) ReactionNote(ref string) string {
+	if !f.react.Load() {
+		return ""
+	}
+	return "[You may react: [react: " + ref + " <emoji>]]"
+}
+
+func (f *fakeIface) Reaction(emoji string) (string, bool) {
+	emoji = strings.ReplaceAll(emoji, "\uFE0F", "")
+	return emoji, emoji == "👍" || emoji == "❤"
+}
 
 func (f *fakeIface) PromptNote() string { s, _ := f.note.Load().(string); return s }
 
@@ -1084,4 +1098,69 @@ func TestCancelDropsHeldAlbumParts(t *testing.T) {
 	e.send(employee, "c1", "cancel")
 	want(t, e.reply(), "Cancelled 1 queued message(s).")
 	e.noReply(2500 * time.Millisecond)
+}
+
+// The harness may react to each message it was given, as with the hub's
+// Telegram reactions: the directive lines leave the answer and become the
+// reply's reactions; a reaction alone is a whole answer.
+func TestReactions(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.f.react.Store(true)
+	id := e.send(owner, "c1", "hi REACT=👍")
+	out := e.reply()
+	want(t, out, "omp#1", "— omp")
+	if strings.Contains(out.Text, "[react:") || !slices.Equal(out.Reactions, []core.Reaction{{MsgID: id, Emoji: "👍"}}) || !out.Formatted {
+		t.Fatalf("reply %+v", out)
+	}
+	inputs := fakeharness.Inputs(e.state)
+	if !regexp.MustCompile(`^\[Heimdall \| [^\n]*\]\n\[You may react: \[react: [a-f0-9-]{36} <emoji>\]\]\nhi REACT=`).MatchString(inputs[0].Text) {
+		t.Fatalf("prompt %q", inputs[0].Text)
+	}
+
+	id = e.send(owner, "c1", "REACT=❤️ REACTONLY")
+	if out := e.reply(); out.Text != "" || !slices.Equal(out.Reactions, []core.Reaction{{MsgID: id, Emoji: "❤"}}) {
+		t.Fatalf("reaction-only reply %+v", out)
+	}
+	e.send(owner, "c1", "REACT=🦀 REACTONLY")
+	if out := e.reply(); out.Text != "Could not confirm reaction delivery.\n\n— omp" || out.Reactions != nil || out.Formatted {
+		t.Fatalf("invalid reaction reply %+v", out)
+	}
+
+	// A steered message has its own ref; an album's parts share one, which
+	// targets the first part.
+	first := e.send(owner, "c1", "work WAIT_STEER")
+	e.waitReady("c1")
+	part := e.album(owner, "c1", "g1", "REACT=👍 FINISH", false)
+	e.album(owner, "c1", "g1", "", false)
+	out = e.reply()
+	if want(t, out, "steers=1"); !slices.Equal(out.Reactions, []core.Reaction{{MsgID: first, Emoji: "👍"}, {MsgID: part, Emoji: "👍"}}) {
+		t.Fatalf("steer reactions %+v", out.Reactions)
+	}
+}
+
+// Without a Reactor interface, or with directives that do not all check
+// out, no reaction is set.
+func TestReactionDirectives(t *testing.T) {
+	refs := map[string]string{"11111111-1111-4111-8111-111111111111": "m1", "22222222-2222-4222-8222-222222222222": "m2"}
+	valid := func(e string) (string, bool) { e = strings.ReplaceAll(e, "\uFE0F", ""); return e, e == "👍" }
+	r1, r2 := "[react: 11111111-1111-4111-8111-111111111111 👍]", "[react: 22222222-2222-4222-8222-222222222222 👍️]"
+	for _, tc := range []struct {
+		in, text string
+		n        int
+	}{
+		{"answer", "answer", 0},
+		{"answer\n\n" + r1 + "\n" + r2, "answer", 2},
+		{"answer\n" + r1 + "\n\n", "answer", 1},
+		{"answer\n" + r1 + "\nmore", "answer\nmore", 0},
+		{"```\n" + r1 + "\n```", "```\n```", 0},
+		{"answer\n" + r1 + "\n" + r1, "answer", 0},
+		{"answer\n[react: 33333333-3333-4333-8333-333333333333 👍]", "answer", 0},
+		{"answer\n[react: 11111111-1111-4111-8111-111111111111 🦀]", "answer", 0},
+		{"answer\n[react: 11111111-1111-4111-8111-111111111111 👍 ]", "answer", 0},
+	} {
+		text, directives, got := reactions(tc.in, refs, valid)
+		if text != tc.text || len(got) != tc.n || directives != (tc.in != "answer") {
+			t.Errorf("%q: text %q, directives %v, reactions %+v", tc.in, text, directives, got)
+		}
+	}
 }

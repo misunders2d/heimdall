@@ -958,3 +958,87 @@ func TestAlbumParts(t *testing.T) {
 		t.Fatalf("accepted %v", ids)
 	}
 }
+
+// Reactions are set after the text with setMessageReaction; a failure is
+// only logged, unless the reaction was the whole answer, which then becomes
+// the hub's notice.
+func TestReactionsAreSetAfterTheText(t *testing.T) {
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	i := newIface(t, api.srv.URL, botName, &logs)
+	var mu sync.Mutex
+	var reactions []map[string]any
+	var order []string
+	api.set("sendMessage", func(w http.ResponseWriter, b map[string]any) bool {
+		mu.Lock()
+		order = append(order, "text:"+b["text"].(string))
+		mu.Unlock()
+		ok(w, map[string]any{"message_id": 9})
+		return true
+	})
+	failOn := float64(0)
+	api.set("setMessageReaction", func(w http.ResponseWriter, b map[string]any) bool {
+		mu.Lock()
+		reactions = append(reactions, b)
+		order = append(order, "react")
+		mu.Unlock()
+		if b["message_id"] == failOn {
+			fail(w, 400, "Bad Request: REACTION_INVALID", 0)
+			return true
+		}
+		ok(w, true)
+		return true
+	})
+	conv := core.ConvKey{Interface: "telegram", Chat: "-1002", Thread: "5"}
+	if err := i.Send(context.Background(), core.Outbound{Conv: conv, ReplyTo: "3", Text: "answer", Reactions: []core.Reaction{{MsgID: "3", Emoji: "👍"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(order, []string{"text:answer", "react"}) || len(reactions) != 1 {
+		t.Fatalf("order %v", order)
+	}
+	r := reactions[0]
+	if r["chat_id"] != float64(-1002) || r["message_id"] != float64(3) || r["message_thread_id"] != nil || fmt.Sprint(r["reaction"]) != "[map[emoji:👍 type:emoji]]" {
+		t.Fatalf("reaction body %v", r)
+	}
+	order, failOn = nil, 4
+	if err := i.Send(context.Background(), core.Outbound{Conv: conv, ReplyTo: "3", Text: "answer", Reactions: []core.Reaction{{MsgID: "4", Emoji: "👍"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(order, []string{"text:answer", "react"}) {
+		t.Fatalf("a failed reaction after text: %v", order)
+	}
+	order = nil
+	if err := i.Send(context.Background(), core.Outbound{Conv: conv, ReplyTo: "4", Reactions: []core.Reaction{{MsgID: "4", Emoji: "👍"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(order, []string{"react", "text:Could not confirm Telegram reaction delivery."}) {
+		t.Fatalf("a failed reaction-only answer: %v", order)
+	}
+	order = nil
+	if err := i.Send(context.Background(), core.Outbound{Conv: conv, Reactions: []core.Reaction{{MsgID: "5", Emoji: "👍"}}}); err != nil || !slices.Equal(order, []string{"react"}) {
+		t.Fatalf("reaction-only answer: %v %v", order, err)
+	}
+	if strings.Contains(logs.String(), "👍") {
+		t.Fatalf("logs carry the reaction: %q", logs.String())
+	}
+}
+
+func TestReactionEmoji(t *testing.T) {
+	i := &Interface{}
+	for in, want := range map[string]string{"👍": "👍", "❤️": "❤", "❤": "❤", "❤️‍🔥": "❤‍🔥", "🤷‍♂️": "🤷‍♂"} {
+		if got, ok := i.Reaction(in); !ok || got != want {
+			t.Errorf("%q: %q %v", in, got, ok)
+		}
+	}
+	for _, in := range []string{"🦀", "ok", "", "👍👍"} {
+		if _, ok := i.Reaction(in); ok {
+			t.Errorf("%q accepted", in)
+		}
+	}
+	if len(reactionEmoji) != 73 {
+		t.Fatalf("%d emoji, the hub has 73", len(reactionEmoji))
+	}
+	if n := i.ReactionNote("REF"); !strings.Contains(n, "Optional final line: [react: REF <emoji>].") {
+		t.Fatalf("note %q", n)
+	}
+}

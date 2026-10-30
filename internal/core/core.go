@@ -229,6 +229,15 @@ type Outbound struct {
 	// Formatted marks a harness's answer, written for the interface's
 	// prompt note (Telegram Markdown). Heimdall's own text is plain.
 	Formatted bool
+	// Reactions are set on messages of the conversation, after Text (which
+	// may then be empty).
+	Reactions []Reaction
+}
+
+// Reaction is an emoji reaction on one interface message.
+type Reaction struct {
+	MsgID string `json:"msg"`
+	Emoji string `json:"emoji"`
 }
 
 // RunAs is the OS account a role's turns run under.

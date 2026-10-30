@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -175,7 +176,35 @@ func (f *fake) answer() string {
 			break
 		}
 	}
-	return fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s head=%q frame=%q last=%q ext=%q home=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[0], frame, lines[len(lines)-1], strings.Join(ext, " "), os.Getenv("HOME"))
+	answer := fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s head=%q frame=%q last=%q ext=%q home=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[0], frame, lines[len(lines)-1], strings.Join(ext, " "), os.Getenv("HOME"))
+	return f.react(answer)
+}
+
+var reactRef = regexp.MustCompile(`\[react: ([a-f0-9-]{36}) <emoji>\]`)
+
+// react ends the answer with a reaction directive for each message ref the
+// harness was given (REACT=<emoji>), or answers with the directives only
+// (REACTONLY).
+func (f *fake) react(answer string) string {
+	all := f.prompt + "\n" + strings.Join(f.steers, "\n")
+	_, rest, ok := strings.Cut(all, "REACT=")
+	if !ok {
+		return answer
+	}
+	emoji, _, _ := strings.Cut(rest, " ")
+	emoji, _, _ = strings.Cut(emoji, "\n")
+	var lines []string
+	seen := map[string]bool{}
+	for _, m := range reactRef.FindAllStringSubmatch(all, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			lines = append(lines, "[react: "+m[1]+" "+emoji+"]")
+		}
+	}
+	if strings.Contains(all, "REACTONLY") {
+		return strings.Join(lines, "\n")
+	}
+	return answer + "\n\n" + strings.Join(lines, "\n")
 }
 
 // session advances the turn counter stored at path; create says whether

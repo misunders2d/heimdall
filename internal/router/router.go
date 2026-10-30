@@ -275,6 +275,7 @@ type item struct {
 	harness string // !<harness>: this message only
 	next    bool   // !next: never steer
 	text    string
+	react   string // the interface's reaction note for this message, if any
 }
 
 // conv serializes one conversation. Only its loop goroutine touches its
@@ -328,10 +329,11 @@ type turn struct {
 	stopped  atomic.Bool
 	mu       sync.Mutex
 	run      *harness.Run
-	typing   chan struct{}    // closed when the turn ends: stops the typing indicator
-	reset    bool             // the caller reset their sessions: keep none from this turn
-	launch   harness.Launch   // how the harness was launched (t.mu)
-	dir      *harness.TurnDir // the turn's directory, once created (t.mu)
+	typing   chan struct{}     // closed when the turn ends: stops the typing indicator
+	reset    bool              // the caller reset their sessions: keep none from this turn
+	launch   harness.Launch    // how the harness was launched (t.mu)
+	dir      *harness.TurnDir  // the turn's directory, once created (t.mu)
+	refs     map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
 }
 
 type readyEvent struct {
@@ -342,6 +344,7 @@ type readyEvent struct {
 type steerEvent struct {
 	t       *turn
 	items   []item // one message, or the parts of one album
+	refs    []string
 	outcome harness.SteerOutcome
 }
 
@@ -732,6 +735,7 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 			parts = append(parts, note)
 		}
 	}
+	c.react(t, batch)
 	for _, it := range batch {
 		blocks, ims := c.files(t, it)
 		parts = append(parts, frame(it, blocks))
@@ -899,7 +903,7 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 	n := 1
 	for g := t.steerQ[0].row.Group; g != "" && n < len(t.steerQ) && t.steerQ[n].row.Group == g; n++ {
 	}
-	items := t.steerQ[:n:n]
+	items := slices.Clone(t.steerQ[:n])
 	t.steerQ = t.steerQ[n:]
 	// Recorded before the hand-over: from here on a crash reports the
 	// message as unconfirmed instead of replaying it.
@@ -923,6 +927,7 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 	go func() {
 		var parts []string
 		var images []harness.Image
+		refs := c.react(t, items)
 		for _, it := range items {
 			blocks, ims := c.files(t, it)
 			parts = append(parts, frame(it, blocks))
@@ -932,7 +937,7 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 			images = images[:maxImages]
 		}
 		outcome := run.Steer(ctx, fmt.Sprintf("heimdall-%d", items[0].row.ID), strings.Join(parts, "\n\n"), images)
-		c.send(ctx, steerEvent{t: t, items: items, outcome: outcome})
+		c.send(ctx, steerEvent{t: t, items: items, refs: refs, outcome: outcome})
 	}()
 }
 
@@ -957,6 +962,7 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 		c.reply(ev.items[0].row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
 	default:
 		// Not handed over: run it as a follow-up turn.
+		c.unreact(t, ev.refs)
 		for _, it := range ev.items {
 			if err := c.r.store.Unsteer(it.row.ID); err != nil {
 				c.r.log.Printf("message %d: steer not undone: %v", it.row.ID, err)
@@ -1026,7 +1032,23 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, true
 		text = strings.TrimSpace(res.Answer)
 	}
-	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: scrub(text + footer), Formatted: e.State == store.TurnDone}
+	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Formatted: e.State == store.TurnDone}
+	if r, ok := c.r.ifaces[c.key.Interface].(Reactor); ok && e.State == store.TurnDone {
+		t.mu.Lock()
+		var directives bool
+		text, directives, e.Reply.Reactions = reactions(text, t.refs, r.Reaction)
+		t.mu.Unlock()
+		switch {
+		case text != "":
+		case len(e.Reply.Reactions) > 0:
+			footer = "" // a reaction-only answer (the hub's)
+		case directives:
+			text, e.Reply.Formatted = "Could not confirm reaction delivery.", false
+		}
+	}
+	if text+footer != "" {
+		e.Reply.Text = scrub(text + footer)
+	}
 	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
 		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
 	}
@@ -1057,7 +1079,11 @@ func frame(it item, files []string) string {
 	if len(files) > 0 {
 		attached = "\n" + strings.Join(files, "\n")
 	}
-	return fmt.Sprintf("[Heimdall | from %q | role %s | verified %s | %s%s]\n%s%s%s", name, it.role, it.row.From.Key(), it.row.Conv, origin, context, it.text, attached)
+	react := ""
+	if it.react != "" {
+		react = it.react + "\n"
+	}
+	return fmt.Sprintf("[Heimdall | from %q | role %s | verified %s | %s%s]\n%s%s%s%s", name, it.role, it.row.From.Key(), it.row.Conv, origin, react, context, it.text, attached)
 }
 
 func sanitizeName(s string) string {
