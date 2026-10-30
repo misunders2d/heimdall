@@ -29,6 +29,14 @@ type Interface interface {
 	Send(ctx context.Context, out core.Outbound) error
 }
 
+// Typer is an optional Interface feature: a "typing…" indicator. The router
+// calls Typing when a turn starts, every Options.TypingEvery while it runs and
+// once more after a steer was accepted. It is best effort and reports nothing;
+// it must return within a few seconds.
+type Typer interface {
+	Typing(ctx context.Context, conv core.ConvKey)
+}
+
 // PermanentError marks a delivery failure that retrying cannot fix.
 type PermanentError struct{ Err error }
 
@@ -46,6 +54,7 @@ type Options struct {
 	MaxParallel int
 	Accounts    Accounts
 	Log         *log.Logger
+	TypingEvery time.Duration // how often Typing repeats while a turn runs; default 4s
 }
 
 type Router struct {
@@ -67,6 +76,9 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	}
 	if opt.Log == nil {
 		opt.Log = log.Default()
+	}
+	if opt.TypingEvery <= 0 {
+		opt.TypingEvery = 4 * time.Second
 	}
 	r := &Router{opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}}
 	for _, i := range ifaces {
@@ -292,6 +304,7 @@ type turn struct {
 	stopped  atomic.Bool
 	mu       sync.Mutex
 	run      *harness.Run
+	typing   chan struct{} // closed when the turn ends: stops the typing indicator
 }
 
 type readyEvent struct {
@@ -522,7 +535,45 @@ func (c *conv) start(ctx context.Context) {
 	}
 	c.turn = t
 	c.r.log.Printf("turn %d in %s: %d message(s), role %s, candidates %s", id, c.key, len(batch), t.role, strings.Join(t.candidates, ","))
+	c.startTyping(ctx, t)
 	go c.runTurn(ctx, t, strings.Join(parts, "\n\n"))
+}
+
+// startTyping shows the interface's typing indicator now and every
+// TypingEvery until the turn ends.
+func (c *conv) startTyping(ctx context.Context, t *turn) {
+	ty, ok := c.r.ifaces[c.key.Interface].(Typer)
+	if !ok {
+		return
+	}
+	t.typing = make(chan struct{})
+	stop := t.typing
+	go func() {
+		tick := time.NewTicker(c.r.opt.TypingEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			ty.Typing(ctx, c.key)
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+}
+
+// typedOnce shows the typing indicator once, without waiting for it.
+func (c *conv) typedOnce(ctx context.Context) {
+	if ty, ok := c.r.ifaces[c.key.Interface].(Typer); ok {
+		go ty.Typing(ctx, c.key)
+	}
 }
 
 func (c *conv) send(ctx context.Context, ev any) {
@@ -659,6 +710,9 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 		if err := c.r.store.Steered(t.id, ev.it.row.ID); err != nil {
 			c.r.log.Printf("message %d: steer not recorded: %v", ev.it.row.ID, err)
 		}
+		if t.done == nil {
+			c.typedOnce(ctx)
+		}
 	case harness.SteerUnknown:
 		_ = c.r.store.SetInbound(ev.it.row.ID, store.InUnconfirmed, "steer acceptance unknown; not replayed")
 		c.reply(ev.it.row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
@@ -694,6 +748,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	if ctx.Err() != nil {
 		// Shutdown: leave the turn recorded as running; the next start reports it.
 		return
+	}
+	if t.typing != nil {
+		close(t.typing)
 	}
 	c.requeue(t.steerQ...)
 	t.steerQ = nil

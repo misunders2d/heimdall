@@ -35,6 +35,7 @@ type fakeAPI struct {
 	offsets []int64 // offset of every getUpdates call
 	calls   []string
 	sent    []map[string]any
+	actions []map[string]any // sendChatAction bodies
 	newUpd  chan struct{}
 	handle  map[string]func(w http.ResponseWriter, body map[string]any) bool // true: handled
 }
@@ -115,6 +116,11 @@ func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.sent = append(f.sent, body)
 		f.mu.Unlock()
 		ok(w, map[string]any{"message_id": 1})
+	case "sendChatAction":
+		f.mu.Lock()
+		f.actions = append(f.actions, body)
+		f.mu.Unlock()
+		ok(w, true)
 	default:
 		fail(w, http.StatusBadRequest, "unexpected method "+method, 0)
 	}
@@ -618,4 +624,26 @@ func TestNewNeedsTokenAndUsername(t *testing.T) {
 	if _, err := New(Options{Token: token}); err == nil {
 		t.Fatal("no username accepted")
 	}
+}
+
+// Typing is sendChatAction "typing" in the conversation's chat and topic;
+// a failure is ignored.
+func TestTypingIsAChatAction(t *testing.T) {
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	i := newIface(t, api.srv.URL, botName, &logs)
+	i.Typing(context.Background(), core.ConvKey{Interface: "telegram", Chat: "-1005", Thread: "7"})
+	i.Typing(context.Background(), core.ConvKey{Interface: "telegram", Chat: "42"})
+	api.mu.Lock()
+	got := append([]map[string]any(nil), api.actions...)
+	api.mu.Unlock()
+	if len(got) != 2 || got[0]["action"] != "typing" || got[0]["chat_id"] != float64(-1005) || got[0]["message_thread_id"] != float64(7) ||
+		got[1]["chat_id"] != float64(42) || got[1]["message_thread_id"] != nil {
+		t.Fatalf("chat actions: %v", got)
+	}
+	api.set("sendChatAction", func(w http.ResponseWriter, _ map[string]any) bool {
+		fail(w, 400, "Bad Request: chat not found", 0)
+		return true
+	})
+	i.Typing(context.Background(), core.ConvKey{Interface: "telegram", Chat: "1"}) // no panic, no error
 }

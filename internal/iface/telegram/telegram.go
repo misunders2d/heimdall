@@ -381,21 +381,13 @@ func (t *Interface) command(text string) string {
 // failure; any other 4xx is permanent. Delivery is at-least-once: if a
 // later part of a split reply fails, the retry sends every part again.
 func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
-	var chatID any = out.Conv.Chat
-	if id, err := strconv.ParseInt(out.Conv.Chat, 10, 64); err == nil {
-		chatID = id
-	}
 	first := true
 	for _, part := range split(out.Text, maxText) {
 		if strings.TrimSpace(part) == "" {
 			continue
 		}
-		body := map[string]any{"chat_id": chatID, "text": part}
-		if out.Conv.Thread != "" {
-			if id, err := strconv.ParseInt(out.Conv.Thread, 10, 64); err == nil {
-				body["message_thread_id"] = id
-			}
-		}
+		body := target(out.Conv)
+		body["text"] = part
 		if first && out.ReplyTo != "" {
 			if id, err := strconv.ParseInt(out.ReplyTo, 10, 64); err == nil {
 				body["reply_parameters"] = map[string]any{"message_id": id, "allow_sending_without_reply": true}
@@ -407,6 +399,30 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 		first = false
 	}
 	return nil
+}
+
+// target is the Bot API chat (and forum topic) a conversation's messages go to.
+func target(conv core.ConvKey) map[string]any {
+	var chatID any = conv.Chat
+	if id, err := strconv.ParseInt(conv.Chat, 10, 64); err == nil {
+		chatID = id
+	}
+	body := map[string]any{"chat_id": chatID}
+	if conv.Thread != "" {
+		if id, err := strconv.ParseInt(conv.Thread, 10, 64); err == nil {
+			body["message_thread_id"] = id
+		}
+	}
+	return body
+}
+
+// Typing shows "typing…" in the conversation for a few seconds
+// (sendChatAction), as the hub does while a turn runs. Failures are ignored:
+// the indicator is cosmetic.
+func (t *Interface) Typing(ctx context.Context, conv core.ConvKey) {
+	body := target(conv)
+	body["action"] = "typing"
+	_ = t.call(ctx, "sendChatAction", body, nil, 10*time.Second)
 }
 
 func (t *Interface) sendError(ctx context.Context, err error) error {

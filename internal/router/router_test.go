@@ -32,7 +32,10 @@ type fakeIface struct {
 	in    chan core.Inbound
 	out   chan core.Outbound
 	fails atomic.Int64 // transient Send failures still to report
+	typed atomic.Int64 // Typing calls
 }
+
+func (f *fakeIface) Typing(context.Context, core.ConvKey) { f.typed.Add(1) }
 
 func newFakeIface() *fakeIface {
 	return &fakeIface{in: make(chan core.Inbound), out: make(chan core.Outbound, 64)}
@@ -722,4 +725,45 @@ func TestCommandReplyIsNeverLost(t *testing.T) {
 	if h, _ := e.st.ChatHarness(conv); h != "codex" {
 		t.Fatalf("harness after restart = %q", h)
 	}
+}
+
+// The interface's typing indicator shows when a turn starts, repeats while
+// it runs, shows again after an accepted steer and stops with the turn.
+func TestTypingWhileTurnRuns(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.stop()
+	e.opt.TypingEvery = time.Hour // only the start and the steer
+	e.start()
+	e.send(owner, "c1", "work WAIT_STEER")
+	eventuallyTrue(t, "typing at turn start", func() bool { return e.f.typed.Load() == 1 })
+	e.waitReady("c1")
+	e.send(owner, "c1", "and FINISH")
+	want(t, e.reply(), "omp#1", "steers=1")
+	if n := e.f.typed.Load(); n != 2 {
+		t.Fatalf("typing calls after start and one steer: %d", n)
+	}
+
+	e.stop()
+	e.opt.TypingEvery = 30 * time.Millisecond
+	e.start()
+	e.send(owner, "c2", "work WAIT_STEER")
+	eventuallyTrue(t, "typing repeats while the turn runs", func() bool { return e.f.typed.Load() >= 4 })
+	e.send(owner, "c2", "FINISH")
+	want(t, e.reply(), "omp#1")
+	time.Sleep(100 * time.Millisecond)
+	n := e.f.typed.Load()
+	time.Sleep(200 * time.Millisecond)
+	if m := e.f.typed.Load(); m != n {
+		t.Fatalf("typing continued after the turn ended: %d → %d", n, m)
+	}
+}
+
+func eventuallyTrue(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
