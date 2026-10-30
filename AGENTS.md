@@ -89,6 +89,14 @@ Its whole job, per message:
   `!stop` it.
 - **Conversations.** Key = interface + chat + thread. Same key: one turn at a
   time. Different keys run in parallel up to `max_parallel`.
+- **Telegram** (as the hub's `isMentioned`). A private chat is always
+  handled. In a group, a message (`!` commands included) is handled only if
+  it mentions `@<bot username>` or replies to one of the bot's messages;
+  everything else is ignored and never stored. `/start` is `!help`. The text,
+  else the caption; attachments are not handled yet. Before polling, `getMe`
+  must report the configured `telegram.bot_username`; Heimdall never calls
+  `deleteWebhook` or `setWebhook`. The token comes only from
+  `HEIMDALL_TELEGRAM_TOKEN` and never appears in errors or logs.
 - **Harness choice.** Default order `omp → codex → claude → pi`
   (configurable). Fall back to the next harness only when the previous one
   failed before its turn started (before any side effect is possible).
@@ -136,14 +144,16 @@ thinking stream and live-session reply registration.
 
 | Path | What |
 |---|---|
-| `cmd/heimdall` | CLI: `local`, `harnesses`, `version` |
+| `cmd/heimdall` | CLI: `run`, `local`, `harnesses`, `version` |
 | `internal/core` | principals, roles, modes, conversation keys, messages |
 | `internal/config` | the one JSON config file |
 | `internal/store` | SQLite: inbound/outbound queues, turns, sessions, chat settings |
 | `internal/harness` | ported native adapters, launch as an OS user |
 | `internal/router` | conversations, `!` commands, steer/follow-up, fallback, delivery |
 | `internal/iface/local` | local stdin/stdout interface for end-to-end tests |
+| `internal/iface/telegram` | Telegram Bot API long-poll interface (`heimdall run`) |
 | `internal/iface/slack` | Slack caller verification (the interface comes in phase 2) |
+| `docs/` | `HANDOFF.md` (state and next steps), `hub-parity.md` (hub variables) |
 
 ## Working rules
 
@@ -159,10 +169,11 @@ thinking stream and live-session reply registration.
 - Keep it lean: standard library plus pure-Go SQLite (static binary,
   `CGO_ENABLED=0`). Add a dependency only when a requirement needs it.
 - Tests: `go vet ./...` and `go test -race ./...` (fake harnesses speak each
-  real protocol). Live harness checks are manual: `heimdall local` with a
-  scratch config and data dir outside the repo, synthetic prompts, and
-  `MEMENTO_PROCESSING=1` in the environment so test turns are not captured as
-  memory. Remove the scratch state afterwards.
+  real protocol). Live harness checks are manual: `heimdall local` (or
+  `heimdall run` with a separate test bot's token, never the production
+  bot's) with a scratch config and data dir outside the repo, synthetic
+  prompts, and `MEMENTO_PROCESSING=1` in the environment so test turns are
+  not captured as memory. Remove the scratch state afterwards.
 - Commit and push regularly; leave the tree clean. Credit participating
   coding agents in commit trailers.
 - Claims must match evidence: a fake-harness test is not a live harness run.
@@ -171,7 +182,8 @@ thinking stream and live-session reply registration.
 
 1. **Now (framework):** core router, identity and modes, persisted queues,
    session store, harness selection and `!` commands, steer/follow-up,
-   delivery, ported adapters, local CLI interface.
-2. Telegram, Slack and AgentNet interfaces.
+   delivery, ported adapters, local CLI interface, and the Telegram
+   interface (end to end on the development machine).
+2. Slack and AgentNet interfaces.
 3. Scheduler (jobs carry and run as their creator).
 4. Production cutover.

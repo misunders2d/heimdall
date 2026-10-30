@@ -18,9 +18,11 @@ agent-to-agent work (use [AgentNet](https://github.com/misunders2d/agentnet)),
 business connectors or tool restrictions (each harness's native configuration).
 
 **Status:** framework. The core router, identity and modes, persisted queues,
-session store, `!` commands, steer/follow-up, delivery, the harness adapters
-and a local terminal interface work. Telegram, Slack, AgentNet interfaces and
-the scheduler come next. Linux only.
+session store, `!` commands, steer/follow-up, delivery, the harness adapters,
+a local terminal interface and the Telegram interface work (Telegram is
+tested against a fake Bot API and checked live for start-up and polling;
+real chats are next). Slack, AgentNet interfaces and the scheduler come
+next. Linux only.
 
 ## Build
 
@@ -41,6 +43,7 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | `harness_order` | default order, `omp, codex, claude, pi` |
 | `max_parallel` | conversations running a turn at once |
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
+| `telegram.bot_username` | the bot the token must belong to; checked with `getMe` before polling |
 
 Every other caller the interface verified is non-root: any Telegram user who
 is not an owner, any member of the bot's own Slack workspace whose email
@@ -58,6 +61,27 @@ yourself; Heimdall never copies credentials.
 
 `heimdall harnesses -config FILE` shows which harnesses each role's OS user
 can launch.
+
+## Run
+
+```sh
+HEIMDALL_TELEGRAM_TOKEN=... heimdall run -config heimdall.json   # logs on stderr
+```
+
+The token comes only from the environment (`HEIMDALL_*` variables never
+reach a harness) and never appears in logs or errors. If the token belongs
+to another bot than `telegram.bot_username`, Heimdall refuses to poll and
+exits. It never touches webhooks: a webhook or a second poller on the same
+token shows as a logged conflict. Use a separate bot for testing; two
+pollers on one token conflict.
+
+On Telegram, a private chat with the bot is always answered. In a group,
+Heimdall answers only messages that mention `@<bot username>` or reply to
+one of its messages, and ignores (never stores) everything else. With
+Telegram's privacy mode on, a group bot receives replies to it and
+`/command@bot`, but plain mentions may not reach it: make it a group admin,
+or turn privacy off in BotFather and add it to the group again. `/start`
+shows the help. Text or a caption is used; attachments are not handled yet.
 
 ## Use
 
