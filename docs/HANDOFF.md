@@ -1,4 +1,4 @@
-# Heimdall handoff (2026-10-30, fourth session)
+# Heimdall handoff (2026-10-30, fifth session)
 
 Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
 records where the work stands, what was decided, and what comes next. It
@@ -6,12 +6,12 @@ supersedes the earlier handoffs of the same day.
 
 ## State
 
-- `main` = the commit that updates this file; code HEAD `5b3c62f` (the
-  steering fix). Pushed, tree clean. No WIP branch.
-- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `5b3c62f`
+- `main` = the commit that updates this file; code HEAD `32bd194` (steers
+  that wait go together). Pushed, tree clean. No WIP branch.
+- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `32bd194`
   (config, core, harness, iface/slack, iface/telegram, router, store). The
-  router package takes about 90 s, harness about 32 s, store and
-  iface/telegram about 15 s each.
+  router package takes about 100 s, harness about 35 s, store and
+  iface/telegram about 13 s each.
 - Store schema: steps 1-9 are shipped (5 `inbound.private`, 6
   `outbound.extra`, 7 `inbound.extra`, 8 `ambient`, 9 `callers`). Steps are
   append-only; add new ones, never edit shipped steps.
@@ -19,11 +19,11 @@ supersedes the earlier handoffs of the same day.
   what is not ported and why, and two open recommendations are in
   [`docs/hub-parity.md`](hub-parity.md) (Telegram). Phase 1 is complete
   except the live Telegram chat check with a human (see "Remaining work" 1).
-- The live dev instance (`8743721`) was stopped at 21:38:04 by systemd when
-  the T3 session that had started it ended: `setsid nohup` keeps a process
-  in its parent's systemd scope. Not restarted yet: the token env file's
-  path is not recorded here (see "Remaining work" 1). A `5b3c62f` binary is
-  in place at the same path.
+- The live dev instance runs as its own systemd user unit `heimdall-live`
+  (started by the orchestrator with `systemd-run --user`, so it outlives
+  T3 sessions), binary `~/.cache/heimdall-live/heimdall`, the test bot.
+  Restart it with `systemctl --user restart heimdall-live` only when its
+  log shows no turn running; never `setsid nohup`.
 
 ## Incident: steering in the owner's live test (2026-10-30 21:13)
 
@@ -59,7 +59,32 @@ starts only after it exited; steers that become follow-ups are logged.
 
 ## Done
 
-### Fourth session (this one): steering fix, owner decisions
+### Fifth session (this one): guard, review of the steering fix, lingering processes
+
+| Commit | What |
+|---|---|
+| `2269945` | Prompt-injection guard, log only (owner decision 1): `internal/router/guard.go`, `<data_dir>/prompt-guard.log`, config `prompt_guard.log_max_bytes` (default 1 MiB). |
+| `d13b7e5` | Review findings 1, 2: a stop during a Claude drain is a stop (was an empty `— claude` and a clean session); a bad late turn (error, denial, approval, non-zero exit) keeps the answers with a note and `Result.Unclean`. |
+| `47135e8` | Review finding 3: Codex keeps a final answer given before an accepted steer (checked live, see below). |
+| `57f0d88` | Steps 3, 4 and review findings 4, 6: ExitGrace then SIGTERM, SIGKILL `TermGrace` (5 s) later, logged with the turn; `!stop` after the answer sends the SIGTERM at once; `max_parallel` counts live processes. |
+| `311b605` | Review finding 5: reactions are parsed per answer (`Result.Answers`). |
+| `6379042` | Review finding 7: an answer before ready never ends a turn early; a fallback waits for the failed candidate's exit. |
+| `32bd194` | Step 2: steers that wait while another is handed over go as one steer, in order, with all their images. |
+| this file | State and decisions. |
+
+Each has a test that fails on the old code (checked by putting the old
+code back). Review tests added: cancel, crash, error result and approval
+during a Claude drain (harness and router); a Codex steer after its final
+answer; router multi-answer coverage for claude and codex.
+
+Live check (no human), real `codex-cli 0.166.0` through its app-server
+directly, an ephemeral thread, a synthetic prompt, `MEMENTO_PROCESSING=1`:
+a `turn/steer` sent right after `final_answer` "ALPHA" was accepted for the
+same turn (`turnId` matched), and Codex completed a second `final_answer`
+"BRAVO" before `turn/completed`. The old code kept only "BRAVO". No rollout
+was written (ephemeral); Codex's own sqlite files were touched as before.
+
+### Fourth session: steering fix, owner decisions
 
 | Commit | What |
 |---|---|
@@ -269,17 +294,29 @@ usernames and tokens live only outside the repository.
   `docs/hub-parity.md` "Decisions"):
   1. Prompt-injection guard: the hub's scoring, log only, router level,
      capped dedicated log file (score, pattern names, conversation, caller
-     key, message ID; never text). Not built yet.
+     key, message ID; never text). Built (`2269945`): every admitted
+     message, ambient included, logged at the hub's block score 4.
   2. Memento intake: per-chat opt-in, empty by default, independent of the
      memory mode, durable before acknowledgement. On hold, see below.
   3. Groups: the Pi Telegram bot is the reference (mention or reply to the
      bot); already ported.
   4. T3 Code is for coding only; Heimdall keeps its own harness adapters.
      The earlier open question is closed.
-- **Turn end** (steering fix): Result is final at the harness's answer;
-  `Run.Exited` follows; `harness.ExitGrace` 60 s, then the process group is
-  stopped; the conversation's next turn waits for the previous process to
-  exit. A `!stop` sent while a turn waits for that takes effect after it.
+- **Turn end** (steering fix, then this session): Result is final at the
+  harness's answer (only once the turn is ready); `Run.Exited` follows.
+  `harness.ExitGrace` 60 s after the answer the process group gets
+  SIGTERM, and SIGKILL `harness.TermGrace` 5 s later; both are logged with
+  the turn. A stop by the turn's caller or an owner after the answer sends
+  the SIGTERM at once (`Run.Stop`) and clears queued messages as any stop.
+  The process holds its `max_parallel` slot until it exits; the
+  conversation's next turn takes a slot only after it exited.
+- **Steers that wait go together**: every steer waiting while another is
+  handed over is one steer (frames in order, images capped at 10 per
+  input as before). An unknown outcome is one notice to the first message.
+- **Claude drain**: a stop is a stop (Cancelled, session not resumed); a
+  late turn that fails keeps the answers given, notes why, and leaves the
+  session unclean (`Result.Unclean`, `Result.Warning`). Exit 0 without
+  answering the pending input stays clean.
 - claude.ai connectors for the employee user are not phase 1.
 
 ### Memento intake: what exists (on hold for the orchestrator)
@@ -306,12 +343,8 @@ usernames and tokens live only outside the repository.
 
 ## Remaining work, in order
 
-0. **Restart the live instance** with `5b3c62f` (binary already at
-   `~/.cache/heimdall-live/heimdall`), same config and log, the test bot's
-   token env file. Use `systemd-run --user` (its own unit) rather than
-   `setsid nohup`, so it outlives the session that starts it.
-0. **Prompt-injection guard** (decision 1), then **Memento intake** once the
-   orchestrator decides how (decision 2).
+0. **Memento intake** once the orchestrator decides among its options
+   (a), (b) and (c) (decision 2). Not started.
 1. **Live Telegram chat check with a human** (orchestrator runs it with the
    owner). Scratch config outside the repo: `data_dir` in a scratch dir,
    `mode` `personal`, `owners` = `telegram:<owner numeric ID>`,
@@ -436,10 +469,18 @@ are in `docs/hub-parity.md`.
     SUCCESS), `REACT=<emoji>` and `REACTONLY` (reaction directives),
     `WRITE=<name>:<content>` (a file in the outbox the prompt names), `SLOW`
     (AGY sleeps 2 s), `STEERREPLY` (pi/omp: a final text for each input
-    before the next steer is taken), `STEERLATE` (claude: the steer runs
-    after the prompt's result), `LINGER=<s>` (the process stays after its
-    answer with `STATE/lingering`; a fake started meanwhile writes
-    `STATE/overlap`). The fake harness also records the images it got.
+    before the next steer is taken), `SLOWACK` (pi/omp: each steer taken
+    1 s after it arrived), `STEERLATE` (claude: the steer runs after the
+    prompt's result; with `LATEHANG`, `LATECRASH`, `LATEFAIL`, `LATEASK`
+    that late turn hangs, exits 4, ends in an error result or asks for
+    approval), `FINALFIRST` (codex: a final answer before steers are
+    taken), `LINGER=<s>` (the process stays after its answer with
+    `STATE/lingering`; a fake started meanwhile writes `STATE/overlap`;
+    SIGTERM writes `STATE/terminated` and exits, unless `NOTERM`). The fake
+    harness also records the images it got.
+  - Router tests keep the router's log in `env.logs` and the
+    prompt-injection log at `env.guard`; `setGrace` shortens ExitGrace and
+    TermGrace for one test.
   - A process started with `setsid nohup` from a T3 session stays in that
     session's systemd scope and is stopped with it.
   - The router's `fakeIface` opts in to each optional interface with an
