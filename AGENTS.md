@@ -188,9 +188,9 @@ thinking stream and live-session reply registration.
   Claude steer written while Claude produced its result runs as Claude's
   next turn in the stream: no more input is sent and that turn is waited
   for. A stop meanwhile stops the turn (never an answer, session not
-  resumed); if that late turn fails, exits non-zero or asks for approval,
-  the answers already given stand with a note and the session is not
-  resumed. Codex folds a steer taken while it works into one final
+  resumed); if that late turn fails, exits non-zero or without its
+  result, or asks for approval, the answers already given stand with a
+  note and the session is not resumed. Codex folds a steer taken while it works into one final
   answer; a steer it accepts after a final answer, before the turn
   completed, gets a final answer of its own (both checked live, 0.166.0),
   and both are kept.

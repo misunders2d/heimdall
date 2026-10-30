@@ -1849,3 +1849,16 @@ func TestFallbackWaitsForTheFailedProcessToExit(t *testing.T) {
 		t.Fatal("the fallback started while the failed harness process still ran")
 	}
 }
+
+// A late Claude turn that took the steer and exited without its result
+// keeps the first answer with a note, and the next turn starts a fresh
+// session (review of d05b748, finding 4: it stayed clean, with no note).
+func TestClaudeLateTurnExitWithoutResult(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
+	e.send(owner, "c1", "work STEERLATE LATEEXIT")
+	e.waitReadyOn("c1", "claude")
+	e.send(owner, "c1", "also CHARLIE")
+	want(t, e.reply(), "claude#1 resumed=false", "— claude (a later message was not answered: Claude exited without answering it)")
+	e.send(owner, "c1", "after")
+	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
+}

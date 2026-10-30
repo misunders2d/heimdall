@@ -26,7 +26,8 @@
 //	STEERLATE      (claude) take the first steer only after the prompt's
 //	               result, as Claude's next turn in the stream; that turn
 //	               then hangs (LATEHANG), exits 4 (LATECRASH), ends with an
-//	               error result (LATEFAIL) or asks for approval (LATEASK)
+//	               error result (LATEFAIL), asks for approval (LATEASK) or
+//	               exits 0 without a result (LATEEXIT)
 //	FINALFIRST     (codex) complete a final answer, "early answer: LAST
 //	               LINE", before taking steers, as Codex can before it
 //	               completes the turn
@@ -486,6 +487,8 @@ func (f *fake) claude() {
 			f.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "session_id": id, "is_error": true, "result": "fake late failure"})
 		case f.has("LATEASK"):
 			f.emit(map[string]any{"type": "control_request", "session_id": id})
+		case f.has("LATEEXIT"):
+			return
 		default:
 			result("late reply: " + lastLine(text))
 		}

@@ -218,12 +218,14 @@ func TestClaudeDrainCancelled(t *testing.T) {
 
 // When the turn Claude runs for a late steer ends badly, the answer it
 // already gave stands, with a note, and the session is not resumed
-// (finding 2): a crash, an error result, an approval request.
+// (finding 2): a crash, an error result, an approval request, an exit
+// without a result (review of d05b748, finding 4: clean, with no note).
 func TestClaudeDrainBadEndKeepsTheAnswer(t *testing.T) {
 	for word, note := range map[string]string{
 		"LATECRASH": "claude exited: exit status 4",
 		"LATEFAIL":  "a later message was not answered: Claude reported an error: fake late failure",
 		"LATEASK":   "a later message was not answered: Claude needs native approval or input",
+		"LATEEXIT":  "a later message was not answered: Claude exited without answering it",
 	} {
 		t.Run(word, func(t *testing.T) {
 			res := lateSteer(t, word).Result()

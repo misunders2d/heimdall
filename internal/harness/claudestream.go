@@ -37,6 +37,7 @@ type claudeStreamBridge struct {
 	answer               string
 	answers              []string // each result's text, in order
 	draining             bool     // a result came with steers pending: no new input, wait for theirs
+	awaiting             int      // steers Claude replayed while draining whose result has not come
 	warning              string   // the late turn ended badly: the answers stand, the session is not resumed
 	atExit               bool     // published when the process exited during a drain
 	pending              map[string]*pendingSteer
@@ -159,8 +160,12 @@ func (b *claudeStreamBridge) finish() {
 	case b.done:
 	case b.drained():
 		// Claude exited without answering the pending input: the answers it
-		// gave stand; the pending steers are reported unknown. A failed exit
-		// makes the session unclean (Run.wait).
+		// gave stand; the pending steers are reported unknown. A steer it
+		// took without answering it, or a failed exit (Run.wait), makes the
+		// session unclean.
+		if b.awaiting > 0 {
+			b.warning = "a later message was not answered: Claude exited without answering it"
+		}
 		b.atExit = true
 		b.publishLocked()
 	default:
@@ -273,6 +278,9 @@ func (b *claudeStreamBridge) event(raw []byte) {
 				p.result <- SteerAccepted
 				b.seen[id] = text
 				delete(b.pending, id)
+				if b.draining {
+					b.awaiting++ // runs as Claude's next turn: its result is due
+				}
 			}
 		}
 	case "result":
@@ -297,6 +305,7 @@ func (b *claudeStreamBridge) event(raw []byte) {
 			e.Result = e.Result[:maxAnswer+1]
 		}
 		b.answers = keepAnswer(b.answers, e.Result)
+		b.awaiting = 0
 		if len(b.pending) > 0 {
 			// Input written while this result was produced runs as Claude's
 			// next turn in this stream. Send nothing more (Claude exits once
