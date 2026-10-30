@@ -14,14 +14,16 @@ type Caller struct {
 	Principal core.Principal
 	Role      core.Role
 	Conv      core.ConvKey
+	Private   bool // the conversation is the caller's one-to-one chat with the bot
 }
 
-// identityPrefixes name variables that claim who the caller is. Inherited
-// ones are dropped from every harness environment before the turn's own are
-// set, so neither Heimdall's environment nor anything a sender wrote can
-// supply them. BIGQUERY_CALLER_PRINCIPAL is an older caller claim that a hub
-// tool still reads.
-var identityPrefixes = []string{"PI_EXTERNAL_", "A2A_CALLER_", "PI_RESTRICTED_", "BIGQUERY_CALLER_PRINCIPAL="}
+// identityPrefixes name variables that claim who the caller is, or what
+// the process is to hub tools. Inherited ones are dropped from every harness
+// environment before the turn's own are set, so neither Heimdall's
+// environment nor anything a sender wrote can supply them.
+// BIGQUERY_CALLER_PRINCIPAL is an older caller claim that a hub tool still
+// reads.
+var identityPrefixes = []string{"PI_EXTERNAL_", "A2A_CALLER_", "PI_RESTRICTED_", "BIGQUERY_CALLER_PRINCIPAL=", "PI_TRANSPORT_CHILD="}
 
 // identityVars maps a caller to the Pi hub's identity variables, in the
 // hub's names and formats (misunderstood-pi-pack ec72c7d,
@@ -33,7 +35,32 @@ var identityPrefixes = []string{"PI_EXTERNAL_", "A2A_CALLER_", "PI_RESTRICTED_",
 // The variables tell tools who is calling. Heimdall adds no tool flags:
 // PI_RESTRICTED_EXTERNAL_USER is 1 for employees and every AgentNet caller,
 // as the hub sets it for callers who are not admins, and 0 for the owner.
+// Every turn also gets, as the hub sets them on every child it spawns:
+// PI_EXTERNAL_MCP_PRIVATE (1 only in the caller's one-to-one chat with the
+// bot; MCP sign-in is refused elsewhere) and PI_TRANSPORT_CHILD=1 (the
+// process is a chat turn, not the transport owner: hub extensions then run
+// no scheduler runtime, chat bridge or poller of their own, and an unset
+// caller is never the hub's trusted local admin).
 func identityVars(c Caller) ([]string, error) {
+	vars, err := callerVars(c)
+	if err != nil {
+		return nil, err
+	}
+	private := "0"
+	if c.Private {
+		private = "1"
+	}
+	vars = append(vars, "PI_EXTERNAL_MCP_PRIVATE="+private, "PI_TRANSPORT_CHILD=1")
+	for _, kv := range vars {
+		if strings.ContainsFunc(kv, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return nil, fmt.Errorf("caller identity %s contains a control character", strings.SplitN(kv, "=", 2)[0])
+		}
+	}
+	return vars, nil
+}
+
+// callerVars is the caller's own identity in the hub's variables.
+func callerVars(c Caller) ([]string, error) {
 	p := c.Principal
 	if p.Platform == "" || p.ID == "" || c.Conv.Chat == "" {
 		return nil, errors.New("turn without a verified caller and chat")
@@ -74,11 +101,6 @@ func identityVars(c Caller) ([]string, error) {
 	}
 	if email != "" {
 		vars = append(vars, "PI_EXTERNAL_USER_EMAIL="+email)
-	}
-	for _, kv := range vars {
-		if strings.ContainsFunc(kv, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-			return nil, fmt.Errorf("caller identity %s contains a control character", strings.SplitN(kv, "=", 2)[0])
-		}
 	}
 	return vars, nil
 }

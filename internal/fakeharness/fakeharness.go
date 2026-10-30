@@ -16,8 +16,8 @@
 //	ASK_HUMAN      request native approval/input
 //
 // The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" last="LAST LINE" ext="IDENTITY" home="HOME"
-// where IDENTITY lists the PI_EXTERNAL_*, A2A_CALLER_* and PI_RESTRICTED_*
-// variables the process received, sorted.
+// where IDENTITY lists the PI_EXTERNAL_*, A2A_CALLER_*, PI_RESTRICTED_* and
+// PI_TRANSPORT_CHILD variables the process received, sorted.
 package fakeharness
 
 import (
@@ -130,7 +130,7 @@ func (f *fake) answer() string {
 	lines := strings.Split(strings.TrimSpace(f.prompt), "\n")
 	var ext []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "PI_EXTERNAL_") || strings.HasPrefix(kv, "A2A_CALLER_") || strings.HasPrefix(kv, "PI_RESTRICTED_") {
+		if strings.HasPrefix(kv, "PI_EXTERNAL_") || strings.HasPrefix(kv, "A2A_CALLER_") || strings.HasPrefix(kv, "PI_RESTRICTED_") || strings.HasPrefix(kv, "PI_TRANSPORT_CHILD=") {
 			ext = append(ext, kv)
 		}
 	}

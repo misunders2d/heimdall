@@ -174,6 +174,10 @@ type Inbound struct {
 	Origin string
 	Text   string
 	At     time.Time
+	// Private is set by the interface for a one-to-one chat between the
+	// caller and the bot (Telegram private chat, Slack DM). Tools allow
+	// private actions such as MCP sign-in only there.
+	Private bool
 }
 
 func (in Inbound) Validate() error {

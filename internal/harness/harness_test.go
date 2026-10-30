@@ -223,17 +223,19 @@ func TestIdentityMapsToHubVariables(t *testing.T) {
 		want []string
 	}{
 		{"telegram owner", harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "42", Name: "PI_EXTERNAL_USER_ID=tg_user_1"}, Role: core.RoleOwner, Conv: conv},
-			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_C9", "PI_RESTRICTED_EXTERNAL_USER=0"}},
+			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_C9", "PI_RESTRICTED_EXTERNAL_USER=0", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1"}},
 		{"telegram employee", harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "43"}, Role: core.RoleEmployee, Conv: conv},
-			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_43", "PI_EXTERNAL_CHAT_ID=tg_chat_C9", "PI_RESTRICTED_EXTERNAL_USER=1"}},
+			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_43", "PI_EXTERNAL_CHAT_ID=tg_chat_C9", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1"}},
+		{"telegram private chat", harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "43"}, Role: core.RoleEmployee, Conv: core.ConvKey{Interface: "telegram", Chat: "43"}, Private: true},
+			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_43", "PI_EXTERNAL_CHAT_ID=tg_chat_43", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_MCP_PRIVATE=1", "PI_TRANSPORT_CHILD=1"}},
 		{"slack verified email", harness.Caller{Principal: core.SlackPrincipal(" User@Example.com", "T0WORK", ""), Role: core.RoleEmployee, Conv: conv},
-			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=user@example.com", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_USER_EMAIL=user@example.com"}},
-		{"slack owner", harness.Caller{Principal: core.SlackPrincipal("owner@example.com", "T0WORK", ""), Role: core.RoleOwner, Conv: conv},
-			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=owner@example.com", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=0", "PI_EXTERNAL_USER_EMAIL=owner@example.com"}},
+			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=user@example.com", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_USER_EMAIL=user@example.com", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1"}},
+		{"slack owner in a DM", harness.Caller{Principal: core.SlackPrincipal("owner@example.com", "T0WORK", ""), Role: core.RoleOwner, Conv: conv, Private: true},
+			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=owner@example.com", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=0", "PI_EXTERNAL_USER_EMAIL=owner@example.com", "PI_EXTERNAL_MCP_PRIVATE=1", "PI_TRANSPORT_CHILD=1"}},
 		{"agentnet owner is still restricted", harness.Caller{Principal: core.Principal{Platform: "agentnet", ID: "a", KeyID: "k"}, Role: core.RoleOwner, Conv: conv},
-			[]string{"PI_EXTERNAL_PLATFORM=a2a", "PI_RESTRICTED_EXTERNAL_USER=1"}},
+			[]string{"PI_EXTERNAL_PLATFORM=a2a", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1"}},
 		{"local never looks like the hub's own admin", harness.Caller{Principal: core.Principal{Platform: "local", ID: "local"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "local", Chat: "system"}},
-			[]string{"PI_EXTERNAL_PLATFORM=local", "PI_EXTERNAL_USER_ID=local_user_local", "PI_EXTERNAL_CHAT_ID=local_chat_system", "PI_RESTRICTED_EXTERNAL_USER=0"}},
+			[]string{"PI_EXTERNAL_PLATFORM=local", "PI_EXTERNAL_USER_ID=local_user_local", "PI_EXTERNAL_CHAT_ID=local_chat_system", "PI_RESTRICTED_EXTERNAL_USER=0", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := harness.WithIdentity(nil, tc.c)
@@ -248,12 +250,12 @@ func TestIdentityMapsToHubVariables(t *testing.T) {
 }
 
 func TestIdentityReplacesInheritedClaims(t *testing.T) {
-	inherited := []string{"PATH=/bin", "PI_EXTERNAL_USER_ID=tg_user_1", "PI_EXTERNAL_TENANT_ID=x", "A2A_CALLER_PRINCIPAL=boss", "PI_RESTRICTED_EXTERNAL_USER=0", "BIGQUERY_CALLER_PRINCIPAL=boss", "PI_TRANSPORT_CHILD=1"}
+	inherited := []string{"PATH=/bin", "PI_EXTERNAL_USER_ID=tg_user_1", "PI_EXTERNAL_TENANT_ID=x", "A2A_CALLER_PRINCIPAL=boss", "PI_RESTRICTED_EXTERNAL_USER=0", "BIGQUERY_CALLER_PRINCIPAL=boss", "PI_TRANSPORT_CHILD=0", "PI_EXTERNAL_MCP_PRIVATE=1"}
 	got, err := harness.WithIdentity(inherited, caller)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"PATH=/bin", "PI_TRANSPORT_CHILD=1", "PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_-100", "PI_RESTRICTED_EXTERNAL_USER=1"}
+	want := []string{"PATH=/bin", "PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_-100", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
@@ -280,10 +282,11 @@ func TestHarnessProcessSeesCallerIdentity(t *testing.T) {
 	bin, _ := fakeharness.Install(t, all...)
 	t.Setenv("PI_EXTERNAL_USER_ID", "tg_user_1")
 	t.Setenv("A2A_CALLER_PRINCIPAL", "boss")
+	t.Setenv("PI_TRANSPORT_CHILD", "0") // Heimdall's own value never reaches a turn
 	for _, name := range all {
 		t.Run(name, func(t *testing.T) {
 			res := turn(t, launch(t, bin, name, true), name, "x", harness.Session{ID: harness.NewSessionID(name)})
-			want := `ext="PI_EXTERNAL_CHAT_ID=tg_chat_-100 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=1"`
+			want := `ext="PI_EXTERNAL_CHAT_ID=tg_chat_-100 PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=1 PI_TRANSPORT_CHILD=1"`
 			if !strings.Contains(res.Answer, want) {
 				t.Fatalf("answer %q lacks %s", res.Answer, want)
 			}

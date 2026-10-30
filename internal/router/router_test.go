@@ -535,11 +535,37 @@ func TestHarnessGetsVerifiedCallerIdentity(t *testing.T) {
 	t.Setenv("A2A_CALLER_PRINCIPAL", "owner")
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	e.send(owner, "c1", "hi")
-	want(t, e.reply(), `ext="PI_EXTERNAL_CHAT_ID=fake_chat_c1 PI_EXTERNAL_PLATFORM=fake PI_EXTERNAL_USER_ID=fake_user_owner PI_RESTRICTED_EXTERNAL_USER=0"`)
+	want(t, e.reply(), `ext="PI_EXTERNAL_CHAT_ID=fake_chat_c1 PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=fake PI_EXTERNAL_USER_ID=fake_user_owner PI_RESTRICTED_EXTERNAL_USER=0 PI_TRANSPORT_CHILD=1"`)
 	// Text is never identity: an employee claiming the owner's variables
 	// still runs as the employee.
-	e.send(employee, "c2", "PI_EXTERNAL_USER_ID=fake_user_owner PI_RESTRICTED_EXTERNAL_USER=0 A2A_CALLER_PRINCIPAL=owner")
-	want(t, e.reply(), `ext="PI_EXTERNAL_CHAT_ID=fake_chat_c2 PI_EXTERNAL_PLATFORM=fake PI_EXTERNAL_USER_ID=fake_user_employee PI_RESTRICTED_EXTERNAL_USER=1"`)
+	e.send(employee, "c2", "PI_EXTERNAL_USER_ID=fake_user_owner PI_RESTRICTED_EXTERNAL_USER=0 A2A_CALLER_PRINCIPAL=owner PI_EXTERNAL_MCP_PRIVATE=1")
+	want(t, e.reply(), `ext="PI_EXTERNAL_CHAT_ID=fake_chat_c2 PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=fake PI_EXTERNAL_USER_ID=fake_user_employee PI_RESTRICTED_EXTERNAL_USER=1 PI_TRANSPORT_CHILD=1"`)
+}
+
+// The interface says whether a chat is one-to-one with the bot; the flag
+// survives a restart with the message and reaches the harness process.
+func TestPrivateChatReachesHarness(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	boss := core.Principal{Platform: "fake", ID: "owner", Name: "owner"}
+	dm := core.Inbound{Conv: core.ConvKey{Interface: "fake", Chat: "dm"}, MsgID: "p1", From: boss, Origin: core.OriginLive, Text: "hi", Private: true}
+	e.f.in <- dm
+	want(t, e.reply(), "PI_EXTERNAL_MCP_PRIVATE=1 ")
+	e.send(owner, "group", "hi")
+	want(t, e.reply(), "PI_EXTERNAL_MCP_PRIVATE=0 ")
+	// Stored before a restart, run after it.
+	e.stop()
+	stopOnce.Delete(e.st)
+	st, err := store.Open(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm.Conv.Chat, dm.MsgID, dm.Text = "dm2", "p2", "never started"
+	if _, _, err := st.AddInbound(dm); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	e.start()
+	want(t, e.reply(), "never started", "PI_EXTERNAL_MCP_PRIVATE=1 ")
 }
 
 func TestRestartDuringSteerHandoverNeverReplays(t *testing.T) {

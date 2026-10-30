@@ -185,7 +185,7 @@ func TestAnswerCommandIsAtomic(t *testing.T) {
 	}
 }
 
-func TestPendingKeepsVerifiedEmailAndKey(t *testing.T) {
+func TestPendingKeepsVerifiedCallerAndPrivacy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "h.db")
 	// A database from before the email/key step keeps its pending messages.
 	all := steps
@@ -206,6 +206,7 @@ func TestPendingKeepsVerifiedEmailAndKey(t *testing.T) {
 	defer s.Close()
 	in := msg("new")
 	in.From = core.Principal{Platform: "slack", ID: "user@example.com", Email: "user@example.com", Team: "T0WORK", KeyID: "key-1"}
+	in.Private = true
 	if _, _, err := s.AddInbound(in); err != nil {
 		t.Fatal(err)
 	}
@@ -213,11 +214,11 @@ func TestPendingKeepsVerifiedEmailAndKey(t *testing.T) {
 	if err != nil || len(p) != 2 {
 		t.Fatalf("pending = %+v, %v", p, err)
 	}
-	if p[0].From.Email != "" || p[0].From.Team != "" || p[0].From.KeyID != "" {
-		t.Fatalf("old message gained identity: %+v", p[0].From)
+	if p[0].From.Email != "" || p[0].From.Team != "" || p[0].From.KeyID != "" || p[0].Private {
+		t.Fatalf("old message gained identity: %+v", p[0])
 	}
-	if p[1].From != in.From {
-		t.Fatalf("from = %+v, want %+v", p[1].From, in.From)
+	if p[1].From != in.From || !p[1].Private {
+		t.Fatalf("pending = %+v, want from %+v, private", p[1], in.From)
 	}
 }
 

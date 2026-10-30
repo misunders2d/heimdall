@@ -276,6 +276,7 @@ type turn struct {
 	role       core.Role
 	from       core.Principal // verified caller, passed to the harness process
 	who        string         // from.Key(): the turn runs in the caller's own session
+	private    bool           // the caller's one-to-one chat with the bot, as its interface said
 	candidates []string
 	explicit   bool
 	replyTo    string
@@ -506,7 +507,7 @@ func (c *conv) start(ctx context.Context) {
 		return
 	}
 	c.queue = c.queue[n:]
-	t := &turn{id: id, role: first.role, from: first.row.From, who: who, replyTo: first.row.MsgID, started: time.Now()}
+	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now()}
 	switch sticky, _ := c.r.store.ChatHarness(c.key); {
 	case first.harness != "":
 		t.candidates, t.explicit = []string{first.harness}, true
@@ -571,7 +572,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 			notes = append(notes, "turn not recordable, so it did not run: "+err.Error())
 			break
 		}
-		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key}
+		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}
 		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Session: sess, Launch: launch, Caller: caller})
 		if err != nil {
 			c.unbind(t, h, prev, clean)
