@@ -84,6 +84,16 @@ Its whole job, per message:
   which suppresses Memento's own hooks/extensions. Heimdall never enables
   memory the native setup lacks. Memento MCP tools configured natively for
   the employee user and native transcript storage are outside this switch.
+- **Prompt-injection scoring is log only** (owner, 2026-10-30; not built
+  yet). The hub's scoring of every admitted message, on every interface,
+  never blocks or alters a message. It logs the score, pattern names,
+  conversation, caller key and message ID, never the text, to its own file
+  in the data directory, rotated to one `.1` file at a configurable size.
+- **Memento intake is a per-chat opt-in** (owner, 2026-10-30; not built:
+  Memento has no intake contract yet, see `docs/HANDOFF.md`). Only chats
+  listed in the config, none by default, independent of the memory mode;
+  each admitted message, addressed or ambient, is written durably before
+  the interface acknowledges it; nothing for any other chat.
 - **Sessions per verified caller.** Native sessions are kept per
   (conversation, verified caller, harness), as the Pi hub does. A harness
   process serves exactly one caller: a mid-turn message steers only the
@@ -120,6 +130,11 @@ Its whole job, per message:
 - **Steer and follow-up.** Mid-turn messages steer by default; `!next`
   queues instead. A steer counts only on the harness's own acknowledgement;
   when acceptance is unknown the sender is told and nothing is replayed.
+  The reply keeps what the harness answered to every input it took (the
+  prompt, then each accepted steer), never only the last answer. A turn
+  ends, and its reply goes out, at the harness's answer, not when its
+  process exits; the conversation's next turn starts only after that
+  process exited (it gets 60 s), so two processes never share a session.
 - **Reliability.** Inbound and outbound queues are persisted (SQLite) before
   an interface acknowledges a message upstream. A turn interrupted by a
   restart is reported to its chat and never re-run; messages that never
@@ -156,7 +171,13 @@ thinking stream and live-session reply registration.
   Claude `--session-id` / `--resume`; Codex app-server `thread/start` /
   `thread/resume`; AGY `--conversation`.
 - Steering: Pi/OMP RPC `steer`, Claude stream-json user input confirmed by
-  its replay, Codex `turn/steer`. AGY has none (follow-up only).
+  its replay, Codex `turn/steer`. AGY has none (follow-up only). OMP answers
+  the prompt and each steer with separate final texts; all are kept. A
+  Claude steer written while Claude produced its result runs as Claude's
+  next turn in the stream: no more input is sent and that turn is waited
+  for. Codex folds steers into one final answer (checked live).
+- Heimdall keeps its own adapters. T3 Code is for coding only, never a
+  route for chat turns (owner, 2026-10-30).
 - The turn's ready signal is the side-effect boundary used for fallback.
 
 ## Code layout

@@ -1,4 +1,4 @@
-# Heimdall handoff (2026-10-30, third session)
+# Heimdall handoff (2026-10-30, fourth session)
 
 Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
 records where the work stands, what was decided, and what comes next. It
@@ -6,11 +6,11 @@ supersedes the earlier handoffs of the same day.
 
 ## State
 
-- `main` = the commit that updates this file; code HEAD `8205b59`, last
-  test change `3ecd26b`. Pushed, tree clean. No WIP branch.
-- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `3ecd26b`
+- `main` = the commit that updates this file; code HEAD `5b3c62f` (the
+  steering fix). Pushed, tree clean. No WIP branch.
+- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `5b3c62f`
   (config, core, harness, iface/slack, iface/telegram, router, store). The
-  router package takes about 146 s, harness about 30 s, store and
+  router package takes about 90 s, harness about 32 s, store and
   iface/telegram about 15 s each.
 - Store schema: steps 1-9 are shipped (5 `inbound.private`, 6
   `outbound.extra`, 7 `inbound.extra`, 8 `ambient`, 9 `callers`). Steps are
@@ -19,12 +19,69 @@ supersedes the earlier handoffs of the same day.
   what is not ported and why, and two open recommendations are in
   [`docs/hub-parity.md`](hub-parity.md) (Telegram). Phase 1 is complete
   except the live Telegram chat check with a human (see "Remaining work" 1).
-- A live dev instance of `8743721` (code as at `3ecd26b`) polls the test
-  bot for that check.
+- The live dev instance (`8743721`) was stopped at 21:38:04 by systemd when
+  the T3 session that had started it ended: `setsid nohup` keeps a process
+  in its parent's systemd scope. Not restarted yet: the token env file's
+  path is not recorded here (see "Remaining work" 1). A `5b3c62f` binary is
+  in place at the same path.
+
+## Incident: steering in the owner's live test (2026-10-30 21:13)
+
+Private chat, owner, omp. "hey there, testing again." started turn 3; a
+photo with a caption came while it seemed to run; then a text and a
+forward. Turn 3 answered only the greeting; turn 4, replying to the photo,
+answered only about the forward.
+
+Evidence (live log, a copy of the live database, OMP's session JSONL):
+
+- OMP answered turn 3 at 19:13:39 UTC and recorded its exit at 19:13:40,
+  but its process ran until 19:14:08. Heimdall ended a turn only at process
+  exit, so the reply (and the typing indicator) waited 28 s. The photo came
+  at 19:13:50, after OMP's agent had ended: the steer returned `queued` (not
+  handed over) and the photo became turn 4. Steering into an agent that
+  already answered is impossible; the hub would have delivered the reply
+  at `agent_end` and run the photo as the next turn too.
+- Turn 4: the photo reached OMP natively (an `image` block) and OMP
+  described it (19:14:17). The text and the forward then steered turn 4
+  (both acknowledged, at 19:14:18 and 19:14:25) and OMP answered each
+  separately. Heimdall kept only OMP's last assistant text, so the image
+  description and the first steer's answer were dropped. The hub's
+  `extractAssistantText` and AgentNet's adapter also keep only the last.
+- Live probes (harness directly, real OMP/Claude/Codex): OMP's process ran
+  6-28 s after its answer; Claude ran a steer written during its result as
+  its next turn, whose answer Heimdall threw away (and told the sender "may
+  or may not have reached"); Codex folded both steers into one answer.
+
+Fix `5b3c62f`: the reply keeps the final text for each input; Claude's
+late steer is waited for; a turn ends at the harness's answer, its process
+gets 60 s (`harness.ExitGrace`) to exit, and the conversation's next turn
+starts only after it exited; steers that become follow-ups are logged.
 
 ## Done
 
-### Third session (this one): Telegram parity with the hub
+### Fourth session (this one): steering fix, owner decisions
+
+| Commit | What |
+|---|---|
+| `0683d92` | Test fix: `TestMessagesBecomeVerifiedInbound` waits for the confirmed offset (failed once under `-race`). |
+| `5b3c62f` | The steering fix above, with tests that fail on the old code (checked by mutation): `TestPhotoThenForwardSteerTheRunningTurn` (the owner's sequence, omp/pi/claude/codex), `TestReplyAtAnswerNextTurnAfterProcessExit`, `TestAnswerKeepsTheReplyToEachInput`, `TestClaudeLateSteerIsAnsweredNotDropped`, `TestAnswerIsFinalBeforeTheProcessExits`, `TestLingeringProcessIsStoppedAfterGrace`. |
+| this file | Incident, decisions, AGENTS.md and `docs/hub-parity.md` updated. |
+
+Live checks of `5b3c62f` through the router with a fake interface, real
+harnesses as the developer's OS user, `MEMENTO_PROCESSING=1`, synthetic
+prompts and a generated red PNG:
+
+- Sequence A (a text turn running `sleep 15`, then photo+caption, then
+  text, then a forward): omp, claude and codex each named the colour and
+  quoted the forward. Claude took the photo and the text; the forward came
+  after Claude's turn had ended and ran as the logged follow-up, batched
+  with the next message.
+- Sequence B (the incident's turn 4: photo+caption as the prompt, then text
+  and forward at once): omp's reply now has all three answers (image, the
+  text, the forward); claude and codex answered both in one.
+- After each, a follow-up message ran as the next turn and answered.
+
+### Third session: Telegram parity with the hub
 
 | Commit | What |
 |---|---|
@@ -208,12 +265,53 @@ usernames and tokens live only outside the repository.
   - Accepted limitation (review finding 6): which group albums addressed
     the bot is kept in memory only. After a restart, the not yet received
     parts of such an album arrive unaddressed and become ambient context.
-- Not decided yet, do not act: whether Heimdall keeps its own adapters or
-  hands turns to T3 (the orchestrator raises this when phase 1 closes);
-  claude.ai connectors for the employee user are not phase 1.
+- **Owner decisions, 2026-10-30** (also in AGENTS.md and
+  `docs/hub-parity.md` "Decisions"):
+  1. Prompt-injection guard: the hub's scoring, log only, router level,
+     capped dedicated log file (score, pattern names, conversation, caller
+     key, message ID; never text). Not built yet.
+  2. Memento intake: per-chat opt-in, empty by default, independent of the
+     memory mode, durable before acknowledgement. On hold, see below.
+  3. Groups: the Pi Telegram bot is the reference (mention or reply to the
+     bot); already ported.
+  4. T3 Code is for coding only; Heimdall keeps its own harness adapters.
+     The earlier open question is closed.
+- **Turn end** (steering fix): Result is final at the harness's answer;
+  `Run.Exited` follows; `harness.ExitGrace` 60 s, then the process group is
+  stopped; the conversation's next turn waits for the previous process to
+  exit. A `!stop` sent while a turn waits for that takes effect after it.
+- claude.ai connectors for the employee user are not phase 1.
+
+### Memento intake: what exists (on hold for the orchestrator)
+
+- Memento `29dc07b` has no intake or Telegram code. Its contract is the
+  bridge (`src/memento/bridge.py`: `read_config` L83, `Spool` L250,
+  `Spool.episode` L398, `commit` L634, `upload` L650), which queues
+  `/episodes` requests in a private SQLite outbox next to the client config
+  and uploads them to the Memento service.
+- The hub's intake is pi-pack code (`ec72c7d`):
+  `extensions/.shared/telegram-memento.ts` writes one JSON event per
+  message (`version 1`, `conversationId`, `eventId`, `occurredAt`, `text`,
+  `metadata` with `untrusted`, `platform: "telegram"`, `chatId`
+  `tg_chat_-100…`, `threadId`, `messageId`, `authorId` `tg_user_…`,
+  `authorName`, `username`, `textKind`, `media`) to
+  `<state>/memento-intake/<sha256(eventId)>.json` (0600, fsync, rename)
+  before the update offset advances; a policy file
+  (`~/.pi/agent/memento/telegram-intake.json`: one supergroup, a cutover
+  time, the bridge, client config and python paths) enables it; the hub
+  runs `scripts/telegram-memento-delivery.py` every 15 s, which loads the
+  installed `bridge.py`, calls `Spool.episode('telegram', …)` and `upload`.
+- So the format and worker are the hub's, Telegram-only (one supergroup),
+  and the delivery needs a process that Heimdall would have to run.
 
 ## Remaining work, in order
 
+0. **Restart the live instance** with `5b3c62f` (binary already at
+   `~/.cache/heimdall-live/heimdall`), same config and log, the test bot's
+   token env file. Use `systemd-run --user` (its own unit) rather than
+   `setsid nohup`, so it outlives the session that starts it.
+0. **Prompt-injection guard** (decision 1), then **Memento intake** once the
+   orchestrator decides how (decision 2).
 1. **Live Telegram chat check with a human** (orchestrator runs it with the
    owner). Scratch config outside the repo: `data_dir` in a scratch dir,
    `mode` `personal`, `owners` = `telegram:<owner numeric ID>`,
@@ -245,8 +343,7 @@ usernames and tokens live only outside the repository.
    plain `@bot` mentions arrive is not documented. For the mention rule to
    work in groups the bot may need to be a group admin, or privacy off in
    BotFather (`/setprivacy`) and re-added. Check in the live group test.
-3. **Owner decisions**: the two recommendations (prompt-injection guard,
-   Memento Telegram intake) and the further improvements in
+3. **Owner decisions**: the further improvements in
    [`docs/hub-parity.md`](hub-parity.md) (Telegram).
 4. **Employee turns live** need Heimdall running as root (production) or a
    dedicated dev setup. No OS users were created; decision is the owner's.
@@ -338,7 +435,13 @@ are in `docs/hub-parity.md`.
     `WAIT_STEER`, `NOACK`, `SLEEP`, `ASK_HUMAN` (AGY: stderr auto-deny +
     SUCCESS), `REACT=<emoji>` and `REACTONLY` (reaction directives),
     `WRITE=<name>:<content>` (a file in the outbox the prompt names), `SLOW`
-    (AGY sleeps 2 s). The fake harness also records the images it got.
+    (AGY sleeps 2 s), `STEERREPLY` (pi/omp: a final text for each input
+    before the next steer is taken), `STEERLATE` (claude: the steer runs
+    after the prompt's result), `LINGER=<s>` (the process stays after its
+    answer with `STATE/lingering`; a fake started meanwhile writes
+    `STATE/overlap`). The fake harness also records the images it got.
+  - A process started with `setsid nohup` from a T3 session stays in that
+    session's systemd scope and is stopped with it.
   - The router's `fakeIface` opts in to each optional interface with an
     atomic toggle (`react`, `group`, `files`, `notify`); it is recreated on
     every `env.start`, so set toggles again after a restart.

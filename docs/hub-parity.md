@@ -172,7 +172,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 | `deleteWebhook` | AGENTS.md: Heimdall never calls `deleteWebhook` or `setWebhook`; a webhook shows as a logged 409. |
 | Channel posts (`channel_post`) | A channel post has no verified user, and identity is per user (fail closed). `allowed_updates` is `["message"]`. |
 | Injection-line removal (`sanitizeUntrustedText`) | Untrusted text is wrapped as the hub wraps it, and Heimdall's own frame markers in it are defanged, but lines are not removed by pattern (see recommendation 1). |
-| Prompt-injection guard, Memento Telegram intake | Not decided: see the recommendations. |
+| Prompt-injection guard's block, Memento Telegram intake | Decided by the owner: see "Decisions" below. |
 
 ### Improved over the hub
 
@@ -195,7 +195,26 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 - A Markdown fallback is logged (metadata only), so its rate can decide
   whether HTML is worth it.
 
-### Recommendations (not decided)
+### Decisions (owner, 2026-10-30)
+
+1. **Prompt-injection guard: log only, capped file.** Port the hub's
+   scoring (`maybeLogDirectPromptGuard`, `ec72c7d`) at router level so every
+   interface gets it. Never block, never alter the message. Log score,
+   pattern names, conversation, caller key and message ID, never text, to a
+   dedicated file in the data directory, rotated to one `.1` at a
+   configurable cap (small default, about 1 MiB). Not built yet.
+2. **Memento intake: per chat, off by default.** A config list of enabled
+   conversations, empty by default, independent of the memory mode; for
+   those chats every admitted message (addressed and ambient) is written to
+   Memento's intake before acknowledgement; nothing for other chats. On
+   hold: Memento (`29dc07b`) has no intake contract; the hub's format and
+   worker live in pi-pack (see HANDOFF).
+3. **Groups**: the current Pi Telegram bot is the reference: it answers in
+   a group only when mentioned or when someone replies to its message.
+   Ported as such (table above); no change.
+4. **T3 Code is for coding only.** Heimdall keeps its own adapters.
+
+### Earlier recommendations (kept for the reasoning)
 
 1. **Prompt-injection guard** (`maybeLogDirectPromptGuard`, block at score
    4). Recommendation: do not port the block. It scores the caller's own
