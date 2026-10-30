@@ -97,7 +97,26 @@ ALTER TABLE inbound ADD COLUMN user_key_id TEXT NOT NULL DEFAULT '';`,
 	`ALTER TABLE inbound ADD COLUMN private INTEGER NOT NULL DEFAULT 0;`,
 	// How a reply is delivered beyond its text (outExtra, JSON).
 	`ALTER TABLE outbound ADD COLUMN extra TEXT NOT NULL DEFAULT '';`,
+	// What an interface adds to a message beyond its text (inExtra, JSON).
+	`ALTER TABLE inbound ADD COLUMN extra TEXT NOT NULL DEFAULT '';`,
 }
+
+// inExtra is the inbound extra column: what the interface added beyond the
+// text.
+type inExtra struct {
+	Context string `json:"context,omitempty"`
+}
+
+func inExtraOf(in core.Inbound) (string, error) {
+	x := inExtra{Context: in.Context}
+	if x == (inExtra{}) {
+		return "", nil
+	}
+	b, err := json.Marshal(x)
+	return string(b), err
+}
+
+func (x inExtra) apply(in *core.Inbound) { in.Context = x.Context }
 
 // outExtra is the outbound extra column: delivery details beyond the text.
 type outExtra struct {
@@ -181,9 +200,13 @@ func (s *Store) AddInbound(in core.Inbound) (row InboundRow, dup bool, err error
 	if at.IsZero() {
 		at = time.Now()
 	}
-	res, err := s.db.Exec(`INSERT INTO inbound(iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,state,private)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHING`,
-		in.Conv.Interface, in.Conv.Chat, in.Conv.Thread, in.MsgID, in.From.Platform, in.From.ID, in.From.Name, in.From.Email, in.From.Team, in.From.KeyID, in.Origin, in.Text, at.UnixMilli(), InPending, in.Private)
+	extra, err := inExtraOf(in)
+	if err != nil {
+		return row, false, err
+	}
+	res, err := s.db.Exec(`INSERT INTO inbound(iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,state,private,extra)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHING`,
+		in.Conv.Interface, in.Conv.Chat, in.Conv.Thread, in.MsgID, in.From.Platform, in.From.ID, in.From.Name, in.From.Email, in.From.Team, in.From.KeyID, in.Origin, in.Text, at.UnixMilli(), InPending, in.Private, extra)
 	if err != nil {
 		return row, false, err
 	}
@@ -200,7 +223,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHING`
 
 // Pending lists messages never started, oldest first.
 func (s *Store) Pending() ([]InboundRow, error) {
-	rows, err := s.db.Query(`SELECT id,iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,private FROM inbound WHERE state=? ORDER BY id`, InPending)
+	rows, err := s.db.Query(`SELECT id,iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,private,extra FROM inbound WHERE state=? ORDER BY id`, InPending)
 	if err != nil {
 		return nil, err
 	}
@@ -209,8 +232,16 @@ func (s *Store) Pending() ([]InboundRow, error) {
 	for rows.Next() {
 		var r InboundRow
 		var at int64
-		if err := rows.Scan(&r.ID, &r.Conv.Interface, &r.Conv.Chat, &r.Conv.Thread, &r.MsgID, &r.From.Platform, &r.From.ID, &r.From.Name, &r.From.Email, &r.From.Team, &r.From.KeyID, &r.Origin, &r.Text, &at, &r.Private); err != nil {
+		var extra string
+		if err := rows.Scan(&r.ID, &r.Conv.Interface, &r.Conv.Chat, &r.Conv.Thread, &r.MsgID, &r.From.Platform, &r.From.ID, &r.From.Name, &r.From.Email, &r.From.Team, &r.From.KeyID, &r.Origin, &r.Text, &at, &r.Private, &extra); err != nil {
 			return nil, err
+		}
+		if extra != "" {
+			var x inExtra
+			if err := json.Unmarshal([]byte(extra), &x); err != nil {
+				return nil, fmt.Errorf("inbound %d: unreadable details: %w", r.ID, err)
+			}
+			x.apply(&r.Inbound)
 		}
 		r.At, r.State = time.UnixMilli(at), InPending
 		out = append(out, r)

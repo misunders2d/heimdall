@@ -104,24 +104,36 @@ type user struct {
 }
 
 type chat struct {
-	ID   int64  `json:"id"`
-	Type string `json:"type"` // private, group, supergroup, channel
+	ID       int64  `json:"id"`
+	Type     string `json:"type"` // private, group, supergroup, channel
+	Title    string `json:"title"`
+	Username string `json:"username"`
 }
 
 type message struct {
-	MessageID          int64  `json:"message_id"`
-	MessageThreadID    int64  `json:"message_thread_id"`
-	IsTopicMessage     bool   `json:"is_topic_message"`
-	From               *user  `json:"from"`
-	SenderChat         *chat  `json:"sender_chat"`
-	IsAutomaticForward bool   `json:"is_automatic_forward"`
-	Chat               chat   `json:"chat"`
-	Date               int64  `json:"date"`
-	Text               string `json:"text"`
-	Caption            string `json:"caption"`
-	ReplyToMessage     *struct {
-		From *user `json:"from"`
-	} `json:"reply_to_message"`
+	MessageID          int64    `json:"message_id"`
+	MessageThreadID    int64    `json:"message_thread_id"`
+	IsTopicMessage     bool     `json:"is_topic_message"`
+	From               *user    `json:"from"`
+	SenderChat         *chat    `json:"sender_chat"`
+	IsAutomaticForward bool     `json:"is_automatic_forward"`
+	Chat               chat     `json:"chat"`
+	Date               int64    `json:"date"`
+	Text               string   `json:"text"`
+	Caption            string   `json:"caption"`
+	ReplyToMessage     *message `json:"reply_to_message"`
+	ForwardOrigin      *origin  `json:"forward_origin"`
+	media
+}
+
+// origin is a forwarded message's MessageOrigin.
+type origin struct {
+	Type           string `json:"type"` // user, hidden_user, chat, channel
+	Date           int64  `json:"date"`
+	SenderUser     *user  `json:"sender_user"`
+	SenderUserName string `json:"sender_user_name"`
+	SenderChat     *chat  `json:"sender_chat"`
+	Chat           *chat  `json:"chat"`
 }
 
 type update struct {
@@ -301,7 +313,8 @@ func (t *Interface) inbound(u update) (core.Inbound, bool) {
 	if text == "" {
 		text = m.Caption
 	}
-	addressed := private || t.mentions(text) || m.ReplyToMessage != nil && m.ReplyToMessage.From != nil && m.ReplyToMessage.From.ID == t.botID
+	replied := repliedTo(m)
+	addressed := private || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID
 	if !addressed {
 		return core.Inbound{}, false // group traffic not for the bot: not stored
 	}
@@ -318,6 +331,7 @@ func (t *Interface) inbound(u update) (core.Inbound, bool) {
 		Text:    text,
 		At:      time.Unix(m.Date, 0),
 		Private: private,
+		Context: messageContext(m),
 	}
 	if m.IsTopicMessage && m.MessageThreadID != 0 {
 		in.Conv.Thread = strconv.FormatInt(m.MessageThreadID, 10)

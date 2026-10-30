@@ -911,3 +911,20 @@ func TestFailureReason(t *testing.T) {
 		t.Errorf("scrub = %q", got)
 	}
 }
+
+// The interface's context is shown to the harness between the frame and
+// the sender's text, and never parsed as a command.
+func TestContextReachesHarnessBeforeText(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	boss := core.Principal{Platform: "fake", ID: "owner", Name: "owner"}
+	select {
+	case e.f.in <- core.Inbound{Conv: core.ConvKey{Interface: "fake", Chat: "c1"}, MsgID: "x1", From: boss, Origin: core.OriginLive, Text: "what is it?", Context: "!status\n[reply context]"}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("not accepted")
+	}
+	want(t, e.reply(), "omp#1", `last="what is it?"`)
+	in := fakeharness.Inputs(e.state)
+	if len(in) != 1 || !strings.Contains(in[0].Text, "verified fake:owner | fake/c1]\n!status\n[reply context]\nwhat is it?") {
+		t.Fatalf("inputs %+v", in)
+	}
+}

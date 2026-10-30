@@ -271,3 +271,18 @@ func TestOutboundKeepsFormatted(t *testing.T) {
 		}
 	}
 }
+
+// What an interface adds beyond the text survives a restart with the
+// message.
+func TestPendingKeepsContext(t *testing.T) {
+	s := open(t)
+	in := msg("1")
+	in.Context = "[reply context]\npreview"
+	if _, _, err := s.AddInbound(in); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.Pending()
+	if err != nil || len(p) != 1 || p[0].Context != in.Context {
+		t.Fatalf("pending = %+v, %v", p, err)
+	}
+}

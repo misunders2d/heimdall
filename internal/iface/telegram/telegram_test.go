@@ -761,3 +761,73 @@ func TestSlashCommands(t *testing.T) {
 		}
 	}
 }
+
+// A reply carries the replied message's sender, date and preview, a
+// forward its origin, as the hub's telegramContextPayload; the text stays
+// the sender's own words.
+func TestReplyAndForwardContext(t *testing.T) {
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	c := &collector{}
+	photo := msg(5, 42, "private", 77, "")
+	photo["from"] = map[string]any{"id": 77, "first_name": "Bob", "last_name": "Ray"}
+	photo["caption"] = "look\n  at this"
+	photo["photo"] = []any{map[string]any{"file_id": "small"}, map[string]any{"file_id": "big", "file_unique_id": "u1"}}
+	reply := msg(6, 42, "private", 42, "what is it?")
+	reply["reply_to_message"] = photo
+	fwdUser := msg(7, 42, "private", 42, "fyi")
+	fwdUser["forward_origin"] = map[string]any{"type": "user", "date": 1700000100, "sender_user": map[string]any{"id": 8, "first_name": "Cy"}}
+	fwdChannel := msg(8, 42, "private", 42, "news")
+	fwdChannel["forward_origin"] = map[string]any{"type": "channel", "date": 1700000200, "chat": map[string]any{"id": -1009, "type": "channel", "title": "Daily"}}
+	fwdHidden := msg(9, 42, "private", 42, "rumour")
+	fwdHidden["forward_origin"] = map[string]any{"type": "hidden_user", "date": 0, "sender_user_name": "Anon"}
+	signIn := msg(10, 42, "private", 999, "Sign in to MCP server linear in your browser: https://x/?state=s")
+	signIn["from"] = map[string]any{"id": botID, "is_bot": true, "first_name": "Heimdall"}
+	toBot := msg(11, -1002, "supergroup", 43, "done")
+	toBot["reply_to_message"] = signIn
+	topic := msg(12, -1002, "supergroup", 43, "@heimdall_test_bot in a topic")
+	topic["is_topic_message"], topic["message_thread_id"] = true, 3
+	topic["reply_to_message"] = map[string]any{"message_id": 3, "date": 1, "chat": map[string]any{"id": -1002, "type": "supergroup"}, "from": map[string]any{"id": botID, "is_bot": true}}
+	api.push(upd(1, reply), upd(2, fwdUser), upd(3, fwdChannel), upd(4, fwdHidden), upd(5, toBot), upd(6, topic))
+	stop := run(t, newIface(t, api.srv.URL, botName, &logs), c.accept)
+	eventually(t, "all accepted", func() bool { return len(c.list()) == 6 })
+	stop()
+	got := c.list()
+	for i, w := range []struct{ text, context string }{
+		{"what is it?", "[Telegram reply context | replied_msg 5 | from Bob Ray (tg_user_77) | date 2023-11-14T22:13:20.000Z]\nlook at this [Photo]"},
+		{"fyi", "[Telegram forward context | source Cy (tg_user_8) | date 2023-11-14T22:15:00.000Z]"},
+		{"news", "[Telegram forward context | source Daily | date 2023-11-14T22:16:40.000Z]"},
+		{"rumour", "[Telegram forward context | source Anon (hidden user) | date unknown]"},
+		{"done", "[Telegram reply context | replied_msg 10 | from Heimdall (tg_user_999) | date 2023-11-14T22:13:20.000Z]\n[Private native MCP sign-in UI omitted]"},
+		{"in a topic", ""},
+	} {
+		if got[i].Text != w.text || got[i].Context != w.context {
+			t.Errorf("message %d: text %q context %q\nwant %q %q", i, got[i].Text, got[i].Context, w.text, w.context)
+		}
+	}
+}
+
+func TestAttachmentLabels(t *testing.T) {
+	for _, tc := range []struct {
+		m    map[string]any
+		want string
+	}{
+		{map[string]any{"document": map[string]any{"file_id": "d", "file_name": "a.pdf"}}, "[Document: a.pdf]"},
+		{map[string]any{"voice": map[string]any{"file_id": "v"}}, "[Voice Message]"},
+		{map[string]any{"audio": map[string]any{"file_id": "a", "title": "Song"}}, "[Audio: Song]"},
+		{map[string]any{"video": map[string]any{"file_id": "v"}}, "[Video: unknown]"},
+		{map[string]any{"video_note": map[string]any{"file_id": "n"}}, "[Video Message]"},
+		{map[string]any{"contact": map[string]any{"first_name": "Di", "phone_number": "+1", "user_id": 5}}, "[Contact: Di, +1, tg_user_id=5]"},
+		{map[string]any{"location": map[string]any{"latitude": 1.5, "longitude": -2.25}}, "[Location: lat=1.5, lon=-2.25]"},
+		{map[string]any{"venue": map[string]any{"title": "Cafe", "address": "Main St"}}, "[Venue: Cafe — Main St]"},
+	} {
+		raw, _ := json.Marshal(tc.m)
+		var m message
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		if a := detect(&m); a == nil || a.Label != tc.want {
+			t.Errorf("%v: %+v, want %q", tc.m, a, tc.want)
+		}
+	}
+}

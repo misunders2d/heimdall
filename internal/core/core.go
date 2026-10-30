@@ -178,6 +178,10 @@ type Inbound struct {
 	// caller and the bot (Telegram private chat, Slack DM). Tools allow
 	// private actions such as MCP sign-in only there.
 	Private bool
+	// Context is what the interface adds around Text for the harness, such
+	// as the message being replied to or a forward's origin. It is shown
+	// before Text and is never parsed for commands or identity.
+	Context string
 }
 
 func (in Inbound) Validate() error {

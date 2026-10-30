@@ -95,6 +95,38 @@ type fake struct {
 
 func (f *fake) emit(v any) { _ = f.out.Encode(v) }
 
+// record appends one input the harness received (kind "prompt" or "steer")
+// to STATE/inputs.jsonl, for tests that check the whole text.
+func (f *fake) record(kind, text string, images int) {
+	file, err := os.OpenFile(filepath.Join(f.state, "inputs.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_ = json.NewEncoder(file).Encode(Input{Harness: f.name, Kind: kind, Text: text, Images: images})
+}
+
+// Input is one recorded harness input.
+type Input struct {
+	Harness string `json:"harness"`
+	Kind    string `json:"kind"`
+	Text    string `json:"text"`
+	Images  int    `json:"images"`
+}
+
+// Inputs reads the inputs recorded in state, oldest first.
+func Inputs(state string) []Input {
+	raw, _ := os.ReadFile(filepath.Join(state, "inputs.jsonl"))
+	var out []Input
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var in Input
+		if json.Unmarshal([]byte(line), &in) == nil {
+			out = append(out, in)
+		}
+	}
+	return out
+}
+
 func (f *fake) read() (map[string]any, bool) {
 	for f.in.Scan() {
 		var m map[string]any
@@ -217,6 +249,7 @@ func (f *fake) piRPC() {
 		os.Exit(5)
 	}
 	f.prompt, _ = m["message"].(string)
+	f.record("prompt", f.prompt, 0)
 	id, _ := m["id"].(string)
 	f.failPre()
 	dir := arg("--session-dir")
@@ -243,6 +276,7 @@ func (f *fake) piRPC() {
 			return false
 		}
 		text, _ := s["message"].(string)
+		f.record("steer", text, 0)
 		if strings.Contains(text, "NOACK") {
 			_ = os.WriteFile(filepath.Join(f.state, "steer-held"), nil, 0o600)
 			time.Sleep(30 * time.Second)
@@ -275,6 +309,7 @@ func (f *fake) claude() {
 	}
 	msg, _ := m["message"].(map[string]any)
 	f.prompt, _ = msg["content"].(string)
+	f.record("prompt", f.prompt, 0)
 	f.failPre()
 	id := sid
 	if resume != "" {
@@ -302,6 +337,7 @@ func (f *fake) claude() {
 		}
 		sm, _ := s["message"].(map[string]any)
 		text, _ := sm["content"].(string)
+		f.record("steer", text, 0)
 		replay("u"+strconv.Itoa(len(f.steers)+1), text)
 		f.steers = append(f.steers, text)
 		return true
@@ -353,6 +389,7 @@ func (f *fake) codex() {
 		first, _ := input[0].(map[string]any)
 		f.prompt, _ = first["text"].(string)
 	}
+	f.record("prompt", f.prompt, 0)
 	f.failPre()
 	reply(turnReq["id"], map[string]any{"turn": map[string]any{"id": "turn-1"}})
 	f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": "turn-1"}}})
@@ -374,6 +411,7 @@ func (f *fake) codex() {
 			first, _ := in[0].(map[string]any)
 			text, _ = first["text"].(string)
 		}
+		f.record("steer", text, 0)
 		reply(s["id"], map[string]any{"turnId": "turn-1"})
 		f.steers = append(f.steers, text)
 		return true
@@ -389,6 +427,7 @@ func (f *fake) agy() {
 	}
 	msg, _ := m["message"].(map[string]any)
 	f.prompt, _ = msg["content"].(string)
+	f.record("prompt", f.prompt, 0)
 	f.failPre()
 	conv := arg("--conversation")
 	if conv == "" {
