@@ -138,6 +138,7 @@ type env struct {
 	uploads string       // the fake interface's upload directory
 	guard   string       // the prompt-injection log
 	logs    *syncBuffer  // the router's log
+	r       *Router      // the running router
 }
 
 // syncBuffer is a log destination tests can read while the router writes.
@@ -220,6 +221,7 @@ func (e *env) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel, e.done = cancel, make(chan error, 1)
 	r := New(e.opt, st, e.f)
+	e.r = r
 	go func() { e.done <- r.Run(ctx) }()
 	e.t.Cleanup(e.stop)
 }
@@ -1765,5 +1767,53 @@ func TestWaitingSteersGoTogether(t *testing.T) {
 			e.send(owner, "c1", "!status")
 			want(t, e.reply(), "Running: nothing")
 		})
+	}
+}
+
+// Shutdown stops a harness process still running after its answer with
+// SIGTERM and waits for it to exit; one that ignores SIGTERM is killed
+// TermGrace later (review of d05b748: the cancelled context SIGKILLed the
+// process group at once, and Run returned without waiting).
+func TestShutdownStopsHarnessProcessesAndWaits(t *testing.T) {
+	for _, c := range []struct{ name, prompt, log string }{
+		{"term", "hello LINGER=30", "turn 1 in fake/c1: omp process still running at shutdown: SIGTERM to its process group"},
+		{"kill", "hello LINGER=30 NOTERM", "turn 1 in fake/c1: omp process still running 300ms after SIGTERM: SIGKILL"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setGrace(t, 30*time.Second, 300*time.Millisecond)
+			e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+			e.send(owner, "c1", c.prompt)
+			want(t, e.reply(), "omp#1")
+			start := time.Now()
+			e.stop()
+			if d := time.Since(start); d > 10*time.Second {
+				t.Fatalf("shutdown took %s", d)
+			}
+			_, err := os.Stat(filepath.Join(e.state, "terminated"))
+			if c.name == "term" && err != nil {
+				t.Fatal("the lingering process was not sent SIGTERM at shutdown")
+			}
+			if c.name == "term" {
+				if _, err := os.Stat(filepath.Join(e.state, "lingering")); err == nil {
+					t.Fatal("Run returned while the harness process still ran")
+				}
+			}
+			if !strings.Contains(e.logs.String(), c.log) {
+				t.Fatalf("log lacks %q:\n%s", c.log, e.logs.String())
+			}
+		})
+	}
+}
+
+// Idle counts a harness process until it exited, so heimdall local exits
+// only after it (review of d05b748: the turn was cleared at its answer and
+// Idle reported idle while the process still ran).
+func TestIdleWaitsForTheHarnessProcess(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "hello LINGER=2")
+	want(t, e.reply(), "omp#1")
+	eventuallyTrue(t, "idle", e.r.Idle)
+	if _, err := os.Stat(filepath.Join(e.state, "lingering")); err == nil {
+		t.Fatal("idle while the harness process still ran")
 	}
 }

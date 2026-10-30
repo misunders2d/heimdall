@@ -32,7 +32,8 @@ const usage = `usage:
       Logs go to stderr.
   heimdall local -config FILE [-as USER] [-chat CHAT]
       route messages typed on stdin (one per line; optional "@user #chat/thread"
-      prefix) and print replies; exits after stdin ends and all work is delivered.
+      prefix) and print replies; exits after stdin ends, all work is delivered
+      and every harness process has exited.
       The local interface trusts its operator: for testing only.
   heimdall harnesses -config FILE
       show where each harness is found for each role's OS user

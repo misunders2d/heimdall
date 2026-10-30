@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -83,6 +84,13 @@ type Router struct {
 	ctx     context.Context
 	convs   map[core.ConvKey]*conv
 	wakeOut map[string]chan struct{}
+
+	// Live harness processes, each until it exited. At shutdown they are
+	// stopped and waited for, so none outlives Heimdall.
+	runsMu   sync.Mutex
+	runs     map[*harness.Run]struct{}
+	procCtx  context.Context // harness processes' context: ends only after shutdown waited for them
+	stopping bool            // shutdown began: no harness process starts any more
 }
 
 func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
@@ -104,7 +112,7 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.GuardLogMax <= 0 {
 		opt.GuardLogMax = DefaultGuardLogMax
 	}
-	r := &Router{opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}}
+	r := &Router{opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.GuardLog != "" {
 		r.guardLog = &guardLog{path: opt.GuardLog, max: opt.GuardLogMax}
 	}
@@ -118,10 +126,18 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 // Run recovers interrupted work, then routes until ctx ends or an
 // interface fails, which stops everything else and is returned. Turns still
 // running at shutdown stay recorded as running, so the next start reports
-// them exactly like a crash.
+// them exactly like a crash. Before it returns, every harness process still
+// running is stopped and waited for (stopRuns).
 func (r *Router) Run(parent context.Context) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// Harness processes do not end with ctx: shutdown stops them with
+	// SIGTERM first and kills them only if they do not exit.
+	procCtx, kill := context.WithCancel(context.Background())
+	defer kill()
+	r.runsMu.Lock()
+	r.procCtx = procCtx
+	r.runsMu.Unlock()
 	rec, err := r.store.Recover(interruptedNotice, unconfirmedNotice)
 	if err != nil {
 		return fmt.Errorf("recover: %w", err)
@@ -166,7 +182,80 @@ func (r *Router) Run(parent context.Context) error {
 	}
 	cancel()
 	wg.Wait()
+	r.stopRuns(kill)
 	return err
+}
+
+// startRun starts a turn's harness process and counts it as live until it
+// exited. Once shutdown began nothing starts.
+func (r *Router) startRun(spec harness.Spec) (*harness.Run, error) {
+	r.runsMu.Lock()
+	defer r.runsMu.Unlock()
+	if r.stopping {
+		return nil, errors.New("Heimdall is shutting down")
+	}
+	run, err := harness.Start(r.procCtx, spec)
+	if err != nil {
+		return nil, err
+	}
+	r.runs[run] = struct{}{}
+	go func() {
+		<-run.Exited()
+		r.runsMu.Lock()
+		delete(r.runs, run)
+		r.runsMu.Unlock()
+	}()
+	return run, nil
+}
+
+// stopRuns stops every live harness process at shutdown, as after an
+// answer: SIGTERM to its process group, SIGKILL TermGrace later. It waits
+// up to ExitGrace plus TermGrace for them to exit (within systemd's default
+// 90 s stop timeout), then kills the groups of any left (kill) and waits
+// for those briefly. A process's group is killed once the process exited,
+// so helpers it started in its group do not outlive Heimdall either.
+func (r *Router) stopRuns(kill context.CancelFunc) {
+	r.runsMu.Lock()
+	r.stopping = true
+	runs := slices.Collect(maps.Keys(r.runs))
+	r.runsMu.Unlock()
+	if len(runs) == 0 {
+		return
+	}
+	r.log.Printf("shutdown: stopping %d harness process(es)", len(runs))
+	for _, run := range runs {
+		run.Stop("at shutdown")
+	}
+	if left := waitExited(runs, harness.ExitGrace+harness.TermGrace); left > 0 {
+		r.log.Printf("shutdown: %d harness process(es) still running: SIGKILL to their process groups", left)
+		kill()
+		if left := waitExited(runs, 10*time.Second); left > 0 {
+			r.log.Printf("shutdown: %d harness process(es) did not exit", left)
+		}
+	}
+}
+
+// waitExited waits up to d for every run's process to exit and returns how
+// many have not.
+func waitExited(runs []*harness.Run, d time.Duration) int {
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+	for i, run := range runs {
+		select {
+		case <-run.Exited():
+		case <-deadline.C:
+			left := 0
+			for _, run := range runs[i:] {
+				select {
+				case <-run.Exited():
+				default:
+					left++
+				}
+			}
+			return left
+		}
+	}
+	return 0
 }
 
 // accept persists one verified message and hands it to its conversation.
@@ -229,8 +318,16 @@ func (r *Router) dispatch(row store.InboundRow) {
 	c.push(row)
 }
 
-// Idle reports whether nothing is queued, running or waiting for delivery.
+// Idle reports whether nothing is queued, running or waiting for delivery,
+// and every harness process has exited (one may still be running after its
+// answer).
 func (r *Router) Idle() bool {
+	r.runsMu.Lock()
+	live := len(r.runs)
+	r.runsMu.Unlock()
+	if live > 0 {
+		return false
+	}
 	r.mu.Lock()
 	for _, c := range r.convs {
 		if c.busy.Load() {
@@ -1012,7 +1109,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}
 		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
-		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf})
+		run, err := c.r.startRun(harness.Spec{Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf})
 		if err != nil {
 			c.unbind(t, h, prev, clean)
 			notes = append(notes, err.Error())

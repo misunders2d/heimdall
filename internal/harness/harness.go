@@ -357,9 +357,10 @@ func (r *Run) early() {
 	}
 }
 
-// Stop ends a turn that has answered: SIGTERM to its process group now, and
-// SIGKILL TermGrace later if it is still running. why is logged ("60s after
-// its answer"). Before the answer, use Cancel.
+// Stop ends a turn's process: SIGTERM to its process group now, and SIGKILL
+// TermGrace later if it is still running. why is logged ("60s after its
+// answer"). For a turn that has answered, and for every turn at shutdown;
+// to stop a turn before its answer, use Cancel.
 func (r *Run) Stop(why string) {
 	r.stop.Do(func() { go r.terminate(why) })
 }

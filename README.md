@@ -128,7 +128,10 @@ a turn; the owner's `stop` and `cancel` clear everyone's queued messages.
 A turn's reply goes out at the harness's answer; its process may take a
 while to exit, and the conversation's next turn waits for that (at most
 60 s, then SIGTERM, then SIGKILL 5 s later). `stop` then ends that wait at
-once. `max_parallel` counts harness processes until they exit.
+once. `max_parallel` counts harness processes until they exit. At shutdown
+every harness process still running gets SIGTERM, and Heimdall waits for
+it (at most 65 s, SIGKILL first if needed) before it exits; `heimdall
+local` exits once the last one has exited.
 
 A conversation is a chat, or one thread in it: `!use` in a thread changes
 neither the other threads nor the chat itself. Each verified caller has

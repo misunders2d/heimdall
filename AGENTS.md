@@ -144,7 +144,9 @@ Its whole job, per message:
   process exited, so two processes never share a session. It gets 60 s,
   then SIGTERM to its process group and SIGKILL 5 s later (logged with the
   turn); a stop by the turn's caller or an owner sends the SIGTERM at
-  once. A process holds its `max_parallel` slot until it exits.
+  once. A process holds its `max_parallel` slot until it exits. At
+  shutdown every live process gets the SIGTERM at once and is waited for
+  (60 + 5 s at most, then its group is killed); none outlives Heimdall.
 - **Reliability.** Inbound and outbound queues are persisted (SQLite) before
   an interface acknowledges a message upstream. A turn interrupted by a
   restart is reported to its chat and never re-run; messages that never
