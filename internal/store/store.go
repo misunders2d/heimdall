@@ -6,6 +6,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -94,7 +95,25 @@ ALTER TABLE inbound ADD COLUMN user_key_id TEXT NOT NULL DEFAULT '';`,
 	`ALTER TABLE inbound ADD COLUMN user_team TEXT NOT NULL DEFAULT '';`,
 	// The interface's one-to-one chat flag (core.Inbound.Private).
 	`ALTER TABLE inbound ADD COLUMN private INTEGER NOT NULL DEFAULT 0;`,
+	// How a reply is delivered beyond its text (outExtra, JSON).
+	`ALTER TABLE outbound ADD COLUMN extra TEXT NOT NULL DEFAULT '';`,
 }
+
+// outExtra is the outbound extra column: delivery details beyond the text.
+type outExtra struct {
+	Formatted bool `json:"formatted,omitempty"`
+}
+
+func outExtraOf(out core.Outbound) (string, error) {
+	x := outExtra{Formatted: out.Formatted}
+	if x == (outExtra{}) {
+		return "", nil
+	}
+	b, err := json.Marshal(x)
+	return string(b), err
+}
+
+func (x outExtra) apply(out *core.Outbound) { out.Formatted = x.Formatted }
 
 type Store struct{ db *sql.DB }
 
@@ -421,8 +440,12 @@ func (s *Store) Enqueue(out core.Outbound) (int64, error) {
 }
 
 func enqueue(tx *sql.Tx, out core.Outbound) (int64, error) {
-	res, err := tx.Exec(`INSERT INTO outbound(iface,chat,thread,reply_to,text,state,created_at) VALUES(?,?,?,?,?,?,?)`,
-		out.Conv.Interface, out.Conv.Chat, out.Conv.Thread, out.ReplyTo, out.Text, OutPending, now())
+	extra, err := outExtraOf(out)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`INSERT INTO outbound(iface,chat,thread,reply_to,text,extra,state,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		out.Conv.Interface, out.Conv.Chat, out.Conv.Thread, out.ReplyTo, out.Text, extra, OutPending, now())
 	if err != nil {
 		return 0, err
 	}
@@ -441,16 +464,27 @@ type OutboundRow struct {
 // chats proceed.
 func (s *Store) NextOutbound(iface string) (OutboundRow, bool, error) {
 	var r OutboundRow
-	err := s.db.QueryRow(`SELECT o.id,o.chat,o.thread,o.reply_to,o.text,o.attempts FROM outbound o
+	var extra string
+	err := s.db.QueryRow(`SELECT o.id,o.chat,o.thread,o.reply_to,o.text,o.extra,o.attempts FROM outbound o
 WHERE o.iface=? AND o.state=? AND o.next_at<=?
 AND NOT EXISTS(SELECT 1 FROM outbound p WHERE p.iface=o.iface AND p.chat=o.chat AND p.id<o.id AND p.state IN (?,?))
 ORDER BY o.id LIMIT 1`, iface, OutPending, now(), OutPending, OutSending).
-		Scan(&r.ID, &r.Conv.Chat, &r.Conv.Thread, &r.ReplyTo, &r.Text, &r.Attempts)
+		Scan(&r.ID, &r.Conv.Chat, &r.Conv.Thread, &r.ReplyTo, &r.Text, &extra, &r.Attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, false, nil
 	}
+	if err != nil {
+		return r, false, err
+	}
 	r.Conv.Interface = iface
-	return r, err == nil, err
+	if extra != "" {
+		var x outExtra
+		if err := json.Unmarshal([]byte(extra), &x); err != nil {
+			return r, false, fmt.Errorf("outbound %d: unreadable delivery details: %w", r.ID, err)
+		}
+		x.apply(&r.Outbound)
+	}
+	return r, true, nil
 }
 
 // NextDue is when the earliest reply NextOutbound could offer for iface

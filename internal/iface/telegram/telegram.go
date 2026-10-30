@@ -1,6 +1,7 @@
 // Package telegram is Heimdall's Telegram interface: it long-polls the Bot
 // API for messages, hands each verified one to the router and sends
-// replies as plain text. Only the standard library is used.
+// replies (harness answers as Telegram Markdown). Only the standard library
+// is used.
 //
 // Identity is the sender's numeric Telegram user ID, which the Bot API
 // reports for the message; display names and text are never identity.
@@ -27,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf16"
 
 	"github.com/misunders2d/heimdall/internal/core"
@@ -42,6 +44,9 @@ const (
 	DefaultAPI = "https://api.telegram.org"
 	// maxText is Telegram's message limit in UTF-16 code units.
 	maxText = 4096
+	// chunkText is the hub's part size, which leaves room for the "(i/n)"
+	// suffix and for Markdown that Telegram expands.
+	chunkText = 3500
 )
 
 // Options configure the interface.
@@ -375,30 +380,49 @@ func (t *Interface) command(text string) string {
 	return s
 }
 
-// Send delivers one reply as plain text, split at Telegram's limit, in the
-// chat and topic it belongs to and as a reply to the message it answers.
-// A 429 waits out retry_after (bounded) before reporting a transient
-// failure; any other 4xx is permanent. Delivery is at-least-once: if a
-// later part of a split reply fails, the retry sends every part again.
+// Send delivers one reply in the chat and topic it belongs to, split as the
+// hub splits it (splitText) with a "(i/n)" suffix on each part, only the
+// first part replying to the message it answers. A harness's answer
+// (Formatted) is sent with parse_mode Markdown, the dialect PromptNote asks
+// for; when Telegram cannot parse a part it is sent again as plain text, as
+// the hub does. A 429 waits out retry_after (bounded) before reporting a
+// transient failure; any other 4xx is permanent. Delivery is at-least-once:
+// if a later part fails, the retry sends every part again.
 func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
-	first := true
-	for _, part := range split(out.Text, maxText) {
-		if strings.TrimSpace(part) == "" {
-			continue
+	parts := splitText(out.Text, chunkText)
+	for i, part := range parts {
+		if len(parts) > 1 {
+			part += fmt.Sprintf("\n\n(%d/%d)", i+1, len(parts))
 		}
 		body := target(out.Conv)
 		body["text"] = part
-		if first && out.ReplyTo != "" {
+		if i == 0 && out.ReplyTo != "" {
 			if id, err := strconv.ParseInt(out.ReplyTo, 10, 64); err == nil {
 				body["reply_parameters"] = map[string]any{"message_id": id, "allow_sending_without_reply": true}
 			}
 		}
-		if err := t.call(ctx, "sendMessage", body, nil, 30*time.Second); err != nil {
+		if out.Formatted {
+			body["parse_mode"] = "Markdown"
+		}
+		err := t.call(ctx, "sendMessage", body, nil, 30*time.Second)
+		var api *apiError
+		if out.Formatted && errors.As(err, &api) && api.status == http.StatusBadRequest {
+			// Most often "can't parse entities": the model's Markdown is not
+			// Telegram's. Plain text loses the formatting, not the reply.
+			delete(body, "parse_mode")
+			err = t.call(ctx, "sendMessage", body, nil, 30*time.Second)
+		}
+		if err != nil {
 			return t.sendError(ctx, err)
 		}
-		first = false
 	}
 	return nil
+}
+
+// PromptNote is the hub's Telegram transport note (extensions/telegram
+// buildContent): answers are sent as Telegram's legacy Markdown.
+func (t *Interface) PromptNote() string {
+	return "[Transport note: final answer renders in Telegram Markdown. Use *bold*, _italic_, `code`, ```code```, and [label](https://url). Do not use regular Markdown bold like **text**, Markdown headings, or tables.]"
 }
 
 // target is the Bot API chat (and forum topic) a conversation's messages go to.
@@ -442,36 +466,60 @@ func (t *Interface) sendError(ctx context.Context, err error) error {
 	return err
 }
 
-// split cuts text into parts of at most max UTF-16 code units, at a line
-// break in the second half of a part when there is one.
-func split(text string, max int) []string {
+// splitText cuts text as the hub's splitTelegramText does: parts of at most
+// max UTF-16 code units, cut at the last paragraph break, else line break,
+// else space within the limit, as long as that keeps at least half of the
+// part; otherwise at the limit. Whitespace around a cut is dropped.
+func splitText(text string, max int) []string {
+	if units(text) <= max {
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	}
 	var parts []string
-	for units(text) > max {
-		n, cut, newline := 0, len(text), -1
-		for i, r := range text {
-			w := utf16.RuneLen(r)
-			if w < 0 {
-				w = 1 // invalid UTF-8 is sent as U+FFFD
-			}
-			if n+w > max {
-				cut = i
+	rest := text
+	for units(rest) > max {
+		limit := prefixBytes(rest, max)
+		cut := -1
+		for _, sep := range []string{"\n\n", "\n", " "} {
+			// The hub's lastIndexOf(sep, max): the separator starts at or
+			// before the limit.
+			cut = strings.LastIndex(rest[:min(len(rest), limit+len(sep))], sep)
+			if cut >= 0 && units(rest[:cut])*2 >= max {
 				break
 			}
-			n += w
-			if r == '\n' {
-				newline = i + 1
-			}
+			cut = -1
 		}
-		if newline > cut/2 {
-			cut = newline
+		if cut < 0 {
+			cut = limit
 		}
-		parts = append(parts, text[:cut])
-		text = text[cut:]
+		if part := strings.TrimRightFunc(rest[:cut], unicode.IsSpace); part != "" {
+			parts = append(parts, part)
+		}
+		rest = strings.TrimLeftFunc(rest[cut:], unicode.IsSpace)
 	}
-	if text != "" {
-		parts = append(parts, text)
+	if rest != "" {
+		parts = append(parts, rest)
 	}
 	return parts
+}
+
+// prefixBytes is the length in bytes of the longest prefix of s, cut at a
+// rune boundary, that has at most max UTF-16 code units.
+func prefixBytes(s string, max int) int {
+	n := 0
+	for i, r := range s {
+		w := utf16.RuneLen(r)
+		if w < 0 {
+			w = 1 // invalid UTF-8 is sent as U+FFFD
+		}
+		if n+w > max {
+			return i
+		}
+		n += w
+	}
+	return len(s)
 }
 
 func units(s string) int {

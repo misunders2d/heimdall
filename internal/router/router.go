@@ -37,6 +37,13 @@ type Typer interface {
 	Typing(ctx context.Context, conv core.ConvKey)
 }
 
+// Prompter is an optional Interface feature: a note on how replies render
+// on the platform (for Telegram, its Markdown dialect). The router puts it at
+// the top of every turn's prompt and marks the harness's answer Formatted.
+type Prompter interface {
+	PromptNote() string
+}
+
 // PermanentError marks a delivery failure that retrying cannot fix.
 type PermanentError struct{ Err error }
 
@@ -533,6 +540,11 @@ func (c *conv) start(ctx context.Context) {
 	for i, it := range batch {
 		parts[i] = frame(it)
 	}
+	if p, ok := c.r.ifaces[c.key.Interface].(Prompter); ok {
+		if note := strings.TrimSpace(p.PromptNote()); note != "" {
+			parts = append([]string{note}, parts...)
+		}
+	}
 	c.turn = t
 	c.r.log.Printf("turn %d in %s: %d message(s), role %s, candidates %s", id, c.key, len(batch), t.role, strings.Join(t.candidates, ","))
 	c.startTyping(ctx, t)
@@ -785,7 +797,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, true
 		text = strings.TrimSpace(res.Answer)
 	}
-	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text + footer}
+	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text + footer, Formatted: e.State == store.TurnDone}
 	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
 		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
 	}

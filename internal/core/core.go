@@ -199,6 +199,9 @@ type Outbound struct {
 	Conv    ConvKey
 	ReplyTo string // interface message ID being answered, if any
 	Text    string
+	// Formatted marks a harness's answer, written for the interface's
+	// prompt note (Telegram Markdown). Heimdall's own text is plain.
+	Formatted bool
 }
 
 // RunAs is the OS account a role's turns run under.

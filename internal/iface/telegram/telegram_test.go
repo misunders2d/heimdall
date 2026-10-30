@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -507,11 +509,15 @@ func TestSendIsPlainTextInTheRightPlace(t *testing.T) {
 	}
 }
 
-func TestLongRepliesSplitAtUTF16Limit(t *testing.T) {
+// Long replies are split as the hub splits them: at most 3500 UTF-16 units
+// per part, at a paragraph, line or space boundary, numbered (i/n), and
+// only the first part replies to the message.
+func TestLongRepliesSplitLikeTheHub(t *testing.T) {
 	api := newFakeAPI(t)
 	var logs syncBuffer
 	i := newIface(t, api.srv.URL, botName, &logs)
-	// 3000 emoji are 6000 UTF-16 units but only 3000 runes.
+	// 3000 emoji are 6000 UTF-16 units but only 3000 runes: no boundary, so
+	// the cut is at the limit and never inside a surrogate pair.
 	text := strings.Repeat("😀", 3000) + "\n— omp"
 	if err := i.Send(context.Background(), core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, ReplyTo: "5", Text: text}); err != nil {
 		t.Fatal(err)
@@ -523,7 +529,12 @@ func TestLongRepliesSplitAtUTF16Limit(t *testing.T) {
 	var joined string
 	for n, b := range sent {
 		s := b["text"].(string)
-		if u := len(utf16.Encode([]rune(s))); u > maxText {
+		suffix := fmt.Sprintf("\n\n(%d/2)", n+1)
+		if !strings.HasSuffix(s, suffix) {
+			t.Fatalf("part %d lacks %q: %q", n, suffix, s[max(0, len(s)-20):])
+		}
+		s = strings.TrimSuffix(s, suffix)
+		if u := len(utf16.Encode([]rune(s))); u > 3500 {
 			t.Fatalf("part %d has %d UTF-16 units", n, u)
 		}
 		joined += s
@@ -535,10 +546,82 @@ func TestLongRepliesSplitAtUTF16Limit(t *testing.T) {
 	if joined != text {
 		t.Fatal("parts do not add up to the reply")
 	}
-	// A line break in the second half of a part is preferred.
-	parts := split(strings.Repeat("a", 3000)+"\n"+strings.Repeat("b", 3000), maxText)
-	if len(parts) != 2 || parts[0] != strings.Repeat("a", 3000)+"\n" {
-		t.Fatalf("split at %d", len(parts[0]))
+
+	a, b, c := strings.Repeat("a", 2000), strings.Repeat("b", 1000), strings.Repeat("c", 1000)
+	for _, tc := range []struct {
+		name, text string
+		want       []string
+	}{
+		{"short", "hello", []string{"hello"}},
+		{"empty", "", nil},
+		{"paragraph first", a + "\n\n" + b + "\n" + c, []string{a, b + "\n" + c}},
+		{"line before a later space", a + "\n" + b + " " + c, []string{a, b + " " + c}},
+		{"space", a + " " + b + " " + c, []string{a + " " + b, c}},
+		{"paragraph too early", strings.Repeat("x", 1000) + "\n\n" + strings.Repeat("y", 3000), []string{strings.Repeat("x", 1000) + "\n\n" + strings.Repeat("y", 2498), strings.Repeat("y", 502)}},
+	} {
+		if got := splitText(tc.text, 3500); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: %d parts %v", tc.name, len(got), lens(got))
+		}
+	}
+}
+
+func lens(parts []string) []int {
+	var out []int
+	for _, p := range parts {
+		out = append(out, len(p))
+	}
+	return out
+}
+
+// A harness's answer goes out as Telegram Markdown; a part Telegram cannot
+// parse is sent again as plain text, and Heimdall's own text is never
+// Markdown.
+func TestFormattedAnswersUseMarkdownWithPlainFallback(t *testing.T) {
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	i := newIface(t, api.srv.URL, botName, &logs)
+	api.set("sendMessage", func(w http.ResponseWriter, body map[string]any) bool {
+		if body["parse_mode"] != nil && strings.Contains(body["text"].(string), "broken") {
+			fail(w, http.StatusBadRequest, "Bad Request: can't parse entities: can't find end of the entity", 0)
+			return true
+		}
+		return false
+	})
+	conv := core.ConvKey{Interface: "telegram", Chat: "42"}
+	for _, out := range []core.Outbound{
+		{Conv: conv, ReplyTo: "3", Text: "*bold* answer", Formatted: true},
+		{Conv: conv, ReplyTo: "4", Text: "broken *markdown", Formatted: true},
+		{Conv: conv, Text: "!status a_b", Formatted: false},
+	} {
+		if err := i.Send(context.Background(), out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent := api.sentBodies()
+	if len(sent) != 3 {
+		t.Fatalf("sent %v", sent)
+	}
+	if sent[0]["parse_mode"] != "Markdown" || sent[0]["text"] != "*bold* answer" {
+		t.Fatalf("formatted answer: %v", sent[0])
+	}
+	rp, _ := sent[1]["reply_parameters"].(map[string]any)
+	if sent[1]["parse_mode"] != nil || sent[1]["text"] != "broken *markdown" || rp["message_id"] != float64(4) {
+		t.Fatalf("plain retry: %v", sent[1])
+	}
+	if sent[2]["parse_mode"] != nil {
+		t.Fatalf("Heimdall's text as Markdown: %v", sent[2])
+	}
+	// A plain retry that fails too is classified as usual.
+	api.set("sendMessage", func(w http.ResponseWriter, _ map[string]any) bool {
+		fail(w, http.StatusBadRequest, "Bad Request: chat not found", 0)
+		return true
+	})
+	var perm router.PermanentError
+	if err := i.Send(context.Background(), core.Outbound{Conv: conv, Text: "x", Formatted: true}); !errors.As(err, &perm) {
+		t.Fatalf("err %v", err)
+	}
+	if !strings.Contains(i.PromptNote(), "Telegram Markdown") {
+		t.Fatalf("note %q", i.PromptNote())
 	}
 }
 

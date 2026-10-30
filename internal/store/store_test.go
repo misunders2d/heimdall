@@ -251,3 +251,23 @@ func TestNextDueIgnoresRepliesWaitingInTheirChat(t *testing.T) {
 		t.Fatal("a reply waiting behind one in flight counted as due")
 	}
 }
+
+// Delivery details beyond the text survive the queue.
+func TestOutboundKeepsFormatted(t *testing.T) {
+	s := open(t)
+	if _, err := s.Enqueue(core.Outbound{Conv: conv, Text: "plain"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Enqueue(core.Outbound{Conv: conv, Text: "*rich*", Formatted: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []bool{false, true} {
+		r, ok, err := s.NextOutbound(conv.Interface)
+		if err != nil || !ok || r.Formatted != want {
+			t.Fatalf("next = %+v %v %v, want formatted %v", r, ok, err, want)
+		}
+		if err := s.Sent(r.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

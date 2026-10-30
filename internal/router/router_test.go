@@ -33,9 +33,12 @@ type fakeIface struct {
 	out   chan core.Outbound
 	fails atomic.Int64 // transient Send failures still to report
 	typed atomic.Int64 // Typing calls
+	note  atomic.Value // PromptNote, a string
 }
 
 func (f *fakeIface) Typing(context.Context, core.ConvKey) { f.typed.Add(1) }
+
+func (f *fakeIface) PromptNote() string { s, _ := f.note.Load().(string); return s }
 
 func newFakeIface() *fakeIface {
 	return &fakeIface{in: make(chan core.Inbound), out: make(chan core.Outbound, 64)}
@@ -766,4 +769,25 @@ func eventuallyTrue(t *testing.T, what string, cond func() bool) {
 		}
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// The interface's prompt note heads every turn's prompt, and only the
+// harness's answer is marked as written for it.
+func TestPromptNoteAndFormattedAnswers(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.f.note.Store("[Transport note: fake markup]")
+	e.send(owner, "c1", "hello")
+	out := e.reply()
+	want(t, out, `head="[Transport note: fake markup]"`, `last="hello"`)
+	if !out.Formatted {
+		t.Fatalf("answer not marked formatted: %+v", out)
+	}
+	e.send(owner, "c1", "!status")
+	if out := e.reply(); out.Formatted {
+		t.Fatalf("Heimdall's own reply marked formatted: %+v", out)
+	}
+	e.send(owner, "c1", "x FAILPOST=omp")
+	if out := e.reply(); out.Formatted || !strings.Contains(out.Text, "failed") {
+		t.Fatalf("failure reply: %+v", out)
+	}
 }
