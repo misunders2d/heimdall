@@ -6,9 +6,9 @@ supersedes the earlier handoffs of the same day.
 
 ## State
 
-- `main` = the commit that updates this file; code HEAD `8205b59`. Pushed,
-  tree clean. No WIP branch.
-- `go vet ./...` clean. `go test -race ./...` all pass at `8205b59`
+- `main` = the commit that updates this file; code HEAD `8205b59`, last
+  test change `3ecd26b`. Pushed, tree clean. No WIP branch.
+- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `3ecd26b`
   (config, core, harness, iface/slack, iface/telegram, router, store). The
   router package takes about 146 s, harness about 30 s, store and
   iface/telegram about 15 s each.
@@ -19,7 +19,8 @@ supersedes the earlier handoffs of the same day.
   what is not ported and why, and two open recommendations are in
   [`docs/hub-parity.md`](hub-parity.md) (Telegram). Phase 1 is complete
   except the live Telegram chat check with a human (see "Remaining work" 1).
-- A live dev instance of `8743721` polls the test bot for that check.
+- A live dev instance of `8743721` (code as at `3ecd26b`) polls the test
+  bot for that check.
 
 ## Done
 
@@ -47,6 +48,8 @@ supersedes the earlier handoffs of the same day.
 | `7bb6376` | Owners are told once when a new non-root caller writes (store step 9, `router.OwnerNotifier`). |
 | `8205b59` | A Markdown fallback is logged (metadata only). |
 | `8743721` | `docs/hub-parity.md` Telegram section; README and AGENTS name the new-caller notice. |
+| `0ad219d` | This handoff. |
+| `3ecd26b` | Test fix: `TestOutboxFilesAreSentAfterTheAnswer` read the outbox copy after the router may have removed it (flaked once). |
 
 ### Second session
 
