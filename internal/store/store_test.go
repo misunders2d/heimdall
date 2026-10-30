@@ -141,18 +141,46 @@ func TestOutboundInOrderPerChat(t *testing.T) {
 	}
 }
 
-func TestChatHarness(t *testing.T) {
+func TestAnswerCommandIsAtomic(t *testing.T) {
 	s := open(t)
-	if h, _ := s.ChatHarness(conv); h != "" {
-		t.Fatal(h)
+	use := func(id string, h string) error {
+		row, _, err := s.AddInbound(msg(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.AnswerCommand(row.ID, conv, CommandEnd{Detail: "use", SetHarness: true, Harness: h, Reply: core.Outbound{Conv: conv, Text: "ok"}})
 	}
-	s.SetChatHarness(conv, "codex")
+	if err := use("1", "codex"); err != nil {
+		t.Fatal(err)
+	}
 	if h, _ := s.ChatHarness(conv); h != "codex" {
 		t.Fatal(h)
 	}
-	s.SetChatHarness(conv, "")
+	// A reply that cannot be stored undoes the whole command.
+	if _, err := s.db.Exec(`CREATE TRIGGER no_replies BEFORE INSERT ON outbound BEGIN SELECT RAISE(ABORT, 'disk full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := use("2", ""); err == nil {
+		t.Fatal("command recorded without its reply")
+	}
+	if h, _ := s.ChatHarness(conv); h != "codex" {
+		t.Fatalf("harness = %q after a failed command", h)
+	}
+	if p, _ := s.Pending(); len(p) != 1 || p[0].MsgID != "2" {
+		t.Fatalf("pending = %+v, want the unanswered command", p)
+	}
+	if _, err := s.db.Exec(`DROP TRIGGER no_replies`); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := s.Pending()
+	if err := s.AnswerCommand(p[0].ID, conv, CommandEnd{Detail: "use", SetHarness: true, Reply: core.Outbound{Conv: conv, Text: "ok"}}); err != nil {
+		t.Fatal(err)
+	}
 	if h, _ := s.ChatHarness(conv); h != "" {
 		t.Fatal(h)
+	}
+	if n, _ := s.Undelivered(); n != 2 {
+		t.Fatalf("undelivered = %d, want both replies", n)
 	}
 }
 

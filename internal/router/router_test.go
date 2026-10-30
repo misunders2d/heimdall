@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"log"
@@ -642,5 +643,38 @@ func TestInterfaceErrorDuringShutdownIsNotAFailure(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run hung at shutdown")
+	}
+}
+
+func TestCommandReplyIsNeverLost(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+	db, err := sql.Open("sqlite", e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// Replies cannot be stored: the command must not count as answered.
+	if _, err := db.Exec(`CREATE TRIGGER no_replies BEFORE INSERT ON outbound BEGIN SELECT RAISE(ABORT, 'disk full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	e.send(owner, "c1", "!use codex")
+	e.noReply(300 * time.Millisecond)
+	conv := core.ConvKey{Interface: "fake", Chat: "c1"}
+	if h, _ := e.st.ChatHarness(conv); h != "" {
+		t.Fatalf("!use applied without its reply: %q", h)
+	}
+	if p, _ := e.st.Pending(); len(p) != 1 {
+		t.Fatalf("pending = %+v, want the unanswered command", p)
+	}
+	// After a restart the command is answered and applied together.
+	e.stop()
+	stopOnce.Delete(e.st)
+	if _, err := db.Exec(`DROP TRIGGER no_replies`); err != nil {
+		t.Fatal(err)
+	}
+	e.start()
+	want(t, e.reply(), "now uses codex")
+	if h, _ := e.st.ChatHarness(conv); h != "codex" {
+		t.Fatalf("harness after restart = %q", h)
 	}
 }

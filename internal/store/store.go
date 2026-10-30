@@ -352,6 +352,37 @@ func (s *Store) Session(conv core.ConvKey, who, harness string) (id string, clea
 	return id, clean, err
 }
 
+// CommandEnd is how a ! command was answered.
+type CommandEnd struct {
+	Detail     string
+	SetHarness bool   // !use: make Harness sticky for the conversation
+	Harness    string // "" restores the default order
+	Reply      core.Outbound
+}
+
+// AnswerCommand settles a ! command: its message, any harness choice and
+// its reply in one transaction. If it fails nothing is recorded and the
+// message stays pending, to be answered after a restart.
+func (s *Store) AnswerCommand(item int64, conv core.ConvKey, e CommandEnd) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE inbound SET state=?,detail=? WHERE id=?`, InCommand, e.Detail, item); err != nil {
+		return err
+	}
+	if e.SetHarness {
+		if err := setChatHarness(tx, conv, e.Harness); err != nil {
+			return err
+		}
+	}
+	if _, err := enqueue(tx, e.Reply); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ChatHarness is the conversation's sticky harness, or "" for the default order.
 func (s *Store) ChatHarness(conv core.ConvKey) (string, error) {
 	var h string
@@ -362,13 +393,13 @@ func (s *Store) ChatHarness(conv core.ConvKey) (string, error) {
 	return h, err
 }
 
-// SetChatHarness makes harness sticky for conv; "" restores the default order.
-func (s *Store) SetChatHarness(conv core.ConvKey, harness string) error {
+// setChatHarness makes harness sticky for conv; "" restores the default order.
+func setChatHarness(tx *sql.Tx, conv core.ConvKey, harness string) error {
 	if harness == "" {
-		_, err := s.db.Exec(`DELETE FROM chat_settings WHERE iface=? AND chat=? AND thread=?`, conv.Interface, conv.Chat, conv.Thread)
+		_, err := tx.Exec(`DELETE FROM chat_settings WHERE iface=? AND chat=? AND thread=?`, conv.Interface, conv.Chat, conv.Thread)
 		return err
 	}
-	_, err := s.db.Exec(`INSERT INTO chat_settings(iface,chat,thread,harness) VALUES(?,?,?,?) ON CONFLICT(iface,chat,thread) DO UPDATE SET harness=excluded.harness`,
+	_, err := tx.Exec(`INSERT INTO chat_settings(iface,chat,thread,harness) VALUES(?,?,?,?) ON CONFLICT(iface,chat,thread) DO UPDATE SET harness=excluded.harness`,
 		conv.Interface, conv.Chat, conv.Thread, harness)
 	return err
 }

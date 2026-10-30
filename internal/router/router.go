@@ -376,10 +376,15 @@ func (c *conv) reply(row store.InboundRow, text string) {
 	c.r.enqueue(core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: text})
 }
 
-func (c *conv) command(row store.InboundRow, detail string) {
-	if err := c.r.store.SetInbound(row.ID, store.InCommand, detail); err != nil {
-		c.r.log.Printf("message %d: %v", row.ID, err)
+// answer settles a ! command and its reply together. If that cannot be
+// recorded the message stays pending and is answered after a restart.
+func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
+	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: text + "\n— heimdall"}
+	if err := c.r.store.AnswerCommand(row.ID, c.key, e); err != nil {
+		c.r.log.Printf("message %d: command %s not recorded: %v", row.ID, e.Detail, err)
+		return
 	}
+	c.r.wake(c.key.Interface)
 }
 
 // handle routes one stored message. The sender's role is evaluated now, so
@@ -394,32 +399,23 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 	cmd := parseCommand(row.Text)
 	switch cmd.Kind {
 	case cmdInvalid:
-		c.command(row, "invalid")
-		c.reply(row, cmd.Error+"\n— heimdall")
+		c.answer(row, store.CommandEnd{Detail: "invalid"}, cmd.Error)
 		return
 	case cmdHelp:
-		c.command(row, "help")
-		c.reply(row, helpText(c.r.opt.Order)+"\n— heimdall")
+		c.answer(row, store.CommandEnd{Detail: "help"}, helpText(c.r.opt.Order))
 		return
 	case cmdStatus:
-		c.command(row, "status")
-		c.reply(row, c.status()+"\n— heimdall")
+		c.answer(row, store.CommandEnd{Detail: "status"}, c.status())
 		return
 	case cmdUse:
-		c.command(row, "use")
-		if err := c.r.store.SetChatHarness(c.key, cmd.Harness); err != nil {
-			c.reply(row, "Could not save the choice: "+err.Error()+"\n— heimdall")
-			return
-		}
+		text := "This chat now uses " + cmd.Harness + " (no fallback) until !use default."
 		if cmd.Harness == "" {
-			c.reply(row, "This chat is back to the default order: "+strings.Join(c.r.opt.Order, " → ")+".\n— heimdall")
-		} else {
-			c.reply(row, "This chat now uses "+cmd.Harness+" (no fallback) until !use default.\n— heimdall")
+			text = "This chat is back to the default order: " + strings.Join(c.r.opt.Order, " → ") + "."
 		}
+		c.answer(row, store.CommandEnd{Detail: "use", SetHarness: true, Harness: cmd.Harness}, text)
 		return
 	case cmdStop:
-		c.command(row, "stop")
-		c.reply(row, c.stop(role, row.From.Key())+"\n— heimdall")
+		c.answer(row, store.CommandEnd{Detail: "stop"}, c.stop(role, row.From.Key()))
 		return
 	}
 	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next, text: cmd.Text}
