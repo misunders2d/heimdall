@@ -897,6 +897,11 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			return
 		default:
 		}
+		if ctx.Err() != nil {
+			// Shutdown: the binding stays, as after a crash, so the next
+			// start reports the turn and never resumes the session.
+			break
+		}
 		c.unbind(t, h, prev, clean)
 		res := run.Result()
 		if res.Cancelled {
