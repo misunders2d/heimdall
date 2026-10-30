@@ -392,6 +392,11 @@ func (f *fake) agy() {
 	}
 	f.emit(map[string]any{"event": "init", "conversation_id": conv})
 	f.failPost()
+	if f.has("ASK_HUMAN") {
+		// Headless AGY auto-denies the approval on stderr and still reports
+		// SUCCESS: a soft denial that must not become an answer.
+		fmt.Fprintln(os.Stderr, "Headless mode cannot prompt for tool approval: run_command was auto-denied.")
+	}
 	f.emit(map[string]any{"event": "result", "result": map[string]any{"conversation_id": conv, "status": "SUCCESS", "response": f.answer()}})
 }
 

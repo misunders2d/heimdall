@@ -143,8 +143,8 @@ func TestFailureAfterReadyIsReady(t *testing.T) {
 }
 
 func TestNativeApprovalRequestNeedsHuman(t *testing.T) {
-	bin, _ := fakeharness.Install(t, "pi", "omp", "claude", "codex")
-	for _, name := range []string{"pi", "omp", "claude", "codex"} {
+	bin, _ := fakeharness.Install(t, "pi", "omp", "claude", "codex", "agy")
+	for _, name := range []string{"pi", "omp", "claude", "codex", "agy"} {
 		t.Run(name, func(t *testing.T) {
 			res := turn(t, launch(t, bin, name, true), name, "x ASK_HUMAN", harness.Session{ID: harness.NewSessionID(name)})
 			if res.NeedsHuman == "" || res.Answer != "" {
