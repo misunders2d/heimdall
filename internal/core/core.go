@@ -31,10 +31,14 @@ func Memory(mode Mode, role Role) bool { return role == RoleOwner || mode == Mod
 
 // Principal is a caller as verified by its interface: the platform's
 // authenticated user ID, never a display name or anything a sender wrote.
+// Access is decided by Key alone; Email and KeyID only travel with the
+// caller to the harness process.
 type Principal struct {
-	Platform string `json:"platform"`       // telegram, slack, agentnet, local
-	ID       string `json:"id"`             // verified user ID; Slack: TEAM/USER
-	Name     string `json:"name,omitempty"` // display only, never authority
+	Platform string `json:"platform"`         // telegram, slack, agentnet, local
+	ID       string `json:"id"`               // verified user ID; Slack: TEAM/USER
+	Name     string `json:"name,omitempty"`   // display only, never authority
+	Email    string `json:"email,omitempty"`  // interface-verified email (Slack), or ""
+	KeyID    string `json:"key_id,omitempty"` // verified signing key ID (AgentNet), or ""
 }
 
 // Key is the principal's access-list form, platform:id.

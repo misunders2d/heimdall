@@ -138,3 +138,39 @@ func TestChatHarness(t *testing.T) {
 		t.Fatal(h)
 	}
 }
+
+func TestPendingKeepsVerifiedEmailAndKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.db")
+	// A database from before the email/key step keeps its pending messages.
+	all := steps
+	steps = all[:2]
+	old, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.db.Exec(`INSERT INTO inbound(iface,chat,thread,msg_id,platform,user_id,user_name,origin,text,received_at,state) VALUES('x','c','t','old','x','u','','live','hi',0,?)`, InPending); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+	steps = all
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	in := msg("new")
+	in.From = core.Principal{Platform: "slack", ID: "T1/U2", Email: "user@example.com", KeyID: "key-1"}
+	if _, _, err := s.AddInbound(in); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.Pending()
+	if err != nil || len(p) != 2 {
+		t.Fatalf("pending = %+v, %v", p, err)
+	}
+	if p[0].From.Email != "" || p[0].From.KeyID != "" {
+		t.Fatalf("old message gained identity: %+v", p[0].From)
+	}
+	if p[1].From != in.From {
+		t.Fatalf("from = %+v, want %+v", p[1].From, in.From)
+	}
+}
