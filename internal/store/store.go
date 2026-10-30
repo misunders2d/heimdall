@@ -19,6 +19,7 @@ import (
 const (
 	InPending     = "pending"     // stored, not yet in a turn
 	InRunning     = "running"     // part of a turn's initial input
+	InSteering    = "steering"    // being handed to a running turn; outcome not yet recorded
 	InSteered     = "steered"     // accepted into a running turn by the harness
 	InDone        = "done"        // its turn completed with an answer
 	InFailed      = "failed"      // its turn failed
@@ -246,9 +247,30 @@ func (s *Store) CommitTurn(turn int64, conv core.ConvKey, who, harness, session 
 	return tx.Commit()
 }
 
+// Steering records that a pending message is about to be handed to a
+// running turn. From here on a crash reports it as unconfirmed and never
+// replays it.
+func (s *Store) Steering(turn, item int64) error {
+	res, err := s.db.Exec(`UPDATE inbound SET state=?,turn_id=? WHERE id=? AND state=?`, InSteering, turn, item, InPending)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("message %d is no longer pending", item)
+	}
+	return nil
+}
+
 // Steered records a message accepted into a running turn.
 func (s *Store) Steered(turn, item int64) error {
-	_, err := s.db.Exec(`UPDATE inbound SET state=?,turn_id=? WHERE id=? AND state=?`, InSteered, turn, item, InPending)
+	_, err := s.db.Exec(`UPDATE inbound SET state=?,turn_id=? WHERE id=? AND state=?`, InSteered, turn, item, InSteering)
+	return err
+}
+
+// Unsteer returns a message the running turn did not take to pending, to
+// run as a follow-up.
+func (s *Store) Unsteer(item int64) error {
+	_, err := s.db.Exec(`UPDATE inbound SET state=?,turn_id=NULL WHERE id=? AND state=?`, InPending, item, InSteering)
 	return err
 }
 
@@ -428,20 +450,28 @@ type Interrupted struct {
 	Messages  int
 }
 
+// Recovered is what a restart cut off.
+type Recovered struct {
+	Turns       []Interrupted
+	Unconfirmed []InboundRow // messages whose hand-over to a running turn was never recorded
+}
+
 // Recover runs once at startup, before any interface: every turn still
 // running was cut off by the restart. It is marked interrupted with its
-// messages, its session is not resumed, and notice builds the chat notice,
-// all in one transaction. Nothing is re-run. Replies caught mid-send go back
-// to the queue.
-func (s *Store) Recover(notice func(Interrupted) core.Outbound) ([]Interrupted, error) {
+// messages, its session is not resumed, and turnNotice builds the chat
+// notice. A message caught mid-hand-over to a running turn is marked
+// unconfirmed and steerNotice tells its sender. All in one transaction;
+// nothing is re-run. Replies caught mid-send go back to the queue.
+func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice func(InboundRow) core.Outbound) (Recovered, error) {
+	var rec Recovered
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, err
+		return rec, err
 	}
 	defer tx.Rollback()
 	rows, err := tx.Query(`SELECT t.id,t.iface,t.chat,t.thread,t.role,t.principal,t.harness,t.reply_to,(SELECT count(*) FROM inbound i WHERE i.turn_id=t.id AND i.state IN (?,?)) FROM turns t WHERE t.state=? ORDER BY t.id`, InRunning, InSteered, TurnRunning)
 	if err != nil {
-		return nil, err
+		return rec, err
 	}
 	var cut []Interrupted
 	for rows.Next() {
@@ -449,35 +479,63 @@ func (s *Store) Recover(notice func(Interrupted) core.Outbound) ([]Interrupted, 
 		var role string
 		if err := rows.Scan(&t.Turn, &t.Conv.Interface, &t.Conv.Chat, &t.Conv.Thread, &role, &t.Principal, &t.Harness, &t.ReplyTo, &t.Messages); err != nil {
 			rows.Close()
-			return nil, err
+			return rec, err
 		}
 		t.Role = core.Role(role)
 		cut = append(cut, t)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return rec, err
 	}
 	for _, t := range cut {
 		if _, err := tx.Exec(`UPDATE turns SET state=?,detail=?,ended_at=? WHERE id=?`, TurnInterrupted, "Heimdall restarted during this turn; not re-run", now(), t.Turn); err != nil {
-			return nil, err
+			return rec, err
 		}
 		if _, err := tx.Exec(`UPDATE inbound SET state=?,detail=? WHERE turn_id=? AND state IN (?,?)`, InInterrupted, "turn interrupted by restart; not re-run", t.Turn, InRunning, InSteered); err != nil {
-			return nil, err
+			return rec, err
 		}
 		if t.Harness != "" {
 			if _, err := tx.Exec(`UPDATE sessions SET clean=0 WHERE iface=? AND chat=? AND thread=? AND principal=? AND harness=?`, t.Conv.Interface, t.Conv.Chat, t.Conv.Thread, t.Principal, t.Harness); err != nil {
-				return nil, err
+				return rec, err
 			}
 		}
-		if _, err := enqueue(tx, notice(t)); err != nil {
-			return nil, err
+		if _, err := enqueue(tx, turnNotice(t)); err != nil {
+			return rec, err
+		}
+	}
+	rows, err = tx.Query(`SELECT id,iface,chat,thread,msg_id,platform,user_id,turn_id FROM inbound WHERE state=? ORDER BY id`, InSteering)
+	if err != nil {
+		return rec, err
+	}
+	var held []InboundRow
+	for rows.Next() {
+		var r InboundRow
+		var turn sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.Conv.Interface, &r.Conv.Chat, &r.Conv.Thread, &r.MsgID, &r.From.Platform, &r.From.ID, &turn); err != nil {
+			rows.Close()
+			return rec, err
+		}
+		r.State, r.TurnID = InUnconfirmed, turn.Int64
+		held = append(held, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return rec, err
+	}
+	for _, r := range held {
+		if _, err := tx.Exec(`UPDATE inbound SET state=?,detail=? WHERE id=?`, InUnconfirmed, "steer interrupted by restart; not replayed", r.ID); err != nil {
+			return rec, err
+		}
+		if _, err := enqueue(tx, steerNotice(r)); err != nil {
+			return rec, err
 		}
 	}
 	if _, err := tx.Exec(`UPDATE outbound SET state=? WHERE state=?`, OutPending, OutSending); err != nil {
-		return nil, err
+		return rec, err
 	}
-	return cut, tx.Commit()
+	rec.Turns, rec.Unconfirmed = cut, held
+	return rec, tx.Commit()
 }
 
 func clip(s string) string {

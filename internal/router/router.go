@@ -80,12 +80,15 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 // running at shutdown stay recorded as running, so the next start reports
 // them exactly like a crash.
 func (r *Router) Run(ctx context.Context) error {
-	cut, err := r.store.Recover(interruptedNotice)
+	rec, err := r.store.Recover(interruptedNotice, unconfirmedNotice)
 	if err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
-	for _, t := range cut {
+	for _, t := range rec.Turns {
 		r.log.Printf("turn %d in %s interrupted by restart (harness %q); reported, not re-run", t.Turn, t.Conv, t.Harness)
+	}
+	for _, m := range rec.Unconfirmed {
+		r.log.Printf("message %d in %s was being steered into turn %d at the restart; reported, not replayed", m.ID, m.Conv, m.TurnID)
 	}
 	r.mu.Lock()
 	r.ctx = ctx
@@ -607,6 +610,14 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 	}
 	it := t.steerQ[0]
 	t.steerQ = t.steerQ[1:]
+	// Recorded before the hand-over: from here on a crash reports the
+	// message as unconfirmed instead of replaying it.
+	if err := c.r.store.Steering(t.id, it.row.ID); err != nil {
+		c.r.log.Printf("message %d: not steered, steer not recordable: %v", it.row.ID, err)
+		c.requeue(it)
+		c.steerNext(ctx, t)
+		return
+	}
 	t.steering = true
 	t.mu.Lock()
 	run := t.run
@@ -630,6 +641,9 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 		c.reply(ev.it.row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
 	default:
 		// Not handed over: run it as a follow-up turn.
+		if err := c.r.store.Unsteer(ev.it.row.ID); err != nil {
+			c.r.log.Printf("message %d: steer not undone: %v", ev.it.row.ID, err)
+		}
 		c.requeue(ev.it)
 	}
 	if t.done != nil {
@@ -741,6 +755,10 @@ func clipAll(in []string, n int) []string {
 		out[i] = s
 	}
 	return out
+}
+
+func unconfirmedNotice(m store.InboundRow) core.Outbound {
+	return core.Outbound{Conv: m.Conv, ReplyTo: m.MsgID, Text: "⚠ Heimdall restarted while handing this message to the running turn, so it may or may not have reached it. It will not be re-sent automatically; resend it if still needed.\n— heimdall"}
 }
 
 func interruptedNotice(t store.Interrupted) core.Outbound {

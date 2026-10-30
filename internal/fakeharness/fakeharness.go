@@ -9,6 +9,8 @@
 //	FAILPRE=NAME   exit with an error before the turn is ready
 //	FAILPOST=NAME  exit with an error after the turn is ready
 //	WAIT_STEER     wait for steering input until one contains FINISH (10s cap)
+//	NOACK          (in a pi/omp steer) take the steer, create STATE/steer-held
+//	               and never acknowledge it
 //	SLEEP          stay busy for 30 seconds
 //	ASK_HUMAN      request native approval/input
 //
@@ -228,6 +230,11 @@ func (f *fake) piRPC() {
 			return false
 		}
 		text, _ := s["message"].(string)
+		if strings.Contains(text, "NOACK") {
+			_ = os.WriteFile(filepath.Join(f.state, "steer-held"), nil, 0o600)
+			time.Sleep(30 * time.Second)
+			return false
+		}
 		f.emit(map[string]any{"type": "response", "id": s["id"], "command": "steer", "success": true, "data": map[string]any{"disposition": "queued"}})
 		msg := map[string]any{"role": "user", "content": text}
 		if omp {

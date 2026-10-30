@@ -51,35 +51,52 @@ func TestRecoverInterruptsRunningTurnsOnce(t *testing.T) {
 	s := open(t)
 	a, _, _ := s.AddInbound(msg("1"))
 	b, _, _ := s.AddInbound(msg("2"))
+	c, _, _ := s.AddInbound(msg("3"))
+	d, _, _ := s.AddInbound(msg("4"))
 	turn, _ := s.StartTurn(conv, core.RoleOwner, "x:u", "1", []int64{a.ID})
 	if err := s.CommitTurn(turn, conv, "x:u", "omp", "sess"); err != nil {
 		t.Fatal(err)
 	}
+	for _, id := range []int64{b.ID, c.ID, d.ID} {
+		if err := s.Steering(turn, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := s.Steered(turn, b.ID); err != nil {
 		t.Fatal(err)
 	}
-	notices := 0
-	cut, err := s.Recover(func(i Interrupted) core.Outbound {
-		notices++
+	if err := s.Unsteer(d.ID); err != nil { // not taken: a follow-up again
+		t.Fatal(err)
+	}
+	turns, steers := 0, 0
+	rec, err := s.Recover(func(i Interrupted) core.Outbound {
+		turns++
 		if i.Harness != "omp" || i.Messages != 2 || i.ReplyTo != "1" {
 			t.Errorf("interrupted = %+v", i)
 		}
 		return core.Outbound{Conv: i.Conv, Text: "restarted"}
+	}, func(m InboundRow) core.Outbound {
+		steers++
+		if m.MsgID != "3" || m.TurnID != turn {
+			t.Errorf("unconfirmed = %+v", m)
+		}
+		return core.Outbound{Conv: m.Conv, ReplyTo: m.MsgID, Text: "maybe steered"}
 	})
-	if err != nil || len(cut) != 1 || notices != 1 {
-		t.Fatalf("recover: %v %+v %d", err, cut, notices)
+	if err != nil || len(rec.Turns) != 1 || len(rec.Unconfirmed) != 1 || turns != 1 || steers != 1 {
+		t.Fatalf("recover: %v %+v %d %d", err, rec, turns, steers)
 	}
 	if id, clean, _ := s.Session(conv, "x:u", "omp"); id != "sess" || clean {
 		t.Fatalf("session after restart = %q clean=%v, want not resumable", id, clean)
 	}
-	if p, _ := s.Pending(); len(p) != 0 {
-		t.Fatalf("interrupted messages would re-run: %+v", p)
+	if p, _ := s.Pending(); len(p) != 1 || p[0].MsgID != "4" {
+		t.Fatalf("pending after restart = %+v, want only the message never handed over", p)
 	}
-	if again, _ := s.Recover(func(Interrupted) core.Outbound { t.Fatal("second notice"); return core.Outbound{} }); len(again) != 0 {
+	fail := func(Interrupted) core.Outbound { t.Fatal("second notice"); return core.Outbound{} }
+	if again, _ := s.Recover(fail, func(InboundRow) core.Outbound { t.Fatal("second notice"); return core.Outbound{} }); len(again.Turns)+len(again.Unconfirmed) != 0 {
 		t.Fatal("recovered twice")
 	}
-	if n, _ := s.Undelivered(); n != 1 {
-		t.Fatalf("undelivered = %d, want the one notice", n)
+	if n, _ := s.Undelivered(); n != 2 {
+		t.Fatalf("undelivered = %d, want the two notices", n)
 	}
 }
 
@@ -110,7 +127,7 @@ func TestOutboundInOrderPerChat(t *testing.T) {
 		t.Fatal("a2 offered while a1 undelivered")
 	}
 	// A restart returns in-flight replies to the queue (at-least-once).
-	if _, err := s.Recover(func(Interrupted) core.Outbound { return core.Outbound{} }); err != nil {
+	if _, err := s.Recover(func(Interrupted) core.Outbound { return core.Outbound{} }, func(InboundRow) core.Outbound { return core.Outbound{} }); err != nil {
 		t.Fatal(err)
 	}
 	if got := next(); got != "a1" {

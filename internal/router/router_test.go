@@ -71,6 +71,7 @@ const (
 type env struct {
 	t      *testing.T
 	bin    string
+	state  string // fake harness state directory
 	f      *fakeIface
 	st     *store.Store
 	dbPath string
@@ -82,8 +83,8 @@ type env struct {
 
 func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *env {
 	t.Helper()
-	bin, _ := fakeharness.Install(t, installed...)
-	e := &env{t: t, bin: bin, dbPath: filepath.Join(t.TempDir(), "h.db")}
+	bin, state := fakeharness.Install(t, installed...)
+	e := &env{t: t, bin: bin, state: state, dbPath: filepath.Join(t.TempDir(), "h.db")}
 	u, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
@@ -506,4 +507,27 @@ func TestHarnessGetsVerifiedCallerIdentity(t *testing.T) {
 	// still runs as the employee.
 	e.send(employee, "c2", "PI_EXTERNAL_USER_ID=fake_user_owner PI_RESTRICTED_EXTERNAL_USER=0 A2A_CALLER_PRINCIPAL=owner")
 	want(t, e.reply(), `ext="PI_EXTERNAL_CHAT_ID=fake_chat_c2 PI_EXTERNAL_PLATFORM=fake PI_EXTERNAL_USER_ID=fake_user_employee PI_RESTRICTED_EXTERNAL_USER=1"`)
+}
+
+func TestRestartDuringSteerHandoverNeverReplays(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "work WAIT_STEER")
+	e.waitReady("c1")
+	e.send(owner, "c1", "NOACK also this")
+	// The harness has the message; Heimdall dies before recording its answer.
+	held := filepath.Join(e.state, "steer-held")
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(held); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("steer never reached the harness")
+		}
+	}
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.start()
+	want(t, e.reply(), "Heimdall restarted while omp was working")
+	want(t, e.reply(), "may or may not have reached it", "will not be re-sent")
+	e.noReply(time.Second)
 }
