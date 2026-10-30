@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -75,25 +76,27 @@ func (c *conv) file(t *turn, it item, i int, a core.Attachment, imageRoom bool) 
 		}
 		return fmt.Sprintf("[Attachment not available]\nsource: %s\n%s", a.Source, note), nil
 	}
+	stored, ok := c.r.stored(c.key.Interface, a)
+	if !ok {
+		c.r.log.Printf("turn %d: attachment %d of message %d is not in the interface's upload directory; not used", t.id, i+1, it.row.ID)
+		return unavailable("the stored file is not where the interface keeps uploads"), nil
+	}
 	dir, err := c.turnDir(t)
 	if err != nil {
 		c.r.log.Printf("turn %d: turn directory not created: %v", t.id, err)
 		return unavailable("Heimdall could not prepare the turn's directory"), nil
 	}
-	path, err := dir.Add(a.Stored, fmt.Sprintf("%d-%d-%s", it.row.ID, i+1, name))
+	path, err := dir.Add(stored, fmt.Sprintf("%d-%d-%s", it.row.ID, i+1, name))
 	if err != nil {
 		c.r.log.Printf("turn %d: attachment %d of message %d not copied: %v", t.id, i+1, it.row.ID, err)
 		return unavailable("Heimdall could not copy the file for this turn"), nil
 	}
-	text := fileText(a.Stored, a.MIME, name)
+	text := fileText(stored, a.MIME, name)
 	var im *harness.Image
 	if mime := strings.ToLower(a.MIME); imageRoom && inlineMIME[mime] && a.Size > 0 && a.Size <= maxInlineImage {
-		if data, err := os.ReadFile(a.Stored); err == nil && len(data) <= maxInlineImage {
+		if data, err := os.ReadFile(stored); err == nil && len(data) <= maxInlineImage {
 			im = &harness.Image{Path: path, MIME: mime, Data: data}
 		}
-	}
-	if err := os.Remove(a.Stored); err != nil {
-		c.r.log.Printf("turn %d: stored attachment not removed: %v", t.id, err)
 	}
 	block := fmt.Sprintf("[File saved]\nsource: %s\npath: %s\nname: %s\nmime: %s\nkind: %s\nbytes: %d", a.Source, path, name, a.MIME, a.Kind, a.Size)
 	if im != nil {
@@ -103,6 +106,49 @@ func (c *conv) file(t *turn, it item, i int, a core.Attachment, imageRoom bool) 
 		block += "\n" + untrusted("file "+name, text)
 	}
 	return block, im
+}
+
+// Uploader is an optional Interface that stores the files messages carry
+// (core.Attachment.Stored). The router uses, and removes, only files
+// directly inside UploadDir.
+type Uploader interface {
+	UploadDir() string
+}
+
+// stored is a's file if it is a regular file directly inside its
+// interface's upload directory (not a link): the router, possibly root,
+// never opens or removes another path an interface named.
+func (r *Router) stored(iface string, a core.Attachment) (string, bool) {
+	u, ok := r.ifaces[iface].(Uploader)
+	if !ok || a.Stored == "" || u.UploadDir() == "" {
+		return "", false
+	}
+	dir, err := filepath.Abs(u.UploadDir())
+	if err != nil {
+		return "", false
+	}
+	p := filepath.Clean(a.Stored)
+	if !filepath.IsAbs(p) || filepath.Dir(p) != dir {
+		return "", false
+	}
+	if info, err := os.Lstat(p); err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	return p, true
+}
+
+// release removes the interface's stored copies of a message's files once
+// the message is final: handed to a harness (which has its own copies in
+// the turn directory), answered as a command, cancelled, rejected or not
+// stored at all. A message that goes back to the queue keeps them.
+func (r *Router) release(in core.Inbound) {
+	for _, a := range in.Attachments {
+		if p, ok := r.stored(in.Conv.Interface, a); ok {
+			if err := os.Remove(p); err != nil {
+				r.log.Printf("stored attachment in %s not removed: %v", in.Conv, err)
+			}
+		}
+	}
 }
 
 // fileName keeps an interface's file name a plain base name.

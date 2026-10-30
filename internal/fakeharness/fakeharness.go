@@ -480,6 +480,9 @@ func (f *fake) agy() {
 	}
 	f.emit(map[string]any{"event": "init", "conversation_id": conv})
 	f.failPost()
+	if f.has("SLOW") {
+		time.Sleep(2 * time.Second)
+	}
 	if f.has("ASK_HUMAN") {
 		// Headless AGY auto-denies the approval on stderr and still reports
 		// SUCCESS: a soft denial that must not become an answer.

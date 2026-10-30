@@ -22,7 +22,9 @@ import (
 // getFile limit.
 const maxFile = 20 << 20
 
-// uploadRetention is how long a download nobody took is kept.
+// uploadRetention is how long a download is kept at most. The router
+// removes a message's files once the message is final; what is left is from
+// messages a restart interrupted.
 const uploadRetention = 7 * 24 * time.Hour
 
 // attachments downloads the files m and the message it replies to carry

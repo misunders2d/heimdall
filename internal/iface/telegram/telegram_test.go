@@ -1162,3 +1162,30 @@ func TestFilesAreUploaded(t *testing.T) {
 		t.Fatal("token in logs")
 	}
 }
+
+// Old downloads are removed while polling, not only at start.
+func TestOldUploadsArePrunedWhilePolling(t *testing.T) {
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	i := newIface(t, api.srv.URL, botName, &logs)
+	i.opt.UploadDir = t.TempDir()
+	i.pruneEvery = 50 * time.Millisecond
+	stop := run(t, i, (&collector{}).accept)
+	defer stop()
+	eventually(t, "polling", func() bool { return strings.Contains(logs.String(), "polling as") })
+	old, fresh := filepath.Join(i.opt.UploadDir, "old"), filepath.Join(i.opt.UploadDir, "fresh")
+	for _, p := range []string{old, fresh} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-uploadRetention - time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	api.push(upd(1, msg(1, 42, "private", 42, "wake the poll loop")))
+	eventually(t, "old upload pruned", func() bool { _, err := os.Stat(old); return os.IsNotExist(err) })
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh upload removed: %v", err)
+	}
+}

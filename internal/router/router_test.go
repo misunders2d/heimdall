@@ -31,15 +31,18 @@ func TestMain(m *testing.M) {
 
 // fakeIface is a chat platform driven by the test.
 type fakeIface struct {
-	in    chan core.Inbound
-	out   chan core.Outbound
-	fails atomic.Int64 // transient Send failures still to report
-	typed atomic.Int64 // Typing calls
-	note  atomic.Value // PromptNote, a string
-	react atomic.Bool  // offer reactions
-	group atomic.Bool  // keep group context
-	files atomic.Bool  // send files
+	in      chan core.Inbound
+	out     chan core.Outbound
+	fails   atomic.Int64 // transient Send failures still to report
+	typed   atomic.Int64 // Typing calls
+	note    atomic.Value // PromptNote, a string
+	react   atomic.Bool  // offer reactions
+	group   atomic.Bool  // keep group context
+	files   atomic.Bool  // send files
+	uploads string       // UploadDir
 }
+
+func (f *fakeIface) UploadDir() string { return f.uploads }
 
 func (f *fakeIface) GroupContext() bool { return f.group.Load() }
 
@@ -96,22 +99,23 @@ const (
 )
 
 type env struct {
-	t      *testing.T
-	bin    string
-	state  string // fake harness state directory
-	f      *fakeIface
-	st     *store.Store
-	dbPath string
-	cancel context.CancelFunc
-	done   chan error
-	opt    Options
-	seq    atomic.Int64 // message IDs stay unique across restarts
+	t       *testing.T
+	bin     string
+	state   string // fake harness state directory
+	f       *fakeIface
+	st      *store.Store
+	dbPath  string
+	cancel  context.CancelFunc
+	done    chan error
+	opt     Options
+	seq     atomic.Int64 // message IDs stay unique across restarts
+	uploads string       // the fake interface's upload directory
 }
 
 func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *env {
 	t.Helper()
 	bin, state := fakeharness.Install(t, installed...)
-	e := &env{t: t, bin: bin, state: state, dbPath: filepath.Join(t.TempDir(), "h.db")}
+	e := &env{t: t, bin: bin, state: state, dbPath: filepath.Join(t.TempDir(), "h.db"), uploads: t.TempDir()}
 	u, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
@@ -169,6 +173,7 @@ func (e *env) start() {
 		e.t.Fatal(err)
 	}
 	e.st, e.f = st, newFakeIface()
+	e.f.uploads = e.uploads
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel, e.done = cancel, make(chan error, 1)
 	r := New(e.opt, st, e.f)
@@ -956,7 +961,7 @@ func TestContextReachesHarnessBeforeText(t *testing.T) {
 // untrusted; Heimdall's own copy goes. A steered message's files too.
 func TestAttachmentsReachTheTurnDirectory(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
-	uploads := t.TempDir()
+	uploads := e.uploads
 	stored := func(name, body string) string {
 		p := filepath.Join(uploads, name)
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
@@ -1018,11 +1023,11 @@ func TestImagesReachHarnessesNatively(t *testing.T) {
 	for h, images := range map[string]int{"omp": 1, "pi": 1, "claude": 1, "codex": 1, "agy": 0} {
 		t.Run(h, func(t *testing.T) {
 			e := setup(t, core.ModeCorporate, []string{h}, h)
-			photo := filepath.Join(t.TempDir(), "u1")
+			photo := filepath.Join(e.uploads, "u1")
 			if err := os.WriteFile(photo, []byte("\x89PNG fake"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			big := filepath.Join(t.TempDir(), "u2")
+			big := filepath.Join(e.uploads, "u2")
 			if err := os.WriteFile(big, make([]byte, 4_000_000), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -1054,7 +1059,7 @@ func (e *env) album(from, chat, g, text string, photo bool) string {
 	id := fmt.Sprintf("m%d", e.seq.Add(1))
 	in := core.Inbound{Conv: core.ConvKey{Interface: "fake", Chat: chat}, MsgID: id, From: core.Principal{Platform: "fake", ID: name, Name: name}, Origin: core.OriginLive, Text: text, Group: g}
 	if photo {
-		p := filepath.Join(e.t.TempDir(), id)
+		p := filepath.Join(e.uploads, id)
 		if err := os.WriteFile(p, []byte("\x89PNG "+id), 0o600); err != nil {
 			e.t.Fatal(err)
 		}
@@ -1306,4 +1311,91 @@ func TestOutboxFilesAreSentAfterTheAnswer(t *testing.T) {
 	if in := fakeharness.Inputs(e.state); strings.Contains(in[len(in)-1].Text, "[Files:") {
 		t.Fatalf("prompt %q", in[len(in)-1].Text)
 	}
+}
+
+// A message whose steer is not handed over (AGY takes none) runs as a
+// follow-up with its files: Heimdall's copy stays until the message is
+// final, then goes.
+func TestFilesSurviveASteerNotHandedOver(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"agy"}, "agy")
+	e.send(owner, "c1", "work SLOW")
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		e.send(owner, "c1", "!status")
+		if strings.Contains(e.reply().Text, "Running: agy turn") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agy never became ready")
+		}
+	}
+	p := filepath.Join(e.uploads, "u1")
+	if err := os.WriteFile(p, []byte("notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.f.in <- core.Inbound{Conv: core.ConvKey{Interface: "fake", Chat: "c1"}, MsgID: "f1", From: core.Principal{Platform: "fake", ID: "owner", Name: "owner"}, Origin: core.OriginLive, Text: "and this", Attachments: []core.Attachment{{Kind: "document", Name: "n.txt", MIME: "text/plain", Size: 5, Source: "message", Stored: p}}}
+	want(t, e.reply(), "agy#1", "steers=0")
+	want(t, e.reply(), "agy#2")
+	inputs := fakeharness.Inputs(e.state)
+	if last := inputs[len(inputs)-1].Text; !strings.Contains(last, "[File saved]") || !strings.Contains(last, "notes") {
+		t.Fatalf("follow-up lost its file:\n%s", last)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("stored copy kept after its turn: %v", err)
+	}
+}
+
+// The router opens and removes only files directly in the interface's
+// upload directory.
+func TestStoredFilesOutsideTheUploadDirAreNeverUsed(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(e.uploads, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	e.f.in <- core.Inbound{Conv: core.ConvKey{Interface: "fake", Chat: "c1"}, MsgID: "f1", From: core.Principal{Platform: "fake", ID: "owner", Name: "owner"}, Origin: core.OriginLive, Text: "look", Attachments: []core.Attachment{
+		{Kind: "document", Name: "a.txt", Size: 6, Source: "message", Stored: outside},
+		{Kind: "document", Name: "b.txt", Size: 6, Source: "message", Stored: link},
+		{Kind: "document", Name: "c.txt", Size: 6, Source: "message", Stored: e.uploads + "/../" + filepath.Base(e.uploads) + "/link"},
+	}}
+	want(t, e.reply(), "omp#1")
+	in := fakeharness.Inputs(e.state)[0].Text
+	if strings.Count(in, "the stored file is not where the interface keeps uploads") != 3 || strings.Contains(in, "secret") {
+		t.Fatalf("prompt:\n%s", in)
+	}
+	for _, p := range []string{outside, link} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("%s removed: %v", p, err)
+		}
+	}
+}
+
+// Files of a message that never runs are removed: a command, a cancelled
+// message, a duplicate, an unidentified caller.
+func TestStoredFilesOfMessagesThatNeverRunAreRemoved(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	file := func(name string) []core.Attachment {
+		p := filepath.Join(e.uploads, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return []core.Attachment{{Kind: "document", Name: "x.txt", Size: 1, Source: "message", Stored: p}}
+	}
+	conv := core.ConvKey{Interface: "fake", Chat: "c1"}
+	boss := core.Principal{Platform: "fake", ID: "owner", Name: "owner"}
+	e.send(owner, "c1", "work WAIT_STEER")
+	e.waitReady("c1")
+	e.f.in <- core.Inbound{Conv: conv, MsgID: "s1", From: boss, Origin: core.OriginLive, Text: "!status", Attachments: file("cmd")}
+	want(t, e.reply(), "Running: omp turn")
+	e.f.in <- core.Inbound{Conv: conv, MsgID: "q1", From: core.Principal{Platform: "fake", ID: "employee", Name: "employee"}, Origin: core.OriginLive, Text: "queued", Attachments: file("queued")}
+	e.send(employee, "c1", "cancel")
+	want(t, e.reply(), "Cancelled 1 queued message(s).")
+	e.f.in <- core.Inbound{Conv: conv, MsgID: "s1", From: boss, Origin: core.OriginLive, Text: "!status", Attachments: file("dup")}
+	e.f.in <- core.Inbound{Conv: conv, MsgID: "u1", From: core.Principal{Platform: core.PlatformTelegram, ID: "not-numeric"}, Origin: core.OriginLive, Text: "who", Attachments: file("nobody")}
+	e.send(owner, "c1", "FINISH")
+	want(t, e.reply(), "omp#1")
+	eventuallyTrue(t, "every stored file removed", func() bool { entries, _ := os.ReadDir(e.uploads); return len(entries) == 0 })
 }

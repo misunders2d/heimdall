@@ -71,6 +71,7 @@ type Interface struct {
 
 	backoffMin, backoffMax time.Duration // getUpdates failures
 	maxRetryWait           time.Duration // longest 429 retry_after honoured inside Send
+	pruneEvery             time.Duration // how often old uploads are removed while polling
 
 	// albums are the group albums whose first part addressed the bot, by
 	// chat, sender and media_group_id: their later parts, which carry no
@@ -101,7 +102,7 @@ func New(opt Options) (*Interface, error) {
 	if opt.PollTimeout <= 0 {
 		opt.PollTimeout = 50 * time.Second
 	}
-	return &Interface{opt: opt, http: &http.Client{}, backoffMin: time.Second, backoffMax: time.Minute, maxRetryWait: time.Minute}, nil
+	return &Interface{opt: opt, http: &http.Client{}, backoffMin: time.Second, backoffMax: time.Minute, maxRetryWait: time.Minute, pruneEvery: time.Hour}, nil
 }
 
 func (t *Interface) Name() string { return core.PlatformTelegram }
@@ -256,9 +257,14 @@ func (t *Interface) Run(ctx context.Context, accept func(context.Context, core.I
 	t.botID, t.botName = me.ID, me.Username
 	t.logf("polling as @%s", t.botName)
 	t.pruneUploads()
+	pruned := time.Now()
 	var offset int64
 	backoff := t.backoffMin
 	for ctx.Err() == nil {
+		if time.Since(pruned) >= t.pruneEvery {
+			t.pruneUploads()
+			pruned = time.Now()
+		}
 		var updates []update
 		err := t.call(ctx, "getUpdates", map[string]any{
 			"offset":          offset,
@@ -573,6 +579,10 @@ func (t *Interface) react(ctx context.Context, out core.Outbound) error {
 	}
 	return nil
 }
+
+// UploadDir is where downloaded files are kept until their message is
+// final; the router uses only files there.
+func (t *Interface) UploadDir() string { return t.opt.UploadDir }
 
 // SendsFiles reports that Telegram sends the files a harness leaves in its
 // turn's outbox.

@@ -162,18 +162,24 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 		in.Origin = core.OriginLive
 	}
 	if err := in.Validate(); err != nil {
+		r.release(in)
 		return err
 	}
 	if _, ok := r.opt.Access.Role(in.From); !ok {
 		r.log.Printf("ignored message from an unidentified %s caller in %s", in.From.Platform, in.Conv)
+		r.release(in)
 		return nil
 	}
 	if in.Ambient {
 		r.keepAmbient(in)
+		r.release(in)
 		return nil
 	}
 	row, dup, err := r.store.AddInbound(in)
 	if err != nil || dup {
+		// Not stored (or stored before, with its own files): the interface
+		// downloads again if it re-sends this message.
+		r.release(in)
 		return err
 	}
 	if g, ok := r.ifaces[in.Conv.Interface].(GroupContext); ok && g.GroupContext() && !in.Private && in.Origin == core.OriginLive && parseCommand(in.Text).Kind == cmdMessage {
@@ -352,6 +358,7 @@ type turn struct {
 	launch   harness.Launch    // how the harness was launched (t.mu)
 	dir      *harness.TurnDir  // the turn's directory, once created (t.mu)
 	refs     map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
+	batch    []item            // the messages the turn started with
 }
 
 type readyEvent struct {
@@ -491,6 +498,7 @@ func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
 		c.r.log.Printf("message %d: command %s not recorded: %v", row.ID, e.Detail, err)
 		return
 	}
+	c.r.release(row.Inbound)
 	c.r.wake(c.key.Interface)
 }
 
@@ -512,6 +520,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 	if !ok {
 		c.r.log.Printf("message %d from %s in %s rejected: caller no longer authorized", row.ID, row.From.Key(), c.key)
 		_ = c.r.store.SetInbound(row.ID, store.InRejected, "caller not authorized")
+		c.r.release(row.Inbound)
 		return false
 	}
 	cmd := parseCommand(row.Text)
@@ -613,6 +622,7 @@ func (c *conv) cancelQueued(role core.Role, who, why string) int {
 					out = append(out, it)
 					continue
 				}
+				c.r.release(it.row.Inbound)
 				n++
 				continue
 			}
@@ -738,12 +748,13 @@ func (c *conv) start(ctx context.Context) {
 		c.queue = c.queue[n:]
 		for _, it := range batch {
 			_ = c.r.store.SetInbound(it.row.ID, store.InFailed, "turn could not be recorded")
+			c.r.release(it.row.Inbound)
 			c.reply(it.row, "Heimdall could not record this turn, so it did not run: "+err.Error()+"\n— heimdall")
 		}
 		return
 	}
 	c.queue = c.queue[n:]
-	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now()}
+	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch}
 	switch sticky, _ := c.r.store.ChatHarness(c.key); {
 	case first.harness != "":
 		t.candidates, t.explicit = []string{first.harness}, true
@@ -1000,6 +1011,7 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 			if err := c.r.store.Steered(t.id, it.row.ID); err != nil {
 				c.r.log.Printf("message %d: steer not recorded: %v", it.row.ID, err)
 			}
+			c.r.release(it.row.Inbound)
 		}
 		if t.done == nil {
 			c.typedOnce(ctx)
@@ -1007,6 +1019,7 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 	case harness.SteerUnknown:
 		for _, it := range ev.items {
 			_ = c.r.store.SetInbound(it.row.ID, store.InUnconfirmed, "steer acceptance unknown; not replayed")
+			c.r.release(it.row.Inbound)
 		}
 		c.reply(ev.items[0].row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
 	default:
@@ -1109,6 +1122,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	}
 	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
 		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
+	}
+	for _, it := range t.batch {
+		c.r.release(it.row.Inbound)
 	}
 	c.r.wake(c.key.Interface)
 	c.r.log.Printf("turn %d in %s ended: %s (harness %q, %s)", t.id, c.key, e.State, d.harness, time.Since(t.started).Round(time.Millisecond))
