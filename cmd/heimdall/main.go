@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/iface/local"
+	"github.com/misunders2d/heimdall/internal/iface/telegram"
 	"github.com/misunders2d/heimdall/internal/router"
 	"github.com/misunders2d/heimdall/internal/store"
 )
@@ -24,6 +26,10 @@ import (
 var version = "dev"
 
 const usage = `usage:
+  heimdall run -config FILE
+      route messages from the configured interfaces (Telegram) until stopped
+      by SIGINT/SIGTERM. The bot token is read from HEIMDALL_TELEGRAM_TOKEN.
+      Logs go to stderr.
   heimdall local -config FILE [-as USER] [-chat CHAT]
       route messages typed on stdin (one per line; optional "@user #chat/thread"
       prefix) and print replies; exits after stdin ends and all work is delivered.
@@ -39,6 +45,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "run":
+		err = run(os.Args[2:])
 	case "local":
 		err = runLocal(os.Args[2:])
 	case "harnesses":
@@ -71,6 +79,35 @@ func openStore(cfg *config.Config) (*store.Store, error) {
 		return nil, err
 	}
 	return store.Open(filepath.Join(cfg.DataDir, "heimdall.db"))
+}
+
+// run routes the configured chat interfaces until a signal or an interface
+// failure (such as a token that belongs to another bot) stops it.
+func run(args []string) error {
+	cfg, err := loadConfig(flag.NewFlagSet("run", flag.ExitOnError), args)
+	if err != nil {
+		return err
+	}
+	if cfg.Telegram == nil {
+		return errors.New("no interface configured: add a \"telegram\" block with bot_username")
+	}
+	logger := log.New(os.Stderr, "heimdall: ", log.LstdFlags)
+	tg, err := telegram.New(telegram.Options{Token: os.Getenv(telegram.TokenEnv), BotUsername: cfg.Telegram.BotUsername, Log: logger})
+	if err != nil {
+		return err
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger}, st, tg)
+	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
+	err = r.Run(ctx)
+	logger.Printf("stopped")
+	return err
 }
 
 func runLocal(args []string) error {

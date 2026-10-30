@@ -28,6 +28,15 @@ type Config struct {
 	HarnessOrder []string                 `json:"harness_order,omitempty"`
 	MaxParallel  int                      `json:"max_parallel,omitempty"`
 	RunAs        map[core.Role]core.RunAs `json:"run_as"`
+	Telegram     *Telegram                `json:"telegram,omitempty"`
+}
+
+// Telegram configures the Telegram interface. Its bot token is read from
+// the HEIMDALL_TELEGRAM_TOKEN environment variable, never from this file.
+type Telegram struct {
+	// BotUsername is the bot the token must belong to: getMe is checked
+	// against it before polling, so a wrong token is never used.
+	BotUsername string `json:"bot_username"`
 }
 
 // Load reads and validates the config at path.
@@ -92,6 +101,12 @@ func (c *Config) fill() error {
 			return fmt.Errorf("harness_order: %q listed twice", h)
 		}
 	}
+	if c.Telegram != nil {
+		c.Telegram.BotUsername = strings.TrimPrefix(strings.TrimSpace(c.Telegram.BotUsername), "@")
+		if !botUsername(c.Telegram.BotUsername) {
+			return errors.New("telegram.bot_username must be the bot's Telegram username (5-32 letters, digits or _)")
+		}
+	}
 	if c.MaxParallel == 0 {
 		c.MaxParallel = 4
 	}
@@ -124,6 +139,18 @@ func (c *Config) fill() error {
 		return fmt.Errorf("run_as: %w", err)
 	}
 	return nil
+}
+
+func botUsername(s string) bool {
+	if len(s) < 5 || len(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // lookupUser resolves OS accounts; tests replace it.

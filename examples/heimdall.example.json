@@ -7,5 +7,6 @@
   "run_as": {
     "owner": {"user": "root", "dir": "/root"},
     "employee": {"user": "heimdall-employee"}
-  }
+  },
+  "telegram": {"bot_username": "example_heimdall_bot"}
 }

@@ -61,9 +61,26 @@ func TestParseRejects(t *testing.T) {
 		"employee is root":    `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"run_as":{"owner":{"user":"boss"},"employee":{"user":"toor"}}}`,
 		"employee=owner":      `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"run_as":{"owner":{"user":"boss"},"employee":{"user":"boss2"}}}`,
 		"unknown OS user":     `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"nobody-here"}}}`,
+		"telegram no bot":     `{` + base + `,"owners":["t:1"],"telegram":{}}`,
+		"telegram bad bot":    `{` + base + `,"owners":["t:1"],"telegram":{"bot_username":"my bot"}}`,
+		"telegram token":      `{` + base + `,"owners":["t:1"],"telegram":{"bot_username":"a_bot","token":"x"}}`,
 	} {
 		if _, err := Parse([]byte(doc)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+func TestTelegramBlock(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"corporate","owners":["telegram:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
+	c, err := Parse([]byte(`{` + base + `,"telegram":{"bot_username":"@Example_Test_Bot"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Telegram == nil || c.Telegram.BotUsername != "Example_Test_Bot" {
+		t.Fatalf("telegram: %+v", c.Telegram)
+	}
+	if c, err = Parse([]byte(`{` + base + `}`)); err != nil || c.Telegram != nil {
+		t.Fatalf("no telegram block: %+v, %v", c, err)
 	}
 }
