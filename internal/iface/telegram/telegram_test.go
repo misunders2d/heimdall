@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -37,13 +39,14 @@ type fakeAPI struct {
 	offsets []int64 // offset of every getUpdates call
 	calls   []string
 	sent    []map[string]any
-	actions []map[string]any // sendChatAction bodies
+	actions []map[string]any  // sendChatAction bodies
+	files   map[string][]byte // downloadable files by file_path; getFile ids are "id:" + path
 	newUpd  chan struct{}
 	handle  map[string]func(w http.ResponseWriter, body map[string]any) bool // true: handled
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
-	f := &fakeAPI{t: t, newUpd: make(chan struct{}, 1), handle: map[string]func(http.ResponseWriter, map[string]any) bool{}}
+	f := &fakeAPI{t: t, newUpd: make(chan struct{}, 1), files: map[string][]byte{}, handle: map[string]func(http.ResponseWriter, map[string]any) bool{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -68,6 +71,17 @@ func fail(w http.ResponseWriter, status int, desc string, retryAfter int) {
 }
 
 func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
+	if p, ok := strings.CutPrefix(r.URL.Path, "/file/bot"+token+"/"); ok {
+		f.mu.Lock()
+		b, found := f.files[p]
+		f.mu.Unlock()
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(b)
+		return
+	}
 	method, found := strings.CutPrefix(r.URL.Path, "/bot"+token+"/")
 	if !found {
 		fail(w, http.StatusNotFound, "Not Found", 0)
@@ -118,6 +132,21 @@ func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.sent = append(f.sent, body)
 		f.mu.Unlock()
 		ok(w, map[string]any{"message_id": 1})
+	case "getFile":
+		id, _ := body["file_id"].(string)
+		p, valid := strings.CutPrefix(id, "id:")
+		f.mu.Lock()
+		b, found := f.files[p]
+		f.mu.Unlock()
+		if !valid {
+			fail(w, http.StatusBadRequest, "Bad Request: invalid file_id", 0)
+			return
+		}
+		res := map[string]any{"file_id": id, "file_path": p}
+		if found {
+			res["file_size"] = len(b)
+		}
+		ok(w, res)
 	case "sendChatAction":
 		f.mu.Lock()
 		f.actions = append(f.actions, body)
@@ -353,7 +382,7 @@ func TestIgnoredUpdatesAreAcknowledgedButNeverAccepted(t *testing.T) {
 	senderChat["sender_chat"] = map[string]any{"id": -1003, "type": "channel"}
 	forward := msg(4, -1002, "supergroup", 42, "@heimdall_test_bot forwarded")
 	forward["is_automatic_forward"] = true
-	sticker := msg(7, 42, "private", 42, "")
+	empty := msg(7, 42, "private", 42, "")
 	replyToOther := msg(8, -1002, "group", 42, "reply to a person")
 	replyToOther["reply_to_message"] = map[string]any{"from": map[string]any{"id": 5, "is_bot": false}}
 	api.push(
@@ -363,7 +392,7 @@ func TestIgnoredUpdatesAreAcknowledgedButNeverAccepted(t *testing.T) {
 		upd(4, forward),
 		upd(5, msg(5, -1004, "channel", 42, "@heimdall_test_bot channel post")),
 		upd(6, msg(6, -1002, "group", 42, "ambient SECRET-GROUP-TEXT")),
-		upd(7, sticker),
+		upd(7, empty),
 		upd(8, replyToOther),
 		upd(9, msg(9, -1002, "group", 42, "@heimdall_test_bot_fan is someone else")),
 		upd(10, map[string]any{"update_id": 10}),
@@ -375,7 +404,7 @@ func TestIgnoredUpdatesAreAcknowledgedButNeverAccepted(t *testing.T) {
 	if got := c.list(); len(got) != 1 || got[0].Text != "the only one" {
 		t.Fatalf("accepted %+v", got)
 	}
-	if !strings.Contains(logs.String(), "update 7 in chat 42 ignored: no text or caption") {
+	if !strings.Contains(logs.String(), "update 7 in chat 42 ignored: no text, caption or attachment") {
 		t.Errorf("logs: %q", logs.String())
 	}
 	if strings.Contains(logs.String(), "SECRET-GROUP-TEXT") || strings.Contains(logs.String(), "the only one") {
@@ -829,5 +858,63 @@ func TestAttachmentLabels(t *testing.T) {
 		if a := detect(&m); a == nil || a.Label != tc.want {
 			t.Errorf("%v: %+v, want %q", tc.m, a, tc.want)
 		}
+	}
+}
+
+// Files on a message and on the message it replies to are downloaded into
+// the private upload directory; a file Telegram will not hand over is
+// described instead; contacts and locations are labels.
+func TestAttachmentsAreDownloaded(t *testing.T) {
+	api := newFakeAPI(t)
+	api.files["photos/f1.jpg"] = []byte("jpeg bytes")
+	api.files["docs/report.txt"] = []byte("report body")
+	var logs syncBuffer
+	c := &collector{}
+	i := newIface(t, api.srv.URL, botName, &logs)
+	i.opt.UploadDir = filepath.Join(t.TempDir(), "uploads")
+	photo := msg(1, 42, "private", 42, "")
+	photo["caption"] = "what is this?"
+	photo["photo"] = []any{map[string]any{"file_id": "id:photos/f1.jpg", "file_unique_id": "p1", "width": 90, "height": 90}}
+	doc := msg(2, 42, "private", 77, "")
+	doc["document"] = map[string]any{"file_id": "id:docs/report.txt", "file_unique_id": "d1", "file_name": "../report 1.txt", "mime_type": "text/plain"}
+	replyToDoc := msg(3, 42, "private", 42, "summarise")
+	replyToDoc["reply_to_message"] = doc
+	big := msg(4, 42, "private", 42, "")
+	big["video"] = map[string]any{"file_id": "id:videos/big.mp4", "file_unique_id": "v1", "file_size": 30 << 20, "duration": 61}
+	missing := msg(5, 42, "private", 42, "")
+	missing["voice"] = map[string]any{"file_id": "id:voice/gone.ogg", "file_unique_id": "g1"}
+	where := msg(6, 42, "private", 42, "")
+	where["location"] = map[string]any{"latitude": 1.5, "longitude": 2.5}
+	sticker := msg(7, 42, "private", 42, "")
+	sticker["sticker"] = map[string]any{"file_id": "s"}
+	api.push(upd(1, photo), upd(2, replyToDoc), upd(3, big), upd(4, missing), upd(5, where), upd(6, sticker))
+	stop := run(t, i, c.accept)
+	eventually(t, "accepted", func() bool { return len(c.list()) == 5 })
+	eventually(t, "offset past all", func() bool { return api.lastOffset() == 7 })
+	stop()
+	got := c.list()
+	read := func(a core.Attachment) string { b, _ := os.ReadFile(a.Stored); return string(b) }
+
+	if a := got[0].Attachments; len(a) != 1 || a[0].Kind != "photo" || a[0].Source != "message" || a[0].Name != "photo.jpg" || a[0].Size != 10 || read(a[0]) != "jpeg bytes" || got[0].Text != "what is this?" || got[0].Context != "[Photo]" {
+		t.Fatalf("photo: %+v", got[0])
+	}
+	st, err := os.Stat(got[0].Attachments[0].Stored)
+	if dir, _ := os.Stat(i.opt.UploadDir); err != nil || st.Mode().Perm() != 0o600 || dir.Mode().Perm() != 0o700 || filepath.Dir(got[0].Attachments[0].Stored) != i.opt.UploadDir {
+		t.Fatalf("stored file %v %v", st, err)
+	}
+	if a := got[1].Attachments; len(a) != 1 || a[0].Source != "reply_to_message" || a[0].Name != "report_1.txt" || read(a[0]) != "report body" {
+		t.Fatalf("replied document: %+v", got[1].Attachments)
+	}
+	if a := got[2].Attachments; len(a) != 1 || a[0].Stored != "" || !strings.Contains(a[0].Note, "telegram reported file too large: 31457280 bytes") || !strings.Contains(a[0].Note, "duration: 61s") {
+		t.Fatalf("big video: %+v", got[2].Attachments)
+	}
+	if a := got[3].Attachments; len(a) != 1 || a[0].Stored != "" || !strings.Contains(a[0].Note, "file download HTTP 404") {
+		t.Fatalf("missing voice: %+v", got[3].Attachments)
+	}
+	if got[4].Attachments != nil || got[4].Context != "[Location: lat=1.5, lon=2.5]" {
+		t.Fatalf("location: %+v", got[4])
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Fatal("token in logs")
 	}
 }

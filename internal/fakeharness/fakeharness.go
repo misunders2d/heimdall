@@ -23,6 +23,7 @@ package fakeharness
 import (
 	"bufio"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -249,7 +250,7 @@ func (f *fake) piRPC() {
 		os.Exit(5)
 	}
 	f.prompt, _ = m["message"].(string)
-	f.record("prompt", f.prompt, 0)
+	f.record("prompt", f.prompt, piImages(m))
 	id, _ := m["id"].(string)
 	f.failPre()
 	dir := arg("--session-dir")
@@ -276,7 +277,7 @@ func (f *fake) piRPC() {
 			return false
 		}
 		text, _ := s["message"].(string)
-		f.record("steer", text, 0)
+		f.record("steer", text, piImages(s))
 		if strings.Contains(text, "NOACK") {
 			_ = os.WriteFile(filepath.Join(f.state, "steer-held"), nil, 0o600)
 			time.Sleep(30 * time.Second)
@@ -308,8 +309,9 @@ func (f *fake) claude() {
 		os.Exit(5)
 	}
 	msg, _ := m["message"].(map[string]any)
-	f.prompt, _ = msg["content"].(string)
-	f.record("prompt", f.prompt, 0)
+	var images int
+	f.prompt, images = claudeContent(msg["content"])
+	f.record("prompt", f.prompt, images)
 	f.failPre()
 	id := sid
 	if resume != "" {
@@ -319,11 +321,12 @@ func (f *fake) claude() {
 		fmt.Fprintln(os.Stderr, "fake: session unusable")
 		os.Exit(6)
 	}
-	replay := func(uuid, text string) {
-		f.emit(map[string]any{"type": "user", "session_id": id, "uuid": uuid, "isReplay": true, "parent_tool_use_id": nil, "message": map[string]any{"role": "user", "content": text}})
+	// Claude replays the user message's content as it was sent.
+	replay := func(uuid string, content any) {
+		f.emit(map[string]any{"type": "user", "session_id": id, "uuid": uuid, "isReplay": true, "parent_tool_use_id": nil, "message": map[string]any{"role": "user", "content": content}})
 	}
 	f.emit(map[string]any{"type": "system", "subtype": "init", "session_id": id})
-	replay("u0", f.prompt)
+	replay("u0", msg["content"])
 	f.failPost()
 	if f.has("ASK_HUMAN") {
 		f.emit(map[string]any{"type": "control_request", "session_id": id})
@@ -336,9 +339,9 @@ func (f *fake) claude() {
 			return false
 		}
 		sm, _ := s["message"].(map[string]any)
-		text, _ := sm["content"].(string)
-		f.record("steer", text, 0)
-		replay("u"+strconv.Itoa(len(f.steers)+1), text)
+		text, images := claudeContent(sm["content"])
+		f.record("steer", text, images)
+		replay("u"+strconv.Itoa(len(f.steers)+1), sm["content"])
 		f.steers = append(f.steers, text)
 		return true
 	})
@@ -384,12 +387,9 @@ func (f *fake) codex() {
 		os.Exit(5)
 	}
 	tp, _ := turnReq["params"].(map[string]any)
-	input, _ := tp["input"].([]any)
-	if len(input) == 1 {
-		first, _ := input[0].(map[string]any)
-		f.prompt, _ = first["text"].(string)
-	}
-	f.record("prompt", f.prompt, 0)
+	var images int
+	f.prompt, images = codexInput(tp["input"])
+	f.record("prompt", f.prompt, images)
 	f.failPre()
 	reply(turnReq["id"], map[string]any{"turn": map[string]any{"id": "turn-1"}})
 	f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": "turn-1"}}})
@@ -405,13 +405,8 @@ func (f *fake) codex() {
 			return false
 		}
 		sp, _ := s["params"].(map[string]any)
-		in, _ := sp["input"].([]any)
-		text := ""
-		if len(in) == 1 {
-			first, _ := in[0].(map[string]any)
-			text, _ = first["text"].(string)
-		}
-		f.record("steer", text, 0)
+		text, images := codexInput(sp["input"])
+		f.record("steer", text, images)
 		reply(s["id"], map[string]any{"turnId": "turn-1"})
 		f.steers = append(f.steers, text)
 		return true
@@ -444,6 +439,83 @@ func (f *fake) agy() {
 		fmt.Fprintln(os.Stderr, "Headless mode cannot prompt for tool approval: run_command was auto-denied.")
 	}
 	f.emit(map[string]any{"event": "result", "result": map[string]any{"conversation_id": conv, "status": "SUCCESS", "response": f.answer()}})
+}
+
+// piImages counts a Pi/OMP RPC prompt or steer's images, each
+// {type:"image", data:<base64>, mimeType}; a malformed one ends the fake.
+func piImages(m map[string]any) int {
+	list, _ := m["images"].([]any)
+	for _, raw := range list {
+		im, _ := raw.(map[string]any)
+		if im["type"] != "image" || !isImageType(im["mimeType"]) || !isBase64(im["data"]) {
+			fmt.Fprintln(os.Stderr, "fake: malformed image")
+			os.Exit(8)
+		}
+	}
+	return len(list)
+}
+
+// claudeContent is a stream-json user message's text and image count: a
+// string, or text blocks and {type:"image", source:{type:"base64", ...}}.
+func claudeContent(raw any) (string, int) {
+	if text, ok := raw.(string); ok {
+		return text, 0
+	}
+	blocks, _ := raw.([]any)
+	text, images := "", 0
+	for _, b := range blocks {
+		block, _ := b.(map[string]any)
+		switch block["type"] {
+		case "text":
+			t, _ := block["text"].(string)
+			text += t
+		case "image":
+			src, _ := block["source"].(map[string]any)
+			if src["type"] != "base64" || !isImageType(src["media_type"]) || !isBase64(src["data"]) {
+				fmt.Fprintln(os.Stderr, "fake: malformed image")
+				os.Exit(8)
+			}
+			images++
+		default:
+			os.Exit(8)
+		}
+	}
+	return text, images
+}
+
+// codexInput is an app-server turn input's text and image count: one text
+// item, then {type:"localImage", path} items naming files that exist.
+func codexInput(raw any) (string, int) {
+	items, _ := raw.([]any)
+	text, images := "", 0
+	for i, it := range items {
+		item, _ := it.(map[string]any)
+		switch {
+		case i == 0 && item["type"] == "text":
+			text, _ = item["text"].(string)
+		case i > 0 && item["type"] == "localImage":
+			path, _ := item["path"].(string)
+			if _, err := os.Stat(path); err != nil || !filepath.IsAbs(path) {
+				fmt.Fprintln(os.Stderr, "fake: image path unreadable")
+				os.Exit(8)
+			}
+			images++
+		default:
+			os.Exit(8)
+		}
+	}
+	return text, images
+}
+
+func isImageType(v any) bool {
+	s, _ := v.(string)
+	return strings.HasPrefix(s, "image/")
+}
+
+func isBase64(v any) bool {
+	s, _ := v.(string)
+	_, err := base64.StdEncoding.DecodeString(s)
+	return s != "" && err == nil
 }
 
 func randHex() string {

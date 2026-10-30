@@ -11,6 +11,7 @@ package harness
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -109,9 +110,28 @@ type Session struct {
 type Spec struct {
 	Harness string
 	Prompt  string
+	Images  []Image // pictures passed natively, besides their paths in Prompt
 	Session Session
 	Launch  Launch
 	Caller  Caller // required: the process carries the caller's identity
+}
+
+// Image is a picture passed to the harness natively, as the hub passes
+// Telegram photos: inline (Data) to pi, omp and claude; by Path to codex,
+// which reads the file as the turn's OS user. AGY takes no images. The
+// prompt also names the file, so a harness that cannot see it can open it.
+type Image struct {
+	Path string
+	MIME string
+	Data []byte // read from Heimdall's own copy, never from the turn's directory
+}
+
+func inlineImages(images []Image) []map[string]any {
+	var out []map[string]any
+	for _, im := range images {
+		out = append(out, map[string]any{"type": "image", "data": base64.StdEncoding.EncodeToString(im.Data), "mimeType": im.MIME})
+	}
+	return out
 }
 
 // Result is how a turn ended. Exactly one of Answer, Failure, NeedsHuman is
@@ -146,7 +166,7 @@ type outcome struct {
 type bridge interface {
 	io.Writer
 	readyCh() <-chan struct{}
-	steer(ctx context.Context, id, text string) SteerOutcome
+	steer(ctx context.Context, id, text string, images []Image) SteerOutcome
 	settled() bool // a terminal native outcome was observed
 	finish()       // the process exited: a missing terminal is a failure
 	close()
@@ -212,11 +232,11 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	}
 	switch d.style {
 	case sessionDir:
-		r.bridge, err = newPiRPCBridge(runCtx, cmd, spec.Prompt, spec.Session.ID, spec.Harness == "omp")
+		r.bridge, err = newPiRPCBridge(runCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID, spec.Harness == "omp")
 	case sessionID:
-		r.bridge, err = newClaudeStreamBridge(runCtx, cmd, spec.Prompt, spec.Session.ID)
+		r.bridge, err = newClaudeStreamBridge(runCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
 	case sessionThread:
-		r.bridge, err = newCodexBridge(runCtx, cmd, spec.Prompt, spec.Session)
+		r.bridge, err = newCodexBridge(runCtx, cmd, spec.Prompt, spec.Images, spec.Session)
 	case sessionConversation:
 		r.bridge = newAgyBridge(runCtx, cmd, spec.Prompt, expected)
 	}
@@ -292,12 +312,13 @@ func (r *Run) SessionID() string { return r.bridge.outcome().session }
 // Cancel stops the turn and its process group.
 func (r *Run) Cancel() { r.cancel() }
 
-// Steer passes text into the running turn. id must be unique per input.
-func (r *Run) Steer(ctx context.Context, id, text string) SteerOutcome {
+// Steer passes text, and images where the harness takes them, into the
+// running turn. id must be unique per input.
+func (r *Run) Steer(ctx context.Context, id, text string, images []Image) SteerOutcome {
 	if !defs[r.harness].steer {
 		return SteerUnsupported
 	}
-	return r.bridge.steer(ctx, id, text)
+	return r.bridge.steer(ctx, id, text, images)
 }
 
 // limitedBuffer keeps the first max bytes written and notes truncation.

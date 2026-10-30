@@ -46,7 +46,7 @@ type pendingSteer struct {
 	result chan SteerOutcome
 }
 
-func newPiRPCBridge(ctx context.Context, cmd *exec.Cmd, prompt, session string, omp bool) (*piRPCBridge, error) {
+func newPiRPCBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, session string, omp bool) (*piRPCBridge, error) {
 	cmd.Stdin = nil
 	input, err := cmd.StdinPipe()
 	if err != nil {
@@ -56,7 +56,11 @@ func newPiRPCBridge(ctx context.Context, cmd *exec.Cmd, prompt, session string, 
 	b.writes.Add(1)
 	go func() {
 		defer b.writes.Done()
-		if b.send(ctx, "", nil, map[string]any{"id": initialID, "type": "prompt", "message": prompt}) != nil {
+		req := map[string]any{"id": initialID, "type": "prompt", "message": prompt}
+		if len(images) > 0 {
+			req["images"] = inlineImages(images) // the hub's PromptPayload images
+		}
+		if b.send(ctx, "", nil, req) != nil {
 			b.fail(b.nativeName() + " did not accept the request input")
 		}
 	}()
@@ -371,7 +375,7 @@ func (b *piRPCBridge) publishLocked() {
 	_ = b.input.Close()
 }
 
-func (b *piRPCBridge) steer(ctx context.Context, id, text string) SteerOutcome {
+func (b *piRPCBridge) steer(ctx context.Context, id, text string, images []Image) SteerOutcome {
 	b.mu.Lock()
 	if b.done || !b.active || b.ctx.Err() != nil || ctx.Err() != nil || id == "" || text == "" {
 		b.mu.Unlock()
@@ -394,7 +398,11 @@ func (b *piRPCBridge) steer(ctx context.Context, id, text string) SteerOutcome {
 	b.mu.Unlock()
 	go func() {
 		defer b.writes.Done()
-		if b.send(ctx, id, p, map[string]string{"id": id, "type": "steer", "message": text}) != nil {
+		req := map[string]any{"id": id, "type": "steer", "message": text}
+		if len(images) > 0 {
+			req["images"] = inlineImages(images)
+		}
+		if b.send(ctx, id, p, req) != nil {
 			b.mu.Lock()
 			if b.pending[id] == p {
 				delete(b.pending, id)

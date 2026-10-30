@@ -182,6 +182,24 @@ type Inbound struct {
 	// as the message being replied to or a forward's origin. It is shown
 	// before Text and is never parsed for commands or identity.
 	Context string
+	// Attachments are the files the message carried (and the message it
+	// replies to), as the interface stored them.
+	Attachments []Attachment
+}
+
+// Attachment is a file a message carried. The interface downloads it into
+// Heimdall's own storage (Stored); when the turn starts the router copies it
+// into the turn's directory, owned by the turn's OS user, and tells the
+// harness where it is. Name, MIME and Kind come from the sender's platform
+// and are display only.
+type Attachment struct {
+	Kind   string `json:"kind"` // photo, document, voice, audio, video, video_note
+	Name   string `json:"name"`
+	MIME   string `json:"mime,omitempty"`
+	Size   int64  `json:"size,omitempty"`
+	Source string `json:"source,omitempty"` // "message", or "reply_to_message"
+	Stored string `json:"stored,omitempty"` // Heimdall's copy; "" when it could not be downloaded
+	Note   string `json:"note,omitempty"`   // what the harness is told instead when Stored is ""
 }
 
 func (in Inbound) Validate() error {

@@ -56,6 +56,7 @@ type Options struct {
 	API         string        // Bot API base URL; default DefaultAPI
 	Log         *log.Logger   // metadata only, never message text
 	PollTimeout time.Duration // getUpdates long-poll timeout; default 50s
+	UploadDir   string        // where attachments are downloaded (private to Heimdall); "": not downloaded
 }
 
 // Interface is one Telegram bot.
@@ -237,6 +238,7 @@ func (t *Interface) Run(ctx context.Context, accept func(context.Context, core.I
 	}
 	t.botID, t.botName = me.ID, me.Username
 	t.logf("polling as @%s", t.botName)
+	t.pruneUploads()
 	var offset int64
 	backoff := t.backoffMin
 	for ctx.Err() == nil {
@@ -272,7 +274,11 @@ func (t *Interface) Run(ctx context.Context, accept func(context.Context, core.I
 			if u.UpdateID < offset {
 				continue
 			}
-			if in, ok := t.inbound(u); ok {
+			if in, m, ok := t.inbound(u); ok {
+				in.Attachments = t.attachments(ctx, m)
+				if ctx.Err() != nil {
+					return nil
+				}
 				if err := accept(ctx, in); err != nil {
 					if ctx.Err() != nil {
 						return nil
@@ -296,17 +302,17 @@ func sleep(ctx context.Context, d time.Duration) {
 	}
 }
 
-// inbound turns an update into a message for the router, or reports that
-// Heimdall ignores it.
-func (t *Interface) inbound(u update) (core.Inbound, bool) {
+// inbound turns an update into a message for the router (attachments not
+// yet downloaded), or reports that Heimdall ignores it.
+func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 	m := u.Message
 	switch {
 	case m == nil:
-		return core.Inbound{}, false
+		return core.Inbound{}, nil, false
 	case m.From == nil || m.From.IsBot || m.SenderChat != nil || m.IsAutomaticForward || m.Chat.Type == "channel":
 		// Not a person writing as themselves: channel posts, anonymous
 		// admins, linked-channel forwards and bots.
-		return core.Inbound{}, false
+		return core.Inbound{}, nil, false
 	}
 	private := m.Chat.Type == "private"
 	text := m.Text
@@ -316,12 +322,19 @@ func (t *Interface) inbound(u update) (core.Inbound, bool) {
 	replied := repliedTo(m)
 	addressed := private || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID
 	if !addressed {
-		return core.Inbound{}, false // group traffic not for the bot: not stored
+		return core.Inbound{}, nil, false // group traffic not for the bot: not stored
 	}
 	text = t.command(text)
-	if strings.TrimSpace(text) == "" {
-		t.logf("update %d in chat %d ignored: no text or caption", u.UpdateID, m.Chat.ID)
-		return core.Inbound{}, false
+	own := detect(m)
+	if strings.TrimSpace(text) == "" && own == nil && detect(replied) == nil {
+		t.logf("update %d in chat %d ignored: no text, caption or attachment", u.UpdateID, m.Chat.ID)
+		return core.Inbound{}, nil, false
+	}
+	context := messageContext(m)
+	if own != nil {
+		// The message's own attachment, by label; files follow as
+		// attachments, contacts, locations and venues are only this.
+		context = strings.TrimSpace(context + "\n" + own.Label)
 	}
 	in := core.Inbound{
 		Conv:    core.ConvKey{Interface: core.PlatformTelegram, Chat: strconv.FormatInt(m.Chat.ID, 10)},
@@ -331,16 +344,16 @@ func (t *Interface) inbound(u update) (core.Inbound, bool) {
 		Text:    text,
 		At:      time.Unix(m.Date, 0),
 		Private: private,
-		Context: messageContext(m),
+		Context: context,
 	}
 	if m.IsTopicMessage && m.MessageThreadID != 0 {
 		in.Conv.Thread = strconv.FormatInt(m.MessageThreadID, 10)
 	}
 	if err := in.Validate(); err != nil {
 		t.logf("update %d in chat %d ignored: %v", u.UpdateID, m.Chat.ID, err)
-		return core.Inbound{}, false
+		return core.Inbound{}, nil, false
 	}
-	return in, true
+	return in, m, true
 }
 
 // mentions reports whether text mentions @<bot username>: not merely a

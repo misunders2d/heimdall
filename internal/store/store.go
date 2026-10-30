@@ -104,19 +104,20 @@ ALTER TABLE inbound ADD COLUMN user_key_id TEXT NOT NULL DEFAULT '';`,
 // inExtra is the inbound extra column: what the interface added beyond the
 // text.
 type inExtra struct {
-	Context string `json:"context,omitempty"`
+	Context     string            `json:"context,omitempty"`
+	Attachments []core.Attachment `json:"attachments,omitempty"`
 }
 
 func inExtraOf(in core.Inbound) (string, error) {
-	x := inExtra{Context: in.Context}
-	if x == (inExtra{}) {
+	x := inExtra{Context: in.Context, Attachments: in.Attachments}
+	if x.Context == "" && len(x.Attachments) == 0 {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
 	return string(b), err
 }
 
-func (x inExtra) apply(in *core.Inbound) { in.Context = x.Context }
+func (x inExtra) apply(in *core.Inbound) { in.Context, in.Attachments = x.Context, x.Attachments }
 
 // outExtra is the outbound extra column: delivery details beyond the text.
 type outExtra struct {

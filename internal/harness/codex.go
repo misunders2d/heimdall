@@ -33,6 +33,7 @@ type codexBridge struct {
 	steering             map[string]chan SteerOutcome
 	closeOnce            sync.Once
 	prompt, cwd          string
+	images               []Image
 	resume               string
 	buf                  []byte
 	thread, turn, answer string
@@ -41,14 +42,14 @@ type codexBridge struct {
 	failure, human       string
 }
 
-func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, s Session) (*codexBridge, error) {
+func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, s Session) (*codexBridge, error) {
 	// A real OS stdin pipe lets Cmd.Wait finish on process EOF.
 	cmd.Stdin = nil
 	out, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
 	}
-	b := &codexBridge{prompt: prompt, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
+	b := &codexBridge{prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
 	if s.Resume {
 		b.resume = s.ID
 	}
@@ -224,7 +225,7 @@ func (b *codexBridge) event(raw []byte) {
 				return
 			}
 			b.thread = r.Thread.ID
-			b.send(map[string]any{"id": 3, "method": "turn/start", "params": map[string]any{"threadId": b.thread, "cwd": b.cwd, "input": []any{map[string]any{"type": "text", "text": b.prompt}}}})
+			b.send(map[string]any{"id": 3, "method": "turn/start", "params": map[string]any{"threadId": b.thread, "cwd": b.cwd, "input": codexInput(b.prompt, b.images)}})
 		case "3":
 			var r struct {
 				Turn struct {
@@ -326,7 +327,19 @@ func (b *codexBridge) event(raw []byte) {
 	}
 }
 
-func (b *codexBridge) steer(ctx context.Context, id, text string) SteerOutcome {
+// codexInput is a turn's UserInput list: the text, then each image as a
+// localImage the app server reads from its path.
+func codexInput(text string, images []Image) []any {
+	input := []any{map[string]any{"type": "text", "text": text}}
+	for _, im := range images {
+		if im.Path != "" {
+			input = append(input, map[string]any{"type": "localImage", "path": im.Path})
+		}
+	}
+	return input
+}
+
+func (b *codexBridge) steer(ctx context.Context, id, text string, images []Image) SteerOutcome {
 	b.stateMu.Lock()
 	if b.done || b.thread == "" || b.turn == "" || b.ctx.Err() != nil {
 		b.stateMu.Unlock()
@@ -338,7 +351,7 @@ func (b *codexBridge) steer(ctx context.Context, id, text string) SteerOutcome {
 	key := string(keyRaw)
 	ch := make(chan SteerOutcome, 1)
 	b.steering[key] = ch
-	request := map[string]any{"id": rpcID, "method": "turn/steer", "params": map[string]any{"threadId": b.thread, "expectedTurnId": b.turn, "clientUserMessageId": id, "input": []any{map[string]string{"type": "text", "text": text}}}}
+	request := map[string]any{"id": rpcID, "method": "turn/steer", "params": map[string]any{"threadId": b.thread, "expectedTurnId": b.turn, "clientUserMessageId": id, "input": codexInput(text, images)}}
 	b.stateMu.Unlock()
 	// A write failure can follow a partial handover: it proves no rejection.
 	go b.send(request)

@@ -311,8 +311,10 @@ type turn struct {
 	stopped  atomic.Bool
 	mu       sync.Mutex
 	run      *harness.Run
-	typing   chan struct{} // closed when the turn ends: stops the typing indicator
-	reset    bool          // the caller reset their sessions: keep none from this turn
+	typing   chan struct{}    // closed when the turn ends: stops the typing indicator
+	reset    bool             // the caller reset their sessions: keep none from this turn
+	launch   harness.Launch   // how the harness was launched (t.mu)
+	dir      *harness.TurnDir // the turn's directory, once created (t.mu)
 }
 
 type readyEvent struct {
@@ -632,19 +634,32 @@ func (c *conv) start(ctx context.Context) {
 	default:
 		t.candidates = c.r.opt.Order
 	}
-	parts := make([]string, len(batch))
-	for i, it := range batch {
-		parts[i] = frame(it)
-	}
-	if p, ok := c.r.ifaces[c.key.Interface].(Prompter); ok {
-		if note := strings.TrimSpace(p.PromptNote()); note != "" {
-			parts = append([]string{note}, parts...)
-		}
-	}
 	c.turn = t
 	c.r.log.Printf("turn %d in %s: %d message(s), role %s, candidates %s", id, c.key, len(batch), t.role, strings.Join(t.candidates, ","))
 	c.startTyping(ctx, t)
-	go c.runTurn(ctx, t, strings.Join(parts, "\n\n"))
+	go c.runTurn(ctx, t, batch)
+}
+
+// prompt is a turn's input: the interface's prompt note, then each message
+// framed with its caller, context and attachments. It runs once the turn's
+// OS account is known, which the attachments are copied for.
+func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
+	var parts []string
+	var images []harness.Image
+	if p, ok := c.r.ifaces[c.key.Interface].(Prompter); ok {
+		if note := strings.TrimSpace(p.PromptNote()); note != "" {
+			parts = append(parts, note)
+		}
+	}
+	for _, it := range batch {
+		blocks, ims := c.files(t, it)
+		parts = append(parts, frame(it, blocks))
+		images = append(images, ims...)
+	}
+	if len(images) > maxImages {
+		images = images[:maxImages]
+	}
+	return strings.Join(parts, "\n\n"), images
 }
 
 // startTyping shows the interface's typing indicator now and every
@@ -694,8 +709,10 @@ func (c *conv) send(ctx context.Context, ev any) {
 // runTurn tries the candidates in order. A candidate that fails before its
 // turn is ready did nothing, so the next one may take over; once a harness
 // is ready the turn is committed to it.
-func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
+func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 	var notes []string
+	var prompt string
+	var images []harness.Image
 	memory := core.Memory(c.r.opt.Access.Mode, t.role, t.from)
 	for _, h := range t.candidates {
 		if ctx.Err() != nil || t.stopped.Load() {
@@ -710,6 +727,14 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 		if err != nil {
 			notes = append(notes, h+": "+err.Error())
 			continue
+		}
+		if prompt == "" {
+			// Every candidate runs as the same account, so the first one
+			// prepared fixes the turn's directory and prompt.
+			t.mu.Lock()
+			t.launch = launch
+			t.mu.Unlock()
+			prompt, images = c.prompt(t, batch)
 		}
 		sess := harness.Session{}
 		prev, clean, err := c.r.store.Session(c.key, t.who, h)
@@ -732,7 +757,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 			break
 		}
 		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}
-		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Session: sess, Launch: launch, Caller: caller})
+		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller})
 		if err != nil {
 			c.unbind(t, h, prev, clean)
 			notes = append(notes, err.Error())
@@ -805,7 +830,8 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 	run := t.run
 	t.mu.Unlock()
 	go func() {
-		c.send(ctx, steerEvent{t: t, it: it, outcome: run.Steer(ctx, fmt.Sprintf("heimdall-%d", it.row.ID), frame(it))})
+		blocks, images := c.files(t, it)
+		c.send(ctx, steerEvent{t: t, it: it, outcome: run.Steer(ctx, fmt.Sprintf("heimdall-%d", it.row.ID), frame(it, blocks), images)})
 	}()
 }
 
@@ -907,7 +933,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 // harness. Tools read the caller from the process environment
 // (harness.WithIdentity) and the OS user the turn runs as, never from this
 // text.
-func frame(it item) string {
+func frame(it item, files []string) string {
 	name := sanitizeName(it.row.From.Name)
 	if name == "" {
 		name = it.row.From.Key()
@@ -920,7 +946,11 @@ func frame(it item) string {
 	if c := strings.TrimSpace(it.row.Context); c != "" {
 		context = c + "\n"
 	}
-	return fmt.Sprintf("[Heimdall | from %q | role %s | verified %s | %s%s]\n%s%s", name, it.role, it.row.From.Key(), it.row.Conv, origin, context, it.text)
+	attached := ""
+	if len(files) > 0 {
+		attached = "\n" + strings.Join(files, "\n")
+	}
+	return fmt.Sprintf("[Heimdall | from %q | role %s | verified %s | %s%s]\n%s%s%s", name, it.role, it.row.From.Key(), it.row.Conv, origin, context, it.text, attached)
 }
 
 func sanitizeName(s string) string {

@@ -57,7 +57,9 @@ func newAgyBridge(_ context.Context, cmd *exec.Cmd, prompt, expected string) *ag
 
 func (b *agyBridge) readyCh() <-chan struct{} { return b.ready }
 
-func (b *agyBridge) steer(context.Context, string, string) SteerOutcome { return SteerUnsupported }
+func (b *agyBridge) steer(context.Context, string, string, []Image) SteerOutcome {
+	return SteerUnsupported
+}
 
 func (b *agyBridge) settled() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.complete && !b.damaged }
 

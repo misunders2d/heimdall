@@ -92,7 +92,7 @@ func run(args []string) error {
 		return errors.New("no interface configured: add a \"telegram\" block with bot_username")
 	}
 	logger := log.New(os.Stderr, "heimdall: ", log.LstdFlags)
-	tg, err := telegram.New(telegram.Options{Token: os.Getenv(telegram.TokenEnv), BotUsername: cfg.Telegram.BotUsername, Log: logger})
+	tg, err := telegram.New(telegram.Options{Token: os.Getenv(telegram.TokenEnv), BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
 	if err != nil {
 		return err
 	}

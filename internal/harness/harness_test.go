@@ -90,17 +90,17 @@ func TestSteerAcceptedOnNativeAcknowledgement(t *testing.T) {
 				t.Fatal(err)
 			}
 			<-r.Ready()
-			if got := r.Steer(ctx, "s1", "also this"); got != harness.SteerAccepted {
+			if got := r.Steer(ctx, "s1", "also this", nil); got != harness.SteerAccepted {
 				t.Fatalf("first steer: %s", got)
 			}
-			if got := r.Steer(ctx, "s2", "now FINISH"); got != harness.SteerAccepted {
+			if got := r.Steer(ctx, "s2", "now FINISH", nil); got != harness.SteerAccepted {
 				t.Fatalf("second steer: %s", got)
 			}
 			res := r.Result()
 			if !strings.Contains(res.Answer, "steers=2") {
 				t.Fatalf("result: %+v", res)
 			}
-			if got := r.Steer(ctx, "s3", "late"); got != harness.SteerQueued {
+			if got := r.Steer(ctx, "s3", "late", nil); got != harness.SteerQueued {
 				t.Fatalf("steer after the turn: %s, want queued (not handed over)", got)
 			}
 		})
@@ -114,7 +114,7 @@ func TestAgyHasNoSteering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := r.Steer(context.Background(), "s1", "x"); got != harness.SteerUnsupported {
+	if got := r.Steer(context.Background(), "s1", "x", nil); got != harness.SteerUnsupported {
 		t.Fatalf("agy steer: %s", got)
 	}
 	r.Result()

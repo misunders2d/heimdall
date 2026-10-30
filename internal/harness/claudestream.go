@@ -8,6 +8,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"os/exec"
@@ -36,7 +37,7 @@ type claudeStreamBridge struct {
 
 // expected is the session ID passed with --session-id or --resume; the
 // stream must stay in exactly that session.
-func newClaudeStreamBridge(ctx context.Context, cmd *exec.Cmd, prompt, expected string) (*claudeStreamBridge, error) {
+func newClaudeStreamBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, expected string) (*claudeStreamBridge, error) {
 	cmd.Stdin = nil
 	input, err := cmd.StdinPipe()
 	if err != nil {
@@ -46,7 +47,7 @@ func newClaudeStreamBridge(ctx context.Context, cmd *exec.Cmd, prompt, expected 
 	b.writes.Add(1)
 	go func() {
 		defer b.writes.Done()
-		if b.send(ctx, "", nil, map[string]any{"type": "user", "message": map[string]string{"role": "user", "content": prompt}}) != nil {
+		if b.send(ctx, "", nil, claudeUser(prompt, images)) != nil {
 			b.fail("Claude did not accept the request input")
 		}
 	}()
@@ -213,8 +214,11 @@ func (b *claudeStreamBridge) event(raw []byte) {
 	}
 	switch e.Type {
 	case "user":
-		var text string
-		if b.session == "" || e.Session != b.session || e.UUID == "" || !e.Replay || string(e.Parent) != "null" || e.Message.Role != "user" || json.Unmarshal(e.Message.Content, &text) != nil {
+		if b.session == "" || e.Session != b.session || e.UUID == "" || !e.Replay || string(e.Parent) != "null" || e.Message.Role != "user" {
+			return
+		}
+		text, ok := claudeText(e.Message.Content)
+		if !ok {
 			return
 		}
 		if !b.active && text == b.prompt {
@@ -279,7 +283,42 @@ func (b *claudeStreamBridge) publishLocked() {
 	_ = b.input.Close()
 }
 
-func (b *claudeStreamBridge) steer(ctx context.Context, id, text string) SteerOutcome {
+// claudeUser is a stream-json user message: text alone, or text and
+// base64 image blocks (Claude replays the same blocks).
+func claudeUser(text string, images []Image) map[string]any {
+	if len(images) == 0 {
+		return map[string]any{"type": "user", "message": map[string]string{"role": "user", "content": text}}
+	}
+	content := []any{map[string]any{"type": "text", "text": text}}
+	for _, im := range images {
+		content = append(content, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": im.MIME, "data": base64.StdEncoding.EncodeToString(im.Data)}})
+	}
+	return map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": content}}
+}
+
+// claudeText is a replayed user message's text: the string content, or its
+// text blocks joined.
+func claudeText(raw json.RawMessage) (string, bool) {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text, true
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return "", false
+	}
+	for _, b := range blocks {
+		if b.Type == "text" {
+			text += b.Text
+		}
+	}
+	return text, true
+}
+
+func (b *claudeStreamBridge) steer(ctx context.Context, id, text string, images []Image) SteerOutcome {
 	b.mu.Lock()
 	if b.done || !b.active || b.ctx.Err() != nil || ctx.Err() != nil || id == "" || text == "" {
 		b.mu.Unlock()
@@ -302,7 +341,7 @@ func (b *claudeStreamBridge) steer(ctx context.Context, id, text string) SteerOu
 	b.mu.Unlock()
 	go func() {
 		defer b.writes.Done()
-		if b.send(ctx, id, p, map[string]any{"type": "user", "message": map[string]string{"role": "user", "content": text}}) != nil {
+		if b.send(ctx, id, p, claudeUser(text, images)) != nil {
 			b.mu.Lock()
 			if b.pending[id] == p {
 				delete(b.pending, id)
