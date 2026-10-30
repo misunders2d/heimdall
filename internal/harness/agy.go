@@ -57,6 +57,9 @@ func newAgyBridge(_ context.Context, cmd *exec.Cmd, prompt, expected string) *ag
 
 func (b *agyBridge) readyCh() <-chan struct{} { return b.ready }
 
+// answeredCh is nil: AGY's outcome is read when its process ends.
+func (b *agyBridge) answeredCh() <-chan struct{} { return nil }
+
 func (b *agyBridge) steer(context.Context, string, string, []Image) SteerOutcome {
 	return SteerUnsupported
 }

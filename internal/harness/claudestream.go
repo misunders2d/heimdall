@@ -1,9 +1,11 @@
 package harness
 
 // Ported from AgentNet internal/client/claudestream.go. Changes: answer,
-// failure and needs-human reason are fields instead of an output stream; the
-// --include-partial-messages probe, activity and thinking telemetry are not
-// ported; launch arguments are built by the caller.
+// failure and needs-human reason are fields instead of an output stream; input
+// written while a result was being produced, which Claude runs as its next
+// turn in the same stream, is waited for and its result kept with the first;
+// the --include-partial-messages probe, activity and thinking telemetry are
+// not ported; launch arguments are built by the caller.
 
 import (
 	"bytes"
@@ -30,7 +32,10 @@ type claudeStreamBridge struct {
 	prompt, session      string
 	failure, human       string
 	closed               chan struct{}
+	answered             chan struct{} // closed once an answer is published
 	answer               string
+	answers              []string // each result's text, in order
+	draining             bool     // a result came with steers pending: no new input, wait for theirs
 	pending              map[string]*pendingSteer
 	seen                 map[string]string
 }
@@ -43,7 +48,7 @@ func newClaudeStreamBridge(ctx context.Context, cmd *exec.Cmd, prompt string, im
 	if err != nil {
 		return nil, err
 	}
-	b := &claudeStreamBridge{ctx: ctx, input: input, ready: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), prompt: prompt, session: expected}
+	b := &claudeStreamBridge{ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), prompt: prompt, session: expected}
 	b.writes.Add(1)
 	go func() {
 		defer b.writes.Done()
@@ -62,6 +67,8 @@ func newClaudeStreamBridge(ctx context.Context, cmd *exec.Cmd, prompt string, im
 }
 
 func (b *claudeStreamBridge) readyCh() <-chan struct{} { return b.ready }
+
+func (b *claudeStreamBridge) answeredCh() <-chan struct{} { return b.answered }
 
 func (b *claudeStreamBridge) send(ctx context.Context, id string, pending *pendingSteer, v any) error {
 	b.writeMu.Lock()
@@ -120,16 +127,23 @@ func (b *claudeStreamBridge) endLocked() {
 }
 
 // settled reports a terminal native outcome; closing the bridge is not one.
+// A result that came while steers were pending is one.
 func (b *claudeStreamBridge) settled() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.published || b.failed
+	return b.published || b.failed || b.draining && len(b.answers) > 0
 }
 
 func (b *claudeStreamBridge) finish() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !b.done {
+	switch {
+	case b.done:
+	case b.draining && len(b.answers) > 0:
+		// Claude exited without running the pending input: the answers it
+		// gave stand; the pending steers are reported unknown.
+		b.publishLocked()
+	default:
 		b.failLocked("Claude ended before its request settled")
 	}
 }
@@ -262,7 +276,15 @@ func (b *claudeStreamBridge) event(raw []byte) {
 		if len(e.Result) > maxAnswer+1 {
 			e.Result = e.Result[:maxAnswer+1]
 		}
-		b.answer = e.Result
+		b.answers = keepAnswer(b.answers, e.Result)
+		if len(b.pending) > 0 {
+			// Input written while this result was produced runs as Claude's
+			// next turn in this stream. Send nothing more (Claude exits once
+			// its queue is done) and wait for that turn's replay and result.
+			b.draining = true
+			_ = b.input.Close()
+			return
+		}
 		b.publishLocked()
 	case "control_request":
 		b.humanLocked("Claude needs native approval or input; no response or permission override was invented")
@@ -274,6 +296,7 @@ func (b *claudeStreamBridge) event(raw []byte) {
 }
 
 func (b *claudeStreamBridge) publishLocked() {
+	b.answer = joinAnswers(b.answers)
 	if strings.TrimSpace(b.answer) == "" {
 		b.failLocked("Claude finished without an answer")
 		return
@@ -281,6 +304,7 @@ func (b *claudeStreamBridge) publishLocked() {
 	b.published = true
 	b.endLocked()
 	_ = b.input.Close()
+	close(b.answered)
 }
 
 // claudeUser is a stream-json user message: text alone, or text and
@@ -320,7 +344,7 @@ func claudeText(raw json.RawMessage) (string, bool) {
 
 func (b *claudeStreamBridge) steer(ctx context.Context, id, text string, images []Image) SteerOutcome {
 	b.mu.Lock()
-	if b.done || !b.active || b.ctx.Err() != nil || ctx.Err() != nil || id == "" || text == "" {
+	if b.done || !b.active || b.draining || b.ctx.Err() != nil || ctx.Err() != nil || id == "" || text == "" {
 		b.mu.Unlock()
 		return SteerQueued
 	}

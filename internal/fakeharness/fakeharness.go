@@ -14,6 +14,14 @@
 //	               and never acknowledge it
 //	SLEEP          stay busy for 30 seconds
 //	ASK_HUMAN      request native approval/input
+//	STEERREPLY     (pi/omp) before taking each steer, give the input before
+//	               it its own final text, "reply N: LAST LINE", as OMP
+//	               answers the prompt and then each steer
+//	STEERLATE      (claude) take the first steer only after the prompt's
+//	               result, as Claude's next turn in the stream
+//	LINGER=SECONDS keep running that long after the final answer, with
+//	               STATE/lingering present; a fake started meanwhile
+//	               creates STATE/overlap
 //
 // The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" frame="FIRST HEIMDALL FRAME LINE" last="LAST LINE" ext="IDENTITY" home="HOME"
 // where IDENTITY lists the PI_EXTERNAL_*, A2A_CALLER_*, PI_RESTRICTED_* and
@@ -51,6 +59,9 @@ func Main() {
 	}
 	f := &fake{name: name, state: os.Getenv(envState), in: bufio.NewScanner(os.Stdin), out: json.NewEncoder(os.Stdout)}
 	f.in.Buffer(make([]byte, 1<<20), 8<<20)
+	if _, err := os.Stat(filepath.Join(f.state, "lingering")); err == nil {
+		_ = os.WriteFile(filepath.Join(f.state, "overlap"), nil, 0o600)
+	}
 	switch name {
 	case "pi", "omp":
 		f.piRPC()
@@ -64,6 +75,7 @@ func Main() {
 		fmt.Fprintln(os.Stderr, "fake: unknown harness", name)
 		os.Exit(2)
 	}
+	f.linger()
 	os.Exit(0)
 }
 
@@ -100,6 +112,10 @@ func (f *fake) emit(v any) { _ = f.out.Encode(v) }
 // record appends one input the harness received (kind "prompt" or "steer")
 // to STATE/inputs.jsonl, for tests that check the whole text.
 func (f *fake) record(kind, text string, images int) {
+	if kind == "prompt" && strings.Contains(text, "LINGER=") {
+		// Before any answer: the process is lingering until it exits.
+		_ = os.WriteFile(filepath.Join(f.state, "lingering"), nil, 0o600)
+	}
 	file, err := os.OpenFile(filepath.Join(f.state, "inputs.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
@@ -159,6 +175,22 @@ func (f *fake) failPost() {
 		fmt.Fprintln(os.Stderr, "fake: crashed mid-turn")
 		os.Exit(4)
 	}
+}
+
+// linger keeps the process alive after its answer for LINGER=SECONDS.
+func (f *fake) linger() {
+	_, rest, ok := strings.Cut(f.prompt, "LINGER=")
+	if !ok {
+		return
+	}
+	n, _ := strconv.Atoi(strings.Fields(rest + " ")[0])
+	time.Sleep(time.Duration(n) * time.Second)
+	_ = os.Remove(filepath.Join(f.state, "lingering"))
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	return lines[len(lines)-1]
 }
 
 func (f *fake) answer() string {
@@ -330,6 +362,15 @@ func (f *fake) piRPC() {
 			time.Sleep(30 * time.Second)
 			return false
 		}
+		if f.has("STEERREPLY") {
+			prev := f.prompt
+			if len(f.steers) > 0 {
+				prev = f.steers[len(f.steers)-1]
+			}
+			n := strconv.Itoa(len(f.steers) + 1)
+			f.emit(map[string]any{"type": "message_start", "messageId": "r" + n, "message": map[string]any{"role": "assistant", "content": []any{}}})
+			f.emit(map[string]any{"type": "message_end", "messageId": "r" + n, "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": "reply " + n + ": " + lastLine(prev)}}}})
+		}
 		f.emit(map[string]any{"type": "response", "id": s["id"], "command": "steer", "success": true, "data": map[string]any{"disposition": "queued"}})
 		msg := map[string]any{"role": "user", "content": text}
 		if omp {
@@ -372,9 +413,30 @@ func (f *fake) claude() {
 	replay := func(uuid string, content any) {
 		f.emit(map[string]any{"type": "user", "session_id": id, "uuid": uuid, "isReplay": true, "parent_tool_use_id": nil, "message": map[string]any{"role": "user", "content": content}})
 	}
+	result := func(text string) {
+		f.emit(map[string]any{"type": "result", "subtype": "success", "session_id": id, "is_error": false, "result": text})
+	}
 	f.emit(map[string]any{"type": "system", "subtype": "init", "session_id": id})
 	replay("u0", msg["content"])
 	f.failPost()
+	if f.has("STEERLATE") {
+		s, ok := f.read()
+		if !ok {
+			result(f.answer())
+			return
+		}
+		sm, _ := s["message"].(map[string]any)
+		text, images := claudeContent(sm["content"])
+		f.record("steer", text, images)
+		result(f.answer())
+		replay("u1", sm["content"])
+		f.steers = append(f.steers, text)
+		result("late reply: " + lastLine(text))
+		for ok {
+			_, ok = f.read()
+		}
+		return
+	}
 	if f.has("ASK_HUMAN") {
 		f.emit(map[string]any{"type": "control_request", "session_id": id})
 		f.read()
@@ -392,7 +454,7 @@ func (f *fake) claude() {
 		f.steers = append(f.steers, text)
 		return true
 	})
-	f.emit(map[string]any{"type": "result", "subtype": "success", "session_id": id, "is_error": false, "result": f.answer()})
+	result(f.answer())
 }
 
 func (f *fake) codex() {

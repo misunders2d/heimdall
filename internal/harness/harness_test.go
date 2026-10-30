@@ -107,6 +107,111 @@ func TestSteerAcceptedOnNativeAcknowledgement(t *testing.T) {
 	}
 }
 
+// OMP answers the prompt, then each accepted steer, with its own final
+// text; the answer keeps every one (live: an image described before two
+// steers was lost).
+func TestAnswerKeepsTheReplyToEachInput(t *testing.T) {
+	bin, _ := fakeharness.Install(t, "pi", "omp")
+	for _, name := range []string{"pi", "omp"} {
+		t.Run(name, func(t *testing.T) {
+			l := launch(t, bin, name, true)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "work WAIT_STEER STEERREPLY", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: caller})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-r.Ready()
+			for i, text := range []string{"what is on this image?", "and the forward? FINISH"} {
+				if got := r.Steer(ctx, "s"+strconv.Itoa(i), text, nil); got != harness.SteerAccepted {
+					t.Fatalf("steer %d: %s", i, got)
+				}
+			}
+			res := r.Result()
+			parts := strings.Split(res.Answer, "\n\n")
+			if len(parts) != 3 || parts[0] != "reply 1: work WAIT_STEER STEERREPLY" || parts[1] != "reply 2: what is on this image?" || !strings.HasPrefix(parts[2], name+"#1 ") || !strings.Contains(parts[2], "steers=2") {
+				t.Fatalf("answer %q", res.Answer)
+			}
+		})
+	}
+}
+
+// A steer Claude takes only after its result runs as its next turn in the
+// same stream; that turn's result is part of the answer, not dropped.
+func TestClaudeLateSteerIsAnsweredNotDropped(t *testing.T) {
+	bin, _ := fakeharness.Install(t, "claude")
+	l := launch(t, bin, "claude", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	r, err := harness.Start(ctx, harness.Spec{Harness: "claude", Prompt: "work STEERLATE", Session: harness.Session{ID: harness.NewSessionID("claude")}, Launch: l, Caller: caller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-r.Ready()
+	if got := r.Steer(ctx, "s1", "also CHARLIE", nil); got != harness.SteerAccepted {
+		t.Fatalf("late steer: %s, want accepted", got)
+	}
+	res := r.Result()
+	if !strings.HasPrefix(res.Answer, "claude#1 ") || !strings.HasSuffix(res.Answer, "\n\nlate reply: also CHARLIE") {
+		t.Fatalf("answer %q", res.Answer)
+	}
+}
+
+// A turn ends at the harness's answer, as the hub resolves at agent_end,
+// not when the process exits: live, OMP took up to 28 s more to exit.
+func TestAnswerIsFinalBeforeTheProcessExits(t *testing.T) {
+	bin, state := fakeharness.Install(t, "pi", "omp", "claude", "codex")
+	for _, name := range []string{"pi", "omp", "claude", "codex"} {
+		t.Run(name, func(t *testing.T) {
+			l := launch(t, bin, name, true)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "hello LINGER=4", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: caller})
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-r.Done():
+			case <-time.After(3 * time.Second):
+				t.Fatal("answer waited for the process to exit")
+			}
+			if res := r.Result(); !strings.HasPrefix(res.Answer, name+"#1 ") || res.Failure != "" || !res.Ready {
+				t.Fatalf("result %+v", res)
+			}
+			select {
+			case <-r.Exited():
+				t.Fatal("exited before the fake's linger")
+			default:
+			}
+			<-r.Exited()
+			if _, err := os.Stat(state + "/lingering"); err == nil {
+				t.Fatal("Exited closed while the process still ran")
+			}
+		})
+	}
+}
+
+// A process still running ExitGrace after its answer is stopped.
+func TestLingeringProcessIsStoppedAfterGrace(t *testing.T) {
+	old := harness.ExitGrace
+	harness.ExitGrace = 300 * time.Millisecond
+	t.Cleanup(func() { harness.ExitGrace = old })
+	bin, _ := fakeharness.Install(t, "omp")
+	l := launch(t, bin, "omp", true)
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "omp", Prompt: "hello LINGER=30", Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: l, Caller: caller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-r.Exited():
+	case <-time.After(10 * time.Second):
+		t.Fatal("process kept running past the grace")
+	}
+	if res := r.Result(); !strings.HasPrefix(res.Answer, "omp#1 ") || res.Failure != "" {
+		t.Fatalf("result %+v", res)
+	}
+}
+
 func TestAgyHasNoSteering(t *testing.T) {
 	bin, _ := fakeharness.Install(t, "agy")
 	l := launch(t, bin, "agy", true)

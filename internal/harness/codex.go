@@ -29,6 +29,7 @@ type codexBridge struct {
 	readMu               sync.Mutex
 	ready                chan struct{}
 	readyOnce            sync.Once
+	answered             chan struct{} // closed once an answer is published
 	steerID              int
 	steering             map[string]chan SteerOutcome
 	closeOnce            sync.Once
@@ -49,7 +50,7 @@ func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []
 	if err != nil {
 		return nil, err
 	}
-	b := &codexBridge{prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
+	b := &codexBridge{prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), answered: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
 	if s.Resume {
 		b.resume = s.ID
 	}
@@ -62,6 +63,8 @@ func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []
 }
 
 func (b *codexBridge) readyCh() <-chan struct{} { return b.ready }
+
+func (b *codexBridge) answeredCh() <-chan struct{} { return b.answered }
 
 func (b *codexBridge) close() { b.closeOnce.Do(func() { b.input.Close() }) }
 
@@ -306,6 +309,7 @@ func (b *codexBridge) event(raw []byte) {
 		}
 		b.done, b.published = true, true
 		b.close()
+		close(b.answered)
 	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput", "tool/requestUserInput", "mcpServer/elicitation/request":
 		if len(m.ID) > 0 {
 			if b.thread == "" || p.ThreadID != b.thread || b.turn == "" || (p.TurnID != b.turn && !(m.Method == "mcpServer/elicitation/request" && p.TurnID == "")) {

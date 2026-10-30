@@ -45,6 +45,11 @@ const (
 	lineMax   = 4 << 20   // one native protocol line
 )
 
+// ExitGrace bounds how long a harness process may keep running after its
+// answer (its own shutdown work: OMP took 6-28 s on the development
+// machine); then its process group is stopped. A variable for tests.
+var ExitGrace = 60 * time.Second
+
 type sessionStyle int
 
 const (
@@ -153,7 +158,10 @@ type Run struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	stderr  limitedBuffer
-	done    chan struct{}
+	done    chan struct{} // Result is final
+	exited  chan struct{} // the process has exited
+	grace   time.Duration // ExitGrace when started
+	settle  sync.Once
 	result  Result
 }
 
@@ -166,6 +174,7 @@ type outcome struct {
 type bridge interface {
 	io.Writer
 	readyCh() <-chan struct{}
+	answeredCh() <-chan struct{} // closed once an answer is published; nil: only at exit
 	steer(ctx context.Context, id, text string, images []Image) SteerOutcome
 	settled() bool // a terminal native outcome was observed
 	finish()       // the process exited: a missing terminal is a failure
@@ -223,7 +232,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
-	r := &Run{harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{})}
+	r := &Run{harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace}
 	r.stderr.max = 4 << 10
 	cmd.Stderr = &r.stderr
 	expected := ""
@@ -255,6 +264,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 }
 
 func (r *Run) wait() {
+	go r.early()
 	runErr := r.cmd.Wait()
 	// Only an observed native outcome supersedes a process error; finish's
 	// missing-terminal fallback must not hide an actual exit failure.
@@ -285,12 +295,37 @@ func (r *Run) wait() {
 	case res.Failure == "" && res.NeedsHuman == "" && strings.TrimSpace(res.Answer) == "":
 		res.Failure = r.harness + " finished without an answer"
 	}
-	if len(res.Answer) > maxAnswer {
-		res.Answer = res.Answer[:maxAnswer] + "\n[answer truncated by Heimdall]"
-	}
-	r.result = res
-	close(r.done)
+	r.finalize(res)
+	close(r.exited)
 	r.cancel()
+}
+
+// early makes the answer final as soon as the harness published it, as the
+// hub resolves a turn at agent_end: the process may take a while to exit
+// after its answer, and nothing it does then changes the outcome (wait
+// already ranks an observed native outcome above the exit status). The
+// process gets ExitGrace to exit by itself.
+func (r *Run) early() {
+	select {
+	case <-r.bridge.answeredCh():
+	case <-r.exited:
+		return
+	}
+	o := r.bridge.outcome()
+	r.finalize(Result{Answer: o.answer, SessionID: o.session, Ready: true})
+	t := time.AfterFunc(r.grace, r.cancel)
+	<-r.exited
+	t.Stop()
+}
+
+func (r *Run) finalize(res Result) {
+	r.settle.Do(func() {
+		if len(res.Answer) > maxAnswer {
+			res.Answer = res.Answer[:maxAnswer] + "\n[answer truncated by Heimdall]"
+		}
+		r.result = res
+		close(r.done)
+	})
 }
 
 // Harness names the running harness.
@@ -300,8 +335,13 @@ func (r *Run) Harness() string { return r.harness }
 // can have happened, so a failure may fall back to another harness.
 func (r *Run) Ready() <-chan struct{} { return r.bridge.readyCh() }
 
-// Done is closed when the turn has ended and Result is final.
+// Done is closed when the turn has ended and Result is final: once the
+// harness published its answer, or else when its process exited.
 func (r *Run) Done() <-chan struct{} { return r.done }
+
+// Exited is closed once the harness process has exited, which can be after
+// Done. Another process must not use the same native session before.
+func (r *Run) Exited() <-chan struct{} { return r.exited }
 
 // Result is the final outcome; call after Done.
 func (r *Run) Result() Result { <-r.done; return r.result }
@@ -343,6 +383,19 @@ func (l *limitedBuffer) Write(p []byte) (int, error) {
 }
 
 func (l *limitedBuffer) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
+// keepAnswer adds one input's final text to the answers kept for earlier
+// inputs, if it has any.
+func keepAnswer(answers []string, text string) []string {
+	if strings.TrimSpace(text) == "" {
+		return answers
+	}
+	return append(answers, text)
+}
+
+// joinAnswers is a turn's answer: the final text for each input it was
+// given (the prompt, then each accepted steer), in order.
+func joinAnswers(answers []string) string { return strings.Join(answers, "\n\n") }
 
 func clip(b []byte) string {
 	s := strings.TrimSpace(string(b))

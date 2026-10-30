@@ -2,8 +2,10 @@ package harness
 
 // Ported from AgentNet internal/client/pirpc.go. Changes: the answer, failure
 // and needs-human reason are kept as fields instead of written to an output
-// stream; activity and thinking telemetry are not ported; launch arguments
-// are built by the caller (--mode rpc plus session flags).
+// stream; the answer keeps the final text given for each input (the prompt
+// and every accepted steer), not only the last one; activity and thinking
+// telemetry are not ported; launch arguments are built by the caller
+// (--mode rpc plus session flags).
 
 import (
 	"bytes"
@@ -35,7 +37,9 @@ type piRPCBridge struct {
 	failure, human       string
 	session              string // the session directory name
 	closed               chan struct{}
-	answer               string
+	answered             chan struct{} // closed once an answer is published
+	answer               string        // the latest final text since the last accepted steer
+	answers              []string      // final texts for earlier inputs
 	pending              map[string]*pendingSteer
 	seen                 map[string]string
 }
@@ -52,7 +56,7 @@ func newPiRPCBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []
 	if err != nil {
 		return nil, err
 	}
-	b := &piRPCBridge{ctx: ctx, input: input, ready: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), omp: omp, session: session}
+	b := &piRPCBridge{ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), omp: omp, session: session}
 	b.writes.Add(1)
 	go func() {
 		defer b.writes.Done()
@@ -75,6 +79,8 @@ func newPiRPCBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []
 }
 
 func (b *piRPCBridge) readyCh() <-chan struct{} { return b.ready }
+
+func (b *piRPCBridge) answeredCh() <-chan struct{} { return b.answered }
 
 func (b *piRPCBridge) send(ctx context.Context, id string, pending *pendingSteer, v any) error {
 	b.writeMu.Lock()
@@ -309,6 +315,9 @@ func (b *piRPCBridge) event(raw []byte) {
 					p.result <- SteerAccepted
 					b.seen[id] = text
 					delete(b.pending, id)
+					// What the harness answered so far belongs to the earlier
+					// inputs; the answer to this steer comes after it.
+					b.answers, b.answer = keepAnswer(b.answers, b.answer), ""
 				}
 			}
 		}
@@ -366,6 +375,7 @@ func (b *piRPCBridge) event(raw []byte) {
 }
 
 func (b *piRPCBridge) publishLocked() {
+	b.answer = joinAnswers(keepAnswer(b.answers, b.answer))
 	if strings.TrimSpace(b.answer) == "" {
 		b.failLocked(b.nativeName() + " finished without an answer")
 		return
@@ -373,6 +383,7 @@ func (b *piRPCBridge) publishLocked() {
 	b.published = true
 	b.endLocked()
 	_ = b.input.Close()
+	close(b.answered)
 }
 
 func (b *piRPCBridge) steer(ctx context.Context, id, text string, images []Image) SteerOutcome {

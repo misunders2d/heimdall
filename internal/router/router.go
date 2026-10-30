@@ -338,6 +338,7 @@ type conv struct {
 	turn    *turn
 	waiting bool // a goroutine is waiting for a parallelism slot
 	albums  map[string]*album
+	exited  <-chan struct{} // the last turn's harness process has exited
 }
 
 // album is a caller's parts of one grouped message, held until none has
@@ -384,6 +385,7 @@ type turn struct {
 	dir      *harness.TurnDir  // the turn's directory, once created (t.mu)
 	refs     map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
 	batch    []item            // the messages the turn started with
+	after    <-chan struct{}   // the previous turn's harness process has exited
 }
 
 type readyEvent struct {
@@ -806,7 +808,7 @@ func (c *conv) start(ctx context.Context) {
 		return
 	}
 	c.queue = c.queue[n:]
-	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch}
+	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, after: c.exited}
 	switch sticky, _ := c.r.store.ChatHarness(c.key); {
 	case first.harness != "":
 		t.candidates, t.explicit = []string{first.harness}, true
@@ -898,6 +900,15 @@ func (c *conv) send(ctx context.Context, ev any) {
 // turn is ready did nothing, so the next one may take over; once a harness
 // is ready the turn is committed to it.
 func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
+	if t.after != nil {
+		// A turn ends at the harness's answer, and its process may still be
+		// shutting down (at most harness.ExitGrace): two processes never
+		// share a native session.
+		select {
+		case <-t.after:
+		case <-ctx.Done():
+		}
+	}
 	var notes []string
 	var prompt string
 	var images []harness.Image
@@ -1069,6 +1080,7 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 			c.typedOnce(ctx)
 		}
 	case harness.SteerUnknown:
+		c.r.log.Printf("turn %d: message %d steered, acceptance unknown; not replayed", t.id, ev.items[0].row.ID)
 		for _, it := range ev.items {
 			_ = c.r.store.SetInbound(it.row.ID, store.InUnconfirmed, "steer acceptance unknown; not replayed")
 			c.r.release(it.row.Inbound)
@@ -1076,6 +1088,7 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 		c.reply(ev.items[0].row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
 	default:
 		// Not handed over: run it as a follow-up turn.
+		c.r.log.Printf("turn %d: message %d not steered (%s); runs as a follow-up", t.id, ev.items[0].row.ID, ev.outcome)
 		c.unreact(t, ev.refs)
 		for _, it := range ev.items {
 			if err := c.r.store.Unsteer(it.row.ID); err != nil {
@@ -1113,6 +1126,11 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	if t.typing != nil {
 		close(t.typing)
 	}
+	t.mu.Lock()
+	if t.run != nil {
+		c.exited = t.run.Exited()
+	}
+	t.mu.Unlock()
 	c.requeue(t.steerQ...)
 	t.steerQ = nil
 	res := d.res

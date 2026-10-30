@@ -268,11 +268,13 @@ func want(t *testing.T, out core.Outbound, parts ...string) {
 
 // waitReady waits until the owner's turn in chat is running on omp, as
 // !status reports it once the harness is ready.
-func (e *env) waitReady(chat string) {
+func (e *env) waitReady(chat string) { e.t.Helper(); e.waitReadyOn(chat, "omp") }
+
+func (e *env) waitReadyOn(chat, h string) {
 	e.t.Helper()
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		e.send(owner, chat, "!status")
-		if strings.Contains(e.reply().Text, "Running: omp turn") {
+		if strings.Contains(e.reply().Text, "Running: "+h+" turn") {
 			return
 		}
 	}
@@ -362,6 +364,73 @@ func TestMidTurnMessageSteers(t *testing.T) {
 			want(t, e.reply(), h+"#1", "steers=1")
 			e.noReply(300 * time.Millisecond)
 		})
+	}
+}
+
+// The owner's live sequence (2026-10-30): a text turn runs, a photo with
+// a caption arrives, then a text and a forwarded message. Each steers the
+// running turn, the photo reaches the harness natively, and the reply keeps
+// what the harness answered to every input, not only the last.
+func TestPhotoThenForwardSteerTheRunningTurn(t *testing.T) {
+	for _, h := range []string{"omp", "pi", "claude", "codex"} {
+		t.Run(h, func(t *testing.T) {
+			e := setup(t, core.ModeCorporate, []string{h}, h)
+			boss := core.Principal{Platform: "fake", ID: "owner", Name: "owner"}
+			conv := core.ConvKey{Interface: "fake", Chat: "c1"}
+			first := e.send(owner, "c1", "hey there, testing again. WAIT_STEER STEERREPLY")
+			e.waitReadyOn("c1", h)
+			photo := filepath.Join(e.uploads, "u1")
+			if err := os.WriteFile(photo, []byte("\x89PNG fake"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			e.f.in <- core.Inbound{Conv: conv, MsgID: "p1", From: boss, Origin: core.OriginLive, Text: "what's on this image?", Attachments: []core.Attachment{
+				{Kind: "photo", Name: "photo.jpg", MIME: "image/jpeg", Size: 10, Source: "message", Stored: photo},
+			}}
+			e.send(owner, "c1", "do you see the forwarded message?")
+			e.f.in <- core.Inbound{Conv: conv, MsgID: "f1", From: boss, Origin: core.OriginLive, Text: "Order rejected FINISH", Context: "[Telegram forward context | source trader | date 2026-05-21T10:55:07.000Z]"}
+			out := e.reply()
+			if out.ReplyTo != first {
+				t.Fatalf("reply to %q, want the turn's first message %q", out.ReplyTo, first)
+			}
+			want(t, out, h+"#1", "steers=3")
+			if h == "omp" || h == "pi" {
+				// One final text per input, in order; the old reply kept only the last.
+				var at []int
+				for _, part := range []string{"reply 1: hey there, testing again.", "reply 2: ", "reply 3: do you see the forwarded message?", h + "#1 "} {
+					i := strings.Index(out.Text, part)
+					if i < 0 {
+						t.Fatalf("reply %q lacks %q", out.Text, part)
+					}
+					at = append(at, i)
+				}
+				if !slices.IsSorted(at) {
+					t.Fatalf("reply parts out of order: %q", out.Text)
+				}
+			}
+			in := fakeharness.Inputs(e.state)
+			if len(in) != 4 || in[1].Kind != "steer" || in[1].Images != 1 || !strings.Contains(in[1].Text, "what's on this image?") ||
+				!strings.Contains(in[3].Text, "[Telegram forward context | source trader") {
+				t.Fatalf("inputs %+v", in)
+			}
+			e.noReply(300 * time.Millisecond)
+		})
+	}
+}
+
+// A reply goes out at the harness's answer, not when its process exits
+// (live: OMP took 28 s more, the reply waited, and the owner's next
+// message missed the turn); the next turn starts once that process exited.
+func TestReplyAtAnswerNextTurnAfterProcessExit(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "hello LINGER=4")
+	want(t, e.reply(), "omp#1")
+	if _, err := os.Stat(filepath.Join(e.state, "lingering")); err != nil {
+		t.Fatal("the reply waited for the harness process to exit")
+	}
+	e.send(owner, "c1", "next")
+	want(t, e.reply(), "omp#2", "resumed=true")
+	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
+		t.Fatal("the next turn started while the last turn's process still ran")
 	}
 }
 
