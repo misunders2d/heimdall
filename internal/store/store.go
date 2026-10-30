@@ -90,6 +90,8 @@ ALTER TABLE turns ADD COLUMN principal TEXT NOT NULL DEFAULT '';`,
 	// passed to the harness process; never used for access.
 	`ALTER TABLE inbound ADD COLUMN user_email TEXT NOT NULL DEFAULT '';
 ALTER TABLE inbound ADD COLUMN user_key_id TEXT NOT NULL DEFAULT '';`,
+	// The Slack workspace that verified the caller.
+	`ALTER TABLE inbound ADD COLUMN user_team TEXT NOT NULL DEFAULT '';`,
 }
 
 type Store struct{ db *sql.DB }
@@ -158,9 +160,9 @@ func (s *Store) AddInbound(in core.Inbound) (row InboundRow, dup bool, err error
 	if at.IsZero() {
 		at = time.Now()
 	}
-	res, err := s.db.Exec(`INSERT INTO inbound(iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_key_id,origin,text,received_at,state)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHING`,
-		in.Conv.Interface, in.Conv.Chat, in.Conv.Thread, in.MsgID, in.From.Platform, in.From.ID, in.From.Name, in.From.Email, in.From.KeyID, in.Origin, in.Text, at.UnixMilli(), InPending)
+	res, err := s.db.Exec(`INSERT INTO inbound(iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,state)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHING`,
+		in.Conv.Interface, in.Conv.Chat, in.Conv.Thread, in.MsgID, in.From.Platform, in.From.ID, in.From.Name, in.From.Email, in.From.Team, in.From.KeyID, in.Origin, in.Text, at.UnixMilli(), InPending)
 	if err != nil {
 		return row, false, err
 	}
@@ -177,7 +179,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHING`,
 
 // Pending lists messages never started, oldest first.
 func (s *Store) Pending() ([]InboundRow, error) {
-	rows, err := s.db.Query(`SELECT id,iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_key_id,origin,text,received_at FROM inbound WHERE state=? ORDER BY id`, InPending)
+	rows, err := s.db.Query(`SELECT id,iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at FROM inbound WHERE state=? ORDER BY id`, InPending)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +188,7 @@ func (s *Store) Pending() ([]InboundRow, error) {
 	for rows.Next() {
 		var r InboundRow
 		var at int64
-		if err := rows.Scan(&r.ID, &r.Conv.Interface, &r.Conv.Chat, &r.Conv.Thread, &r.MsgID, &r.From.Platform, &r.From.ID, &r.From.Name, &r.From.Email, &r.From.KeyID, &r.Origin, &r.Text, &at); err != nil {
+		if err := rows.Scan(&r.ID, &r.Conv.Interface, &r.Conv.Chat, &r.Conv.Thread, &r.MsgID, &r.From.Platform, &r.From.ID, &r.From.Name, &r.From.Email, &r.From.Team, &r.From.KeyID, &r.Origin, &r.Text, &at); err != nil {
 			return nil, err
 		}
 		r.At, r.State = time.UnixMilli(at), InPending

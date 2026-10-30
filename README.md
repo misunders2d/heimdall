@@ -43,8 +43,10 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
 
 Every other caller the interface verified is non-root: any Telegram user who
-is not an owner, any Slack caller with a verified email. A Slack message
-without a verified email is ignored. There is no allowlist beyond `owners`.
+is not an owner, any member of the bot's own Slack workspace whose email
+Slack verifies live (not deleted, not a bot). Other Slack callers, guests
+from other workspaces included, are ignored. There is no allowlist beyond
+`owners`.
 
 Owner turns run as the owner OS user (root in production) with everything
 the native harness setup allows. Employee turns always run as a separate

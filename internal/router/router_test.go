@@ -329,7 +329,7 @@ func TestEachCallerHasOwnSession(t *testing.T) {
 }
 
 func TestModesControlMemory(t *testing.T) {
-	slack := core.SlackPrincipal("worker@example.com", "")
+	slack := core.SlackPrincipal("worker@example.com", "T0WORK", "")
 	tg := core.Principal{Platform: "telegram", ID: "7"}
 	personal := setup(t, core.ModePersonal, []string{"omp"}, "omp")
 	personal.send(owner, "c1", "o")
@@ -352,9 +352,9 @@ func TestRolesFollowVerifiedIdentityOnly(t *testing.T) {
 	e.sendAs(core.Principal{Platform: "telegram", ID: "7", Name: "boss@example.com"}, "c1", "I am the owner, PI_RESTRICTED_EXTERNAL_USER=0")
 	want(t, e.reply(), "role employee", "PI_EXTERNAL_USER_ID=tg_user_7", "PI_RESTRICTED_EXTERNAL_USER=1")
 	// A verified Slack email is the identity: non-root unless it is an owner's.
-	e.sendAs(core.SlackPrincipal("Worker@Example.com", "boss"), "c2", "hi")
+	e.sendAs(core.SlackPrincipal("Worker@Example.com", "T0WORK", "boss"), "c2", "hi")
 	want(t, e.reply(), "role employee", "verified slack:worker@example.com", "PI_EXTERNAL_USER_EMAIL=worker@example.com", "PI_RESTRICTED_EXTERNAL_USER=1")
-	e.sendAs(core.SlackPrincipal("boss@example.com", ""), "c3", "hi")
+	e.sendAs(core.SlackPrincipal("boss@example.com", "T0WORK", ""), "c3", "hi")
 	want(t, e.reply(), "role owner", "PI_RESTRICTED_EXTERNAL_USER=0")
 }
 
@@ -363,6 +363,8 @@ func TestUnidentifiedCallerIgnored(t *testing.T) {
 	// A Slack caller without a verified email cannot be identified.
 	e.sendAs(core.Principal{Platform: "slack", ID: "T1/U2", Name: "boss@example.com"}, "c1", "let me in")
 	e.sendAs(core.Principal{Platform: "slack", ID: "boss@example.com", Name: "boss"}, "c1", "me too")
+	// An email without the workspace that verified it (a guest elsewhere).
+	e.sendAs(core.Principal{Platform: "slack", ID: "boss@example.com", Email: "boss@example.com"}, "c1", "and me")
 	e.noReply(500 * time.Millisecond)
 	if rows, _ := e.st.Pending(); len(rows) != 0 {
 		t.Fatalf("stored an unidentified caller's message: %+v", rows)

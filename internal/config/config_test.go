@@ -36,7 +36,7 @@ func TestParseDefaultsAndAccess(t *testing.T) {
 	if r, ok := a.Role(core.Principal{Platform: "telegram", ID: "1", Name: "anything"}); !ok || r != core.RoleOwner {
 		t.Fatal("owner not recognised by Telegram user ID")
 	}
-	if r, ok := a.Role(core.SlackPrincipal("owner@example.com", "")); !ok || r != core.RoleOwner {
+	if r, ok := a.Role(core.SlackPrincipal("owner@example.com", "T0WORK", "")); !ok || r != core.RoleOwner {
 		t.Fatal("owner not recognised by verified Slack email")
 	}
 	if r, ok := a.Role(core.Principal{Platform: "telegram", ID: "2", Name: "telegram:1"}); !ok || r != core.RoleEmployee {

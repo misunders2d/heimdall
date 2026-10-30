@@ -176,7 +176,7 @@ func TestPendingKeepsVerifiedEmailAndKey(t *testing.T) {
 	}
 	defer s.Close()
 	in := msg("new")
-	in.From = core.Principal{Platform: "slack", ID: "T1/U2", Email: "user@example.com", KeyID: "key-1"}
+	in.From = core.Principal{Platform: "slack", ID: "user@example.com", Email: "user@example.com", Team: "T0WORK", KeyID: "key-1"}
 	if _, _, err := s.AddInbound(in); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestPendingKeepsVerifiedEmailAndKey(t *testing.T) {
 	if err != nil || len(p) != 2 {
 		t.Fatalf("pending = %+v, %v", p, err)
 	}
-	if p[0].From.Email != "" || p[0].From.KeyID != "" {
+	if p[0].From.Email != "" || p[0].From.Team != "" || p[0].From.KeyID != "" {
 		t.Fatalf("old message gained identity: %+v", p[0].From)
 	}
 	if p[1].From != in.From {

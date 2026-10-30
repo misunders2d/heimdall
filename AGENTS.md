@@ -41,9 +41,13 @@ Its whole job, per message:
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack
   identity (a Slack user ID alone never counts); the AgentNet verified key.
-  Display names, usernames and message text are never identity. A caller
-  the interface cannot identify (a Slack message without a verified email)
-  is ignored and logged, fail closed. The verified identity is carried on
+  A Slack caller is verified only as the Pi hub checks it
+  (`internal/iface/slack`): users.info returned a live email, the user is
+  not deleted and not a bot, and belongs to the bot's own workspace
+  (auth.test team ID). Slack Connect guests from other workspaces, and
+  emails remembered from earlier lookups, never count. Display names,
+  usernames and message text are never identity. A caller the interface
+  cannot identify is ignored and logged, fail closed. The verified identity is carried on
   every message handed to a harness, and to the harness process in the
   hub's identity variables (`docs/hub-parity.md`), including scheduled jobs
   (later phase), which store their creator and run under that creator's
@@ -54,8 +58,8 @@ Its whole job, per message:
     OS user (root in production) with everything enabled; Heimdall never
     restricts owner turns.
   - *Employee (non-root)*: every other caller the interface identified, with
-    no allowlist: any Telegram user who is not an owner, any Slack caller
-    with a verified email that is not an owner's. Employee turns always run
+    no allowlist: any Telegram user who is not an owner, any verified member
+    of the owner's Slack workspace who is not an owner. Employee turns always run
     as a separate non-privileged OS user, with all of that user's tools, and
     tell tools they are restricted (`PI_RESTRICTED_EXTERNAL_USER=1`).
   - The employee OS account is checked by uid: never root's or the
@@ -67,10 +71,9 @@ Its whole job, per message:
     Heimdall never copies credentials and never reuses one user's home or
     environment for another (the employee environment is rebuilt from that
     user's account).
-- **Modes.** `corporate`: the owner and Slack callers (verified email) get
-  memory. `personal`: only the owner gets memory. Telegram callers who are
-  not owners get no memory in either mode (safe default until the owner
-  decides). Memory means Memento's native integration for that
+- **Modes.** `corporate`: the owner and verified Slack callers get memory.
+  `personal`: only the owner gets memory. Telegram callers who are not
+  owners never get memory, in either mode. Memory means Memento's native integration for that
   harness run; for a no-memory turn Heimdall sets `MEMENTO_PROCESSING=1`,
   which suppresses Memento's own hooks/extensions. Heimdall never enables
   memory the native setup lacks. Memento MCP tools configured natively for
@@ -135,6 +138,7 @@ thinking stream and live-session reply registration.
 | `internal/harness` | ported native adapters, launch as an OS user |
 | `internal/router` | conversations, `!` commands, steer/follow-up, fallback, delivery |
 | `internal/iface/local` | local stdin/stdout interface for end-to-end tests |
+| `internal/iface/slack` | Slack caller verification (the interface comes in phase 2) |
 
 ## Working rules
 

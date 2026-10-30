@@ -12,12 +12,13 @@ func TestRoles(t *testing.T) {
 		{"telegram admin", Principal{Platform: "telegram", ID: "1"}, RoleOwner},
 		{"telegram non-admin is non-root", Principal{Platform: "telegram", ID: "2"}, RoleEmployee},
 		{"telegram ID must be numeric", Principal{Platform: "telegram", ID: "@owner"}, ""},
-		{"slack owner email", SlackPrincipal(" Owner@Example.com", "x"), RoleOwner},
-		{"slack verified email is non-root", SlackPrincipal("worker@example.com", ""), RoleEmployee},
+		{"slack owner email", SlackPrincipal(" Owner@Example.com", "T0WORK", "x"), RoleOwner},
+		{"slack verified email is non-root", SlackPrincipal("worker@example.com", "T0WORK", ""), RoleEmployee},
 		{"slack without a verified email", Principal{Platform: "slack", ID: "T1/U2"}, ""},
-		{"slack ID that is not its verified email", Principal{Platform: "slack", ID: "owner@example.com", Email: "worker@example.com"}, ""},
+		{"slack email without its workspace", Principal{Platform: "slack", ID: "worker@example.com", Email: "worker@example.com"}, ""},
+		{"slack ID that is not its verified email", Principal{Platform: "slack", ID: "owner@example.com", Email: "worker@example.com", Team: "T0WORK"}, ""},
 		{"display name is never identity", Principal{Platform: "telegram", ID: "2", Name: "telegram:1"}, RoleEmployee},
-		{"slack display name is never identity", Principal{Platform: "slack", ID: "worker@example.com", Email: "worker@example.com", Name: "owner@example.com"}, RoleEmployee},
+		{"slack display name is never identity", Principal{Platform: "slack", ID: "worker@example.com", Email: "worker@example.com", Team: "T0WORK", Name: "owner@example.com"}, RoleEmployee},
 		{"no identity", Principal{Platform: "telegram"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -27,14 +28,14 @@ func TestRoles(t *testing.T) {
 			}
 		})
 	}
-	if k := SlackPrincipal("Worker@Example.com", "").Key(); k != "slack:worker@example.com" {
+	if k := SlackPrincipal("Worker@Example.com", "T0WORK", "").Key(); k != "slack:worker@example.com" {
 		t.Fatalf("slack key = %q, want the email", k)
 	}
 }
 
 func TestMemory(t *testing.T) {
 	tg := Principal{Platform: "telegram", ID: "2"}
-	sl := SlackPrincipal("worker@example.com", "")
+	sl := SlackPrincipal("worker@example.com", "T0WORK", "")
 	for _, tc := range []struct {
 		mode Mode
 		role Role
