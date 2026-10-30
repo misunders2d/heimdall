@@ -151,7 +151,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 | Attachments | Photo, document, voice, audio, video and video note, the message's own and the replied-to message's; 20 MB cap; kept in a 0700 upload directory, copied at turn start into the turn's `in/` directory owned by the turn's OS user; text files' first 12000 characters inline, untrusted. |
 | Images to the model | JPEG/PNG/GIF/WebP up to 3.75 MB, at most 10 per input, natively: Pi/OMP RPC `images`, Claude content blocks, Codex `localImage` (start and steer). AGY gets the path only. |
 | Albums (`media_group_id`, 1.5 s) | Held 1.5 s after the last part, run as one message (or one steer); the first part's `!harness`/`!next` applies to every part. |
-| Reactions (`[react: <ref> <emoji>]`) | The hub's note, its 73 emoji, its all-or-nothing parse; set after the text; the hub's failure notices. |
+| Reactions (`[react: <ref> <emoji>]`) | The hub's note, its 73 emoji, its all-or-nothing parse, applied to each answer of a steered turn (the prompt's, then each steer's); set after the text; the hub's failure notices. |
 | Control words | `stop`, `/stop`, `cancel`/`abort`/`nevermind`, `reset`, `/reset`, `chatid`, `/chatid`, alone in a message; stop and cancel only by the turn's caller or an owner. |
 | Group chat history as context | Newest 1000 kept per conversation, the 40 latest not in the turn shown at its start, 4000 characters each and 16000 in all (oldest trimmed, the hub's marker), secrets scrubbed, files by label, under the hub's untrusted header. |
 | Failure message | `⚠ <harness> failed: <reason>. Please retry, or send reset if this keeps happening.`, secrets scrubbed. |

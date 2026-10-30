@@ -1702,3 +1702,18 @@ func TestExitGraceStopIsLogged(t *testing.T) {
 		return strings.Contains(e.logs.String(), "turn 1 in fake/c1: omp process still running 300ms after its answer: SIGTERM to its process group")
 	})
 }
+
+// A reaction that ends one answer counts though another answer follows it
+// (review of 5b3c62f, finding 5: the joined reply dropped every reaction).
+func TestReactionsOfEachAnswer(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
+	e.f.react.Store(true)
+	id := e.send(owner, "c1", "work STEERLATE REACT=👍")
+	e.waitReadyOn("c1", "claude")
+	e.send(owner, "c1", "also CHARLIE")
+	out := e.reply()
+	want(t, out, "claude#1 ", "late reply: also CHARLIE")
+	if strings.Contains(out.Text, "[react:") || !slices.Equal(out.Reactions, []core.Reaction{{MsgID: id, Emoji: "👍"}}) {
+		t.Fatalf("reply %+v", out)
+	}
+}

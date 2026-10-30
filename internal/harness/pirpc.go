@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"io"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -161,7 +162,7 @@ func (b *piRPCBridge) outcome() outcome {
 	defer b.mu.Unlock()
 	o := outcome{failure: b.failure, human: b.human, session: b.session}
 	if b.published {
-		o.answer = b.answer
+		o.answer, o.answers = b.answer, slices.Clone(b.answers)
 	}
 	return o
 }
@@ -375,7 +376,8 @@ func (b *piRPCBridge) event(raw []byte) {
 }
 
 func (b *piRPCBridge) publishLocked() {
-	b.answer = joinAnswers(keepAnswer(b.answers, b.answer))
+	b.answers = keepAnswer(b.answers, b.answer)
+	b.answer = joinAnswers(b.answers)
 	if strings.TrimSpace(b.answer) == "" {
 		b.failLocked(b.nativeName() + " finished without an answer")
 		return

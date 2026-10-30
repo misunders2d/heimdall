@@ -149,9 +149,10 @@ func inlineImages(images []Image) []map[string]any {
 // Result is how a turn ended. Exactly one of Answer, Failure, NeedsHuman is
 // set, unless the turn was cancelled.
 type Result struct {
-	Answer     string
-	Failure    string // technical reason the turn ended without a native outcome
-	NeedsHuman string // native approval or input required; nothing was approved
+	Answer     string   // Answers joined by a blank line
+	Answers    []string // the final text for each input the turn took (the prompt, then each accepted steer), in order
+	Failure    string   // technical reason the turn ended without a native outcome
+	NeedsHuman string   // native approval or input required; nothing was approved
 	Cancelled  bool
 	Ready      bool   // the harness accepted the turn: side effects were possible
 	SessionID  string // native session to resume next time, if known
@@ -182,9 +183,10 @@ type Run struct {
 
 type outcome struct {
 	answer, failure, human, session string
-	warning                         string // with an answer: what went wrong after it
-	unclean                         bool   // with an answer: do not resume the session
-	atExit                          bool   // the answer was published when the process exited, so its exit status counts
+	answers                         []string // answer, per input; nil: answer is one
+	warning                         string   // with an answer: what went wrong after it
+	unclean                         bool     // with an answer: do not resume the session
+	atExit                          bool     // the answer was published when the process exited, so its exit status counts
 }
 
 // bridge is one native protocol adapter: it reads the harness's stdout and
@@ -291,7 +293,7 @@ func (r *Run) wait() {
 	r.bridge.close()
 	stopGroup(r.cmd)
 	o := r.bridge.outcome()
-	res := Result{Answer: o.answer, Failure: o.failure, NeedsHuman: o.human, SessionID: o.session, Warning: o.warning, Unclean: o.unclean}
+	res := Result{Answer: o.answer, Answers: o.answers, Failure: o.failure, NeedsHuman: o.human, SessionID: o.session, Warning: o.warning, Unclean: o.unclean}
 	select {
 	case <-r.bridge.readyCh():
 		res.Ready = true
@@ -313,7 +315,7 @@ func (r *Run) wait() {
 		if tail := clip([]byte(r.stderr.String())); tail != "" {
 			why += "; stderr: " + tail
 		}
-		res.Answer, res.Failure = "", why
+		res.Answer, res.Answers, res.Failure = "", nil, why
 	case res.Failure == "" && res.NeedsHuman == "" && strings.TrimSpace(res.Answer) == "":
 		res.Failure = r.harness + " finished without an answer"
 	}
@@ -337,7 +339,7 @@ func (r *Run) early() {
 	if o.atExit {
 		return // published as the process exited: wait settles it with the exit status
 	}
-	r.finalize(Result{Answer: o.answer, SessionID: o.session, Ready: true, Warning: o.warning, Unclean: o.unclean})
+	r.finalize(Result{Answer: o.answer, Answers: o.answers, SessionID: o.session, Ready: true, Warning: o.warning, Unclean: o.unclean})
 	t := time.NewTimer(r.grace)
 	defer t.Stop()
 	select {
@@ -380,12 +382,41 @@ func (r *Run) logf(format string, args ...any) {
 
 func (r *Run) finalize(res Result) {
 	r.settle.Do(func() {
-		if len(res.Answer) > maxAnswer {
-			res.Answer = res.Answer[:maxAnswer] + "\n[answer truncated by Heimdall]"
+		switch {
+		case res.Answer == "":
+			res.Answers = nil
+		case len(res.Answers) == 0:
+			res.Answers = []string{res.Answer}
 		}
+		res.Answers = clipAnswers(res.Answers, maxAnswer)
+		res.Answer = joinAnswers(res.Answers)
 		r.result = res
 		close(r.done)
 	})
+}
+
+// clipAnswers keeps answers to at most n bytes in all, joined: the answer
+// that passes it is cut and marked, later ones are dropped.
+func clipAnswers(answers []string, n int) []string {
+	total := 0
+	for i, a := range answers {
+		if i > 0 {
+			total += 2
+		}
+		if total+len(a) > n {
+			const mark = "\n[answer truncated by Heimdall]"
+			if room := n - total; room > 0 || i == 0 {
+				out := slices.Clone(answers[:i+1])
+				out[i] = a[:max(0, room)] + mark
+				return out
+			}
+			out := slices.Clone(answers[:i]) // no room left even for the separator
+			out[i-1] += mark
+			return out
+		}
+		total += len(a)
+	}
+	return answers
 }
 
 // Harness names the running harness.

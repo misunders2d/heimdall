@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"io"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -172,7 +173,7 @@ func (b *claudeStreamBridge) outcome() outcome {
 	defer b.mu.Unlock()
 	o := outcome{failure: b.failure, human: b.human, session: b.session}
 	if b.published {
-		o.answer, o.warning, o.unclean, o.atExit = b.answer, b.warning, b.warning != "", b.atExit
+		o.answer, o.answers, o.warning, o.unclean, o.atExit = b.answer, slices.Clone(b.answers), b.warning, b.warning != "", b.atExit
 	}
 	return o
 }

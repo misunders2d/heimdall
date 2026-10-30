@@ -1232,7 +1232,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	if r, ok := c.r.ifaces[c.key.Interface].(Reactor); ok && e.State == store.TurnDone {
 		t.mu.Lock()
 		var directives bool
-		text, directives, e.Reply.Reactions = reactions(text, t.refs, r.Reaction)
+		text, directives, e.Reply.Reactions = answerReactions(res.Answers, t.refs, r.Reaction)
 		t.mu.Unlock()
 		switch {
 		case text != "":

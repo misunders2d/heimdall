@@ -73,6 +73,32 @@ func (c *conv) unreact(t *turn, refs []string) {
 	}
 }
 
+// answerReactions takes the reaction directives off the end of each answer
+// of a turn (the prompt's, then each steer's), so a directive that ended
+// one answer counts though another answer follows it. A message reacted to
+// in an earlier answer keeps that reaction. It returns the answers' text,
+// joined.
+func answerReactions(answers []string, refs map[string]string, valid func(string) (string, bool)) (string, bool, []core.Reaction) {
+	var texts []string
+	var out []core.Reaction
+	found := false
+	seen := map[string]bool{}
+	for _, a := range answers {
+		text, directives, rs := reactions(strings.TrimSpace(a), refs, valid)
+		found = found || directives
+		if text != "" {
+			texts = append(texts, text)
+		}
+		for _, r := range rs {
+			if !seen[r.MsgID] {
+				seen[r.MsgID] = true
+				out = append(out, r)
+			}
+		}
+	}
+	return strings.Join(texts, "\n\n"), found, out
+}
+
 var reactLine = regexp.MustCompile(`^\[react: ([a-f0-9-]{36}) ([^\s\p{Z}\[\]]+)\]$`)
 
 // reactions takes the hub's reaction directives off the end of an answer:

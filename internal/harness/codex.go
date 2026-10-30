@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,7 +102,7 @@ func (b *codexBridge) outcome() outcome {
 	defer b.stateMu.Unlock()
 	o := outcome{failure: b.failure, human: b.human, session: b.thread}
 	if b.published {
-		o.answer = b.answer
+		o.answer, o.answers = b.answer, slices.Clone(b.answers)
 	}
 	return o
 }
@@ -307,7 +308,8 @@ func (b *codexBridge) event(raw []byte) {
 			b.failLocked(why)
 			return
 		}
-		b.answer = joinAnswers(keepAnswer(b.answers, b.answer))
+		b.answers = keepAnswer(b.answers, b.answer)
+		b.answer = joinAnswers(b.answers)
 		if strings.TrimSpace(b.answer) == "" {
 			b.failLocked("Codex completed the turn without an answer")
 			return

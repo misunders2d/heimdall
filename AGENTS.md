@@ -118,7 +118,8 @@ Its whole job, per message:
   per-turn directory owned by the turn's OS user; pictures also go natively
   to harnesses that take images. Album parts are held 1.5 s and run as one
   message. Answers go as Telegram Markdown with a plain retry; a harness may
-  end one with `[react: <ref> <emoji>]` lines to react. A harness sends
+  end one (each answer of a steered turn counts) with
+  `[react: <ref> <emoji>]` lines to react. A harness sends
   files by leaving them in its turn's `out/` directory; Heimdall checks and
   copies them itself (never a path the model names) and sends them after
   the answer. Before polling,
