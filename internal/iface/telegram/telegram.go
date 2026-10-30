@@ -552,6 +552,8 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 		if out.Formatted && errors.As(err, &api) && api.status == http.StatusBadRequest {
 			// Most often "can't parse entities": the model's Markdown is not
 			// Telegram's. Plain text loses the formatting, not the reply.
+			// Logged, so how often it happens can be counted.
+			t.logf("reply in %s: part %d/%d sent as plain text: Telegram could not parse its Markdown", out.Conv, i+1, len(parts))
 			delete(body, "parse_mode")
 			err = t.sendRetrying(ctx, send)
 		}

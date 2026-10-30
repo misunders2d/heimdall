@@ -672,6 +672,9 @@ func TestFormattedAnswersUseMarkdownWithPlainFallback(t *testing.T) {
 	if sent[2]["parse_mode"] != nil {
 		t.Fatalf("Heimdall's text as Markdown: %v", sent[2])
 	}
+	if l := logs.String(); strings.Count(l, "sent as plain text") != 1 || !strings.Contains(l, "reply in telegram/42: part 1/1 sent as plain text") || strings.Contains(l, "markdown") {
+		t.Fatalf("fallback log %q", l)
+	}
 	// A plain retry that fails too is classified as usual.
 	api.set("sendMessage", func(w http.ResponseWriter, _ map[string]any) bool {
 		fail(w, http.StatusBadRequest, "Bad Request: chat not found", 0)
