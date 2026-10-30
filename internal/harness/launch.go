@@ -33,28 +33,108 @@ func accountErr(format string, args ...any) error {
 	return &AccountError{msg: fmt.Sprintf(format, args...)}
 }
 
-// Prepare resolves the OS account a turn runs as and finds the harness
-// binary on that account's PATH.
-//
-// Same account as Heimdall: Heimdall's environment, home included, minus its
-// own HEIMDALL_* variables. Another account: Heimdall must be root; the environment is
-// rebuilt from that account so nothing of Heimdall's user (home, logins,
-// secrets) reaches it. Otherwise the turn is refused: it never runs as a
-// different user than its role's.
-func Prepare(r core.RunAs, memory bool, bin string) (Launch, error) {
-	u, err := user.Lookup(r.User)
+// Accounts are the OS accounts each role's turns run as.
+type Accounts struct {
+	RunAs map[core.Role]core.RunAs
+	// Lookup and Getuid replace os/user.Lookup and os.Getuid in tests.
+	Lookup func(name string) (*user.User, error)
+	Getuid func() int
+}
+
+type account struct {
+	u        *user.User
+	uid, gid uint32
+}
+
+func (a Accounts) account(role core.Role) (core.RunAs, account, error) {
+	r, ok := a.RunAs[role]
+	if !ok || r.User == "" {
+		return r, account{}, accountErr("no OS user is configured for %s turns", role)
+	}
+	lookup := a.Lookup
+	if lookup == nil {
+		lookup = user.Lookup
+	}
+	u, err := lookup(r.User)
 	if err != nil {
-		return Launch{}, accountErr("OS user %q: %v", r.User, err)
+		return r, account{}, accountErr("OS user %q: %v", r.User, err)
 	}
 	uid, err1 := strconv.ParseUint(u.Uid, 10, 32)
 	gid, err2 := strconv.ParseUint(u.Gid, 10, 32)
 	if err1 != nil || err2 != nil {
-		return Launch{}, accountErr("OS user %q has a non-numeric uid/gid", r.User)
+		return r, account{}, accountErr("OS user %q has a non-numeric uid/gid", r.User)
 	}
-	l := Launch{Home: u.HomeDir}
-	self := os.Getuid()
+	return r, account{u: u, uid: uint32(uid), gid: uint32(gid)}, nil
+}
+
+// Check verifies that each configured role's OS user exists and that the
+// employee's is neither root nor the owner's. Accounts are compared by uid,
+// so no other name for either passes.
+func (a Accounts) Check() error {
+	_, owner, err := a.account(core.RoleOwner)
+	if err != nil {
+		return err
+	}
+	if _, ok := a.RunAs[core.RoleEmployee]; !ok {
+		return nil
+	}
+	r, emp, err := a.account(core.RoleEmployee)
+	if err != nil {
+		return err
+	}
+	return checkEmployee(r.User, emp, owner)
+}
+
+// checkEmployee refuses an employee account with root's or the owner's
+// uid: employee turns never run with either's privileges.
+func checkEmployee(name string, emp, owner account) error {
 	switch {
-	case int(uid) == self:
+	case emp.uid == 0:
+		return accountErr("employee OS user %q is root (uid 0); employee turns never run as root", name)
+	case emp.uid == owner.uid:
+		return accountErr("employee OS user %q has the owner's uid %d; employee turns never run as the owner", name, emp.uid)
+	}
+	return nil
+}
+
+// Prepare resolves the OS account role's turns run as and finds the harness
+// binary on that account's PATH.
+//
+// Owner turns on Heimdall's own uid get Heimdall's environment, home
+// included, minus its own HEIMDALL_* variables. Every other turn, and every
+// employee turn even on Heimdall's own uid, gets an environment rebuilt from
+// its account, so nothing of Heimdall's user (home, logins, secrets) reaches
+// it; switching to another uid needs Heimdall to be root. Otherwise the turn
+// is refused: it never runs as a different user than its role's.
+func (a Accounts) Prepare(role core.Role, memory bool, bin string) (Launch, error) {
+	r, acct, err := a.account(role)
+	if err != nil {
+		return Launch{}, err
+	}
+	switch role {
+	case core.RoleOwner:
+	case core.RoleEmployee:
+		// Re-checked every turn: an account changed after startup still
+		// never gives an employee turn root's or the owner's uid.
+		_, owner, err := a.account(core.RoleOwner)
+		if err != nil {
+			return Launch{}, err
+		}
+		if err := checkEmployee(r.User, acct, owner); err != nil {
+			return Launch{}, err
+		}
+	default:
+		return Launch{}, accountErr("unknown role %q", role)
+	}
+	getuid := a.Getuid
+	if getuid == nil {
+		getuid = os.Getuid
+	}
+	self := getuid()
+	u := acct.u
+	l := Launch{Home: u.HomeDir}
+	switch {
+	case role == core.RoleOwner && int(acct.uid) == self:
 		for _, kv := range os.Environ() {
 			if !strings.HasPrefix(kv, "HEIMDALL_") {
 				l.Env = append(l.Env, kv)
@@ -66,16 +146,18 @@ func Prepare(r core.RunAs, memory bool, bin string) (Launch, error) {
 		if h := envValue(l.Env, "HOME"); filepath.IsAbs(h) {
 			l.Home = h
 		}
-	case self == 0:
-		var groups []uint32
-		if ids, err := u.GroupIds(); err == nil {
-			for _, id := range ids {
-				if g, err := strconv.ParseUint(id, 10, 32); err == nil {
-					groups = append(groups, uint32(g))
+	case int(acct.uid) == self || self == 0:
+		if int(acct.uid) != self {
+			var groups []uint32
+			if ids, err := u.GroupIds(); err == nil {
+				for _, id := range ids {
+					if g, err := strconv.ParseUint(id, 10, 32); err == nil {
+						groups = append(groups, uint32(g))
+					}
 				}
 			}
+			l.Cred = &syscall.Credential{Uid: acct.uid, Gid: acct.gid, Groups: groups}
 		}
-		l.Cred = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: groups}
 		path := r.Path
 		if path == "" {
 			path = strings.Join([]string{filepath.Join(u.HomeDir, ".local", "bin"), filepath.Join(u.HomeDir, ".local", "share", "mise", "shims"), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}, ":")

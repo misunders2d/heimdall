@@ -35,11 +35,16 @@ type PermanentError struct{ Err error }
 func (e PermanentError) Error() string { return e.Err.Error() }
 func (e PermanentError) Unwrap() error { return e.Err }
 
+// Accounts prepares the OS account a role's turns run as: harness.Accounts.
+type Accounts interface {
+	Prepare(role core.Role, memory bool, bin string) (harness.Launch, error)
+}
+
 type Options struct {
 	Access      core.Access
 	Order       []string // default harness order
 	MaxParallel int
-	RunAs       map[core.Role]core.RunAs
+	Accounts    Accounts
 	Log         *log.Logger
 }
 
@@ -526,13 +531,12 @@ func (c *conv) send(ctx context.Context, ev any) {
 // is ready the turn is committed to it.
 func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 	var notes []string
-	runAs := c.r.opt.RunAs[t.role]
 	memory := core.Memory(c.r.opt.Access.Mode, t.role)
 	for _, h := range t.candidates {
 		if ctx.Err() != nil || t.stopped.Load() {
 			break
 		}
-		launch, err := harness.Prepare(runAs, memory, harness.Binary(h))
+		launch, err := c.r.opt.Accounts.Prepare(t.role, memory, harness.Binary(h))
 		var account *harness.AccountError
 		if errors.As(err, &account) {
 			notes = append(notes, err.Error())

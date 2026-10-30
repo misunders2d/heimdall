@@ -44,8 +44,10 @@ Secrets never go in it; interfaces read their tokens from the environment.
 
 Owner turns run as the owner OS user (root in production) with everything
 the native harness setup allows. Employee turns always run as a separate
-non-privileged OS user; Heimdall must run as root to switch to it and
-refuses employee turns otherwise. Log each harness in for each OS user
+non-privileged OS user with an environment rebuilt from that account;
+Heimdall must run as root to switch to it and refuses employee turns
+otherwise. An employee account whose uid is root's or the owner's is
+refused at startup and on every turn. Log each harness in for each OS user
 yourself; Heimdall never copies credentials.
 
 `heimdall harnesses -config FILE` shows which harnesses each role's OS user

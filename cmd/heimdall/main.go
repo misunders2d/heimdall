@@ -89,7 +89,7 @@ func runLocal(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	l := local.New(os.Stdin, os.Stdout, *as, *chat)
-	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, RunAs: cfg.RunAs, Log: log.New(os.Stderr, "heimdall: ", log.LstdFlags)}, st, l)
+	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs}, Log: log.New(os.Stderr, "heimdall: ", log.LstdFlags)}, st, l)
 	go func() {
 		select {
 		case <-l.EOF():
@@ -113,6 +113,7 @@ func listHarnesses(args []string) error {
 	if err != nil {
 		return err
 	}
+	accounts := harness.Accounts{RunAs: cfg.RunAs}
 	for _, role := range []core.Role{core.RoleOwner, core.RoleEmployee} {
 		runAs, ok := cfg.RunAs[role]
 		if !ok {
@@ -120,7 +121,7 @@ func listHarnesses(args []string) error {
 		}
 		fmt.Printf("%s (OS user %s, memory %v):\n", role, runAs.User, core.Memory(cfg.Mode, role))
 		for _, h := range harness.Names() {
-			l, err := harness.Prepare(runAs, core.Memory(cfg.Mode, role), harness.Binary(h))
+			l, err := accounts.Prepare(role, core.Memory(cfg.Mode, role), harness.Binary(h))
 			if err != nil {
 				fmt.Printf("  %-7s unavailable: %v\n", h, err)
 				continue

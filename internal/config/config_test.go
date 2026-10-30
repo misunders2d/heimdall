@@ -1,11 +1,27 @@
 package config
 
 import (
+	"os/user"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/misunders2d/heimdall/internal/core"
 )
+
+// OS accounts the tests' configs name, by uid.
+var uids = map[string]int{"root": 0, "toor": 0, "boss": 1000, "boss2": 1000, "worker": 1001}
+
+func init() {
+	lookupUser = func(name string) (*user.User, error) {
+		uid, ok := uids[name]
+		if !ok {
+			return nil, user.UnknownUserError(name)
+		}
+		id := strconv.Itoa(uid)
+		return &user.User{Uid: id, Gid: id, Username: name, HomeDir: "/home/" + name}, nil
+	}
+}
 
 func TestParseDefaultsAndAccess(t *testing.T) {
 	c, err := Parse([]byte(`{"data_dir":"/tmp/h","mode":"personal","owners":["telegram:1"],"employees":["slack:T/U"],
@@ -39,6 +55,9 @@ func TestParseRejects(t *testing.T) {
 		"bad mode":         `{"data_dir":"/tmp/h","mode":"x","owners":["t:1"],"run_as":{"owner":{"user":"root"}}}`,
 		"same OS user":     `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"root"},"employee":{"user":"root"}}}`,
 		"employee no user": `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"root"}}}`,
+		"employee is root": `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"boss"},"employee":{"user":"toor"}}}`,
+		"employee=owner":   `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"boss"},"employee":{"user":"boss2"}}}`,
+		"unknown OS user":  `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"root"},"employee":{"user":"nobody-here"}}}`,
 	} {
 		if _, err := Parse([]byte(doc)); err == nil {
 			t.Errorf("%s: accepted", name)

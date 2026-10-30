@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -123,11 +124,15 @@ func (c *Config) fill() error {
 	if _, ok := c.RunAs[core.RoleEmployee]; len(c.Employees) > 0 && !ok {
 		return errors.New("run_as.employee is required when employees are listed")
 	}
-	if e, ok := c.RunAs[core.RoleEmployee]; ok && e.User == c.RunAs[core.RoleOwner].User {
-		return errors.New("run_as.employee.user must differ from the owner's OS user")
+	// The employee's account must be neither root nor the owner's, by uid.
+	if err := (harness.Accounts{RunAs: c.RunAs, Lookup: lookupUser}).Check(); err != nil {
+		return fmt.Errorf("run_as: %w", err)
 	}
 	return nil
 }
+
+// lookupUser resolves OS accounts; tests replace it.
+var lookupUser = user.Lookup
 
 // Access is the config's verified-principal access list.
 func (c *Config) Access() core.Access {

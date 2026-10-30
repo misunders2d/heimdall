@@ -12,7 +12,7 @@
 //	SLEEP          stay busy for 30 seconds
 //	ASK_HUMAN      request native approval/input
 //
-// The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" last="LAST LINE" ext="IDENTITY"
+// The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" last="LAST LINE" ext="IDENTITY" home="HOME"
 // where IDENTITY lists the PI_EXTERNAL_*, A2A_CALLER_* and PI_RESTRICTED_*
 // variables the process received, sorted.
 package fakeharness
@@ -127,7 +127,7 @@ func (f *fake) answer() string {
 		}
 	}
 	sort.Strings(ext)
-	return fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s head=%q last=%q ext=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[0], lines[len(lines)-1], strings.Join(ext, " "))
+	return fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s head=%q last=%q ext=%q home=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[0], lines[len(lines)-1], strings.Join(ext, " "), os.Getenv("HOME"))
 }
 
 // session advances the turn counter stored at path; create says whether

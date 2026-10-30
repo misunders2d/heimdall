@@ -2,8 +2,11 @@ package harness_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/user"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,9 +29,14 @@ func self(t *testing.T) string {
 	return u.Username
 }
 
+// owns runs the owner's turns as r.
+func owns(r core.RunAs) harness.Accounts {
+	return harness.Accounts{RunAs: map[core.Role]core.RunAs{core.RoleOwner: r}}
+}
+
 func launch(t *testing.T, bin, name string, memory bool) harness.Launch {
 	t.Helper()
-	l, err := harness.Prepare(core.RunAs{User: self(t), Dir: t.TempDir(), Path: bin}, memory, harness.Binary(name))
+	l, err := owns(core.RunAs{User: self(t), Dir: t.TempDir(), Path: bin}).Prepare(core.RoleOwner, memory, harness.Binary(name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +182,7 @@ func TestMemoryOffSuppressesMementoHooks(t *testing.T) {
 
 func TestPrepareStripsHeimdallEnvironment(t *testing.T) {
 	t.Setenv("HEIMDALL_TELEGRAM_TOKEN", "secret")
-	l, err := harness.Prepare(core.RunAs{User: self(t), Path: "/usr/bin:/bin"}, true, "sh")
+	l, err := owns(core.RunAs{User: self(t), Path: "/usr/bin:/bin"}).Prepare(core.RoleOwner, true, "sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +200,7 @@ func TestPrepareRefusesAnotherUserWithoutRoot(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("running as root")
 	}
-	if _, err := harness.Prepare(core.RunAs{User: "root"}, true, "sh"); err == nil || !strings.Contains(err.Error(), "not root") {
+	if _, err := owns(core.RunAs{User: "root"}).Prepare(core.RoleOwner, true, "sh"); err == nil || !strings.Contains(err.Error(), "not root") {
 		t.Fatalf("err = %v, want refusal", err)
 	}
 }
@@ -200,7 +208,7 @@ func TestPrepareRefusesAnotherUserWithoutRoot(t *testing.T) {
 func TestPrepareDoesNotUseHeimdallPATH(t *testing.T) {
 	bin, _ := fakeharness.Install(t, "pi")
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	if _, err := harness.Prepare(core.RunAs{User: self(t), Path: t.TempDir()}, true, "pi"); err == nil {
+	if _, err := owns(core.RunAs{User: self(t), Path: t.TempDir()}).Prepare(core.RoleOwner, true, "pi"); err == nil {
 		t.Fatal("found pi on Heimdall's PATH instead of the run-as PATH")
 	}
 }
@@ -277,5 +285,92 @@ func TestHarnessProcessSeesCallerIdentity(t *testing.T) {
 				t.Fatalf("answer %q lacks %s", res.Answer, want)
 			}
 		})
+	}
+}
+
+// stubAccounts resolves OS user names to the given uids and homes, as if
+// Heimdall ran as uid self.
+func stubAccounts(t *testing.T, self int, users map[string]int) (harness.Accounts, map[string]string) {
+	homes := map[string]string{}
+	for name := range users {
+		homes[name] = t.TempDir()
+	}
+	runAs := map[core.Role]core.RunAs{}
+	if _, ok := users["boss"]; ok {
+		runAs[core.RoleOwner] = core.RunAs{User: "boss", Path: "/usr/bin:/bin"}
+	}
+	if _, ok := users["emp"]; ok {
+		runAs[core.RoleEmployee] = core.RunAs{User: "emp", Path: "/usr/bin:/bin"}
+	}
+	return harness.Accounts{
+		RunAs: runAs,
+		Lookup: func(name string) (*user.User, error) {
+			uid, ok := users[name]
+			if !ok {
+				return nil, user.UnknownUserError(name)
+			}
+			id := strconv.Itoa(uid)
+			return &user.User{Uid: id, Gid: id, Username: name, HomeDir: homes[name]}, nil
+		},
+		Getuid: func() int { return self },
+	}, homes
+}
+
+func TestEmployeeAccountNeverRootOrOwner(t *testing.T) {
+	for name, users := range map[string]map[string]int{
+		"root by another name":  {"boss": 1000, "emp": 0},
+		"owner by another name": {"boss": 1000, "emp": 1000},
+		"root owner's uid":      {"boss": 0, "emp": 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, _ := stubAccounts(t, 1000, users)
+			if err := a.Check(); err == nil {
+				t.Fatal("Check accepted the employee account")
+			}
+			_, err := a.Prepare(core.RoleEmployee, true, "sh")
+			var acct *harness.AccountError
+			if !errors.As(err, &acct) {
+				t.Fatalf("Prepare: %v, want an account refusal", err)
+			}
+		})
+	}
+	a, _ := stubAccounts(t, 0, map[string]int{"boss": 0, "emp": 1001})
+	if err := a.Check(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEmployeeEnvironmentRebuiltByRole(t *testing.T) {
+	t.Setenv("HEIMDALL_UNRELATED", "x")
+	t.Setenv("OWNER_SECRET", "x")
+	// Heimdall runs as the employee's uid and the owner is root: the employee
+	// turn still gets an environment rebuilt from its own account.
+	a, homes := stubAccounts(t, 1001, map[string]int{"boss": 0, "emp": 1001})
+	l, err := a.Prepare(core.RoleEmployee, true, "sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Cred != nil || l.Home != homes["emp"] || !slices.Contains(l.Env, "HOME="+homes["emp"]) || slices.ContainsFunc(l.Env, func(kv string) bool { return strings.HasPrefix(kv, "OWNER_SECRET=") }) {
+		t.Fatalf("employee launch on Heimdall's uid: cred %v home %q env %q", l.Cred, l.Home, l.Env)
+	}
+	if _, err := a.Prepare(core.RoleOwner, true, "sh"); err == nil || !strings.Contains(err.Error(), "not root") {
+		t.Fatalf("owner turn as root from a non-root Heimdall: %v", err)
+	}
+	// As root: the employee switches uid with a rebuilt environment, the
+	// owner (root) keeps Heimdall's.
+	a, homes = stubAccounts(t, 0, map[string]int{"boss": 0, "emp": 1001})
+	l, err = a.Prepare(core.RoleEmployee, true, "sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Cred == nil || l.Cred.Uid != 1001 || l.Cred.Gid != 1001 || slices.ContainsFunc(l.Env, func(kv string) bool { return strings.HasPrefix(kv, "OWNER_SECRET=") }) || !slices.Contains(l.Env, "HOME="+homes["emp"]) {
+		t.Fatalf("employee launch as root: cred %+v env %q", l.Cred, l.Env)
+	}
+	l, err = a.Prepare(core.RoleOwner, true, "sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Cred != nil || !slices.Contains(l.Env, "OWNER_SECRET=x") || slices.Contains(l.Env, "HEIMDALL_UNRELATED=x") {
+		t.Fatalf("owner launch as root: cred %+v", l.Cred)
 	}
 }

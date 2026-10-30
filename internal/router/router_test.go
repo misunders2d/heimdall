@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/fakeharness"
+	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -68,6 +70,7 @@ const (
 
 type env struct {
 	t      *testing.T
+	bin    string
 	f      *fakeIface
 	st     *store.Store
 	dbPath string
@@ -80,28 +83,55 @@ type env struct {
 func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *env {
 	t.Helper()
 	bin, _ := fakeharness.Install(t, installed...)
+	e := &env{t: t, bin: bin, dbPath: filepath.Join(t.TempDir(), "h.db")}
 	u, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
 	}
 	home := t.TempDir()
-	// Both roles run as the test user here; config validation requires
-	// distinct OS users in real deployments.
-	runAs := map[core.Role]core.RunAs{
-		core.RoleOwner:    {User: u.Username, Dir: home, Path: bin},
-		core.RoleEmployee: {User: u.Username, Dir: home, Path: bin},
-	}
+	accounts := sameUser{harness.Accounts{RunAs: map[core.Role]core.RunAs{core.RoleOwner: {User: u.Username, Dir: home, Path: bin}}}}
 	t.Setenv("MEMENTO_PROCESSING", "")
 	t.Setenv("HOME", home) // native session directories stay inside the test
-	e := &env{t: t, dbPath: filepath.Join(t.TempDir(), "h.db"), opt: Options{
+	e.opt = Options{
 		Access:      core.Access{Mode: mode, Owners: map[string]bool{owner: true}, Employees: map[string]bool{employee: true, coworker: true}},
 		Order:       order,
 		MaxParallel: 4,
-		RunAs:       runAs,
+		Accounts:    accounts,
 		Log:         log.New(io.Discard, "", 0),
-	}}
+	}
 	e.start()
 	return e
+}
+
+// sameUser runs both roles' turns as the test user, which harness.Accounts
+// refuses in a real deployment; TestEmployeeAccount* cover that.
+type sameUser struct{ harness.Accounts }
+
+func (a sameUser) Prepare(_ core.Role, memory bool, bin string) (harness.Launch, error) {
+	return a.Accounts.Prepare(core.RoleOwner, memory, bin)
+}
+
+// stubbed runs turns through harness.Accounts with OS user names resolved
+// to the given uids and homes. Only the test user's uid can actually run.
+func stubbed(t *testing.T, bin string, users map[string]int) (harness.Accounts, map[string]string) {
+	homes := map[string]string{}
+	for name := range users {
+		homes[name] = t.TempDir()
+	}
+	return harness.Accounts{
+		RunAs: map[core.Role]core.RunAs{
+			core.RoleOwner:    {User: "boss", Path: bin},
+			core.RoleEmployee: {User: "emp", Path: bin},
+		},
+		Lookup: func(name string) (*user.User, error) {
+			uid, ok := users[name]
+			if !ok {
+				return nil, user.UnknownUserError(name)
+			}
+			id := strconv.Itoa(uid)
+			return &user.User{Uid: id, Gid: id, Username: name, HomeDir: homes[name]}, nil
+		},
+	}, homes
 }
 
 func (e *env) start() {
@@ -427,10 +457,8 @@ func TestEmployeeRefusedWhenOSUserUnavailable(t *testing.T) {
 		t.Skip("running as root")
 	}
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
-	r := e.opt.RunAs[core.RoleEmployee]
-	r.User = "root"
 	e.stop()
-	e.opt.RunAs = map[core.Role]core.RunAs{core.RoleOwner: e.opt.RunAs[core.RoleOwner], core.RoleEmployee: r}
+	e.opt.Accounts, _ = stubbed(t, e.bin, map[string]int{"boss": os.Getuid(), "emp": os.Getuid() + 1})
 	e.start()
 	e.send(employee, "c1", "hi")
 	out := e.reply()
@@ -438,6 +466,34 @@ func TestEmployeeRefusedWhenOSUserUnavailable(t *testing.T) {
 	if strings.Contains(out.Text, "codex") || strings.Contains(out.Text, "#1") {
 		t.Fatalf("employee turn ran or kept trying: %q", out.Text)
 	}
+}
+
+func TestEmployeeAccountNeverRunsAsOwner(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.stop()
+	// "emp" is another name for the owner's account.
+	e.opt.Accounts, _ = stubbed(t, e.bin, map[string]int{"boss": os.Getuid(), "emp": os.Getuid()})
+	e.start()
+	e.send(employee, "c1", "hi")
+	want(t, e.reply(), "No harness could take this turn", "the owner's uid")
+	e.send(owner, "c2", "hi")
+	want(t, e.reply(), "omp#1")
+}
+
+func TestEmployeeTurnRebuildsEnvironmentOnHeimdallsUID(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root")
+	}
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.stop()
+	// Heimdall runs as the employee's account; the owner is another account.
+	var homes map[string]string
+	e.opt.Accounts, homes = stubbed(t, e.bin, map[string]int{"boss": 0, "emp": os.Getuid()})
+	e.start()
+	e.send(employee, "c1", "hi")
+	want(t, e.reply(), "omp#1", fmt.Sprintf("home=%q", homes["emp"]))
+	e.send(owner, "c2", "hi")
+	want(t, e.reply(), "No harness could take this turn", "not root")
 }
 
 func TestHarnessGetsVerifiedCallerIdentity(t *testing.T) {
