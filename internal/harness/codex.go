@@ -195,9 +195,12 @@ func (b *codexBridge) event(raw []byte) {
 			result = SteerUnsupported
 		} else if (len(m.Error) == 0 || string(m.Error) == "null") && json.Unmarshal(m.Result, &response) == nil && response.TurnID == b.turn {
 			result = SteerAccepted
-			// A final answer given before this steer belongs to the earlier
-			// inputs; the answer to the steer comes after it.
-			b.answers, b.answer, b.answerPhase = keepAnswer(b.answers, b.answer), "", ""
+			if !b.done {
+				// A final answer given before this steer belongs to the
+				// earlier inputs; the answer to the steer comes after it.
+				// Once the turn completed, the published answer stays.
+				b.answers, b.answer, b.answerPhase = keepAnswer(b.answers, b.answer), "", ""
+			}
 		}
 		delete(b.steering, string(m.ID))
 		ch <- result

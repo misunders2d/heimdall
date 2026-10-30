@@ -6,9 +6,9 @@ supersedes the earlier handoffs of the same day.
 
 ## State
 
-- `main` = the commit that updates this file; code HEAD `32bd194` (steers
-  that wait go together). Pushed, tree clean. No WIP branch.
-- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `32bd194`
+- `main` = the code HEAD (the Codex steer-ack guard after `32bd194`; see
+  "Fifth session"). Pushed, tree clean. No WIP branch.
+- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at that HEAD
   (config, core, harness, iface/slack, iface/telegram, router, store). The
   router package takes about 100 s, harness about 35 s, store and
   iface/telegram about 13 s each.
@@ -70,6 +70,7 @@ starts only after it exited; steers that become follow-ups are logged.
 | `311b605` | Review finding 5: reactions are parsed per answer (`Result.Answers`). |
 | `6379042` | Review finding 7: an answer before ready never ends a turn early; a fallback waits for the failed candidate's exit. |
 | `32bd194` | Step 2: steers that wait while another is handed over go as one steer, in order, with all their images. |
+| next commit | Regression of `47135e8`: a Codex steer acknowledged after `turn/completed` emptied the published answer; guarded (bridge-level test). A steer Codex acknowledges after the turn completed still counts as accepted though its answer is not in the reply (as before this session). |
 | this file | State and decisions. |
 
 Each has a test that fails on the old code (checked by putting the old
