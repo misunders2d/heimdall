@@ -136,6 +136,29 @@ func TestAnswerKeepsTheReplyToEachInput(t *testing.T) {
 	}
 }
 
+// A steer Codex accepts after it completed a final answer, before the turn
+// completed, gets its own answer; the earlier one is kept (review of
+// 5b3c62f, finding 3: the last final answer replaced it).
+func TestCodexSteerAfterFinalAnswerKeepsBoth(t *testing.T) {
+	bin, _ := fakeharness.Install(t, "codex")
+	l := launch(t, bin, "codex", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	r, err := harness.Start(ctx, harness.Spec{Harness: "codex", Prompt: "work WAIT_STEER FINALFIRST", Session: harness.Session{}, Launch: l, Caller: caller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-r.Ready()
+	if got := r.Steer(ctx, "s1", "and this FINISH", nil); got != harness.SteerAccepted {
+		t.Fatalf("steer: %s", got)
+	}
+	res := r.Result()
+	parts := strings.Split(res.Answer, "\n\n")
+	if len(parts) != 2 || parts[0] != "early answer: work WAIT_STEER FINALFIRST" || !strings.HasPrefix(parts[1], "codex#1 ") || !strings.Contains(parts[1], "steers=1") {
+		t.Fatalf("answer %q", res.Answer)
+	}
+}
+
 // A steer Claude takes only after its result runs as its next turn in the
 // same stream; that turn's result is part of the answer, not dropped.
 func TestClaudeLateSteerIsAnsweredNotDropped(t *testing.T) {

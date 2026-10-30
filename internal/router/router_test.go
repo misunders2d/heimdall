@@ -1595,3 +1595,25 @@ func TestClaudeLateTurnFailureKeepsTheAnswer(t *testing.T) {
 	e.send(owner, "c1", "after")
 	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
 }
+
+// The reply keeps each answer Claude and Codex gave in one turn: Claude's
+// for a steer it ran as its next turn, Codex's final answer before a steer
+// it accepted (review of 5b3c62f: router coverage for both).
+func TestReplyKeepsEveryAnswerClaudeCodex(t *testing.T) {
+	for h, c := range map[string]struct{ prompt, first, second string }{
+		"claude": {"work STEERLATE", "claude#1 ", "late reply: also CHARLIE"},
+		"codex":  {"work WAIT_STEER FINALFIRST", "early answer: work WAIT_STEER FINALFIRST", "codex#1 "},
+	} {
+		t.Run(h, func(t *testing.T) {
+			e := setup(t, core.ModeCorporate, []string{h}, h)
+			e.send(owner, "c1", c.prompt)
+			e.waitReadyOn("c1", h)
+			e.send(owner, "c1", "also CHARLIE FINISH")
+			out := e.reply()
+			i, j := strings.Index(out.Text, c.first), strings.Index(out.Text, c.second)
+			if i < 0 || j < 0 || i > j || !strings.Contains(out.Text, "steers=1") && h == "codex" {
+				t.Fatalf("reply %q lacks %q then %q", out.Text, c.first, c.second)
+			}
+		})
+	}
+}

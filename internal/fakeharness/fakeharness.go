@@ -21,6 +21,9 @@
 //	               result, as Claude's next turn in the stream; that turn
 //	               then hangs (LATEHANG), exits 4 (LATECRASH), ends with an
 //	               error result (LATEFAIL) or asks for approval (LATEASK)
+//	FINALFIRST     (codex) complete a final answer, "early answer: LAST
+//	               LINE", before taking steers, as Codex can before it
+//	               completes the turn
 //	LINGER=SECONDS keep running that long after the final answer, with
 //	               STATE/lingering present; a fake started meanwhile
 //	               creates STATE/overlap
@@ -518,6 +521,9 @@ func (f *fake) codex() {
 	reply(turnReq["id"], map[string]any{"turn": map[string]any{"id": "turn-1"}})
 	f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": "turn-1"}}})
 	f.failPost()
+	if f.has("FINALFIRST") {
+		f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": "turn-1", "item": map[string]any{"id": "i0", "type": "agentMessage", "text": "early answer: " + lastLine(f.prompt), "phase": "final_answer"}}})
+	}
 	if f.has("ASK_HUMAN") {
 		f.emit(map[string]any{"id": 99, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": thread, "turnId": "turn-1", "reason": "fake wants to run a command"}})
 		f.read()

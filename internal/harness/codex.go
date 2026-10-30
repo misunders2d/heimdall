@@ -39,6 +39,7 @@ type codexBridge struct {
 	buf                  []byte
 	thread, turn, answer string
 	answerPhase          string
+	answers              []string // final texts for inputs before the last accepted steer
 	done, published      bool
 	failure, human       string
 }
@@ -193,6 +194,9 @@ func (b *codexBridge) event(raw []byte) {
 			result = SteerUnsupported
 		} else if (len(m.Error) == 0 || string(m.Error) == "null") && json.Unmarshal(m.Result, &response) == nil && response.TurnID == b.turn {
 			result = SteerAccepted
+			// A final answer given before this steer belongs to the earlier
+			// inputs; the answer to the steer comes after it.
+			b.answers, b.answer, b.answerPhase = keepAnswer(b.answers, b.answer), "", ""
 		}
 		delete(b.steering, string(m.ID))
 		ch <- result
@@ -303,6 +307,7 @@ func (b *codexBridge) event(raw []byte) {
 			b.failLocked(why)
 			return
 		}
+		b.answer = joinAnswers(keepAnswer(b.answers, b.answer))
 		if strings.TrimSpace(b.answer) == "" {
 			b.failLocked("Codex completed the turn without an answer")
 			return

@@ -180,7 +180,10 @@ thinking stream and live-session reply registration.
   for. A stop meanwhile stops the turn (never an answer, session not
   resumed); if that late turn fails, exits non-zero or asks for approval,
   the answers already given stand with a note and the session is not
-  resumed. Codex folds steers into one final answer (checked live).
+  resumed. Codex folds a steer taken while it works into one final
+  answer; a steer it accepts after a final answer, before the turn
+  completed, gets a final answer of its own (both checked live, 0.166.0),
+  and both are kept.
 - Heimdall keeps its own adapters. T3 Code is for coding only, never a
   route for chat turns (owner, 2026-10-30).
 - The turn's ready signal is the side-effect boundary used for fallback.
