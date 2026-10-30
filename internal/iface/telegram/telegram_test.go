@@ -730,3 +730,34 @@ func TestTypingIsAChatAction(t *testing.T) {
 	})
 	i.Typing(context.Background(), core.ConvKey{Interface: "telegram", Chat: "1"}) // no panic, no error
 }
+
+// Telegram /commands, alone or addressed to this bot, are Heimdall's
+// commands; anything else stays text for the harness.
+func TestSlashCommands(t *testing.T) {
+	i := &Interface{botName: botName}
+	for in, want := range map[string]string{
+		"/start":                       "!help",
+		"/start deep-link":             "!help",
+		"/start@Heimdall_Test_Bot":     "!help",
+		"/help":                        "!help",
+		"/status":                      "!status",
+		"/stop":                        "!stop",
+		"/STOP@heimdall_test_bot":      "!stop",
+		"@Heimdall_Test_Bot /stop":     "!stop",
+		"/cancel":                      "!cancel",
+		"/reset@Heimdall_Test_Bot":     "!reset",
+		"/chatid":                      "!chatid",
+		"/stop now":                    "/stop now",
+		"/stop@other_bot":              "/stop@other_bot",
+		"/frobnicate":                  "/frobnicate",
+		"stop":                         "stop",
+		"@Heimdall_Test_Bot stop":      "stop",
+		"please /stop":                 "please /stop",
+		"!status @Heimdall_Test_Bot":   "!status",
+		"/use codex@Heimdall_Test_Bot": "/use codex",
+	} {
+		if got := i.command(in); got != want {
+			t.Errorf("command(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

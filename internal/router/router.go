@@ -312,6 +312,7 @@ type turn struct {
 	mu       sync.Mutex
 	run      *harness.Run
 	typing   chan struct{} // closed when the turn ends: stops the typing indicator
+	reset    bool          // the caller reset their sessions: keep none from this turn
 }
 
 type readyEvent struct {
@@ -438,6 +439,23 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 	case cmdStop:
 		c.answer(row, store.CommandEnd{Detail: "stop"}, c.stop(role, row.From.Key()))
 		return
+	case cmdCancel:
+		n := c.cancelQueued(role, row.From.Key(), "cancelled by cancel")
+		text := fmt.Sprintf("Cancelled %d queued message(s).", n)
+		if n == 0 {
+			text = "No queued message of yours in this conversation."
+			if role == core.RoleOwner {
+				text = "No queued message in this conversation."
+			}
+		}
+		c.answer(row, store.CommandEnd{Detail: "cancel"}, text)
+		return
+	case cmdReset:
+		c.answer(row, store.CommandEnd{Detail: "reset", Forget: row.From.Key()}, c.reset(row.From.Key()))
+		return
+	case cmdChatID:
+		c.answer(row, store.CommandEnd{Detail: "chatid"}, c.chatID(row, role))
+		return
 	}
 	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next, text: cmd.Text}
 	// Steer only the sender's own turn: sessions are per verified caller, so
@@ -450,14 +468,29 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 	c.queue = append(c.queue, it)
 }
 
+// stop stops the running turn, if the caller may (its sender or the owner),
+// and clears the caller's queued messages (the owner's stop clears
+// everyone's), as the hub's stop does.
 func (c *conv) stop(role core.Role, who string) string {
 	t := c.turn
 	if t == nil || t.done != nil {
+		if n := c.cancelQueued(role, who, "cancelled by stop"); n > 0 {
+			return fmt.Sprintf("Nothing is running in this conversation. Cleared %d queued message(s).", n)
+		}
 		return "Nothing is running in this conversation."
 	}
 	if role != core.RoleOwner && who != t.who {
 		return "Only the person who started this turn, or the owner, can stop it."
 	}
+	n := c.cancelQueued(role, who, "cancelled by stop")
+	c.cancelTurn(t)
+	if n > 0 {
+		return fmt.Sprintf("Stopping the current turn. Cleared %d queued message(s).", n)
+	}
+	return "Stopping the current turn."
+}
+
+func (c *conv) cancelTurn(t *turn) {
 	t.stopped.Store(true)
 	t.mu.Lock()
 	run := t.run
@@ -465,7 +498,70 @@ func (c *conv) stop(role core.Role, who string) string {
 	if run != nil {
 		run.Cancel()
 	}
-	return "Stopping the current turn."
+}
+
+// cancelQueued drops queued messages that have not reached a harness: the
+// caller's own, or everyone's for the owner. Messages already handed to the
+// running turn are not affected.
+func (c *conv) cancelQueued(role core.Role, who, why string) int {
+	n := 0
+	keep := func(items []item) []item {
+		var out []item
+		for _, it := range items {
+			if role == core.RoleOwner || it.row.From.Key() == who {
+				if err := c.r.store.SetInbound(it.row.ID, store.InCancelled, why); err != nil {
+					c.r.log.Printf("message %d: cancel not recorded: %v", it.row.ID, err)
+					out = append(out, it)
+					continue
+				}
+				n++
+				continue
+			}
+			out = append(out, it)
+		}
+		return out
+	}
+	c.queue = keep(c.queue)
+	if t := c.turn; t != nil {
+		t.steerQ = keep(t.steerQ)
+	}
+	return n
+}
+
+// reset makes the caller's next message in this conversation start a fresh
+// native session on every harness: the store forgets the caller's sessions
+// with the command's reply. Sessions are per caller, so nobody else's is
+// touched; the caller's own running turn is stopped and its session is not
+// kept either. Native session files are left in place.
+func (c *conv) reset(who string) string {
+	text := "Session reset. Your next message in this conversation starts a fresh session."
+	if t := c.turn; t != nil && t.who == who {
+		t.reset = true
+		if t.done == nil {
+			c.cancelTurn(t)
+			text = "Stopping your running turn. " + text
+		}
+	}
+	return text
+}
+
+// chatID shows the conversation and the caller as Heimdall and hub tools
+// see them (the hub's /chatid).
+func (c *conv) chatID(row store.InboundRow, role core.Role) string {
+	user, chat := harness.HubIDs(harness.Caller{Principal: row.From, Role: role, Conv: c.key, Private: row.Private})
+	var b strings.Builder
+	if chat != "" {
+		fmt.Fprintf(&b, "chat: %s\n", chat)
+	}
+	if user != "" {
+		fmt.Fprintf(&b, "user: %s\n", user)
+	}
+	private := "no"
+	if row.Private {
+		private = "yes"
+	}
+	fmt.Fprintf(&b, "principal: %s (%s)\nconversation: %s\nprivate chat: %s", row.From.Key(), role, c.key, private)
+	return b.String()
 }
 
 func (c *conv) status() string {
@@ -775,11 +871,11 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	if len(d.notes) > 0 {
 		footer += " (" + strings.Join(clipAll(d.notes, 160), "; ") + ")"
 	}
-	e := store.TurnEnd{Harness: d.harness, Session: res.SessionID}
+	e := store.TurnEnd{Harness: d.harness, Session: res.SessionID, Forget: t.reset}
 	var text string
 	switch {
 	case res.Cancelled && t.stopped.Load():
-		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, "stopped by !stop"
+		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, "stopped by stop or reset"
 		text = "⏹ Stopped."
 	case d.harness == "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "no harness could start"

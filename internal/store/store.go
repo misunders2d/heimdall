@@ -325,6 +325,7 @@ type TurnEnd struct {
 	Harness   string // harness that ran it ("" if none became ready)
 	Session   string // native session to keep for Harness, if known
 	Clean     bool   // the session may be resumed
+	Forget    bool   // the caller reset their sessions: keep none for this conversation
 	Reply     *core.Outbound
 }
 
@@ -342,7 +343,12 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 	if _, err = tx.Exec(`UPDATE inbound SET state=? WHERE turn_id=? AND state IN (?,?)`, e.ItemState, turn, InRunning, InSteered); err != nil {
 		return 0, err
 	}
-	if e.Harness != "" {
+	switch {
+	case e.Forget:
+		if err = forgetSessions(tx, conv, who); err != nil {
+			return 0, err
+		}
+	case e.Harness != "":
 		if err = saveSession(tx, conv, who, e.Harness, e.Session, e.Clean && e.Session != ""); err != nil {
 			return 0, err
 		}
@@ -362,6 +368,13 @@ ON CONFLICT(iface,chat,thread,principal,harness) DO UPDATE SET native_id=exclude
 	return err
 }
 
+// forgetSessions drops every native session binding of the caller in conv,
+// so the caller's next turn there starts fresh on every harness.
+func forgetSessions(tx *sql.Tx, conv core.ConvKey, who string) error {
+	_, err := tx.Exec(`DELETE FROM sessions WHERE iface=? AND chat=? AND thread=? AND principal=?`, conv.Interface, conv.Chat, conv.Thread, who)
+	return err
+}
+
 // Session returns the native session bound to (conv, caller, harness) and
 // whether its last turn ended cleanly.
 func (s *Store) Session(conv core.ConvKey, who, harness string) (id string, clean bool, err error) {
@@ -378,6 +391,7 @@ type CommandEnd struct {
 	Detail     string
 	SetHarness bool   // !use: make Harness sticky for the conversation
 	Harness    string // "" restores the default order
+	Forget     string // reset: forget this caller's sessions in the conversation
 	Reply      core.Outbound
 }
 
@@ -395,6 +409,11 @@ func (s *Store) AnswerCommand(item int64, conv core.ConvKey, e CommandEnd) error
 	}
 	if e.SetHarness {
 		if err := setChatHarness(tx, conv, e.Harness); err != nil {
+			return err
+		}
+	}
+	if e.Forget != "" {
+		if err := forgetSessions(tx, conv, e.Forget); err != nil {
 			return err
 		}
 	}

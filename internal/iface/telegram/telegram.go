@@ -354,10 +354,23 @@ func usernameByte(s string, i int) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
 }
 
+// slashCommands map Telegram /commands to Heimdall's: the hub's /start
+// (help), /stop, /reset and /chatid, plus /help, /status and /cancel.
+var slashCommands = map[string]string{
+	"start":  "!help",
+	"help":   "!help",
+	"status": "!status",
+	"stop":   "!stop",
+	"cancel": "!cancel",
+	"reset":  "!reset",
+	"chatid": "!chatid",
+}
+
 // command removes one leading or trailing @<bot username> (as the hub's
 // chat-control.ts does), so "@bot !status" and "!status @bot" are commands,
-// and maps /start and /start@<bot> (with or without a deep-link payload) to
-// !help. Other text is returned unchanged.
+// and maps a /command or /command@<bot> alone to Heimdall's command
+// (slashCommands; /start also with a deep-link payload). Other text is
+// returned unchanged.
 func (t *Interface) command(text string) string {
 	s := strings.TrimSpace(text)
 	if t.botName != "" {
@@ -370,9 +383,14 @@ func (t *Interface) command(text string) string {
 			s = strings.TrimSpace(s[:len(s)-n])
 		}
 	}
-	first, _, _ := strings.Cut(s, " ")
-	if strings.EqualFold(first, "/start") || t.botName != "" && strings.EqualFold(first, "/start@"+t.botName) {
-		return "!help"
+	first, rest, _ := strings.Cut(s, " ")
+	if word, ok := strings.CutPrefix(first, "/"); ok {
+		if name, bot, addressed := strings.Cut(word, "@"); !addressed || t.botName != "" && strings.EqualFold(bot, t.botName) {
+			name = strings.ToLower(name)
+			if cmd, known := slashCommands[name]; known && (name == "start" || strings.TrimSpace(rest) == "") {
+				return cmd
+			}
+		}
 	}
 	if s == strings.TrimSpace(text) {
 		return text

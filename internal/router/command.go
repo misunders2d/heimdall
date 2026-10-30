@@ -14,6 +14,9 @@ const (
 	cmdHelp    = "help"
 	cmdStatus  = "status"
 	cmdStop    = "stop"
+	cmdCancel  = "cancel" // clear queued messages
+	cmdReset   = "reset"  // forget the caller's native sessions here
+	cmdChatID  = "chatid" // show the conversation's and caller's IDs
 	cmdUse     = "use"
 	cmdInvalid = "invalid" // answered with Error, never sent to a harness
 )
@@ -26,10 +29,25 @@ type command struct {
 	Error   string
 }
 
-// parseCommand reads a message. Text that does not start with "!" followed
-// by a letter is a plain message.
+// controlWords are whole messages that act as commands without the "!", as
+// in the hub's chat control (chat-control.ts isExactStopCommand, Telegram
+// handleCommand): case-insensitive, nothing else in the message.
+var controlWords = map[string]string{
+	"stop":      cmdStop,
+	"cancel":    cmdCancel,
+	"abort":     cmdCancel,
+	"nevermind": cmdCancel,
+	"reset":     cmdReset,
+	"chatid":    cmdChatID,
+}
+
+// parseCommand reads a message. A control word alone is its command; other
+// text that does not start with "!" followed by a letter is a plain message.
 func parseCommand(text string) command {
 	t := strings.TrimSpace(text)
+	if kind, ok := controlWords[strings.ToLower(t)]; ok {
+		return command{Kind: kind}
+	}
 	if len(t) < 2 || t[0] != '!' || !isLetter(t[1]) {
 		return command{Kind: cmdMessage, Text: text}
 	}
@@ -45,6 +63,12 @@ func parseCommand(text string) command {
 		return command{Kind: cmdStatus}
 	case "stop":
 		return command{Kind: cmdStop}
+	case "cancel":
+		return command{Kind: cmdCancel}
+	case "reset":
+		return command{Kind: cmdReset}
+	case "chatid":
+		return command{Kind: cmdChatID}
 	case "use":
 		switch arg := strings.ToLower(rest); {
 		case arg == "":
@@ -78,12 +102,16 @@ func helpText(order []string) string {
 		"Heimdall commands:",
 		"!help — this list",
 		"!status — what is running and queued in this conversation (chat + thread)",
-		"!stop — cancel the current turn",
+		"!stop (or stop) — stop the current turn and clear your queued messages",
+		"!cancel (or cancel, abort, nevermind) — clear your queued messages; the turn keeps running",
+		"!reset (or reset) — your next message here starts a fresh session (stops your running turn)",
+		"!chatid (or chatid) — show this conversation's and your IDs",
 		"!use <harness> — this conversation (chat + thread) uses <harness> (no fallback) until !use default",
 		"!use default — back to the default order: " + strings.Join(order, " → "),
 		"!<harness> <msg> — send only this message to <harness>",
 		"!next <msg> — queue as a follow-up instead of steering the running turn",
 		"Harnesses: " + strings.Join(harness.Names(), ", ") + ".",
 		"Messages sent while a turn runs steer it by default; replies are tagged with the harness that produced them.",
+		"The owner's stop and cancel clear everyone's queued messages; only the turn's sender or the owner can stop it.",
 	}, "\n")
 }

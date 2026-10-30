@@ -105,6 +105,21 @@ func callerVars(c Caller) ([]string, error) {
 	return vars, nil
 }
 
+// HubIDs are the caller's and the chat's IDs as hub tools read them
+// (PI_EXTERNAL_USER_ID, PI_EXTERNAL_CHAT_ID); "" for what is not set.
+func HubIDs(c Caller) (user, chat string) {
+	vars, _ := callerVars(c)
+	for _, kv := range vars {
+		switch k, v, _ := strings.Cut(kv, "="); k {
+		case "PI_EXTERNAL_USER_ID":
+			user = v
+		case "PI_EXTERNAL_CHAT_ID":
+			chat = v
+		}
+	}
+	return user, chat
+}
+
 // WithIdentity returns env without inherited identity variables and with
 // the caller's own.
 func WithIdentity(env []string, c Caller) ([]string, error) {

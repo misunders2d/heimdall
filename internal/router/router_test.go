@@ -471,6 +471,18 @@ func TestParseCommand(t *testing.T) {
 		"!use default":    {Kind: cmdUse},
 		"!omp do it":      {Kind: cmdMessage, Harness: "omp", Text: "do it"},
 		"!next\tlater":    {Kind: cmdMessage, Next: true, Text: "later"},
+		"stop":            {Kind: cmdStop},
+		" STOP ":          {Kind: cmdStop},
+		"Cancel":          {Kind: cmdCancel},
+		"abort":           {Kind: cmdCancel},
+		"nevermind":       {Kind: cmdCancel},
+		"reset":           {Kind: cmdReset},
+		"chatid":          {Kind: cmdChatID},
+		"!cancel":         {Kind: cmdCancel},
+		"!reset":          {Kind: cmdReset},
+		"!chatid":         {Kind: cmdChatID},
+		"stop now":        {Kind: cmdMessage, Text: "stop now"},
+		"!next stop":      {Kind: cmdMessage, Next: true, Text: "stop"},
 	}
 	for in, w := range cases {
 		if got := parseCommand(in); got != w {
@@ -790,4 +802,86 @@ func TestPromptNoteAndFormattedAnswers(t *testing.T) {
 	if out := e.reply(); out.Formatted || !strings.Contains(out.Text, "failed") {
 		t.Fatalf("failure reply: %+v", out)
 	}
+}
+
+// stop stops the caller's turn and clears queued messages: the caller's own,
+// or everyone's when the owner stops.
+func TestStopClearsQueuedMessages(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "SLEEP")
+	e.waitReady("c1")
+	e.send(employee, "c1", "employee waits")
+	e.send(owner, "c1", "!next owner waits")
+	e.send(employee, "c1", "stop")
+	want(t, e.reply(), "Only the person who started this turn")
+	e.send(owner, "c1", "Stop")
+	want(t, e.reply(), "Stopping the current turn. Cleared 2 queued message(s).")
+	want(t, e.reply(), "⏹ Stopped.")
+	e.noReply(500 * time.Millisecond)
+	e.send(employee, "c1", "stop")
+	want(t, e.reply(), "Nothing is running in this conversation.")
+}
+
+// cancel clears only the caller's queued messages; the running turn and
+// other callers' messages go on.
+func TestCancelClearsOnlyTheCallersQueue(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "owner work WAIT_STEER")
+	e.waitReady("c1")
+	e.send(employee, "c1", "first")
+	e.send(employee, "c1", "second")
+	e.send(coworker, "c1", "coworker asks")
+	e.send(employee, "c1", "abort")
+	want(t, e.reply(), "Cancelled 2 queued message(s).")
+	e.send(employee, "c1", "!cancel")
+	want(t, e.reply(), "No queued message of yours in this conversation.")
+	e.send(owner, "c1", "FINISH")
+	want(t, e.reply(), "omp#1", "role owner", "steers=1")
+	want(t, e.reply(), "omp#1", "coworker asks")
+	e.noReply(500 * time.Millisecond)
+}
+
+// reset makes the caller's next message start a fresh session, without the
+// "did not finish cleanly" note, stops the caller's own running turn and
+// leaves other callers' sessions alone.
+func TestResetStartsAFreshSession(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+	e.send(owner, "c1", "one")
+	want(t, e.reply(), "omp#1 resumed=false")
+	e.send(owner, "c1", "!codex on codex")
+	want(t, e.reply(), "codex#1 resumed=false")
+	e.send(employee, "c1", "employee one")
+	want(t, e.reply(), "omp#1 resumed=false", "role employee")
+	e.send(owner, "c1", "RESET")
+	want(t, e.reply(), "Session reset.", "— heimdall")
+	e.send(owner, "c1", "two")
+	out := e.reply()
+	want(t, out, "omp#1 resumed=false")
+	if strings.Contains(out.Text, "new omp session") {
+		t.Fatalf("reset reported as an unclean session: %q", out.Text)
+	}
+	e.send(owner, "c1", "!codex again")
+	want(t, e.reply(), "codex#1 resumed=false")
+	e.send(employee, "c1", "employee two")
+	want(t, e.reply(), "omp#2 resumed=true", "role employee")
+
+	e.send(owner, "c1", "SLEEP")
+	e.waitReady("c1")
+	e.send(owner, "c1", "!reset")
+	want(t, e.reply(), "Stopping your running turn. Session reset.")
+	want(t, e.reply(), "⏹ Stopped.")
+	e.send(owner, "c1", "three")
+	out = e.reply()
+	want(t, out, "omp#1 resumed=false")
+	if strings.Contains(out.Text, "new omp session") {
+		t.Fatalf("reset during a turn kept its session: %q", out.Text)
+	}
+}
+
+// chatid shows the conversation and the caller as Heimdall and hub tools
+// see them.
+func TestChatID(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(employee, "c1", "chatid")
+	want(t, e.reply(), "chat: fake_chat_c1\n", "user: fake_user_employee\n", "principal: fake:employee (employee)", "conversation: fake/c1", "private chat: no", "— heimdall")
 }
