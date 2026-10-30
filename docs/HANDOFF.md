@@ -1,24 +1,54 @@
-# Heimdall handoff (2026-10-30, second session)
+# Heimdall handoff (2026-10-30, third session)
 
 Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
 records where the work stands, what was decided, and what comes next. It
-supersedes the first handoff of the same day.
+supersedes the earlier handoffs of the same day.
 
 ## State
 
-- `main` = the commit that adds this file; code HEAD `a51160a` (docs at
-  `ba27cd1`). Pushed, tree clean. No WIP branch.
-- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `ba27cd1`
+- `main` = the commit that updates this file; code HEAD `8205b59`. Pushed,
+  tree clean. No WIP branch.
+- `go vet ./...` clean. `go test -race ./...` all pass at `8205b59`
   (config, core, harness, iface/slack, iface/telegram, router, store). The
-  router package takes about 55 s, harness about 28 s.
-- Store schema: steps 1-5 are shipped (5 = `inbound.private`). Steps are
+  router package takes about 146 s, harness about 30 s, store and
+  iface/telegram about 15 s each.
+- Store schema: steps 1-9 are shipped (5 `inbound.private`, 6
+  `outbound.extra`, 7 `inbound.extra`, 8 `ambient`, 9 `callers`). Steps are
   append-only; add new ones, never edit shipped steps.
-- Phase 1 is complete except the live Telegram chat check with a human
-  (see "Remaining work" 1). The no-human live check passed (below).
+- Telegram has the hub connector's transport behaviour; the parity table,
+  what is not ported and why, and two open recommendations are in
+  [`docs/hub-parity.md`](hub-parity.md) (Telegram). Phase 1 is complete
+  except the live Telegram chat check with a human (see "Remaining work" 1).
+- A live dev instance of `8743721` polls the test bot for that check.
 
 ## Done
 
-### Second session (this one)
+### Third session (this one): Telegram parity with the hub
+
+| Commit | What |
+|---|---|
+| `197c092` | Typing while a turn runs (`router.Typer`, every 4 s). |
+| `e8347e6` | Harness answers as Telegram Markdown with a plain retry, the hub's transport note, the hub's reply splitting. |
+| `caed3f6` | Control words `stop`, `cancel`/`abort`/`nevermind`, `reset`, `chatid` and their `/` forms; stop and cancel only by the turn's caller or an owner. |
+| `ba61965` | The hub's failure message; secrets scrubbed from everything sent to a chat. |
+| `10a783d` | Reply and forward context, marked untrusted. |
+| `fc83681` | Attachments: 20 MB cap, 0700 upload dir, per-turn copy owned by the turn's OS user, native images for Pi/OMP/Claude/Codex. |
+| `fff5f94` | Albums run as one message (1.5 s). |
+| `d6db1c2` | Reactions (`[react: <ref> <emoji>]`), the hub's emoji and parse. |
+| `156b031` | An album caption's harness choice applies to every part. |
+| `248ea50` | Recent group messages are context for later turns (ambient, store step 8). |
+| `df1bddc` | A shutdown before the harness is ready keeps the turn's binding (flaky restart test). |
+| `d5c281d` | Design of outbound files, written before building. |
+| `bbe83af` | Harnesses send files back through a per-turn outbox. |
+| `05c5c32` | Review findings 1, 4, 7: a message's files live until it is final; only files inside the upload dir are used; uploads pruned hourly. |
+| `5c98492` | Review finding 2: each Telegram request retried in place; a reply fails after 50 attempts. |
+| `50c72cc` | Review finding 3: an album part still downloading holds the album. |
+| `71ae0d0` | Review findings 5, 6: README, AGENTS and this file describe Telegram as built; finding 6 accepted and documented. |
+| `7bb6376` | Owners are told once when a new non-root caller writes (store step 9, `router.OwnerNotifier`). |
+| `8205b59` | A Markdown fallback is logged (metadata only). |
+| `8743721` | `docs/hub-parity.md` Telegram section; README and AGENTS name the new-caller notice. |
+
+### Second session
 
 | Commit | What |
 |---|---|
@@ -45,9 +75,28 @@ cancels on interface failure; `!` command, setting and reply in one
 transaction; `store.NextDue` without busy-polling. Commits `3822a13` through
 `b6edf62`; see `git log`.
 
-## Live check (no human), 2026-10-30
+## Live checks (no human), 2026-10-30
 
-Done on the development machine with a scratch config outside the repo,
+Third session, the development machine, real harnesses as the developer's
+OS user, `MEMENTO_PROCESSING=1`, synthetic prompts:
+
+- **Images** (review finding 8): field shapes checked against Pi 1.4.0
+  `docs/rpc-commands.md` (`images: [{type: "image", data, mimeType}]` on
+  prompt and steer), OMP 18.14.0's bundled RPC schema (`images?:
+  ImageContent[]`) and Codex 0.166.0's generated schema (`UserInput`
+  `{type: "localImage", path}` in `turn/start` and `turn/steer`). One turn
+  per harness through `harness.Start` with a red PNG, the prompt not naming
+  the colour: omp, pi, claude and codex each answered "red".
+- **Outbox**: one turn per harness through the router with a file-sending
+  fake interface: omp, codex, claude and pi each wrote `check.txt`
+  (`pong`) into `out/` in automatic mode, without a human, and Heimdall
+  collected and delivered it after the answer.
+- Residue removed: session dirs, turn dirs, the Claude project dirs, the
+  Codex rollouts, the OMP memory banks of the scratch working dirs. Left:
+  rows for those Codex threads in Codex's live `state_5.sqlite` and
+  `thread_history_1.sqlite`.
+
+Second session, done on the development machine with a scratch config outside the repo,
 `MEMENTO_PROCESSING=1`, the throwaway test bot (not production):
 
 - `heimdall harnesses`: all five harnesses found for the owner OS user;
@@ -175,21 +224,33 @@ usernames and tokens live only outside the repository.
    `/start`; optionally a group test (reply to a bot message; for plain
    `@bot` mentions see item 2). Expected: each answered as a reply, tagged
    `— <harness>` or `— heimdall`; the log shows `turn N ... ended: done`.
+   Then the Telegram behaviour, each checked once: typing while a turn
+   runs; a message mid-turn (steers); `stop`; `cancel`; `/reset`; a reply to
+   an earlier message; a forwarded message; a photo ("what colour?"); a text
+   document; an album of two photos (one turn); a reaction ("react with 👍
+   to my message"); a group mention; a file back ("send me a file
+   hello.txt"); a second, non-owner account writing once (each owner gets
+   one new-caller notice; that caller's turn is refused while Heimdall is
+   not root).
    Afterwards delete the scratch data dir and log, and any harness session
    files the turns created under the owner's home
-   (`~/.local/state/heimdall/sessions/` for pi/omp, plus the native session
-   stores of Claude/Codex for the scratch working directory).
+   (`~/.local/state/heimdall/sessions/` for pi/omp,
+   `~/.local/state/heimdall/turns/`, plus the native session stores of
+   Claude/Codex for the scratch working directory).
 2. **Group privacy mode, unverified.** Telegram docs: with privacy mode on,
    a group bot receives `/command@bot` and replies to its messages; whether
    plain `@bot` mentions arrive is not documented. For the mention rule to
    work in groups the bot may need to be a group admin, or privacy off in
    BotFather (`/setprivacy`) and re-added. Check in the live group test.
-3. **Employee turns live** need Heimdall running as root (production) or a
+3. **Owner decisions**: the two recommendations (prompt-injection guard,
+   Memento Telegram intake) and the further improvements in
+   [`docs/hub-parity.md`](hub-parity.md) (Telegram).
+4. **Employee turns live** need Heimdall running as root (production) or a
    dedicated dev setup. No OS users were created; decision is the owner's.
-4. Phase 2: Slack interface (verification exists in `internal/iface/slack`;
+5. Phase 2: Slack interface (verification exists in `internal/iface/slack`;
    set `Inbound.Private` for DMs), AgentNet interface and its principal
    format (`identity.go` TODO).
-5. Phase 3: scheduler (revisit `PI_RESTRICTED_EXTERNAL_USER` and
+6. Phase 3: scheduler (revisit `PI_RESTRICTED_EXTERNAL_USER` and
    `PI_EXTERNAL_DEFAULT_DELIVERY`).
 
 ## Design: outbound files (Telegram gap item 10)
@@ -272,7 +333,23 @@ are in `docs/hub-parity.md`.
     until the router answers once and use `busy_timeout`.
   - Fake-harness prompt words: `FAILPRE=`, `FAILPOST=`, `HANGPRE=`,
     `WAIT_STEER`, `NOACK`, `SLEEP`, `ASK_HUMAN` (AGY: stderr auto-deny +
-    SUCCESS). The answer ends with `ext="..."`, now listing
+    SUCCESS), `REACT=<emoji>` and `REACTONLY` (reaction directives),
+    `WRITE=<name>:<content>` (a file in the outbox the prompt names), `SLOW`
+    (AGY sleeps 2 s). The fake harness also records the images it got.
+  - The router's `fakeIface` opts in to each optional interface with an
+    atomic toggle (`react`, `group`, `files`, `notify`); it is recreated on
+    every `env.start`, so set toggles again after a restart.
+  - Album parts the interface is still downloading arrive first as
+    `Announce` rows (never stored), then as the part itself.
+  - `heimdall run` keeps Telegram uploads in `<data_dir>/uploads/telegram`
+    and files to send in `<data_dir>/outbox`; harness turns use
+    `~/.local/state/heimdall/turns/<turn>-<hex>/{in,out}` in the run-as
+    user's home (kept 7 days).
+  - Build with `-ldflags "-X main.version=$(git rev-parse --short HEAD)"`
+    or the start line says `dev`.
+  - `pkill -f '<pattern>'` from a shell whose own command line contains the
+    pattern kills that shell too; anchor it (`'^/path/heimdall run'`) or
+    kill by PID. The answer ends with `ext="..."`, now listing
     `PI_EXTERNAL_*`, `A2A_CALLER_*`, `PI_RESTRICTED_*` and
     `PI_TRANSPORT_CHILD`, and `home="..."`.
   - `internal/iface/telegram` tests use a fake Bot API (`fakeAPI`) with
