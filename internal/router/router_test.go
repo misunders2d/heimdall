@@ -1399,3 +1399,21 @@ func TestStoredFilesOfMessagesThatNeverRunAreRemoved(t *testing.T) {
 	want(t, e.reply(), "omp#1")
 	eventuallyTrue(t, "every stored file removed", func() bool { entries, _ := os.ReadDir(e.uploads); return len(entries) == 0 })
 }
+
+// A reply that keeps failing is given up after MaxAttempts deliveries.
+func TestDeliveryGivesUpAfterMaxAttempts(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.opt.MaxAttempts = 2
+	e.start()
+	e.f.fails.Store(100)
+	e.send(owner, "c1", "!help")
+	eventuallyTrue(t, "two attempts", func() bool { return e.f.fails.Load() == 98 })
+	eventuallyTrue(t, "reply given up", func() bool { n, err := e.st.Undelivered(); return err == nil && n == 0 })
+	time.Sleep(3 * time.Second) // past the next backoff
+	if left := e.f.fails.Load(); left != 98 {
+		t.Fatalf("%d delivery attempts, want 2", 100-left)
+	}
+	e.noReply(100 * time.Millisecond)
+}

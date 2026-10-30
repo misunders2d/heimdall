@@ -65,6 +65,7 @@ type Options struct {
 	TypingEvery time.Duration // how often Typing repeats while a turn runs; default 4s
 	AlbumWait   time.Duration // how long a grouped message's parts are held after the last; default 1.5s
 	OutboxDir   string        // Heimdall's copies of files to send; "" sends none
+	MaxAttempts int           // delivery attempts of one reply before it is failed; default 50 (about 3.6 h)
 }
 
 type Router struct {
@@ -92,6 +93,9 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	}
 	if opt.AlbumWait <= 0 {
 		opt.AlbumWait = 1500 * time.Millisecond
+	}
+	if opt.MaxAttempts <= 0 {
+		opt.MaxAttempts = 50
 	}
 	r := &Router{opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}}
 	for _, i := range ifaces {
@@ -271,6 +275,12 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		case errors.As(err, &perm):
 			r.log.Printf("reply %d to %s failed permanently: %v", row.ID, row.Conv, err)
 			err = r.store.Failed(row.ID, err.Error())
+			if row.File != nil {
+				os.Remove(row.File.Path)
+			}
+		case row.Attempts+1 >= r.opt.MaxAttempts:
+			r.log.Printf("reply %d to %s failed after %d attempts: %v", row.ID, row.Conv, row.Attempts+1, err)
+			err = r.store.Failed(row.ID, fmt.Sprintf("gave up after %d attempts: %v", row.Attempts+1, err))
 			if row.File != nil {
 				os.Remove(row.File.Path)
 			}

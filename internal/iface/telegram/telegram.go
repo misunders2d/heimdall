@@ -518,9 +518,11 @@ func (t *Interface) command(text string) string {
 // first part replying to the message it answers. A harness's answer
 // (Formatted) is sent with parse_mode Markdown, the dialect PromptNote asks
 // for; when Telegram cannot parse a part it is sent again as plain text, as
-// the hub does. A 429 waits out retry_after (bounded) before reporting a
-// transient failure; any other 4xx is permanent. Delivery is at-least-once:
-// if a later part fails, the retry sends every part again.
+// the hub does. Each part is retried in place (sendRetrying), so a rate
+// limit on a later part never sends the earlier ones again; a part that
+// still fails ends Send, transient unless a 4xx other than 429. Delivery
+// is at-least-once: when the router retries such a reply, every part is
+// sent again.
 func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 	if out.File != nil {
 		return t.sendFile(ctx, out)
@@ -540,19 +542,42 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 		if out.Formatted {
 			body["parse_mode"] = "Markdown"
 		}
-		err := t.call(ctx, "sendMessage", body, nil, 30*time.Second)
+		send := func() error { return t.call(ctx, "sendMessage", body, nil, 30*time.Second) }
+		err := t.sendRetrying(ctx, send)
 		var api *apiError
 		if out.Formatted && errors.As(err, &api) && api.status == http.StatusBadRequest {
 			// Most often "can't parse entities": the model's Markdown is not
 			// Telegram's. Plain text loses the formatting, not the reply.
 			delete(body, "parse_mode")
-			err = t.call(ctx, "sendMessage", body, nil, 30*time.Second)
+			err = t.sendRetrying(ctx, send)
 		}
 		if err != nil {
-			return t.sendError(ctx, err)
+			return t.sendError(err)
 		}
 	}
 	return t.react(ctx, out)
+}
+
+// sendTries is how many times sendRetrying makes one request.
+const sendTries = 5
+
+// sendRetrying makes one send request, again after a 429 (once its
+// retry_after, at most maxRetryWait, has passed) or a 5xx or network error
+// (after a short backoff), at most sendTries times in all.
+func (t *Interface) sendRetrying(ctx context.Context, send func() error) error {
+	for try := 1; ; try++ {
+		err := send()
+		var api *apiError
+		isAPI := errors.As(err, &api)
+		if err == nil || try == sendTries || ctx.Err() != nil || isAPI && api.status < 500 && api.status != http.StatusTooManyRequests {
+			return err
+		}
+		wait := t.backoffMin << (try - 1)
+		if isAPI && api.status == http.StatusTooManyRequests && api.retryAfter > 0 {
+			wait = min(time.Duration(api.retryAfter)*time.Second, t.maxRetryWait)
+		}
+		sleep(ctx, wait)
+	}
 }
 
 // react sets out's reactions after its text, as the hub does: each is tried
@@ -623,8 +648,8 @@ func (t *Interface) sendFile(ctx context.Context, out core.Outbound) error {
 	if err := w.Close(); err != nil {
 		return err
 	}
-	if err := t.post(ctx, method, w.FormDataContentType(), buf.Bytes(), nil, 2*time.Minute); err != nil {
-		return t.sendError(ctx, err)
+	if err := t.sendRetrying(ctx, func() error { return t.post(ctx, method, w.FormDataContentType(), buf.Bytes(), nil, 2*time.Minute) }); err != nil {
+		return t.sendError(err)
 	}
 	return nil
 }
@@ -686,18 +711,11 @@ func (t *Interface) Typing(ctx context.Context, conv core.ConvKey) {
 	_ = t.call(ctx, "sendChatAction", body, nil, 10*time.Second)
 }
 
-func (t *Interface) sendError(ctx context.Context, err error) error {
+// sendError classifies a failed send for the router: a 4xx other than 429
+// is permanent; anything else (network, 5xx, 429) is transient.
+func (t *Interface) sendError(err error) error {
 	var api *apiError
-	if !errors.As(err, &api) {
-		return err // network: transient
-	}
-	switch {
-	case api.status == http.StatusTooManyRequests:
-		if api.retryAfter > 0 {
-			sleep(ctx, min(time.Duration(api.retryAfter)*time.Second, t.maxRetryWait))
-		}
-		return err
-	case api.status >= 400 && api.status < 500:
+	if errors.As(err, &api) && api.status >= 400 && api.status < 500 && api.status != http.StatusTooManyRequests {
 		return router.PermanentError{Err: err}
 	}
 	return err

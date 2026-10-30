@@ -1189,3 +1189,48 @@ func TestOldUploadsArePrunedWhilePolling(t *testing.T) {
 		t.Fatalf("fresh upload removed: %v", err)
 	}
 }
+
+// A rate limit on a later part of a long reply waits and resends that part
+// only: earlier parts are never repeated. A part that keeps failing ends
+// Send after sendTries requests.
+func TestRateLimitedPartIsRetriedInPlace(t *testing.T) {
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	i := newIface(t, api.srv.URL, botName, &logs)
+	var mu sync.Mutex
+	var texts []string
+	calls := 0
+	api.set("sendMessage", func(w http.ResponseWriter, b map[string]any) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 3 || calls == 4 {
+			fail(w, http.StatusTooManyRequests, "Too Many Requests: retry after 1", 1)
+			return true
+		}
+		texts = append(texts, b["text"].(string)[len(b["text"].(string))-5:])
+		ok(w, map[string]any{"message_id": calls})
+		return true
+	})
+	long := strings.TrimSpace(strings.Repeat(strings.Repeat("word ", 699)+"\n\n", 5))
+	if err := i.Send(context.Background(), core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "-1002"}, Text: long}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(texts, ",") != "(1/5),(2/5),(3/5),(4/5),(5/5)" || calls != 7 {
+		t.Fatalf("sent %v in %d calls", texts, calls)
+	}
+
+	calls = 0
+	api.set("sendMessage", func(w http.ResponseWriter, _ map[string]any) bool {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		fail(w, http.StatusBadGateway, "Bad Gateway", 0)
+		return true
+	})
+	err := i.Send(context.Background(), core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: "hi"})
+	var perm router.PermanentError
+	if err == nil || errors.As(err, &perm) || calls != sendTries {
+		t.Fatalf("err %v after %d calls", err, calls)
+	}
+}
