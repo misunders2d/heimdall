@@ -1164,3 +1164,25 @@ func TestReactionDirectives(t *testing.T) {
 		}
 	}
 }
+
+// A harness choice or !next in an album's caption applies to every part.
+func TestAlbumCaptionChoiceAppliesToAllParts(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+	e.album(owner, "c1", "g1", "!codex what are these?", true)
+	e.album(owner, "c1", "g1", "", true)
+	want(t, e.reply(), "codex#1", "— codex")
+	if inputs := fakeharness.Inputs(e.state); len(inputs) != 1 || inputs[0].Images != 2 {
+		t.Fatalf("inputs %+v", inputs)
+	}
+	e.noReply(500 * time.Millisecond)
+
+	e.send(owner, "c1", "work WAIT_STEER")
+	e.waitReady("c1")
+	e.album(owner, "c1", "g2", "!next later", false)
+	e.album(owner, "c1", "g2", "", false)
+	time.Sleep(2 * time.Second)
+	e.send(owner, "c1", "FINISH")
+	want(t, e.reply(), "omp#1", "steers=1")
+	want(t, e.reply(), "omp#2", "steers=0")
+	e.noReply(500 * time.Millisecond)
+}

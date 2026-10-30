@@ -388,8 +388,17 @@ func (c *conv) loop(ctx context.Context) {
 			case albumEvent:
 				if a := c.albums[ev.key]; a != nil && a.gen == ev.gen {
 					delete(c.albums, ev.key)
+					// A harness choice or !next in one part's caption is the
+					// album's: the parts stay one message.
+					var choice *command
 					for _, row := range a.rows {
-						c.route(row)
+						if cmd := parseCommand(row.Text); cmd.Kind == cmdMessage && (cmd.Harness != "" || cmd.Next) {
+							choice = &cmd
+							break
+						}
+					}
+					for _, row := range a.rows {
+						c.route(row, choice)
 					}
 					if c.turn != nil {
 						c.steerNext(ctx, c.turn)
@@ -468,15 +477,17 @@ func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
 // handle routes one stored message and steers the running turn with it if
 // it is the turn caller's.
 func (c *conv) handle(ctx context.Context, row store.InboundRow) {
-	if c.route(row) {
+	if c.route(row, nil) {
 		c.steerNext(ctx, c.turn)
 	}
 }
 
 // route answers a command, or queues a message as a follow-up or a steer of
-// the sender's running turn (true). The sender's role is evaluated now, so
-// a revoked principal (or, later, a scheduled job's creator) fails closed.
-func (c *conv) route(row store.InboundRow) bool {
+// the sender's running turn (true). A message without its own harness
+// choice or !next takes choice's, if any. The sender's role is evaluated
+// now, so a revoked principal (or, later, a scheduled job's creator) fails
+// closed.
+func (c *conv) route(row store.InboundRow, choice *command) bool {
 	role, ok := c.r.opt.Access.Role(row.From)
 	if !ok {
 		c.r.log.Printf("message %d from %s in %s rejected: caller no longer authorized", row.ID, row.From.Key(), c.key)
@@ -521,6 +532,9 @@ func (c *conv) route(row store.InboundRow) bool {
 	case cmdChatID:
 		c.answer(row, store.CommandEnd{Detail: "chatid"}, c.chatID(row, role))
 		return false
+	}
+	if choice != nil && cmd.Harness == "" && !cmd.Next {
+		cmd.Harness, cmd.Next = choice.Harness, choice.Next
 	}
 	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next, text: cmd.Text}
 	// Steer only the sender's own turn: sessions are per verified caller, so
