@@ -27,8 +27,35 @@ type injectionPattern struct {
 // ASCII only.
 const jsSpace = `[\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]`
 
+// hubPattern compiles one of the hub's /i patterns (JavaScript, no u flag)
+// for RE2. JavaScript then folds case only between ASCII letters; RE2's
+// (?i) also folds ſ to s and the Kelvin sign to k. So each ASCII letter
+// becomes a class of its two cases, and \s becomes jsSpace. The hub's
+// patterns have no character classes, which this does not handle.
 func hubPattern(re string) *regexp.Regexp {
-	return regexp.MustCompile(`(?i)` + strings.ReplaceAll(re, `\s`, jsSpace))
+	var b strings.Builder
+	for i := 0; i < len(re); i++ {
+		switch ch := re[i]; {
+		case ch == '\\' && i+1 < len(re):
+			i++
+			if re[i] == 's' {
+				b.WriteString(jsSpace)
+			} else {
+				b.WriteByte(ch)
+				b.WriteByte(re[i])
+			}
+		case ch == '[':
+			panic("hubPattern: character class in " + re)
+		case 'a' <= ch && ch <= 'z' || 'A' <= ch && ch <= 'Z':
+			b.WriteByte('[')
+			b.WriteByte(ch | 0x20)
+			b.WriteByte(ch &^ 0x20)
+			b.WriteByte(']')
+		default:
+			b.WriteByte(ch)
+		}
+	}
+	return regexp.MustCompile(b.String())
 }
 
 var injectionPatterns = []injectionPattern{
