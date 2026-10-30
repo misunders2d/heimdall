@@ -1,248 +1,229 @@
-# Heimdall handoff (2026-10-30)
+# Heimdall handoff (2026-10-30, second session)
 
 Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
-records where the work stands, what was decided, and what comes next.
+records where the work stands, what was decided, and what comes next. It
+supersedes the first handoff of the same day.
 
 ## State
 
-- `main` = the commit that adds this file; code HEAD `b6edf62`. Pushed, tree
-  clean. No WIP branch.
-- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `b6edf62`
-  (config, core, harness, iface/slack, router, store). The router package
-  takes about 55 s.
-- Store schema: steps 3 (`user_email`, `user_key_id`) and 4 (`user_team`)
-  are shipped. Steps are append-only; add new ones, never edit these.
+- `main` = the commit that adds this file; code HEAD `a51160a` (docs at
+  `ba27cd1`). Pushed, tree clean. No WIP branch.
+- `go vet ./...` clean. `go test -race -count=1 ./...` all pass at `ba27cd1`
+  (config, core, harness, iface/slack, iface/telegram, router, store). The
+  router package takes about 55 s, harness about 28 s.
+- Store schema: steps 1-5 are shipped (5 = `inbound.private`). Steps are
+  append-only; add new ones, never edit shipped steps.
+- Phase 1 is complete except the live Telegram chat check with a human
+  (see "Remaining work" 1). The no-human live check passed (below).
 
-## Done this session
+## Done
+
+### Second session (this one)
 
 | Commit | What |
 |---|---|
-| `3822a13` | Caller record keeps the verified Slack email and the AgentNet key ID (core.Principal, store schema step 3). |
-| `17f34a2` | Every harness process gets the caller identity in the Pi hub's variables (`internal/harness/identity.go`); `harness.Start` refuses a turn without a `Caller`. |
-| `045c873` | Codex fix 1: run-as accounts compared by uid; the employee account must be neither root nor the owner's (checked at config load and every turn); employee environments always rebuilt. `harness.Accounts` with injectable lookup for tests. |
-| `beb971c` | Codex fix 2: a steer is recorded as `steering` before the hand-over; restart marks unresolved ones `unconfirmed` and tells the sender, never replays. |
-| `df467ea` | Caller-role rewrite: owners are root, every other verified caller is non-root; no employee allowlist; `run_as.employee` required. |
-| `5a819e6` | Codex fix 3: harness and session bound (not clean) before the harness gets input; turn refused if that write fails; binding restored when a harness fails before ready. |
-| `4be70ab` | Slack caller verification as the hub does it (`internal/iface/slack/identity.go`), workspace kept in the caller record (schema step 4); Telegram non-owners never get memory. |
-| `587b409` | Codex fix 4: `Router.Run` cancels its own context when an interface fails, then joins; interface error at shutdown is not a failure. |
-| `4da108c` | Codex fix 5: a `!` command's state, a `!use` setting and its reply in one transaction (`store.AnswerCommand`). |
-| `32f1410` | Test hardening: tests that edit the database wait for the router and use a busy timeout. |
-| `fc0a98f` | Codex item 7: AGENTS.md now says harnesses run in their native automatic approval/review mode. |
-| `b6edf62` | AGY fix: `store.NextDue` counts only replies `NextOutbound` could offer (no 10 ms polling during a chat's backoff). |
+| `61f3a61` | `!use` is sticky per conversation (chat + thread): replies, help, AGENTS.md and README say so; `TestUseIsStickyPerConversation` checks `!use` in one thread changes neither another thread nor the channel. |
+| `d2c34fd` | AGY in `TestNativeApprovalRequestNeedsHuman`: the fake AGY's `ASK_HUMAN` auto-denies on stderr and still reports SUCCESS, as headless AGY does. |
+| `9e6deee` | `harness.Accounts.Prepare` logs a warning when an employee's supplementary groups cannot be read (the turn keeps its primary group only). `Accounts.GroupIDs`/`Accounts.Log` are injectable. |
+| `510843e` | Every turn gets `PI_TRANSPORT_CHILD=1` and `PI_EXTERNAL_MCP_PRIVATE` (`1` only in the caller's one-to-one chat). `core.Inbound.Private` set by the interface, stored (schema step 5), carried to `harness.Caller.Private`. Both stripped from the inherited environment first. |
+| `c20c539` | [`docs/hub-parity.md`](hub-parity.md): every hub turn variable, its readers and Heimdall's value or why not set. |
+| `a51160a` | Telegram interface `internal/iface/telegram` and `heimdall run -config FILE`; config `telegram.bot_username`. Tested against an `httptest` fake Bot API, including an end-to-end test through the router and a fake harness. |
+| `ba27cd1` | AGENTS.md and README: Telegram rules, `heimdall run`, code layout (`iface/telegram`, `docs/`), status line. |
 
-Every fix above has a test that was confirmed to fail with the old behaviour
-put back temporarily.
+Every change has a test that fails on the old behaviour (checked by putting
+the old code back temporarily, or by mutation for the new package).
+
+### First session (summary)
+
+Caller identity in the hub's variables (`internal/harness/identity.go`);
+run-as accounts compared by uid and the employee account never root's or
+the owner's; steers recorded before hand-over and never replayed after a
+restart; owners are root and every other verified caller is non-root (no
+allowlist); harness/session bound before the harness gets input; Slack caller
+verification as the hub does it (`internal/iface/slack`); `Router.Run`
+cancels on interface failure; `!` command, setting and reply in one
+transaction; `store.NextDue` without busy-polling. Commits `3822a13` through
+`b6edf62`; see `git log`.
+
+## Live check (no human), 2026-10-30
+
+Done on the development machine with a scratch config outside the repo,
+`MEMENTO_PROCESSING=1`, the throwaway test bot (not production):
+
+- `heimdall harnesses`: all five harnesses found for the owner OS user;
+  every employee harness "unavailable": Heimdall is not root, so employee
+  turns are refused (as designed).
+- `heimdall run` with the right `bot_username`: `telegram: polling as
+  @<test bot>`, no 409/conflict, SIGTERM after 20 s → `stopped`, exit 0.
+- `heimdall run` with a wrong `bot_username`: exit 1, `the token belongs to
+  @<test bot>, not the configured @<wrong>; refusing to poll`; no
+  `getUpdates`.
+- The token appeared 0 times in either log. Scratch data dir and logs
+  deleted afterwards; the scratch config and a built binary were kept for
+  the human check, and the token file was left alone.
 
 ## Decisions in force
 
-Made by the owner and the orchestrator on 2026-10-30.
+Owner and orchestrator, 2026-10-30. Values below are placeholders; real IDs,
+usernames and tokens live only outside the repository.
 
-- **Identity variable names and formats are the Pi hub's**, so existing hub
-  tools work unchanged. `PI_EXTERNAL_PLATFORM` (`telegram`, `slack`, `a2a`;
-  other platforms use their own name), `PI_EXTERNAL_USER_ID`
-  (`tg_user_<id>`; Slack: the verified email; other platforms
-  `<platform>_user_<id>`, never bare `local`/`system`, which hub guards
-  trust as their own admin), `PI_EXTERNAL_CHAT_ID` (`tg_chat_<chat>`,
-  `sl_channel_<channel>`, `<platform>_chat_<chat>`), `PI_EXTERNAL_USER_EMAIL`
-  (Slack verified email, also used as the user ID). The mapping lives only
-  in `internal/harness/identity.go`; Heimdall's own `platform:id` keys stay
-  in the store.
+- **Identity variables are the Pi hub's** (names and formats), mapped only in
+  `internal/harness/identity.go`; full list in `docs/hub-parity.md`.
+  `PI_EXTERNAL_PLATFORM`, `PI_EXTERNAL_USER_ID` (`tg_user_<id>`; Slack the
+  verified email; others `<platform>_user_<id>`, never bare `local`/`system`),
+  `PI_EXTERNAL_CHAT_ID` (`tg_chat_<chat>`, `sl_channel_<channel>`,
+  `<platform>_chat_<chat>`), `PI_EXTERNAL_USER_EMAIL` (Slack only).
+- **`PI_TRANSPORT_CHILD=1` on every harness turn** (orchestrator answer 1).
+  Why: the hub sets it on every child (`external-pi-runner.ts:800`); without
+  it hub extensions act as the transport owner and run their scheduler
+  runtime, chat bridges and pollers inside every turn.
+- **`PI_EXTERNAL_MCP_PRIVATE`** (answer 2): `1` for a private one-to-one chat
+  (Telegram `chat.type == "private"`, later the Slack DM), `0` otherwise; the
+  interface sets `core.Inbound.Private`. Mirrors the hub's
+  `nativeMcpUi.privateChat`.
 - **`PI_RESTRICTED_EXTERNAL_USER`**: `0` for owner turns, `1` for every
-  non-root turn and every AgentNet turn. Why: the hub sets 1 for non-admins
-  and its A2A check requires 1. Side effect accepted for now: the hub
-  scheduler extension creates jobs without built-in tools for restricted
-  callers and scopes their jobs per caller (employees share one OS user).
-  Provisional; revisit when Heimdall's own scheduler arrives (phase 3); the
-  owner may overrule.
+  non-root and every AgentNet turn. Provisional (hub scheduler side effects in
+  `docs/hub-parity.md`); revisit with Heimdall's own scheduler (phase 3).
 - **Strip, then set**: inherited `PI_EXTERNAL_*`, `A2A_CALLER_*`,
-  `PI_RESTRICTED_*` and `BIGQUERY_CALLER_PRINCIPAL` are removed from every
-  harness environment before the turn's own are set. Why: owner turns on
-  Heimdall's uid inherit its environment; neither that nor message text may
-  supply an identity.
-- **Caller roles** (`internal/core/core.go` `Access.Role`): owners are listed
-  in config `owners` as `telegram:<numeric user ID>` or
-  `slack:<verified email>` and are root. Every other caller the interface
-  verified is non-root: any Telegram user (numeric ID), any Slack member of
-  the bot's own workspace. A Slack caller counts only if users.info returned
-  a live email, the user is neither deleted nor a bot, and `team_id` equals
-  the bot's `auth.test` team ID (`internal/iface/slack.Verify`); no email
-  cache counts as proof. Any other Slack caller is ignored silently and
-  logged. Never by display name, username or message text. Why: owner rule,
-  copying the hub's Slack check.
+  `PI_RESTRICTED_*`, `BIGQUERY_CALLER_PRINCIPAL` and `PI_TRANSPORT_CHILD`
+  are removed before the turn's own values are set.
+- **Caller roles**: owners listed in config `owners` (`telegram:<numeric
+  ID>`, `slack:<verified email>`) are root; every other caller its interface
+  verified is non-root. Slack callers count only as `internal/iface/slack`
+  verifies them. Never by name, username or text.
 - **Memory**: owner always; in `corporate` mode also verified Slack callers;
-  Telegram non-owners never, in either mode (final). Other non-owners
-  (local test interface, AgentNet) get none. No-memory turns get
-  `MEMENTO_PROCESSING=1`.
-- **`!use` is sticky per conversation** (interface + chat + thread); the
-  code already works that way, the docs still say "chat" (see remaining
-  work). **`!stop`**: keep the session if the harness confirmed the cancel,
-  otherwise start a fresh one. Today Heimdall always kills the process
-  group, so a stopped session is never resumed (the "otherwise" branch).
+  Telegram non-owners never. No-memory turns get `MEMENTO_PROCESSING=1`.
+- **`!use` is sticky per conversation** (interface + chat + thread).
+  **`!stop`** keeps the session only if the harness confirmed the cancel;
+  today the process group is always killed, so a stopped session is never
+  resumed.
 - **Launch flags stay** (OMP `--auto-approve`, Claude `--permission-mode
-  auto`, Codex `approvalsReviewer: auto_review`): they select each
-  harness's own automatic mode from AgentNet's table. AGENTS.md wording was
-  fixed in `fc0a98f`.
-- **AgentNet principal format is deferred to phase 2.** AgentNet turns set
-  only `PI_EXTERNAL_PLATFORM=a2a` and `PI_RESTRICTED_EXTERNAL_USER=1`, so hub
-  tools treat them as unverified A2A callers and fail closed. TODO in
-  `internal/harness/identity.go`. Do not invent a format.
-- **Unknown callers**: ignored silently with a log line (platform and
-  conversation only). Now only Slack callers that fail verification, or a
-  principal without an ID, are unknown.
-- **Telegram is phase 1** and must work end to end on the development
-  machine. Use a separate test bot token, never the production bot's (two
-  pollers on one token conflict).
+  auto`, Codex `approvalsReviewer: auto_review`).
+- **AgentNet principal format is deferred to phase 2** (TODO in
+  `identity.go`). Do not invent one.
+- **Unknown callers** are ignored silently with a metadata log line.
+- **Telegram** (answers 3-6):
+  - Private chat: always handled. Group/supergroup: handled only if the text
+    contains `@<bot username>` or the message replies to one of the bot's own
+    messages (copy of the hub's `isMentioned`); `!` commands follow the same
+    rule. Everything else is ignored silently and never stored (no ambient
+    context in phase 1).
+  - `/start` and `/start@<bot>` map to `!help`. Implementation choice: also
+    with a deep-link payload (`/start abc`).
+  - Text, else caption; neither: ignored with one log line. Attachments are
+    not in phase 1.
+  - Token only from `HEIMDALL_TELEGRAM_TOKEN`; config `telegram.bot_username`
+    (5-32 letters, digits, `_`; a leading `@` is dropped); `getMe` must
+    report that username (case-insensitive) before any `getUpdates`, or `Run`
+    returns an error and Heimdall exits 1. Never `deleteWebhook`/`setWebhook`.
+  - Use a separate test bot; never the production bot's token.
+- **Telegram implementation choices** (mine, closest to the hub; the
+  orchestrator may change them):
+  - Mention matching is case-insensitive and needs a username boundary:
+    `@<bot>_fan` does not count (the hub's `includes` would match it).
+  - One leading or trailing `@<bot>` is stripped before command parsing (as
+    the hub's `chat-control.ts`), so `@bot !status` and `!status @bot` work.
+  - Offset: advanced past an update only after `accept` returned nil or the
+    update was deliberately ignored; an `accept` error stops the batch and
+    re-polls from that update after 1 s. The offset is not stored: Telegram
+    keeps unconfirmed updates, and the store deduplicates by (interface,
+    chat, message ID).
+  - `getMe` failure at start: exit (fail fast). `getUpdates` 401/404 (token
+    revoked or malformed): exit. 409: logged as "another poller or a webhook"
+    and retried with backoff 1 s → 60 s. 429: wait `retry_after`. Other
+    errors: backoff.
+  - `sendMessage`: plain text (no `parse_mode`), `message_thread_id` for
+    topics, `reply_parameters{message_id, allow_sending_without_reply}` on the
+    first part only; parts of at most 4096 UTF-16 units, cut at a line break
+    in the second half of a part when there is one. 429 sleeps
+    `min(retry_after, 60 s)` inside `Send`, then reports a transient failure
+    (the router's retry API takes no hint). Other 4xx: `PermanentError`. 5xx
+    and network: transient. A failure in a later part makes the retry resend
+    every part (at-least-once).
+  - Thread = `message_thread_id` only when `is_topic_message`.
+  - Skipped: no `from`, `from.is_bot`, `sender_chat`,
+    `is_automatic_forward`, channel chats, `allowed_updates` is `["message"]`
+    only (no channel posts, no edits).
 - Not decided yet, do not act: whether Heimdall keeps its own adapters or
   hands turns to T3 (the orchestrator raises this when phase 1 closes);
   claude.ai connectors for the employee user are not phase 1.
 
 ## Remaining work, in order
 
-Identity steps 2-3, the caller-role rewrite, Codex fixes 1-5 and the missing
-coverage (different OS users per role via stubbed accounts, crash-window
-restart tests, interface error at shutdown) are done, see above. Left:
-
-1. **AGY: `!use` scope docs and test.** Say "conversation (chat + thread)"
-   instead of "chat" in AGENTS.md:109, README.md:68-70,
-   `internal/router/command.go:80-82` and the `!use` replies at
-   `internal/router/router.go:411-413`. Rename `TestUseIsStickyPerChat`
-   (`internal/router/router_test.go:265`) to `...PerConversation` and add
-   the assertion that `!use` in thread T1 changes neither thread T2 nor the
-   channel itself (`e.send` has no thread: send `core.Inbound` with
-   `Conv.Thread` set, as `sendAs` does for principals).
-2. **AGY: AGY in the approval test.** Add `agy` to
-   `TestNativeApprovalRequestNeedsHuman`
-   (`internal/harness/harness_test.go:145`). First check that the fake's
-   `agy()` in `internal/fakeharness/fakeharness.go` handles `ASK_HUMAN`;
-   add it the way the AGY protocol reports an approval request
-   (`internal/harness/agy.go`).
-3. **Optional (AGY): log a warning when `u.GroupIds()` fails** in
-   `harness.Accounts.Prepare` (`internal/harness/launch.go:152`); a lookup
-   failure must not silently drop the employee's own groups. Root's groups
-   are dropped anyway (Go calls `setgroups` whenever Credential is set).
-4. **Step 4: `docs/hub-parity.md`** (`internal/harness/identity.go` already
-   links to it). For every environment variable the hub sets, give who sets
-   it, who reads it and whether Heimdall sets it. Sources are under
-   "Findings" below. Include: the provisional `PI_RESTRICTED_EXTERNAL_USER`
-   rule and its scheduler side effects; `PI_TRANSPORT_CHILD`,
-   `PI_EXTERNAL_MCP_PRIVATE`, `PI_EXTERNAL_DEFAULT_DELIVERY`,
-   `PI_EXTERNAL_TENANT_ID`, `MCP_OAUTH_DIR`/`PI_MCP_OAUTH_*`,
-   `OMP_RESTRICTED_NATIVE_IMAGE`, `PI_GOOGLE_WORKSPACE_MODE`,
-   `PI_PLANE_BROKER_ENABLED`, `PI_SCHEDULER_REPAIR_READONLY`,
-   `PI_WEBSITE_XLSX_*` as "not set by Heimdall"; that hub admin checks read
-   the hub's own admin list (owner IDs must be in it on the Heimdall host);
-   and the memento finding. Placeholders only, no real IDs or hosts.
-5. **AGENTS.md and README**: add `internal/iface/telegram` and `docs/` to
-   the code-layout table when they land, and keep the README status line
-   current.
-6. **Telegram interface** (`internal/iface/telegram`, stdlib `net/http`,
-   no new dependency) plus a `heimdall run -config FILE` command
-   (`cmd/heimdall/main.go`; only `local` exists today). Proposed config,
-   not yet implemented or approved:
-   - environment `HEIMDALL_TELEGRAM_TOKEN` (the test bot's token; the
-     `HEIMDALL_` prefix keeps it out of harness environments);
-   - config block `"telegram": {"bot_username": "<test bot username>"}`;
-     at start call `getMe` and refuse to poll if the username differs, so a
-     wrong (production) token is never used;
-   - `owners`: `telegram:<your numeric user ID>`; `run_as.owner` and
-     `run_as.employee` must name existing OS users with distinct uids.
-
-   Behaviour to build and test against an `httptest` fake Bot API:
-   - long-poll `getUpdates` with `allowed_updates: ["message"]`. Call
-     `accept` per update in order, and advance `offset` only past updates
-     whose `accept` returned nil: that offset is the upstream acknowledgement.
-     Duplicates are already deduplicated by (iface, chat, msg_id).
-   - principal `telegram:<from.id>`, Name from first/last name. Skip updates
-     without `from`, with `from.is_bot`, `sender_chat` or
-     `is_automatic_forward`, and channel posts.
-   - conversation: `Chat` = `chat.id`, `Thread` = `message_thread_id` only
-     when `is_topic_message`.
-   - `sendMessage`: plain text, no `parse_mode`; `message_thread_id`;
-     `reply_parameters{message_id, allow_sending_without_reply: true}`;
-     split at 4096 UTF-16 units.
-   - error mapping: 429 is transient (honour `retry_after`), other 4xx are
-     `router.PermanentError`, 5xx and network errors are transient. A 409
-     (another poller or a webhook) is logged and backed off; never call
-     `deleteWebhook`/`setWebhook`.
-   - Go's `*url.Error` text contains the request URL, which contains the
-     token: scrub it from every error and log. Test that the token never
-     appears in errors.
-   - logs carry metadata only, never message text.
-   - Open questions for the orchestrator: in groups, answer only on
-     @mention, reply to the bot, or a `!` command (proposed default), or
-     every message? Map `/start` to `!help`? Non-text messages: use the
-     caption, otherwise ignore with a log line?
-   - Live check after the token arrives: scratch config and data dir outside
-     the repo, `MEMENTO_PROCESSING=1`, a synthetic prompt from a private
-     chat; remove the scratch state afterwards.
-7. **Leftover test artifacts outside the repo** (orchestrator: delete them
-   if they are only Heimdall test artifacts; look before deleting): the
-   Claude project dir whose name ends `...-scratchpad-live-work` under
-   `~/.claude/projects/` (3 files), and 2 Codex rollouts under
-   `~/.codex/sessions` that mention `scratchpad/live/work`.
-8. **Open questions for the orchestrator** (not blocking 1-6): set
-   `PI_TRANSPORT_CHILD=1` and `PI_EXTERNAL_MCP_PRIVATE` like the hub does? See
-   Findings for what they change.
+1. **Live Telegram chat check with a human** (orchestrator runs it with the
+   owner). Scratch config outside the repo: `data_dir` in a scratch dir,
+   `mode` `personal`, `owners` = `telegram:<owner numeric ID>`,
+   `run_as.owner` = the developer's OS user, `run_as.employee` = any
+   existing non-root account with another uid (the dev check used `nobody`;
+   employee turns are refused because Heimdall is not root),
+   `telegram.bot_username` = the test bot. Start:
+   `set -a; . <token env file>; set +a; MEMENTO_PROCESSING=1 heimdall run
+   -config <scratch config> 2>> <scratch log>`. The owner sends, in a private
+   chat with the test bot: a short synthetic prompt, `!status`, `!help`,
+   `/start`; optionally a group test (reply to a bot message; for plain
+   `@bot` mentions see item 2). Expected: each answered as a reply, tagged
+   `— <harness>` or `— heimdall`; the log shows `turn N ... ended: done`.
+   Afterwards delete the scratch data dir and log, and any harness session
+   files the turns created under the owner's home
+   (`~/.local/state/heimdall/sessions/` for pi/omp, plus the native session
+   stores of Claude/Codex for the scratch working directory).
+2. **Group privacy mode, unverified.** Telegram docs: with privacy mode on,
+   a group bot receives `/command@bot` and replies to its messages; whether
+   plain `@bot` mentions arrive is not documented. For the mention rule to
+   work in groups the bot may need to be a group admin, or privacy off in
+   BotFather (`/setprivacy`) and re-added. Check in the live group test.
+3. **Employee turns live** need Heimdall running as root (production) or a
+   dedicated dev setup. No OS users were created; decision is the owner's.
+4. Phase 2: Slack interface (verification exists in `internal/iface/slack`;
+   set `Inbound.Private` for DMs), AgentNet interface and its principal
+   format (`identity.go` TODO).
+5. Phase 3: scheduler (revisit `PI_RESTRICTED_EXTERNAL_USER` and
+   `PI_EXTERNAL_DEFAULT_DELIVERY`).
 
 ## Findings and gotchas
 
 Hub source read at `misunders2d/misunderstood-pi-pack` `ec72c7d` (branch
 `hub`), memento at `misunders2d/memento` `d944c7d`, agentnet at `22cb8c1`.
-Clone them into a temp dir to re-check; do not edit them.
+Clone them into a temp dir to re-check; do not edit them. Line references
+are in `docs/hub-parity.md`.
 
-- The hub's per-turn environment is set in
-  `extensions/.shared/external-pi-runner.ts` ~L796-827 and
-  `external-omp-runner.ts` ~L955-970; `buildMcpOAuthChildEnv`
-  (`extensions/.shared/mcp-oauth-scope.ts:83`) adds `MCP_OAUTH_DIR` and
-  `PI_MCP_OAUTH_*`.
-- The hub never sets `PI_EXTERNAL_USER_EMAIL`; only `mellanni-bigquery`
-  (`extensions/mellanni-bigquery/index.ts:24`) reads it, after
-  `A2A_CALLER_PRINCIPAL` and `BIGQUERY_CALLER_PRINCIPAL`. Nothing in
-  pi-pack `ec72c7d` or agentnet `22cb8c1` sets `A2A_CALLER_*`; only
-  `scripts/omp-a2a-agent-run.sh` checks them.
-- `extensions/.shared/a2a-external-identity.ts`: an A2A caller is verified
-  only if platform `a2a`, principal, source `a2a_signed`, key ID,
-  `PI_EXTERNAL_USER_ID == principal` and `PI_RESTRICTED_EXTERNAL_USER=1`.
-  Its admin list only accepts entries containing `@`.
-- `extensions/scheduler.ts:970` (OMP `omp-extensions/scheduler.ts:641`):
-  `restricted = a2a.indicated ? !a2a.admin : PI_RESTRICTED_EXTERNAL_USER === "1"`.
-  Restricted callers' jobs get `allowBuiltinTools: false` (L1010, L1029),
-  failure routing is denied, and job listing/editing is limited to the
-  caller's own scope.
-- `extensions/privileged-tool-guard.ts` `actor()` (~L135): an unset
-  `PI_EXTERNAL_USER_ID`, or the raw value `local`/`system`, counts as the
-  hub's trusted local admin. Admin otherwise comes from the hub's own list
-  (`access-control.ts` `isAdmin`, `ADMIN_USER_IDS`/admins file), not from
-  Heimdall's role.
-- `extensions/native-mcp-auth.ts:18-19`: with any `PI_EXTERNAL_*` set, MCP
-  sign-in is refused unless `PI_EXTERNAL_MCP_PRIVATE=1`. Heimdall does not
-  set it, so MCP OAuth sign-in inside Heimdall turns fails today.
-- Several hub extensions branch on `PI_TRANSPORT_CHILD=1` (scheduler
-  runtime, helium10-hub); Heimdall does not set it.
-- Hub Telegram (`extensions/telegram/index.ts:740-752`): user ID
-  `canonUser("tg", from.id)`; non-admins get `--no-builtin-tools` and
-  `PI_RESTRICTED_EXTERNAL_USER=1`. Hub Slack (`extensions/slack.ts`):
-  `slackUserEmail` L206-217, `auth.test` L1091, liveVerified + team check
-  ~L1150.
-- Memento `d944c7d`: `src/memento/bridge.py:1659` returns early for every
-  operation except `install` when `MEMENTO_PROCESSING=1` (Claude, Codex and
-  AGY hooks); `src/memento/native_shared.ts:153` makes the Pi/OMP extension
-  install nothing. **Not verified live**: that each harness passes its
-  environment to hook processes.
+- Hub Telegram (`extensions/telegram/index.ts`): `isMentioned` ~L724,
+  `processMessage` ~L735, poll loop ~L851 (the hub calls `deleteWebhook`;
+  Heimdall does not). Hub Slack (`extensions/slack.ts`): `slackUserEmail`
+  L206-217, `auth.test` L1091, live verification + team check ~L1150,
+  `nativeMcpPrivate: isDirectSlackConversation(event)` L1163.
+- Hub admin checks read the hub's own admin list (`ADMIN_USER_IDS`, or
+  `admins.json` under `$PI_ACCESS_DIR`, default `$HOME/.pi/agent/access/` of
+  the turn's OS user), not Heimdall's role. Owner IDs must be listed there on
+  the Heimdall host.
+- `native-mcp-auth.ts:18-19`: MCP sign-in only with
+  `PI_EXTERNAL_MCP_PRIVATE=1`, now set in private chats.
+- Memento: `MEMENTO_PROCESSING=1` suppresses hooks (`bridge.py:1659`) and
+  the Pi/OMP extension (`native_shared.ts:153`). **Not verified live**: that
+  each harness passes its environment to hook processes. An owner turn on
+  Heimdall's own uid inherits Heimdall's environment, so setting it for
+  Heimdall disables memory for every turn (intended for live tests).
 - Gotchas:
-  - Config load now looks up both OS users and requires
-    `run_as.employee`. The example config's
-    `telegram:OWNER_TELEGRAM_USER_ID` placeholder fails validation on
-    purpose (IDs must be numeric).
+  - Config load looks up both OS users and requires `run_as.employee`; the
+    example config's `telegram:OWNER_TELEGRAM_USER_ID` placeholder fails
+    validation on purpose (IDs must be numeric). Unknown config keys are
+    rejected, so a token can never be put in the config.
   - Router tests run both roles as the test user through `sameUser`;
     account rules are tested with stubbed `harness.Accounts` (`stubbed` in
-    router_test, `stubAccounts` in harness_test).
-  - `waitReady` polls `!status`: a session row now exists before ready.
-  - A test that edits the SQLite file through a second connection must
-    wait until the router answers once and must use `busy_timeout`, or it
-    aborts the router's startup recovery.
-  - New fake-harness prompt words: `NOACK` (pi/omp steer taken but never
-    acknowledged), `HANGPRE=NAME` (hang before ready). Its answer now ends
-    with `ext="..."` (identity variables seen) and `home="..."`.
-  - The owner's earlier journal handoff note (2026-10-29, outside the repo)
-    is superseded by this file.
+    router_test, `stubAccounts` in harness_test). The Telegram package has
+    its own `sameUser` and `TestMain` calling `fakeharness.Main()`.
+  - `waitReady` polls `!status`: a session row exists before ready.
+  - A test that edits the SQLite file through a second connection must wait
+    until the router answers once and use `busy_timeout`.
+  - Fake-harness prompt words: `FAILPRE=`, `FAILPOST=`, `HANGPRE=`,
+    `WAIT_STEER`, `NOACK`, `SLEEP`, `ASK_HUMAN` (AGY: stderr auto-deny +
+    SUCCESS). The answer ends with `ext="..."`, now listing
+    `PI_EXTERNAL_*`, `A2A_CALLER_*`, `PI_RESTRICTED_*` and
+    `PI_TRANSPORT_CHILD`, and `home="..."`.
+  - `internal/iface/telegram` tests use a fake Bot API (`fakeAPI`) with
+    per-method overrides; `newIface` shortens backoffs and the poll timeout.
+  - A reference clone of the hub (`pi-pack` at `ec72c7d`) and three `.bak`
+    copies of earlier Heimdall sources sit in a temp dir from the first
+    session (`/tmp/heimdall-src`); not Heimdall test artifacts, left alone.
+  - The first session's leftover live-test sessions (one Claude project dir,
+    two Codex rollouts, synthetic prompts only) were deleted on 2026-10-30.
