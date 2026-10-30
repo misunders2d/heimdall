@@ -1127,18 +1127,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		select {
 		case <-run.Ready():
-			if err := c.r.store.BindTurn(t.id, c.key, t.who, h, run.SessionID()); err != nil {
-				// The session is already recorded as in progress; only a new
-				// session's native ID is missing, so a crash now means the
-				// next turn starts a fresh one.
-				c.r.log.Printf("turn %d: native session ID not recorded: %v", t.id, err)
-			}
-			c.send(ctx, readyEvent{t: t, harness: h})
-			done := doneEvent{t: t, harness: h, res: run.Result(), notes: notes}
-			if r := done.res; r.Failure == "" && r.NeedsHuman == "" && !r.Cancelled {
-				done.files, done.skipped = c.collect(t)
-			}
-			c.send(ctx, done)
+			c.commit(ctx, t, h, run, notes)
 			return
 		default:
 		}
@@ -1149,8 +1138,15 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		// Not ready: the next candidate never runs beside this process.
 		<-run.Exited()
-		c.unbind(t, h, prev, clean)
 		res := run.Result()
+		if res.Answer != "" || res.NeedsHuman != "" {
+			// It answered, or asked for an approval, without signalling
+			// ready first: it took the turn, so side effects were possible
+			// and no other harness may run it.
+			c.commit(ctx, t, h, run, notes)
+			return
+		}
+		c.unbind(t, h, prev, clean)
 		if res.Cancelled {
 			break
 		}
@@ -1161,6 +1157,23 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		notes = append(notes, h+" failed before starting: "+why)
 	}
 	c.send(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes})
+}
+
+// commit ends the turn with harness h's outcome: h took the turn, so no
+// other harness runs it.
+func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, notes []string) {
+	if err := c.r.store.BindTurn(t.id, c.key, t.who, h, run.SessionID()); err != nil {
+		// The session is already recorded as in progress; only a new
+		// session's native ID is missing, so a crash now means the next
+		// turn starts a fresh one.
+		c.r.log.Printf("turn %d: native session ID not recorded: %v", t.id, err)
+	}
+	c.send(ctx, readyEvent{t: t, harness: h})
+	done := doneEvent{t: t, harness: h, res: run.Result(), notes: notes}
+	if r := done.res; r.Failure == "" && r.NeedsHuman == "" && !r.Cancelled {
+		done.files, done.skipped = c.collect(t)
+	}
+	c.send(ctx, done)
 }
 
 // unbind restores h's session binding after h failed before its turn was

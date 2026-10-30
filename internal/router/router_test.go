@@ -1817,3 +1817,35 @@ func TestIdleWaitsForTheHarnessProcess(t *testing.T) {
 		t.Fatal("idle while the harness process still ran")
 	}
 }
+
+// A harness that answers, or asks for an approval, before it signalled
+// ready took the turn: the next harness never runs the prompt again
+// (review of d05b748, finding 3: it fell back, so side effects could
+// repeat).
+func TestAnswerBeforeReadyNeverFallsBack(t *testing.T) {
+	for word, text := range map[string]string{"EARLYRESULT": "claude#1 resumed=false", "EARLYASK": "⚠ claude needs a native approval"} {
+		t.Run(word, func(t *testing.T) {
+			e := setup(t, core.ModeCorporate, []string{"claude", "codex"}, "claude", "codex")
+			e.send(owner, "c1", "x "+word)
+			out := e.reply()
+			want(t, out, text, "— claude")
+			if in := fakeharness.Inputs(e.state); len(in) != 1 || in[0].Harness != "claude" || strings.Contains(out.Text, "— codex") {
+				t.Fatalf("fell back: reply %q, inputs %+v", out.Text, in)
+			}
+		})
+	}
+}
+
+// A fallback starts the next harness only once the failed one's process
+// exited, though its failure was known before (an unreadable protocol
+// line while the process kept running). A guard: Done closes before ready
+// only when the process exited, so the router's own wait is not what
+// this test can fail on today.
+func TestFallbackWaitsForTheFailedProcessToExit(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+	e.send(owner, "c1", "x BADLINE=omp")
+	want(t, e.reply(), "codex#1", "omp failed before starting: OMP sent an unreadable protocol line")
+	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
+		t.Fatal("the fallback started while the failed harness process still ran")
+	}
+}

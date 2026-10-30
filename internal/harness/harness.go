@@ -154,7 +154,7 @@ type Result struct {
 	Failure    string   // technical reason the turn ended without a native outcome
 	NeedsHuman string   // native approval or input required; nothing was approved
 	Cancelled  bool
-	Ready      bool   // the harness accepted the turn: side effects were possible
+	Ready      bool   // the harness accepted the turn (signalled ready, answered or asked for approval): side effects were possible
 	SessionID  string // native session to resume next time, if known
 	// Unclean marks an answer whose native session must not be resumed: the
 	// harness's work after the answers it kept ended badly (Warning says
@@ -318,6 +318,9 @@ func (r *Run) wait() {
 		res.Answer, res.Answers, res.Failure = "", nil, why
 	case res.Failure == "" && res.NeedsHuman == "" && strings.TrimSpace(res.Answer) == "":
 		res.Failure = r.harness + " finished without an answer"
+	}
+	if res.Answer != "" || res.NeedsHuman != "" {
+		res.Ready = true // it took the turn, even if it never signalled ready
 	}
 	r.finalize(res)
 	close(r.exited)

@@ -9,6 +9,11 @@
 //	FAILPRE=NAME   exit with an error before the turn is ready
 //	FAILPOST=NAME  exit with an error after the turn is ready
 //	HANGPRE=NAME   create STATE/hang-pre and hang before the turn is ready
+//	BADLINE=NAME   before the turn is ready, send an unreadable protocol
+//	               line, then stay 1 s with STATE/lingering present and
+//	               exit with an error
+//	EARLYRESULT    (claude) report a result before replaying the prompt
+//	EARLYASK       (claude) ask for approval before replaying the prompt
 //	WAIT_STEER     wait for steering input until one contains FINISH (10s cap)
 //	NOACK          (in a pi/omp steer) take the steer, create STATE/steer-held
 //	               and never acknowledge it
@@ -170,6 +175,14 @@ func (f *fake) failPre() {
 	if f.has("HANGPRE=" + f.name) {
 		_ = os.WriteFile(filepath.Join(f.state, "hang-pre"), nil, 0o600)
 		time.Sleep(30 * time.Second)
+		os.Exit(3)
+	}
+	if f.has("BADLINE=" + f.name) {
+		lingering := filepath.Join(f.state, "lingering")
+		_ = os.WriteFile(lingering, nil, 0o600)
+		fmt.Println("not a protocol line")
+		time.Sleep(time.Second)
+		_ = os.Remove(lingering)
 		os.Exit(3)
 	}
 	if f.has("FAILPRE=" + f.name) {
@@ -439,6 +452,15 @@ func (f *fake) claude() {
 		f.emit(map[string]any{"type": "result", "subtype": "success", "session_id": id, "is_error": false, "result": text})
 	}
 	f.emit(map[string]any{"type": "system", "subtype": "init", "session_id": id})
+	switch {
+	case f.has("EARLYRESULT"):
+		result(f.answer())
+		return
+	case f.has("EARLYASK"):
+		f.emit(map[string]any{"type": "control_request", "session_id": id})
+		f.read()
+		return
+	}
 	replay("u0", msg["content"])
 	f.failPost()
 	if f.has("STEERLATE") {
