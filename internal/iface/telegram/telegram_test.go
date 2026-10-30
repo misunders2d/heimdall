@@ -918,3 +918,43 @@ func TestAttachmentsAreDownloaded(t *testing.T) {
 		t.Fatal("token in logs")
 	}
 }
+
+// An album's parts carry its media_group_id as the message group. In a
+// group chat only the first part has the caption that mentions the bot;
+// the same sender's later parts of that album are addressed too, nobody
+// else's.
+func TestAlbumParts(t *testing.T) {
+	api := newFakeAPI(t)
+	c := &collector{}
+	var logs syncBuffer
+	part := func(id int, from int64, caption, group string) map[string]any {
+		m := msg(id, -1002, "group", from, "")
+		m["caption"] = caption
+		m["media_group_id"] = group
+		m["photo"] = []any{map[string]any{"file_id": fmt.Sprintf("id:p/%d.jpg", id), "file_unique_id": fmt.Sprintf("u%d", id)}}
+		api.files[fmt.Sprintf("p/%d.jpg", id)] = []byte("jpeg")
+		return m
+	}
+	i := newIface(t, api.srv.URL, botName, &logs)
+	i.opt.UploadDir = filepath.Join(t.TempDir(), "uploads")
+	api.push(
+		upd(1, part(1, 42, "@heimdall_test_bot what are these?", "A1")),
+		upd(2, part(2, 42, "", "A1")),
+		upd(3, part(3, 43, "", "A1")),
+		upd(4, part(4, 42, "", "B2")),
+		upd(5, part(5, 42, "", "A1")),
+	)
+	stop := run(t, i, c.accept)
+	eventually(t, "offset past all", func() bool { return api.lastOffset() == 6 })
+	stop()
+	var ids []string
+	for _, in := range c.list() {
+		if in.Group != "A1" || len(in.Attachments) != 1 || in.Attachments[0].Stored == "" {
+			t.Errorf("part %+v", in)
+		}
+		ids = append(ids, in.MsgID)
+	}
+	if !slices.Equal(ids, []string{"1", "2", "5"}) {
+		t.Fatalf("accepted %v", ids)
+	}
+}

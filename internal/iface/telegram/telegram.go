@@ -68,7 +68,15 @@ type Interface struct {
 
 	backoffMin, backoffMax time.Duration // getUpdates failures
 	maxRetryWait           time.Duration // longest 429 retry_after honoured inside Send
+
+	// albums are the group albums whose first part addressed the bot, by
+	// chat, sender and media_group_id: their later parts, which carry no
+	// caption, are addressed too. Touched only by Run.
+	albums map[string]time.Time
 }
+
+// albumMemory is how long an addressed album's later parts are taken.
+const albumMemory = time.Minute
 
 // New checks the options. The token is verified against BotUsername by
 // Run, before anything is polled.
@@ -124,6 +132,7 @@ type message struct {
 	Caption            string   `json:"caption"`
 	ReplyToMessage     *message `json:"reply_to_message"`
 	ForwardOrigin      *origin  `json:"forward_origin"`
+	MediaGroupID       string   `json:"media_group_id"`
 	media
 }
 
@@ -320,9 +329,12 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		text = m.Caption
 	}
 	replied := repliedTo(m)
-	addressed := private || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID
+	addressed := private || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
 	if !addressed {
 		return core.Inbound{}, nil, false // group traffic not for the bot: not stored
+	}
+	if m.MediaGroupID != "" && !private {
+		t.rememberAlbum(m)
 	}
 	text = t.command(text)
 	own := detect(m)
@@ -345,6 +357,7 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		At:      time.Unix(m.Date, 0),
 		Private: private,
 		Context: context,
+		Group:   m.MediaGroupID,
 	}
 	if m.IsTopicMessage && m.MessageThreadID != 0 {
 		in.Conv.Thread = strconv.FormatInt(m.MessageThreadID, 10)
@@ -354,6 +367,32 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		return core.Inbound{}, nil, false
 	}
 	return in, m, true
+}
+
+func albumKey(m *message) string {
+	return fmt.Sprintf("%d:%d:%s", m.Chat.ID, m.From.ID, m.MediaGroupID)
+}
+
+// albumAddressed reports whether m is a later part of a group album whose
+// earlier part, from the same sender, addressed the bot.
+func (t *Interface) albumAddressed(m *message) bool {
+	if m.MediaGroupID == "" {
+		return false
+	}
+	at, ok := t.albums[albumKey(m)]
+	return ok && time.Since(at) < albumMemory
+}
+
+func (t *Interface) rememberAlbum(m *message) {
+	if t.albums == nil {
+		t.albums = map[string]time.Time{}
+	}
+	for k, at := range t.albums {
+		if time.Since(at) >= albumMemory {
+			delete(t.albums, k)
+		}
+	}
+	t.albums[albumKey(m)] = time.Now()
 }
 
 // mentions reports whether text mentions @<bot username>: not merely a

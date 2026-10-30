@@ -106,18 +106,21 @@ ALTER TABLE inbound ADD COLUMN user_key_id TEXT NOT NULL DEFAULT '';`,
 type inExtra struct {
 	Context     string            `json:"context,omitempty"`
 	Attachments []core.Attachment `json:"attachments,omitempty"`
+	Group       string            `json:"group,omitempty"`
 }
 
 func inExtraOf(in core.Inbound) (string, error) {
-	x := inExtra{Context: in.Context, Attachments: in.Attachments}
-	if x.Context == "" && len(x.Attachments) == 0 {
+	x := inExtra{Context: in.Context, Attachments: in.Attachments, Group: in.Group}
+	if x.Context == "" && len(x.Attachments) == 0 && x.Group == "" {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
 	return string(b), err
 }
 
-func (x inExtra) apply(in *core.Inbound) { in.Context, in.Attachments = x.Context, x.Attachments }
+func (x inExtra) apply(in *core.Inbound) {
+	in.Context, in.Attachments, in.Group = x.Context, x.Attachments, x.Group
+}
 
 // outExtra is the outbound extra column: delivery details beyond the text.
 type outExtra struct {

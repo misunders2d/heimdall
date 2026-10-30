@@ -1025,3 +1025,63 @@ func TestImagesReachHarnessesNatively(t *testing.T) {
 		})
 	}
 }
+
+// album sends one part of the caller's grouped message g.
+func (e *env) album(from, chat, g, text string, photo bool) string {
+	e.t.Helper()
+	name := strings.TrimPrefix(from, "fake:")
+	id := fmt.Sprintf("m%d", e.seq.Add(1))
+	in := core.Inbound{Conv: core.ConvKey{Interface: "fake", Chat: chat}, MsgID: id, From: core.Principal{Platform: "fake", ID: name, Name: name}, Origin: core.OriginLive, Text: text, Group: g}
+	if photo {
+		p := filepath.Join(e.t.TempDir(), id)
+		if err := os.WriteFile(p, []byte("\x89PNG "+id), 0o600); err != nil {
+			e.t.Fatal(err)
+		}
+		in.Attachments = []core.Attachment{{Kind: "photo", Name: "photo.png", MIME: "image/png", Size: int64(len(id) + 5), Source: "message", Stored: p}}
+	}
+	e.f.in <- in
+	return id
+}
+
+// An album's parts, which the platform delivers one by one, start one
+// turn that answers the first part (the hub's media group merge).
+func TestAlbumPartsRunAsOneTurn(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	first := e.album(owner, "c1", "g1", "what are these?", true)
+	time.Sleep(300 * time.Millisecond)
+	e.album(owner, "c1", "g1", "", true)
+	e.album(owner, "c1", "g1", "", true)
+	out := e.reply()
+	want(t, out, "omp#1", "steers=0")
+	if out.ReplyTo != first {
+		t.Fatalf("reply to %q, want %q", out.ReplyTo, first)
+	}
+	inputs := fakeharness.Inputs(e.state)
+	if len(inputs) != 1 || strings.Count(inputs[0].Text, "[Heimdall |") != 3 || inputs[0].Images != 3 {
+		t.Fatalf("inputs %+v", inputs)
+	}
+	e.noReply(500 * time.Millisecond)
+}
+
+// An album sent while the caller's turn runs steers it once.
+func TestAlbumSteersOnce(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "work WAIT_STEER")
+	e.waitReady("c1")
+	e.album(owner, "c1", "g1", "look and FINISH", true)
+	e.album(owner, "c1", "g1", "", true)
+	want(t, e.reply(), "omp#1", "steers=1")
+	inputs := fakeharness.Inputs(e.state)
+	if len(inputs) != 2 || inputs[1].Kind != "steer" || strings.Count(inputs[1].Text, "[Heimdall |") != 2 || inputs[1].Images != 2 {
+		t.Fatalf("inputs %+v", inputs)
+	}
+}
+
+// cancel also drops album parts still being collected.
+func TestCancelDropsHeldAlbumParts(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.album(employee, "c1", "g1", "these", true)
+	e.send(employee, "c1", "cancel")
+	want(t, e.reply(), "Cancelled 1 queued message(s).")
+	e.noReply(2500 * time.Millisecond)
+}

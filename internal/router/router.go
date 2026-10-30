@@ -62,6 +62,7 @@ type Options struct {
 	Accounts    Accounts
 	Log         *log.Logger
 	TypingEvery time.Duration // how often Typing repeats while a turn runs; default 4s
+	AlbumWait   time.Duration // how long a grouped message's parts are held after the last; default 1.5s
 }
 
 type Router struct {
@@ -86,6 +87,9 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	}
 	if opt.TypingEvery <= 0 {
 		opt.TypingEvery = 4 * time.Second
+	}
+	if opt.AlbumWait <= 0 {
+		opt.AlbumWait = 1500 * time.Millisecond
 	}
 	r := &Router{opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}}
 	for _, i := range ifaces {
@@ -288,6 +292,19 @@ type conv struct {
 	queue   []item
 	turn    *turn
 	waiting bool // a goroutine is waiting for a parallelism slot
+	albums  map[string]*album
+}
+
+// album is a caller's parts of one grouped message, held until none has
+// arrived for AlbumWait.
+type album struct {
+	rows []store.InboundRow
+	gen  int
+}
+
+type albumEvent struct {
+	key string
+	gen int
 }
 
 type turn struct {
@@ -324,7 +341,7 @@ type readyEvent struct {
 
 type steerEvent struct {
 	t       *turn
-	it      item
+	items   []item // one message, or the parts of one album
 	outcome harness.SteerOutcome
 }
 
@@ -357,10 +374,24 @@ func (c *conv) loop(ctx context.Context) {
 			c.inbox = nil
 			c.mu.Unlock()
 			for _, row := range rows {
+				if row.Group != "" {
+					c.hold(ctx, row)
+					continue
+				}
 				c.handle(ctx, row)
 			}
 		case ev := <-c.events:
 			switch ev := ev.(type) {
+			case albumEvent:
+				if a := c.albums[ev.key]; a != nil && a.gen == ev.gen {
+					delete(c.albums, ev.key)
+					for _, row := range a.rows {
+						c.route(row)
+					}
+					if c.turn != nil {
+						c.steerNext(ctx, c.turn)
+					}
+				}
 			case readyEvent:
 				ev.t.harness, ev.t.ready = ev.harness, true
 				c.steerNext(ctx, ev.t)
@@ -391,9 +422,29 @@ func (c *conv) loop(ctx context.Context) {
 			}()
 		}
 		c.mu.Lock()
-		c.busy.Store(c.turn != nil || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0)
+		c.busy.Store(c.turn != nil || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0)
 		c.mu.Unlock()
 	}
+}
+
+// hold keeps one part of a grouped message until the caller's group has
+// been quiet for AlbumWait (the hub's 1.5 s media group merge). The parts
+// are then handled together, so they start one turn, or steer the running
+// one once.
+func (c *conv) hold(ctx context.Context, row store.InboundRow) {
+	key := row.From.Key() + "\x00" + row.Group
+	if c.albums == nil {
+		c.albums = map[string]*album{}
+	}
+	a := c.albums[key]
+	if a == nil {
+		a = &album{}
+		c.albums[key] = a
+	}
+	a.rows = append(a.rows, row)
+	a.gen++
+	ev := albumEvent{key: key, gen: a.gen}
+	time.AfterFunc(c.r.opt.AlbumWait, func() { c.send(ctx, ev) })
 }
 
 func (c *conv) reply(row store.InboundRow, text string) {
@@ -411,36 +462,45 @@ func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
 	c.r.wake(c.key.Interface)
 }
 
-// handle routes one stored message. The sender's role is evaluated now, so
-// a revoked principal (or, later, a scheduled job's creator) fails closed.
+// handle routes one stored message and steers the running turn with it if
+// it is the turn caller's.
 func (c *conv) handle(ctx context.Context, row store.InboundRow) {
+	if c.route(row) {
+		c.steerNext(ctx, c.turn)
+	}
+}
+
+// route answers a command, or queues a message as a follow-up or a steer of
+// the sender's running turn (true). The sender's role is evaluated now, so
+// a revoked principal (or, later, a scheduled job's creator) fails closed.
+func (c *conv) route(row store.InboundRow) bool {
 	role, ok := c.r.opt.Access.Role(row.From)
 	if !ok {
 		c.r.log.Printf("message %d from %s in %s rejected: caller no longer authorized", row.ID, row.From.Key(), c.key)
 		_ = c.r.store.SetInbound(row.ID, store.InRejected, "caller not authorized")
-		return
+		return false
 	}
 	cmd := parseCommand(row.Text)
 	switch cmd.Kind {
 	case cmdInvalid:
 		c.answer(row, store.CommandEnd{Detail: "invalid"}, cmd.Error)
-		return
+		return false
 	case cmdHelp:
 		c.answer(row, store.CommandEnd{Detail: "help"}, helpText(c.r.opt.Order))
-		return
+		return false
 	case cmdStatus:
 		c.answer(row, store.CommandEnd{Detail: "status"}, c.status())
-		return
+		return false
 	case cmdUse:
 		text := "This conversation now uses " + cmd.Harness + " (no fallback) until !use default."
 		if cmd.Harness == "" {
 			text = "This conversation is back to the default order: " + strings.Join(c.r.opt.Order, " → ") + "."
 		}
 		c.answer(row, store.CommandEnd{Detail: "use", SetHarness: true, Harness: cmd.Harness}, text)
-		return
+		return false
 	case cmdStop:
 		c.answer(row, store.CommandEnd{Detail: "stop"}, c.stop(role, row.From.Key()))
-		return
+		return false
 	case cmdCancel:
 		n := c.cancelQueued(role, row.From.Key(), "cancelled by cancel")
 		text := fmt.Sprintf("Cancelled %d queued message(s).", n)
@@ -451,23 +511,23 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 			}
 		}
 		c.answer(row, store.CommandEnd{Detail: "cancel"}, text)
-		return
+		return false
 	case cmdReset:
 		c.answer(row, store.CommandEnd{Detail: "reset", Forget: row.From.Key()}, c.reset(row.From.Key()))
-		return
+		return false
 	case cmdChatID:
 		c.answer(row, store.CommandEnd{Detail: "chatid"}, c.chatID(row, role))
-		return
+		return false
 	}
 	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next, text: cmd.Text}
 	// Steer only the sender's own turn: sessions are per verified caller, so
 	// nobody steers another person's turn.
 	if t := c.turn; t != nil && t.done == nil && !it.next && it.harness == "" && row.From.Key() == t.who {
 		t.steerQ = append(t.steerQ, it)
-		c.steerNext(ctx, t)
-		return
+		return true
 	}
 	c.queue = append(c.queue, it)
+	return false
 }
 
 // stop stops the running turn, if the caller may (its sender or the owner),
@@ -527,7 +587,24 @@ func (c *conv) cancelQueued(role core.Role, who, why string) int {
 	if t := c.turn; t != nil {
 		t.steerQ = keep(t.steerQ)
 	}
+	for key, a := range c.albums {
+		var rows []store.InboundRow
+		for _, it := range keep(albumItems(a)) {
+			rows = append(rows, it.row)
+		}
+		if a.rows = rows; len(rows) == 0 {
+			delete(c.albums, key)
+		}
+	}
 	return n
+}
+
+func albumItems(a *album) []item {
+	items := make([]item, len(a.rows))
+	for i, row := range a.rows {
+		items[i] = item{row: row}
+	}
+	return items
 }
 
 // reset makes the caller's next message in this conversation start a fresh
@@ -590,7 +667,11 @@ func (c *conv) status() string {
 	} else {
 		b.WriteString("Running: nothing\n")
 	}
-	fmt.Fprintf(&b, "Queued: %d message(s)", len(c.queue))
+	held := 0
+	for _, a := range c.albums {
+		held += len(a.rows)
+	}
+	fmt.Fprintf(&b, "Queued: %d message(s)", len(c.queue)+held)
 	return b.String()
 }
 
@@ -815,23 +896,43 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 	if !t.ready || t.steering || t.done != nil || len(t.steerQ) == 0 {
 		return
 	}
-	it := t.steerQ[0]
-	t.steerQ = t.steerQ[1:]
+	n := 1
+	for g := t.steerQ[0].row.Group; g != "" && n < len(t.steerQ) && t.steerQ[n].row.Group == g; n++ {
+	}
+	items := t.steerQ[:n:n]
+	t.steerQ = t.steerQ[n:]
 	// Recorded before the hand-over: from here on a crash reports the
 	// message as unconfirmed instead of replaying it.
-	if err := c.r.store.Steering(t.id, it.row.ID); err != nil {
-		c.r.log.Printf("message %d: not steered, steer not recordable: %v", it.row.ID, err)
-		c.requeue(it)
-		c.steerNext(ctx, t)
-		return
+	for i, it := range items {
+		if err := c.r.store.Steering(t.id, it.row.ID); err != nil {
+			c.r.log.Printf("message %d: not steered, steer not recordable: %v", it.row.ID, err)
+			for _, done := range items[:i] {
+				if err := c.r.store.Unsteer(done.row.ID); err != nil {
+					c.r.log.Printf("message %d: steer not undone: %v", done.row.ID, err)
+				}
+			}
+			c.requeue(items...)
+			c.steerNext(ctx, t)
+			return
+		}
 	}
 	t.steering = true
 	t.mu.Lock()
 	run := t.run
 	t.mu.Unlock()
 	go func() {
-		blocks, images := c.files(t, it)
-		c.send(ctx, steerEvent{t: t, it: it, outcome: run.Steer(ctx, fmt.Sprintf("heimdall-%d", it.row.ID), frame(it, blocks), images)})
+		var parts []string
+		var images []harness.Image
+		for _, it := range items {
+			blocks, ims := c.files(t, it)
+			parts = append(parts, frame(it, blocks))
+			images = append(images, ims...)
+		}
+		if len(images) > maxImages {
+			images = images[:maxImages]
+		}
+		outcome := run.Steer(ctx, fmt.Sprintf("heimdall-%d", items[0].row.ID), strings.Join(parts, "\n\n"), images)
+		c.send(ctx, steerEvent{t: t, items: items, outcome: outcome})
 	}()
 }
 
@@ -841,21 +942,27 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 	switch ev.outcome {
 	case harness.SteerAccepted:
 		t.steered++
-		if err := c.r.store.Steered(t.id, ev.it.row.ID); err != nil {
-			c.r.log.Printf("message %d: steer not recorded: %v", ev.it.row.ID, err)
+		for _, it := range ev.items {
+			if err := c.r.store.Steered(t.id, it.row.ID); err != nil {
+				c.r.log.Printf("message %d: steer not recorded: %v", it.row.ID, err)
+			}
 		}
 		if t.done == nil {
 			c.typedOnce(ctx)
 		}
 	case harness.SteerUnknown:
-		_ = c.r.store.SetInbound(ev.it.row.ID, store.InUnconfirmed, "steer acceptance unknown; not replayed")
-		c.reply(ev.it.row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
+		for _, it := range ev.items {
+			_ = c.r.store.SetInbound(it.row.ID, store.InUnconfirmed, "steer acceptance unknown; not replayed")
+		}
+		c.reply(ev.items[0].row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
 	default:
 		// Not handed over: run it as a follow-up turn.
-		if err := c.r.store.Unsteer(ev.it.row.ID); err != nil {
-			c.r.log.Printf("message %d: steer not undone: %v", ev.it.row.ID, err)
+		for _, it := range ev.items {
+			if err := c.r.store.Unsteer(it.row.ID); err != nil {
+				c.r.log.Printf("message %d: steer not undone: %v", it.row.ID, err)
+			}
 		}
-		c.requeue(ev.it)
+		c.requeue(ev.items...)
 	}
 	if t.done != nil {
 		c.finish(ctx, t)

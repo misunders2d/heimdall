@@ -278,11 +278,12 @@ func TestPendingKeepsContext(t *testing.T) {
 	s := open(t)
 	in := msg("1")
 	in.Context = "[reply context]\npreview"
+	in.Group = "album-1"
 	if _, _, err := s.AddInbound(in); err != nil {
 		t.Fatal(err)
 	}
 	p, err := s.Pending()
-	if err != nil || len(p) != 1 || p[0].Context != in.Context {
+	if err != nil || len(p) != 1 || p[0].Context != in.Context || p[0].Group != in.Group {
 		t.Fatalf("pending = %+v, %v", p, err)
 	}
 }

@@ -185,6 +185,11 @@ type Inbound struct {
 	// Attachments are the files the message carried (and the message it
 	// replies to), as the interface stored them.
 	Attachments []Attachment
+	// Group marks one part of a message the platform delivers in several
+	// (a Telegram album: its media_group_id). The router holds a caller's
+	// parts of one group until none has arrived for a moment, then handles
+	// them as one message.
+	Group string
 }
 
 // Attachment is a file a message carried. The interface downloads it into
