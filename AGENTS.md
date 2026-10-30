@@ -198,8 +198,8 @@ thinking stream and live-session reply registration.
 - Heimdall keeps its own adapters. T3 Code is for coding only, never a
   route for chat turns (owner, 2026-10-30).
 - The turn's ready signal is the side-effect boundary used for fallback. A
-  harness that answers or asks for an approval before it took the turn
-  too: no fallback.
+  harness that answers, or asks for an approval, before that signal has
+  taken the turn too: no fallback.
 
 ## Code layout
 
