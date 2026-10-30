@@ -451,10 +451,14 @@ ORDER BY o.id LIMIT 1`, iface, OutPending, now(), OutPending, OutSending).
 	return r, err == nil, err
 }
 
-// NextDue is when iface's earliest waiting reply becomes due, if any.
+// NextDue is when the earliest reply NextOutbound could offer for iface
+// becomes due, if any. Replies queued behind an older undelivered one in
+// their chat do not count: they wait for it, not for their own time.
 func (s *Store) NextDue(iface string) (time.Time, bool, error) {
 	var at sql.NullInt64
-	err := s.db.QueryRow(`SELECT min(next_at) FROM outbound WHERE iface=? AND state=?`, iface, OutPending).Scan(&at)
+	err := s.db.QueryRow(`SELECT min(o.next_at) FROM outbound o
+WHERE o.iface=? AND o.state=?
+AND NOT EXISTS(SELECT 1 FROM outbound p WHERE p.iface=o.iface AND p.chat=o.chat AND p.id<o.id AND p.state IN (?,?))`, iface, OutPending, OutPending, OutSending).Scan(&at)
 	if err != nil || !at.Valid {
 		return time.Time{}, false, err
 	}

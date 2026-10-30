@@ -3,6 +3,7 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 )
@@ -217,5 +218,35 @@ func TestPendingKeepsVerifiedEmailAndKey(t *testing.T) {
 	}
 	if p[1].From != in.From {
 		t.Fatalf("from = %+v, want %+v", p[1].From, in.From)
+	}
+}
+
+func TestNextDueIgnoresRepliesWaitingInTheirChat(t *testing.T) {
+	s := open(t)
+	first, _ := s.Enqueue(core.Outbound{Conv: conv, Text: "1"})
+	if err := s.Sending(first); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Minute)
+	if err := s.Retry(first, later, "429"); err != nil {
+		t.Fatal(err)
+	}
+	s.Enqueue(core.Outbound{Conv: conv, Text: "2"}) // due now, but waits for 1
+	if _, ok, _ := s.NextOutbound("x"); ok {
+		t.Fatal("a reply was offered during its chat's backoff")
+	}
+	due, ok, err := s.NextDue("x")
+	if err != nil || !ok || due.Before(later.Add(-time.Second)) {
+		t.Fatalf("next due = %v, %v, %v; want the backoff end %v, not now", due, ok, err, later)
+	}
+	// While the first is being sent nothing in its chat is due.
+	if err := s.Retry(first, time.Now(), "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sending(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.NextDue("x"); ok {
+		t.Fatal("a reply waiting behind one in flight counted as due")
 	}
 }
