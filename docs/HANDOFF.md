@@ -180,6 +180,49 @@ usernames and tokens live only outside the repository.
 5. Phase 3: scheduler (revisit `PI_RESTRICTED_EXTERNAL_USER` and
    `PI_EXTERNAL_DEFAULT_DELIVERY`).
 
+## Design: outbound files (Telegram gap item 10)
+
+Written before it was built, as the orchestrator asked. Goal: a harness
+can send files back to the chat, on every harness, without Heimdall ever
+reading a path the model chose.
+
+- **Outbox.** Every turn on an interface that sends files gets its
+  per-turn directory (`~/.local/state/heimdall/turns/<turn>-<hex>/`, the
+  one attachments use) with an `out/` directory, created through `os.Root`
+  in the run-as user's home and owned by that user (0700). A note at the top
+  of the prompt gives its absolute path: write files there before the final
+  answer; Heimdall sends the regular files it finds there after the answer
+  (at most 5, each at most 50 MB); nothing else is sent.
+- **No model-chosen paths.** Heimdall parses no path or directive from the
+  answer. When a turn ends with an answer (not failed, stopped or
+  needs-human), Heimdall lists `out/` itself: top level only, in name order.
+- **Checks per entry**, through `os.Root` on the user's home (nothing
+  outside it is reachable, symlinks included): directories, devices and
+  FIFOs are skipped; the opened file's own `fstat` must show a regular file
+  owned by the turn's uid, `nlink == 1` (no hard link to a file the user
+  cannot read) and 1 byte to 50 MB. Beyond 5 files the rest are reported.
+- **Copy, then send.** Each accepted file is copied from the open
+  descriptor into Heimdall's `<data_dir>/outbox/` (0700 directory, 0600
+  file, random name), so the user cannot change what is sent afterwards and
+  a restart can still send it. The answer and one outbound row per file
+  (`core.Outbound.File`: the copy, a display name, MIME by extension) are
+  stored in the turn's end transaction, in that order. A file not sent is a
+  footer note on the answer: `file <name> not sent: <reason>`.
+- **Delivery.** Telegram sends a file as `sendPhoto` (JPEG/PNG/WebP up to
+  10 MB) or else `sendDocument`, multipart, replying to the turn's first
+  message in its topic, as the hub's `sendLocalArtifact`. The retry rules
+  are those of text: 429, 5xx and network errors are transient, other 4xx
+  permanent. The copy is removed once its row is sent or failed; copies
+  older than 7 days are pruned at start.
+- **Harness-agnostic.** The harness writes files with its own tools as the
+  turn's OS user. Interfaces opt in (`router.FileSender`); others get no
+  note and no outbox.
+- **Not done:** files sent mid-turn, files from failed or stopped turns,
+  captions.
+- **Hub difference:** the hub sends the artifacts OMP and Pi tools report in
+  their telemetry (path, device, inode, SHA-256; at most 5). That is
+  harness-specific and is not ported.
+
 ## Findings and gotchas
 
 Hub source read at `misunders2d/misunderstood-pi-pack` `ec72c7d` (branch
