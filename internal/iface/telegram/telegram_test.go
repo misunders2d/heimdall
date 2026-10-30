@@ -41,13 +41,14 @@ type fakeAPI struct {
 	calls   []string
 	sent    []map[string]any
 	actions []map[string]any  // sendChatAction bodies
-	files   map[string][]byte // downloadable files by file_path; getFile ids are "id:" + path
+	files   map[string][]byte
+	slow    map[string]time.Duration // file paths served after a delay // downloadable files by file_path; getFile ids are "id:" + path
 	newUpd  chan struct{}
 	handle  map[string]func(w http.ResponseWriter, body map[string]any) bool // true: handled
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
-	f := &fakeAPI{t: t, newUpd: make(chan struct{}, 1), files: map[string][]byte{}, handle: map[string]func(http.ResponseWriter, map[string]any) bool{}}
+	f := &fakeAPI{t: t, newUpd: make(chan struct{}, 1), files: map[string][]byte{}, slow: map[string]time.Duration{}, handle: map[string]func(http.ResponseWriter, map[string]any) bool{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -75,11 +76,13 @@ func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 	if p, ok := strings.CutPrefix(r.URL.Path, "/file/bot"+token+"/"); ok {
 		f.mu.Lock()
 		b, found := f.files[p]
+		delay := f.slow[p]
 		f.mu.Unlock()
 		if !found {
 			http.NotFound(w, r)
 			return
 		}
+		time.Sleep(delay)
 		w.Write(b)
 		return
 	}
@@ -976,18 +979,26 @@ func TestAlbumParts(t *testing.T) {
 	stop := run(t, i, c.accept)
 	eventually(t, "offset past all", func() bool { return api.lastOffset() == 6 })
 	stop()
+	// Each part is announced before its download, then accepted with its
+	// file.
 	var ids, ambient []string
 	for _, in := range c.list() {
-		if in.Ambient {
+		switch {
+		case in.Ambient:
 			ambient = append(ambient, in.MsgID)
-			continue
+		case in.Announce:
+			if in.Group != "A1" || in.Text != "" || len(in.Attachments) != 0 {
+				t.Errorf("announce %+v", in)
+			}
+			ids = append(ids, "announce "+in.MsgID)
+		default:
+			if in.Group != "A1" || len(in.Attachments) != 1 || in.Attachments[0].Stored == "" {
+				t.Errorf("part %+v", in)
+			}
+			ids = append(ids, in.MsgID)
 		}
-		if in.Group != "A1" || len(in.Attachments) != 1 || in.Attachments[0].Stored == "" {
-			t.Errorf("part %+v", in)
-		}
-		ids = append(ids, in.MsgID)
 	}
-	if !slices.Equal(ids, []string{"1", "2", "5"}) || !slices.Equal(ambient, []string{"3", "4"}) {
+	if !slices.Equal(ids, []string{"announce 1", "1", "announce 2", "2", "announce 5", "5"}) || !slices.Equal(ambient, []string{"3", "4"}) {
 		t.Fatalf("accepted %v, context %v", ids, ambient)
 	}
 }

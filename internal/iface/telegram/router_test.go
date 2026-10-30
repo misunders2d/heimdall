@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -108,5 +109,59 @@ func TestTelegramThroughRouter(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "hello") {
 		t.Fatalf("logs carry message text: %q", logs.String())
+	}
+}
+
+// An album whose later part downloads for longer than the album wait still
+// runs as one turn: the part is announced before its download.
+func TestSlowAlbumPartStaysInTheAlbum(t *testing.T) {
+	bin, state := fakeharness.Install(t, "omp")
+	u, err := osuser.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	st, err := store.Open(filepath.Join(t.TempDir(), "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	tg := newIface(t, api.srv.URL, botName, &logs)
+	tg.opt.UploadDir = filepath.Join(t.TempDir(), "uploads")
+	r := router.New(router.Options{
+		Access:      core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{"telegram:42": true}},
+		Order:       []string{"omp"},
+		MaxParallel: 2,
+		Accounts:    sameUser{harness.Accounts{RunAs: map[core.Role]core.RunAs{core.RoleOwner: {User: u.Username, Path: bin}}}},
+		Log:         log.New(io.Discard, "", 0),
+		AlbumWait:   500 * time.Millisecond,
+	}, st, tg)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	part := func(id int, caption string) map[string]any {
+		m := msg(id, 42, "private", 42, "")
+		m["caption"], m["media_group_id"] = caption, "A1"
+		m["photo"] = []any{map[string]any{"file_id": fmt.Sprintf("id:p/%d.jpg", id), "file_unique_id": fmt.Sprintf("u%d", id)}}
+		api.files[fmt.Sprintf("p/%d.jpg", id)] = []byte("jpeg")
+		return m
+	}
+	api.slow["p/2.jpg"] = 1500 * time.Millisecond
+	api.push(upd(1, part(1, "what are these?")), upd(2, part(2, "")))
+	eventually(t, "a reply", func() bool { return len(api.sentBodies()) >= 1 })
+	time.Sleep(time.Second)
+	if n := len(api.sentBodies()); n != 1 {
+		t.Fatalf("%d replies: the album split", n)
+	}
+	if in := fakeharness.Inputs(state); len(in) != 1 || strings.Count(in[0].Text, "[File saved]") != 2 {
+		t.Fatalf("inputs %+v", in)
 	}
 }

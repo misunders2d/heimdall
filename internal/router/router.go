@@ -174,6 +174,12 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 		r.release(in)
 		return nil
 	}
+	if in.Announce {
+		if in.Group != "" && !in.Ambient {
+			r.dispatch(store.InboundRow{Inbound: in})
+		}
+		return nil
+	}
 	if in.Ambient {
 		r.keepAmbient(in)
 		r.release(in)
@@ -331,11 +337,16 @@ type conv struct {
 }
 
 // album is a caller's parts of one grouped message, held until none has
-// arrived for AlbumWait.
+// arrived, or been announced, for AlbumWait.
 type album struct {
-	rows []store.InboundRow
-	gen  int
+	rows    []store.InboundRow
+	gen     int
+	pending int // parts announced, not yet arrived
 }
+
+// albumPendingWait bounds how long an announced part is waited for: longer
+// than an interface's download (Telegram: 2 minutes).
+const albumPendingWait = 3 * time.Minute
 
 type albumEvent struct {
 	key string
@@ -414,6 +425,10 @@ func (c *conv) loop(ctx context.Context) {
 			c.inbox = nil
 			c.mu.Unlock()
 			for _, row := range rows {
+				if row.Announce {
+					c.expect(ctx, row)
+					continue
+				}
 				if row.Group != "" {
 					c.hold(ctx, row)
 					continue
@@ -481,6 +496,25 @@ func (c *conv) loop(ctx context.Context) {
 // are then handled together, so they start one turn, or steer the running
 // one once.
 func (c *conv) hold(ctx context.Context, row store.InboundRow) {
+	key, a := c.album(row)
+	a.rows = append(a.rows, row)
+	a.pending = max(a.pending-1, 0)
+	wait := c.r.opt.AlbumWait
+	if a.pending > 0 {
+		wait = albumPendingWait
+	}
+	c.armAlbum(ctx, key, a, wait)
+}
+
+// expect notes that a part of the caller's group is on its way: the group
+// waits for it, as the hub clears its timer before downloading a part.
+func (c *conv) expect(ctx context.Context, row store.InboundRow) {
+	key, a := c.album(row)
+	a.pending++
+	c.armAlbum(ctx, key, a, albumPendingWait)
+}
+
+func (c *conv) album(row store.InboundRow) (string, *album) {
 	key := row.From.Key() + "\x00" + row.Group
 	if c.albums == nil {
 		c.albums = map[string]*album{}
@@ -490,10 +524,14 @@ func (c *conv) hold(ctx context.Context, row store.InboundRow) {
 		a = &album{}
 		c.albums[key] = a
 	}
-	a.rows = append(a.rows, row)
+	return key, a
+}
+
+// armAlbum makes the group due after wait; earlier timers no longer count.
+func (c *conv) armAlbum(ctx context.Context, key string, a *album, wait time.Duration) {
 	a.gen++
 	ev := albumEvent{key: key, gen: a.gen}
-	time.AfterFunc(c.r.opt.AlbumWait, func() { c.send(ctx, ev) })
+	time.AfterFunc(wait, func() { c.send(ctx, ev) })
 }
 
 func (c *conv) reply(row store.InboundRow, text string) {
@@ -649,7 +687,7 @@ func (c *conv) cancelQueued(role core.Role, who, why string) int {
 		for _, it := range keep(albumItems(a)) {
 			rows = append(rows, it.row)
 		}
-		if a.rows = rows; len(rows) == 0 {
+		if a.rows = rows; len(rows) == 0 && a.pending == 0 {
 			delete(c.albums, key)
 		}
 	}

@@ -298,6 +298,10 @@ func (t *Interface) Run(ctx context.Context, accept func(context.Context, core.I
 				continue
 			}
 			if in, m, ok := t.inbound(u); ok {
+				if in.Group != "" && !in.Ambient {
+					// The album waits for this part while it downloads.
+					_ = accept(ctx, core.Inbound{Conv: in.Conv, MsgID: in.MsgID, From: in.From, Origin: in.Origin, At: in.At, Group: in.Group, Announce: true})
+				}
 				if !in.Ambient {
 					in.Attachments = t.attachments(ctx, m)
 				}

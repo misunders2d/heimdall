@@ -194,6 +194,10 @@ type Inbound struct {
 	// never run or answered; it is kept, bounded, as untrusted context for
 	// the conversation's next turns (the hub's recent group context).
 	Ambient bool
+	// Announce says a part of Group from From is on its way (the interface
+	// is downloading its files), so the router keeps holding the group. It
+	// carries no message and is never stored.
+	Announce bool
 }
 
 // Attachment is a file a message carried. The interface downloads it into
