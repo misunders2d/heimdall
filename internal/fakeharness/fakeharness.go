@@ -14,6 +14,7 @@
 //	               and never acknowledge it
 //	SLEEP          stay busy for 30 seconds
 //	ASK_HUMAN      request native approval/input
+//	SLOWACK        (pi/omp) take each steer 1 s after it arrived
 //	STEERREPLY     (pi/omp) before taking each steer, give the input before
 //	               it its own final text, "reply N: LAST LINE", as OMP
 //	               answers the prompt and then each steer
@@ -375,6 +376,9 @@ func (f *fake) piRPC() {
 		}
 		text, _ := s["message"].(string)
 		f.record("steer", text, piImages(s))
+		if f.has("SLOWACK") {
+			time.Sleep(time.Second)
+		}
 		if strings.Contains(text, "NOACK") {
 			_ = os.WriteFile(filepath.Join(f.state, "steer-held"), nil, 0o600)
 			time.Sleep(30 * time.Second)

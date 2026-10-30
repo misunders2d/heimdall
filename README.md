@@ -133,8 +133,9 @@ once. `max_parallel` counts harness processes until they exit.
 A conversation is a chat, or one thread in it: `!use` in a thread changes
 neither the other threads nor the chat itself. Each verified caller has
 their own native session per conversation. A message sent
-while the sender's own turn runs steers it; everything else queues as a
-follow-up. Replies end with `— <harness>`.
+while the sender's own turn runs steers it (messages that wait while
+another is handed over go together, as one steer); everything else queues
+as a follow-up. Replies end with `— <harness>`.
 
 ## Try it locally
 

@@ -1075,17 +1075,17 @@ func (c *conv) unbind(t *turn, h, prev string, clean bool) {
 	}
 }
 
-// steerNext hands the oldest waiting steer to the running turn, one at a
-// time and in order, once the harness is ready.
+// steerNext hands every waiting steer to the running turn as one steer,
+// framed in order with all their images, once the harness is ready and no
+// other steer is being handed over. One at a time, each waited for the
+// harness's answer to the one before (OMP answered the first alone).
+// Waiting steers are all the turn caller's (route).
 func (c *conv) steerNext(ctx context.Context, t *turn) {
 	if !t.ready || t.steering || t.done != nil || len(t.steerQ) == 0 {
 		return
 	}
-	n := 1
-	for g := t.steerQ[0].row.Group; g != "" && n < len(t.steerQ) && t.steerQ[n].row.Group == g; n++ {
-	}
-	items := slices.Clone(t.steerQ[:n])
-	t.steerQ = t.steerQ[n:]
+	items := t.steerQ
+	t.steerQ = nil
 	// Recorded before the hand-over: from here on a crash reports the
 	// message as unconfirmed instead of replaying it.
 	for i, it := range items {
@@ -1127,7 +1127,7 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 	t.steering = false
 	switch ev.outcome {
 	case harness.SteerAccepted:
-		t.steered++
+		t.steered += messages(ev.items)
 		for _, it := range ev.items {
 			if err := c.r.store.Steered(t.id, it.row.ID); err != nil {
 				c.r.log.Printf("message %d: steer not recorded: %v", it.row.ID, err)
@@ -1138,15 +1138,20 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 			c.typedOnce(ctx)
 		}
 	case harness.SteerUnknown:
-		c.r.log.Printf("turn %d: message %d steered, acceptance unknown; not replayed", t.id, ev.items[0].row.ID)
+		n := messages(ev.items)
+		c.r.log.Printf("turn %d: message %d (%d in all) steered, acceptance unknown; not replayed", t.id, ev.items[0].row.ID, n)
 		for _, it := range ev.items {
 			_ = c.r.store.SetInbound(it.row.ID, store.InUnconfirmed, "steer acceptance unknown; not replayed")
 			c.r.release(it.row.Inbound)
 		}
-		c.reply(ev.items[0].row, "⚠ This message may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
+		what := "This message"
+		if n > 1 {
+			what = fmt.Sprintf("This message and the %d after it", n-1)
+		}
+		c.reply(ev.items[0].row, "⚠ "+what+" may or may not have reached the running "+t.harness+" turn. It will not be re-sent automatically; resend it if the answer does not cover it.\n— heimdall")
 	default:
-		// Not handed over: run it as a follow-up turn.
-		c.r.log.Printf("turn %d: message %d not steered (%s); runs as a follow-up", t.id, ev.items[0].row.ID, ev.outcome)
+		// Not handed over: run them as a follow-up turn.
+		c.r.log.Printf("turn %d: message %d (%d in all) not steered (%s); runs as a follow-up", t.id, ev.items[0].row.ID, messages(ev.items), ev.outcome)
 		c.unreact(t, ev.refs)
 		for _, it := range ev.items {
 			if err := c.r.store.Unsteer(it.row.ID); err != nil {
@@ -1160,6 +1165,17 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 		return
 	}
 	c.steerNext(ctx, t)
+}
+
+// messages counts items as the caller sent them: an album is one message.
+func messages(items []item) int {
+	n := 0
+	for i, it := range items {
+		if it.row.Group == "" || i == 0 || items[i-1].row.Group != it.row.Group {
+			n++
+		}
+	}
+	return n
 }
 
 // requeue returns messages to the follow-up queue in arrival order.

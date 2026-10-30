@@ -132,8 +132,11 @@ Its whole job, per message:
   Explicit choices (`!use <harness>`, `!<harness> <msg>`) never fall back.
   Every reply is tagged with the harness that produced it.
 - **Steer and follow-up.** Mid-turn messages steer by default; `!next`
-  queues instead. A steer counts only on the harness's own acknowledgement;
-  when acceptance is unknown the sender is told and nothing is replayed.
+  queues instead. Steers that wait while another is handed over go to the
+  harness together, as one steer framed in order with all their images (at
+  most 10 natively, every file by path). A steer counts only on the
+  harness's own acknowledgement; when acceptance is unknown the sender is
+  told and nothing is replayed.
   The reply keeps what the harness answered to every input it took (the
   prompt, then each accepted steer), never only the last answer. A turn
   ends, and its reply goes out, at the harness's answer, not when its

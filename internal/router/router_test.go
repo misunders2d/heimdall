@@ -400,10 +400,15 @@ func TestPhotoThenForwardSteerTheRunningTurn(t *testing.T) {
 			if err := os.WriteFile(photo, []byte("\x89PNG fake"), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			// Each is sent once the one before was handed over, so each is a
+			// steer of its own (waiting steers go together:
+			// TestWaitingSteersGoTogether).
 			e.f.in <- core.Inbound{Conv: conv, MsgID: "p1", From: boss, Origin: core.OriginLive, Text: "what's on this image?", Attachments: []core.Attachment{
 				{Kind: "photo", Name: "photo.jpg", MIME: "image/jpeg", Size: 10, Source: "message", Stored: photo},
 			}}
+			e.waitInputs(2)
 			e.send(owner, "c1", "do you see the forwarded message?")
+			e.waitInputs(3)
 			e.f.in <- core.Inbound{Conv: conv, MsgID: "f1", From: boss, Origin: core.OriginLive, Text: "Order rejected FINISH", Context: "[Telegram forward context | source trader | date 2026-05-21T10:55:07.000Z]"}
 			out := e.reply()
 			if out.ReplyTo != first {
@@ -1715,5 +1720,50 @@ func TestReactionsOfEachAnswer(t *testing.T) {
 	want(t, out, "claude#1 ", "late reply: also CHARLIE")
 	if strings.Contains(out.Text, "[react:") || !slices.Equal(out.Reactions, []core.Reaction{{MsgID: id, Emoji: "👍"}}) {
 		t.Fatalf("reply %+v", out)
+	}
+}
+
+// waitInputs waits until the fake harness recorded n inputs.
+func (e *env) waitInputs(n int) {
+	e.t.Helper()
+	eventuallyTrue(e.t, fmt.Sprintf("%d harness inputs", n), func() bool { return len(fakeharness.Inputs(e.state)) >= n })
+}
+
+// Steers that wait while another is handed over go to the harness together,
+// as one steer framed in order with all their images (the owner's test,
+// 2026-10-30: one at a time, each waited for OMP's answer to the one before,
+// and OMP answered the first alone).
+func TestWaitingSteersGoTogether(t *testing.T) {
+	for _, h := range []string{"omp", "pi"} {
+		t.Run(h, func(t *testing.T) {
+			e := setup(t, core.ModeCorporate, []string{h}, h)
+			boss := core.Principal{Platform: "fake", ID: "owner", Name: "owner"}
+			conv := core.ConvKey{Interface: "fake", Chat: "c1"}
+			e.send(owner, "c1", "work WAIT_STEER SLOWACK")
+			e.waitReadyOn("c1", h)
+			e.send(owner, "c1", "alpha")
+			e.waitInputs(2) // alpha is being handed over, for 1 s
+			photo := func(name string) []core.Attachment {
+				p := filepath.Join(e.uploads, name)
+				if err := os.WriteFile(p, []byte("\x89PNG fake"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return []core.Attachment{{Kind: "photo", Name: name + ".jpg", MIME: "image/jpeg", Size: 10, Source: "message", Stored: p}}
+			}
+			e.f.in <- core.Inbound{Conv: conv, MsgID: "b1", From: boss, Origin: core.OriginLive, Text: "bravo", Attachments: photo("u1")}
+			e.f.in <- core.Inbound{Conv: conv, MsgID: "c1", From: boss, Origin: core.OriginLive, Text: "charlie FINISH", Attachments: photo("u2")}
+			out := e.reply()
+			want(t, out, h+"#1", "steers=2")
+			in := fakeharness.Inputs(e.state)
+			if len(in) != 3 || in[1].Kind != "steer" || !strings.HasSuffix(in[1].Text, "\nalpha") || in[2].Kind != "steer" || in[2].Images != 2 {
+				t.Fatalf("inputs %+v", in)
+			}
+			b, c := strings.Index(in[2].Text, "\nbravo"), strings.Index(in[2].Text, "\ncharlie FINISH")
+			if b < 0 || c < b || strings.Count(in[2].Text, "[Heimdall |") != 2 {
+				t.Fatalf("combined steer %q", in[2].Text)
+			}
+			e.send(owner, "c1", "!status")
+			want(t, e.reply(), "Running: nothing")
+		})
 	}
 }
