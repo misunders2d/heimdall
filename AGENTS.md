@@ -35,8 +35,11 @@ Its whole job, per message:
   job trackers or delegation layers. Memory is Memento's job; agent-to-agent
   work and job tracking are AgentNet's job; business connectors and tool
   restrictions belong to each harness's native configuration. Heimdall
-  injects no tool exclusions, sandbox changes or permission overrides, and
-  runs no extra services.
+  launches each harness in its own native automatic approval/review mode
+  (AgentNet's launch table: OMP `--auto-approve`, Claude
+  `--permission-mode auto`, Codex automatic review), adds no tool
+  exclusions, sandbox changes or other restrictions, and runs no extra
+  services.
 - **Identity comes from the interface, never from text.** Callers never log
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack
@@ -117,8 +120,9 @@ AgentNet's current adapter first and record the source revision in the file
 header. Left out on purpose: AgentNet's room tool, approval relay UI,
 thinking stream and live-session reply registration.
 
-- Native approval or input requests end the turn as *needs human*; nothing
-  is approved on anyone's behalf.
+- Anything the native automatic mode still escalates (an approval or input
+  request) ends the turn as *needs human*; Heimdall answers no such request
+  itself.
 - Sessions: Pi and OMP use a per-session `--session-dir` with `--continue`
   (verified: an empty directory starts fresh, the same directory resumes);
   Claude `--session-id` / `--resume`; Codex app-server `thread/start` /
