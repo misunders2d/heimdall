@@ -41,6 +41,18 @@ type fakeIface struct {
 	files   atomic.Bool  // send files
 	notify  atomic.Bool  // reach owners privately
 	uploads string       // UploadDir
+
+	mu   sync.Mutex
+	sent map[string]string // a sent file's content, read when it was sent, by path
+}
+
+// fileSent is what the file at path held when it was sent: the router
+// removes its copy once sent.
+func (f *fakeIface) fileSent(path string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.sent[path]
+	return b, ok
 }
 
 func (f *fakeIface) OwnerChat(id string) (core.ConvKey, bool) {
@@ -70,7 +82,7 @@ func (f *fakeIface) Reaction(emoji string) (string, bool) {
 func (f *fakeIface) PromptNote() string { s, _ := f.note.Load().(string); return s }
 
 func newFakeIface() *fakeIface {
-	return &fakeIface{in: make(chan core.Inbound), out: make(chan core.Outbound, 64)}
+	return &fakeIface{in: make(chan core.Inbound), out: make(chan core.Outbound, 64), sent: map[string]string{}}
 }
 
 func (f *fakeIface) Name() string { return "fake" }
@@ -92,6 +104,15 @@ func (f *fakeIface) Send(_ context.Context, out core.Outbound) error {
 	if f.fails.Load() > 0 {
 		f.fails.Add(-1)
 		return fmt.Errorf("transient")
+	}
+	if out.File != nil {
+		b, err := os.ReadFile(out.File.Path)
+		if err != nil {
+			return err
+		}
+		f.mu.Lock()
+		f.sent[out.File.Path] = string(b)
+		f.mu.Unlock()
 	}
 	f.out <- out
 	return nil
@@ -1284,11 +1305,11 @@ func TestOutboxFilesAreSentAfterTheAnswer(t *testing.T) {
 		if f.File == nil || f.ReplyTo != id || f.Text != "" {
 			t.Fatalf("file reply %+v", f)
 		}
-		b, err := os.ReadFile(f.File.Path)
-		if err != nil || filepath.Dir(f.File.Path) != e.opt.OutboxDir {
-			t.Fatalf("copy %+v: %v", f.File, err)
+		b, ok := e.f.fileSent(f.File.Path)
+		if !ok || filepath.Dir(f.File.Path) != e.opt.OutboxDir {
+			t.Fatalf("copy %+v", f.File)
 		}
-		sent = append(sent, f.File.Name+"="+string(b)+"="+f.File.MIME)
+		sent = append(sent, f.File.Name+"="+b+"="+f.File.MIME)
 	}
 	if strings.Join(sent, ",") != "a.png=first=image/png,b.txt=second=text/plain" {
 		t.Fatalf("sent %v", sent)
