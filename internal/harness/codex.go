@@ -194,11 +194,15 @@ func (b *codexBridge) event(raw []byte) {
 		if json.Unmarshal(m.Error, &rpcErr) == nil && rpcErr.Code == -32601 {
 			result = SteerUnsupported
 		} else if (len(m.Error) == 0 || string(m.Error) == "null") && json.Unmarshal(m.Result, &response) == nil && response.TurnID == b.turn {
-			result = SteerAccepted
-			if !b.done {
+			if b.done {
+				// Acknowledged after the turn ended: its answer is out without
+				// this steer, which may or may not have reached Codex. The
+				// sender is told; nothing is replayed.
+				result = SteerUnknown
+			} else {
+				result = SteerAccepted
 				// A final answer given before this steer belongs to the
 				// earlier inputs; the answer to the steer comes after it.
-				// Once the turn completed, the published answer stays.
 				b.answers, b.answer, b.answerPhase = keepAnswer(b.answers, b.answer), "", ""
 			}
 		}
