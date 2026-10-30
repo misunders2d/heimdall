@@ -362,6 +362,8 @@ func TestMessagesBecomeVerifiedInbound(t *testing.T) {
 	)
 	stop := run(t, newIface(t, api.srv.URL, botName, &logs), c.accept)
 	eventually(t, "all accepted", func() bool { return len(c.list()) == 8 })
+	// The offset is confirmed by the next getUpdates, after the last accept.
+	eventually(t, "offset confirmed", func() bool { return api.lastOffset() == 9 })
 	stop()
 	got := c.list()
 	want := []struct {
