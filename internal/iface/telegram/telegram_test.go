@@ -40,7 +40,7 @@ type fakeAPI struct {
 	offsets []int64 // offset of every getUpdates call
 	calls   []string
 	sent    []map[string]any
-	actions []map[string]any  // sendChatAction bodies
+	actions []map[string]any // sendChatAction bodies
 	files   map[string][]byte
 	slow    map[string]time.Duration // file paths served after a delay // downloadable files by file_path; getFile ids are "id:" + path
 	newUpd  chan struct{}
@@ -1243,5 +1243,15 @@ func TestRateLimitedPartIsRetriedInPlace(t *testing.T) {
 	var perm router.PermanentError
 	if err == nil || errors.As(err, &perm) || calls != sendTries {
 		t.Fatalf("err %v after %d calls", err, calls)
+	}
+}
+
+func TestOwnerChatIsThePrivateChat(t *testing.T) {
+	var tg Interface
+	if c, ok := tg.OwnerChat("4242"); !ok || c != (core.ConvKey{Interface: core.PlatformTelegram, Chat: "4242"}) {
+		t.Fatalf("owner chat %+v %v", c, ok)
+	}
+	if _, ok := tg.OwnerChat("boss@example.com"); ok {
+		t.Fatal("a non-numeric owner has a Telegram chat")
 	}
 }

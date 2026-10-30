@@ -169,7 +169,8 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 		r.release(in)
 		return err
 	}
-	if _, ok := r.opt.Access.Role(in.From); !ok {
+	role, ok := r.opt.Access.Role(in.From)
+	if !ok {
 		r.log.Printf("ignored message from an unidentified %s caller in %s", in.From.Platform, in.Conv)
 		r.release(in)
 		return nil
@@ -196,6 +197,9 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 		// Addressed group messages are context for later turns too, as
 		// in the hub; commands are not.
 		r.keepAmbient(in)
+	}
+	if role != core.RoleOwner {
+		r.newCaller(in)
 	}
 	r.dispatch(row)
 	return nil

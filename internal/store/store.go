@@ -107,6 +107,10 @@ ALTER TABLE inbound ADD COLUMN user_key_id TEXT NOT NULL DEFAULT '';`,
 	at INTEGER NOT NULL, who TEXT NOT NULL, name TEXT NOT NULL, text TEXT NOT NULL, file TEXT NOT NULL,
 	UNIQUE(iface, chat, msg_id));
 CREATE INDEX ambient_conv ON ambient(iface, chat, thread, id);`,
+	// Callers seen, for the owners' one-time new-caller notice.
+	// Callers who wrote before this step are not new.
+	`CREATE TABLE callers(principal TEXT PRIMARY KEY, first_at INTEGER NOT NULL);
+INSERT INTO callers SELECT platform || ':' || user_id, MIN(received_at) FROM inbound GROUP BY platform, user_id;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -779,4 +783,15 @@ func (s *Store) RecentAmbient(conv core.ConvKey, skip []string, limit int) ([]Am
 	}
 	slices.Reverse(out)
 	return out, rows.Err()
+}
+
+// FirstMessage records that p has written and reports whether p never
+// had before.
+func (s *Store) FirstMessage(p core.Principal) (bool, error) {
+	res, err := s.db.Exec(`INSERT INTO callers(principal, first_at) VALUES(?,?) ON CONFLICT(principal) DO NOTHING`, p.Key(), now())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }

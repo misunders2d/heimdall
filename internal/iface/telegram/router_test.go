@@ -73,10 +73,18 @@ func TestTelegramThroughRouter(t *testing.T) {
 		upd(2, msg(102, -1002, "group", 43, "@heimdall_test_bot hello from a colleague")),
 		upd(3, msg(103, -1002, "group", 43, "not for the bot")),
 	)
-	eventually(t, "two replies", func() bool { return len(api.sentBodies()) == 2 })
+	eventually(t, "two replies and the owner's new-caller notice", func() bool { return len(api.sentBodies()) == 3 })
 	byChat := map[float64]map[string]any{}
+	var notice map[string]any
 	for _, b := range api.sentBodies() {
+		if text, _ := b["text"].(string); strings.HasPrefix(text, "ℹ New caller") {
+			notice = b
+			continue
+		}
 		byChat[b["chat_id"].(float64)] = b
+	}
+	if text, _ := notice["text"].(string); notice["chat_id"] != float64(42) || !strings.Contains(text, `"Ann Lee" (telegram:43)`) || strings.Contains(text, "colleague") {
+		t.Fatalf("new-caller notice %v", notice)
 	}
 	dm, group := byChat[42], byChat[-1002]
 	for name, tc := range map[string]struct {
@@ -104,7 +112,7 @@ func TestTelegramThroughRouter(t *testing.T) {
 	// only: never run, never logged.
 	eventually(t, "offset past every update", func() bool { return api.lastOffset() == 4 })
 	time.Sleep(200 * time.Millisecond)
-	if n := len(api.sentBodies()); n != 2 {
+	if n := len(api.sentBodies()); n != 3 {
 		t.Fatalf("%d replies", n)
 	}
 	if strings.Contains(logs.String(), "hello") {

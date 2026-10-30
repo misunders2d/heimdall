@@ -609,6 +609,15 @@ func (t *Interface) react(ctx context.Context, out core.Outbound) error {
 	return nil
 }
 
+// OwnerChat is an owner's private chat with the bot: in Telegram, the
+// chat ID of a private chat is the user's ID.
+func (t *Interface) OwnerChat(id string) (core.ConvKey, bool) {
+	if _, err := strconv.ParseInt(id, 10, 64); err != nil {
+		return core.ConvKey{}, false
+	}
+	return core.ConvKey{Interface: core.PlatformTelegram, Chat: id}, true
+}
+
 // UploadDir is where downloaded files are kept until their message is
 // final; the router uses only files there.
 func (t *Interface) UploadDir() string { return t.opt.UploadDir }

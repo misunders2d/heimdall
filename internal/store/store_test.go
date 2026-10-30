@@ -332,3 +332,36 @@ func TestAmbient(t *testing.T) {
 		t.Fatalf("topic %+v", got)
 	}
 }
+
+func TestFirstMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := core.Principal{Platform: "x", ID: "old"}
+	in := msg("1")
+	in.From = old
+	if _, _, err := s.AddInbound(in); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen as a database from before the callers step: whoever wrote
+	// before it is not new.
+	if _, err := s.db.Exec(`DROP TABLE callers; PRAGMA user_version=8`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if s, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	newcomer := core.Principal{Platform: "x", ID: "new"}
+	for _, c := range []struct {
+		p     core.Principal
+		first bool
+	}{{old, false}, {newcomer, true}, {newcomer, false}, {core.Principal{Platform: "y", ID: "new"}, true}} {
+		if first, err := s.FirstMessage(c.p); err != nil || first != c.first {
+			t.Fatalf("%s: first %v, %v", c.p.Key(), first, err)
+		}
+	}
+}

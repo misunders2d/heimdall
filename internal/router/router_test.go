@@ -39,7 +39,12 @@ type fakeIface struct {
 	react   atomic.Bool  // offer reactions
 	group   atomic.Bool  // keep group context
 	files   atomic.Bool  // send files
+	notify  atomic.Bool  // reach owners privately
 	uploads string       // UploadDir
+}
+
+func (f *fakeIface) OwnerChat(id string) (core.ConvKey, bool) {
+	return core.ConvKey{Interface: "fake", Chat: "dm-" + id}, f.notify.Load()
 }
 
 func (f *fakeIface) UploadDir() string { return f.uploads }
@@ -1416,4 +1421,44 @@ func TestDeliveryGivesUpAfterMaxAttempts(t *testing.T) {
 		t.Fatalf("%d delivery attempts, want 2", 100-left)
 	}
 	e.noReply(100 * time.Millisecond)
+}
+
+// Owners are told once, privately, that a non-root caller wrote for the
+// first time: who and where, never what. It is remembered across restarts.
+func TestOwnersAreToldOfANewCaller(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.f.notify.Store(true)
+	replies := func(n int) map[string]core.Outbound {
+		t.Helper()
+		got := map[string]core.Outbound{}
+		for range n {
+			out := e.reply()
+			got[out.Conv.Chat] = out
+		}
+		e.noReply(300 * time.Millisecond)
+		return got
+	}
+	e.send(owner, "c1", "!help")
+	replies(1)
+	e.send(employee, "c1", "secret words")
+	got := replies(2)
+	notice, ok := got["dm-owner"]
+	if !ok {
+		t.Fatalf("no notice: %+v", got)
+	}
+	want(t, notice, `New caller: "employee" (fake:employee)`, "in fake/c1", "— heimdall")
+	if strings.Contains(notice.Text, "secret") || notice.ReplyTo != "" {
+		t.Fatalf("notice %+v", notice)
+	}
+	e.send(employee, "c1", "again")
+	replies(1)
+
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.start()
+	e.f.notify.Store(true)
+	e.send(employee, "c2", "!help")
+	replies(1)
+	e.send(coworker, "c2", "!help")
+	want(t, replies(2)["dm-owner"], "fake:coworker")
 }
