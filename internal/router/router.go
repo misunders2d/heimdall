@@ -76,10 +76,13 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	return r
 }
 
-// Run recovers interrupted work, then routes until ctx ends. Turns still
+// Run recovers interrupted work, then routes until ctx ends or an
+// interface fails, which stops everything else and is returned. Turns still
 // running at shutdown stay recorded as running, so the next start reports
 // them exactly like a crash.
-func (r *Router) Run(ctx context.Context) error {
+func (r *Router) Run(parent context.Context) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 	rec, err := r.store.Recover(interruptedNotice, unconfirmedNotice)
 	if err != nil {
 		return fmt.Errorf("recover: %w", err)
@@ -100,6 +103,8 @@ func (r *Router) Run(ctx context.Context) error {
 	}
 	pending, err := r.store.Pending()
 	if err != nil {
+		cancel()
+		wg.Wait()
 		return err
 	}
 	for _, row := range pending {
@@ -119,6 +124,7 @@ func (r *Router) Run(ctx context.Context) error {
 	case <-ctx.Done():
 	case err = <-errs:
 	}
+	cancel()
 	wg.Wait()
 	return err
 }

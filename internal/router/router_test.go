@@ -577,3 +577,70 @@ func TestFailureBeforeReadyKeepsSessionResumable(t *testing.T) {
 	e.send(owner, "c1", "again")
 	want(t, e.reply(), "omp#2 resumed=true")
 }
+
+// failingIface fails its Run after fail is closed; while running it may
+// also report an error once its context ends.
+type failingIface struct {
+	name        string
+	fail        chan struct{}
+	errOnCancel bool
+}
+
+func (f *failingIface) Name() string { return f.name }
+
+func (f *failingIface) Run(ctx context.Context, _ func(context.Context, core.Inbound) error) error {
+	select {
+	case <-f.fail:
+		return fmt.Errorf("%s connection lost", f.name)
+	case <-ctx.Done():
+		if f.errOnCancel {
+			return fmt.Errorf("%s: closed during shutdown", f.name)
+		}
+		return nil
+	}
+}
+
+func (f *failingIface) Send(context.Context, core.Outbound) error { return nil }
+
+func runRouter(t *testing.T, ctx context.Context, ifaces ...Interface) chan error {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	r := New(Options{Access: core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{owner: true}}, Order: []string{"omp"}, Log: log.New(io.Discard, "", 0)}, st, ifaces...)
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	return done
+}
+
+func TestInterfaceFailureStopsRouter(t *testing.T) {
+	broken := &failingIface{name: "broken", fail: make(chan struct{})}
+	healthy := &failingIface{name: "healthy", fail: make(chan struct{})}
+	done := runRouter(t, context.Background(), broken, healthy)
+	close(broken.fail)
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "broken connection lost") {
+			t.Fatalf("Run = %v, want the interface's failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run hung after an interface failed")
+	}
+}
+
+func TestInterfaceErrorDuringShutdownIsNotAFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runRouter(t, ctx, &failingIface{name: "a", fail: make(chan struct{}), errOnCancel: true}, &failingIface{name: "b", fail: make(chan struct{})})
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want a clean shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run hung at shutdown")
+	}
+}
