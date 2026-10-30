@@ -246,7 +246,7 @@ func TestFallbackOnlyBeforeTurnStarted(t *testing.T) {
 	// After the harness was ready, a failure is reported, never retried elsewhere.
 	e.send(owner, "c2", "x FAILPOST=omp")
 	out := e.reply()
-	want(t, out, "⚠ omp failed", "— omp")
+	want(t, out, "⚠ omp failed: provider/model error — OMP ended before its request settled (omp exited: exit status 4); stderr: fake: crashed mid-turn. Please retry, or send reset if this keeps happening.", "— omp")
 	if strings.Contains(out.Text, "codex") {
 		t.Fatalf("fell back after side effects were possible: %q", out.Text)
 	}
@@ -884,4 +884,30 @@ func TestChatID(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	e.send(employee, "c1", "chatid")
 	want(t, e.reply(), "chat: fake_chat_c1\n", "user: fake_user_employee\n", "principal: fake:employee (employee)", "conversation: fake/c1", "private chat: no", "— heimdall")
+}
+
+// A failure is reported as the hub reports it: its kind first, secrets and
+// internal IDs removed, clipped.
+func TestFailureReason(t *testing.T) {
+	t.Setenv("HEIMDALL_TEST_SECRET", "s3cr3t-value-123")
+	for in, want := range map[string]string{
+		"":                             "the harness returned no final answer",
+		"request timed out after 600s": "model/provider timeout — request timed out after 600s",
+		"HTTP 429 rate limit for session_abcdef1234":                              "provider unavailable — HTTP 429 rate limit for [provider-id]",
+		"upstream returned 502 {bad gateway}":                                     "provider server error — upstream returned 502 bad gateway",
+		"prompt is too long: exceeds the context window":                          "context too large — send reset to start a fresh session",
+		"spawn ENOENT /home/x/.local/bin/omp":                                     "local harness or runtime configuration error",
+		"socket hang up":                                                          "connection/provider stream error — socket hang up",
+		"key sk-abcdefghijklmnopqrstuvwxyz0123 and s3cr3t-value-123 in turn_9f2k": "provider/model error — key [REDACTED] and [REDACTED] in [internal-id]",
+	} {
+		if got := failureReason(in); got != want {
+			t.Errorf("failureReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := failureReason(strings.Repeat("é", 300)); len([]rune(got)) != len([]rune("provider/model error — "))+180 {
+		t.Errorf("not clipped to 180 runes: %d", len([]rune(got)))
+	}
+	if got := scrub("token ghp_" + strings.Repeat("a", 36) + " ok"); got != "token [REDACTED] ok" {
+		t.Errorf("scrub = %q", got)
+	}
 }

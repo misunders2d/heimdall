@@ -395,13 +395,13 @@ func (c *conv) loop(ctx context.Context) {
 }
 
 func (c *conv) reply(row store.InboundRow, text string) {
-	c.r.enqueue(core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: text})
+	c.r.enqueue(core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: scrub(text)})
 }
 
 // answer settles a ! command and its reply together. If that cannot be
 // recorded the message stays pending and is answered after a restart.
 func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
-	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: text + "\n— heimdall"}
+	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: scrub(text) + "\n— heimdall"}
 	if err := c.r.store.AnswerCommand(row.ID, c.key, e); err != nil {
 		c.r.log.Printf("message %d: command %s not recorded: %v", row.ID, e.Detail, err)
 		return
@@ -888,12 +888,12 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		text = "⏹ The turn was cancelled."
 	case res.Failure != "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, res.Failure
-		text = "⚠ " + d.harness + " failed: " + res.Failure
+		text = "⚠ " + d.harness + " failed: " + failureReason(res.Failure) + ". Please retry, or send reset if this keeps happening."
 	default:
 		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, true
 		text = strings.TrimSpace(res.Answer)
 	}
-	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text + footer, Formatted: e.State == store.TurnDone}
+	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: scrub(text + footer), Formatted: e.State == store.TurnDone}
 	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
 		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
 	}
