@@ -408,9 +408,9 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 		c.answer(row, store.CommandEnd{Detail: "status"}, c.status())
 		return
 	case cmdUse:
-		text := "This chat now uses " + cmd.Harness + " (no fallback) until !use default."
+		text := "This conversation now uses " + cmd.Harness + " (no fallback) until !use default."
 		if cmd.Harness == "" {
-			text = "This chat is back to the default order: " + strings.Join(c.r.opt.Order, " → ") + "."
+			text = "This conversation is back to the default order: " + strings.Join(c.r.opt.Order, " → ") + "."
 		}
 		c.answer(row, store.CommandEnd{Detail: "use", SetHarness: true, Harness: cmd.Harness}, text)
 		return
@@ -432,7 +432,7 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 func (c *conv) stop(role core.Role, who string) string {
 	t := c.turn
 	if t == nil || t.done != nil {
-		return "Nothing is running in this chat."
+		return "Nothing is running in this conversation."
 	}
 	if role != core.RoleOwner && who != t.who {
 		return "Only the person who started this turn, or the owner, can stop it."

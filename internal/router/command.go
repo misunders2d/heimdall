@@ -77,9 +77,9 @@ func helpText(order []string) string {
 	return strings.Join([]string{
 		"Heimdall commands:",
 		"!help — this list",
-		"!status — what is running and queued in this chat",
+		"!status — what is running and queued in this conversation (chat + thread)",
 		"!stop — cancel the current turn",
-		"!use <harness> — this chat uses <harness> (no fallback) until !use default",
+		"!use <harness> — this conversation (chat + thread) uses <harness> (no fallback) until !use default",
 		"!use default — back to the default order: " + strings.Join(order, " → "),
 		"!<harness> <msg> — send only this message to <harness>",
 		"!next <msg> — queue as a follow-up instead of steering the running turn",

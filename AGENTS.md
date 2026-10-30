@@ -106,8 +106,9 @@ Its whole job, per message:
   between a successful platform send and its local acknowledgement can repeat
   that one message. Say so; never claim exactly-once.
 - **Commands** use the `!` prefix on every interface (Slack forbids `/` in
-  threads): `!help`, `!status`, `!stop`, `!use <harness>` (sticky per chat),
-  `!use default`, `!<harness> <msg>` (that message only), `!next <msg>`.
+  threads): `!help`, `!status`, `!stop`, `!use <harness>` (sticky per
+  conversation: chat + thread), `!use default`, `!<harness> <msg>` (that
+  message only), `!next <msg>`.
   Unknown `!word` commands are answered with help, never sent to a harness.
 
 ## Harness adapters

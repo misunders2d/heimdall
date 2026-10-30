@@ -65,15 +65,17 @@ Commands work the same on every interface:
 
 ```
 !help              list commands
-!status            what is running and queued in this chat
+!status            what is running and queued in this conversation
 !stop              cancel the current turn
-!use <harness>     this chat uses <harness> until !use default
+!use <harness>     this conversation uses <harness> until !use default
 !use default       back to the default order
 !<harness> <msg>   only this message goes to <harness>
 !next <msg>        queue as follow-up instead of steering
 ```
 
-Each verified caller has their own native session per chat. A message sent
+A conversation is a chat, or one thread in it: `!use` in a thread changes
+neither the other threads nor the chat itself. Each verified caller has
+their own native session per conversation. A message sent
 while the sender's own turn runs steers it; everything else queues as a
 follow-up. Replies end with `— <harness>`.
 

@@ -165,9 +165,13 @@ func (e *env) send(from, chat, text string) string {
 }
 
 func (e *env) sendAs(from core.Principal, chat, text string) string {
+	return e.sendIn(from, core.ConvKey{Interface: "fake", Chat: chat}, text)
+}
+
+func (e *env) sendIn(from core.Principal, conv core.ConvKey, text string) string {
 	id := fmt.Sprintf("m%d", e.seq.Add(1))
 	select {
-	case e.f.in <- core.Inbound{Conv: core.ConvKey{Interface: "fake", Chat: chat}, MsgID: id, From: from, Origin: core.OriginLive, Text: text}:
+	case e.f.in <- core.Inbound{Conv: conv, MsgID: id, From: from, Origin: core.OriginLive, Text: text}:
 	case <-time.After(5 * time.Second):
 		e.t.Fatal("interface did not accept")
 	}
@@ -262,20 +266,31 @@ func TestExplicitHarnessNeverFallsBack(t *testing.T) {
 	want(t, e.reply(), "codex#1", `last="only this"`)
 }
 
-func TestUseIsStickyPerChat(t *testing.T) {
+func TestUseIsStickyPerConversation(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
-	e.send(owner, "c1", "!use codex")
-	want(t, e.reply(), "now uses codex")
-	e.send(owner, "c1", "one")
-	want(t, e.reply(), "codex#1")
+	boss := core.Principal{Platform: "fake", ID: "owner", Name: "owner"}
+	t1 := core.ConvKey{Interface: "fake", Chat: "c1", Thread: "t1"}
+	t2 := core.ConvKey{Interface: "fake", Chat: "c1", Thread: "t2"}
+	channel := core.ConvKey{Interface: "fake", Chat: "c1"}
+	in := func(conv core.ConvKey, text string, parts ...string) {
+		t.Helper()
+		e.sendIn(boss, conv, text)
+		out := e.reply()
+		if out.Conv != conv {
+			t.Fatalf("reply to %s went to %s", conv, out.Conv)
+		}
+		want(t, out, parts...)
+	}
+	in(t1, "!use codex", "This conversation now uses codex")
+	in(t1, "one", "codex#1")
+	in(t2, "other thread", "omp#1")
+	in(channel, "the channel itself", "omp#1")
 	e.send(owner, "c2", "other chat")
 	want(t, e.reply(), "omp#1")
-	e.send(owner, "c1", "!status")
-	want(t, e.reply(), "Harness: codex (sticky")
-	e.send(owner, "c1", "!use default")
-	want(t, e.reply(), "back to the default order: omp → codex")
-	e.send(owner, "c1", "two")
-	want(t, e.reply(), "omp#1")
+	in(t1, "!status", "Harness: codex (sticky")
+	in(t2, "!status", "Harness: default order")
+	in(t1, "!use default", "This conversation is back to the default order: omp → codex")
+	in(t1, "two", "omp#1")
 }
 
 func TestMidTurnMessageSteers(t *testing.T) {
