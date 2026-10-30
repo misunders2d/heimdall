@@ -335,6 +335,14 @@ func (r *Run) early() {
 	case <-r.exited:
 		return
 	}
+	select {
+	case <-r.bridge.readyCh():
+	default:
+		// An answer before the turn was ready is no turn the router may
+		// commit to: wait settles it once the process exited, so a fallback
+		// never runs beside a live process.
+		return
+	}
 	o := r.bridge.outcome()
 	if o.atExit {
 		return // published as the process exited: wait settles it with the exit status

@@ -1050,6 +1050,8 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			// start reports the turn and never resumes the session.
 			break
 		}
+		// Not ready: the next candidate never runs beside this process.
+		<-run.Exited()
 		c.unbind(t, h, prev, clean)
 		res := run.Result()
 		if res.Cancelled {
