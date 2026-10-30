@@ -1,4 +1,9 @@
-# Hub parity: the environment of a harness turn
+# Hub parity
+
+Two parts: the environment of a harness turn (below), and the Telegram
+connector ([Telegram](#telegram)).
+
+## The environment of a harness turn
 
 Heimdall replaces the Pi hub as the interface to every harness, so tools
 written for the hub must read the same caller identity from a Heimdall turn.
@@ -14,7 +19,7 @@ OMP); `buildMcpOAuthChildEnv` (`extensions/.shared/mcp-oauth-scope.ts:83`)
 adds the MCP OAuth variables. Re-check against the current hub before relying
 on a line number.
 
-## How Heimdall sets them
+### How Heimdall sets them
 
 - **Strip, then set.** Every inherited `PI_EXTERNAL_*`, `A2A_CALLER_*`,
   `PI_RESTRICTED_*`, `BIGQUERY_CALLER_PRINCIPAL` and `PI_TRANSPORT_CHILD` is
@@ -25,7 +30,7 @@ on a line number.
   role Heimdall gave it, the conversation and the interface's one-to-one chat
   flag (`core.Inbound.Private`). Message text is never used.
 
-## Variables Heimdall sets
+### Variables Heimdall sets
 
 | Variable | Heimdall's value | Hub sets it | Read by (hub `ec72c7d`) |
 |---|---|---|---|
@@ -38,7 +43,7 @@ on a line number.
 | `PI_TRANSPORT_CHILD` | `1` on every turn | yes, `1` on every child | see below |
 | `MEMENTO_PROCESSING` | `1` on turns without memory; otherwise not set (the native setup decides) | no | Memento hooks and extensions (below) |
 
-### `PI_TRANSPORT_CHILD=1`
+#### `PI_TRANSPORT_CHILD=1`
 
 It tells hub extensions that the process is a chat turn, not the process that
 owns the chat transports. Without it, every Heimdall turn would act as the
@@ -56,7 +61,7 @@ transport owner and start duplicate schedulers, pollers and chat bridges:
 - `extensions/helium10-hub.ts:11`, `.shared/website-professional-knowledge.ts:470`:
   behaviour reserved for Slack and website children.
 
-### `PI_RESTRICTED_EXTERNAL_USER` (provisional)
+#### `PI_RESTRICTED_EXTERNAL_USER` (provisional)
 
 The hub sets `1` for callers who are not admins and its A2A check requires
 `1`, so Heimdall sets `1` for every non-root turn and every AgentNet turn,
@@ -69,7 +74,7 @@ own scope. Employees share one OS user, so their jobs are separated only by
 that scope. Revisit when Heimdall's own scheduler arrives (phase 3); the
 owner may overrule.
 
-### AgentNet (phase 2)
+#### AgentNet (phase 2)
 
 AgentNet turns set only `PI_EXTERNAL_PLATFORM=a2a`,
 `PI_RESTRICTED_EXTERNAL_USER=1`, `PI_EXTERNAL_MCP_PRIVATE=0` and
@@ -83,7 +88,7 @@ principal format is decided with the AgentNet interface; nothing in pi-pack
 `scripts/omp-a2a-agent-run.sh` checks them). Its admin list accepts only
 entries containing `@`.
 
-## Variables Heimdall does not set
+### Variables Heimdall does not set
 
 | Variable | Hub sets it for | Effect of its absence in a Heimdall turn |
 |---|---|---|
@@ -99,7 +104,7 @@ entries containing `@`.
 | `PI_SCHEDULER_RUNTIME_ENABLED=0`, `PI_GOOGLE_OAUTH_SERVER_ENABLED=0` | OMP children | covered by `PI_TRANSPORT_CHILD=1` for the same extensions. |
 | `A2A_CALLER_*`, `BIGQUERY_CALLER_PRINCIPAL` | nothing in the hub | stripped; see AgentNet above. |
 
-## Admin checks read the hub's own list
+### Admin checks read the hub's own list
 
 Heimdall's role does not make a caller a hub admin. Hub guards
 (`extensions/privileged-tool-guard.ts` `actor()` ~L135,
@@ -112,7 +117,7 @@ admin-only tools. An unset `PI_EXTERNAL_USER_ID`, or the raw value
 `local`/`system`, counts as the hub's trusted local admin; Heimdall never
 sends either.
 
-## Memento
+### Memento
 
 Memento `d944c7d`: `src/memento/bridge.py:1659` returns early for every
 operation except `install` when `MEMENTO_PROCESSING=1` (Claude, Codex and AGY
@@ -122,3 +127,105 @@ otherwise; an owner turn on Heimdall's own uid inherits Heimdall's value, so
 setting it for Heimdall itself (as live tests do) suppresses memory for every
 turn. **Not verified live**: that each harness passes its environment
 to its hook processes.
+
+## Telegram
+
+Hub source: `extensions/telegram/index.ts` at `ec72c7d` (with
+`.shared/telegram-context.ts`, `context-budget.ts`, `prompt-injection-guard.ts`,
+`telegram-memento.ts`). Heimdall: Bot API details in `internal/iface/telegram`;
+everything another interface can reuse (typing, albums, reactions, group
+context, files, control words) in `internal/router` behind optional
+interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
+`Uploader`, `OwnerNotifier`).
+
+### Ported
+
+| Hub behaviour | Heimdall |
+|---|---|
+| Private chat always handled; in a group only a mention or a reply to the bot (`isMentioned` ~L724) | Same; `!` commands and control words too. Later parts of an addressed album count. |
+| `/start` | `!help` (also `/start@bot`, deep-link payload). |
+| Typing | `sendChatAction typing` at turn start and every 4 s while it runs. |
+| Answers as legacy Markdown, plain retry on a parse error, transport note in the prompt | Same, note verbatim; Heimdall's own text is always plain. |
+| `splitTelegramText` | 3500 UTF-16 units, cut at a paragraph, line or space break that keeps at least half the part, `(i/n)` appended; only the first part replies. |
+| Reply and forward context | The replied-to message's text or caption and file, and the forward origin, marked untrusted. |
+| Attachments | Photo, document, voice, audio, video and video note, the message's own and the replied-to message's; 20 MB cap; kept in a 0700 upload directory, copied at turn start into the turn's `in/` directory owned by the turn's OS user; text files' first 12000 characters inline, untrusted. |
+| Images to the model | JPEG/PNG/GIF/WebP up to 3.75 MB, at most 10 per input, natively: Pi/OMP RPC `images`, Claude content blocks, Codex `localImage` (start and steer). AGY gets the path only. |
+| Albums (`media_group_id`, 1.5 s) | Held 1.5 s after the last part, run as one message (or one steer); the first part's `!harness`/`!next` applies to every part. |
+| Reactions (`[react: <ref> <emoji>]`) | The hub's note, its 73 emoji, its all-or-nothing parse; set after the text; the hub's failure notices. |
+| Control words | `stop`, `/stop`, `cancel`/`abort`/`nevermind`, `reset`, `/reset`, `chatid`, `/chatid`, alone in a message; stop and cancel only by the turn's caller or an owner. |
+| Group chat history as context | Newest 1000 kept per conversation, the 40 latest not in the turn shown at its start, 4000 characters each and 16000 in all (oldest trimmed, the hub's marker), secrets scrubbed, files by label, under the hub's untrusted header. |
+| Failure message | `⚠ <harness> failed: <reason>. Please retry, or send reset if this keeps happening.`, secrets scrubbed. |
+| Sending files back (`sendLocalArtifact`) | Per-turn outbox instead of tool telemetry; see "Design: outbound files" in [HANDOFF](HANDOFF.md). `sendPhoto` up to 10 MB, else `sendDocument`; at most 5 files, 50 MB each. |
+
+### Not ported, and why
+
+| Hub feature | Why not |
+|---|---|
+| Access whitelist and admin commands (`isAllowed`, whitelist/blacklist commands) | Heimdall has no allowlist (AGENTS.md roles): owners come from the config, every other verified caller is a non-root employee. Nothing to administer by chat. |
+| Google Workspace guard (`enforceGoogleWorkspaceOutputBoundary`) | Tool and output restrictions belong to each harness's native configuration; hub guard extensions still run inside a harness that loads them, reading the identity variables Heimdall sets. |
+| Admin-action guard | Same: a harness-side guard. Owner turns are never restricted by Heimdall. |
+| MCP OAuth UI | Harness-native. Heimdall sets `PI_EXTERNAL_MCP_PRIVATE=1` in private chats, so `native-mcp-auth` works as under the hub. |
+| Caption artifacts (`mellanni_drive_transcript` captions sent as `captions.txt`) | Tool-specific. A harness can leave the file in its outbox, which works for every tool and harness. |
+| Scheduled-delivery context (`PI_EXTERNAL_DEFAULT_DELIVERY`) | Phase 3 scheduler owns delivery. |
+| Unauthorized-user notices (`notifyAdminsOnce`, `notifyUnauthorizedTelegramUser`) | Every identified caller is allowed, so there is nobody to refuse; unidentified callers are ignored and logged (fail closed). Replaced by a one-time new-caller notice to the owners, without the hub's message snippet. |
+| PID lock and heartbeat | One Heimdall per systemd unit; a second poller on the same token gets Telegram's 409, which is logged and retried. A data-directory lock is a cheap later addition if two instances ever share one. |
+| `deleteWebhook` | AGENTS.md: Heimdall never calls `deleteWebhook` or `setWebhook`; a webhook shows as a logged 409. |
+| Channel posts (`channel_post`) | A channel post has no verified user, and identity is per user (fail closed). `allowed_updates` is `["message"]`. |
+| Injection-line removal (`sanitizeUntrustedText`) | Untrusted text is wrapped as the hub wraps it, and Heimdall's own frame markers in it are defanged, but lines are not removed by pattern (see recommendation 1). |
+| Prompt-injection guard, Memento Telegram intake | Not decided: see the recommendations. |
+
+### Improved over the hub
+
+- Mention match is case-insensitive and needs a username boundary
+  (`@bot_fan` does not count; the hub's `includes` matches it).
+- Each Telegram request is retried in place (429 after `retry_after`, at
+  most 60 s; 5xx and network errors with backoff, 5 tries), so a rate
+  limit never resends earlier parts; a reply is failed after 50 delivery
+  attempts.
+- Files back to the chat work on every harness and never from a path the
+  model names; ownership, link count and type are checked on the opened
+  file.
+- Stored uploads are used only from the interface's upload directory,
+  removed once their message is final, pruned hourly after 7 days.
+- An album part still downloading holds the album (up to 3 minutes)
+  instead of splitting it.
+- Group context is kept per topic, not per chat.
+- Owners are told once of each new non-root caller: name, verified key and
+  conversation, never message text.
+- A Markdown fallback is logged (metadata only), so its rate can decide
+  whether HTML is worth it.
+
+### Recommendations (not decided)
+
+1. **Prompt-injection guard** (`maybeLogDirectPromptGuard`, block at score
+   4). Recommendation: do not port the block. It scores the caller's own
+   message, and that caller is verified and gated per user already: the
+   run-as OS user, `PI_RESTRICTED_EXTERNAL_USER` and the harness's tool
+   rules are the protection. The patterns refuse ordinary requests ("ignore
+   the previous rules in this config") and are easy to evade. Third-party
+   text (group context, replies, forwards, files) is already marked
+   untrusted. If the owner wants visibility, a log-only port is cheap:
+   score and pattern names, never text.
+2. **Memento Telegram intake** (`createTelegramIntake`: every message of one
+   configured supergroup written durably to a queue before the update is
+   acknowledged, delivered by a Python worker every 15 s). Recommendation:
+   keep Memento's logic in Memento, and only if the owner wants group
+   intake add one generic, interface-agnostic hook: per configured chat,
+   each accepted or ambient message written as an untrusted event file into
+   a 0700 spool directory before acknowledgement; Memento's own worker
+   (today's `telegram-memento-delivery.py`) delivers it. It needs an owner
+   decision first: it stores non-owner Telegram text in memory, which
+   today's mode rules never do.
+
+### Further improvements, not built
+
+| Idea | Recommendation |
+|---|---|
+| Edited messages | Later, small: with `edited_message` allowed, an edit of a message still queued replaces its text; edits of messages already run are ignored. Low value. |
+| HTML formatting with escaping | Not now. Models write Markdown, so HTML needs a Markdown-to-HTML converter with escaping; the plain fallback already keeps every answer readable. Decide from the fallback log rate. |
+| `setMyCommands` (command menu) | Owner's choice, once, in BotFather: it changes the bot's public profile. Heimdall's commands are `!` words; the menu would list the `/` forms. |
+| Voice transcription, PDF text | Leave to the harness: the file is saved in the turn's directory and its path given; no new dependency or service in Heimdall. |
+| Local Bot API server (files over 20 MB) | No: an extra service. |
+| Skip the download of a duplicate update | Not worth a router hook: duplicates arrive only after a restart before the offset was confirmed, and their download is removed at once. |
+| Remember addressed albums across a restart (review finding 6) | Accepted limitation; a store row per album would fix it if it matters. |
+| Group context for steers | Leave: messages that arrive mid-turn are context for the next turn. |

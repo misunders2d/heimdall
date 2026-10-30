@@ -49,7 +49,9 @@ Every other caller the interface verified is non-root: any Telegram user who
 is not an owner, any member of the bot's own Slack workspace whose email
 Slack verifies live (not deleted, not a bot). Other Slack callers, guests
 from other workspaces included, are ignored. There is no allowlist beyond
-`owners`.
+`owners`. The first time a non-root caller writes, each owner is told so
+once in their private Telegram chat with the bot: the caller's name,
+verified ID and conversation, never the message.
 
 Owner turns run as the owner OS user (root in production) with everything
 the native harness setup allows. Employee turns always run as a separate

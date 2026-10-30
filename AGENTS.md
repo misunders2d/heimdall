@@ -65,6 +65,9 @@ Its whole job, per message:
     of the owner's Slack workspace who is not an owner. Employee turns always run
     as a separate non-privileged OS user, with all of that user's tools, and
     tell tools they are restricted (`PI_RESTRICTED_EXTERNAL_USER=1`).
+    The first time one writes, each owner the interface can reach
+    privately is told once: name, verified key and conversation, never the
+    message.
   - The employee OS account is checked by uid: never root's or the
     owner's, at startup and on every turn.
   - When Heimdall cannot switch to a turn's OS user (it is not root and the
