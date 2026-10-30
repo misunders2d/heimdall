@@ -76,12 +76,26 @@ token shows as a logged conflict. Use a separate bot for testing; two
 pollers on one token conflict.
 
 On Telegram, a private chat with the bot is always answered. In a group,
-Heimdall answers only messages that mention `@<bot username>` or reply to
-one of its messages, and ignores (never stores) everything else. With
-Telegram's privacy mode on, a group bot receives replies to it and
-`/command@bot`, but plain mentions may not reach it: make it a group admin,
-or turn privacy off in BotFather and add it to the group again. `/start`
-shows the help. Text or a caption is used; attachments are not handled yet.
+Heimdall answers only messages that mention `@<bot username>`, reply to one
+of its messages, or are later parts of an album whose first part did. It
+never answers other group messages; it keeps the recent ones (the newest
+1000, scrubbed, files by label only) and shows the newest 40, marked
+untrusted, to the group's next turns. With Telegram's privacy mode on, a
+group bot receives replies to it and `/command@bot`, but plain mentions may
+not reach it: make it a group admin, or turn privacy off in BotFather and
+add it to the group again. `/start` shows the help; `/help`, `/status`,
+`/stop`, `/cancel`, `/reset` and `/chatid` work too.
+
+The text, else the caption, is used, with the replied-to or forwarded
+message as context. Files (the message's and the replied-to message's, up
+to 20 MB) are downloaded and copied, when the turn starts, into a directory
+of that turn's own owned by its OS user; pictures also reach the harnesses
+that take images (Pi, OMP, Claude, Codex) natively. The parts of an album
+run as one message. Answers are sent as Telegram Markdown (plain text if
+Telegram cannot parse it), cut into parts of 3500 characters. A harness may
+react to a message with an emoji, and can send files back by saving them in
+its turn's outbox (`out/`, named in its prompt): Heimdall sends up to 5
+files of at most 50 MB after the answer.
 
 ## Use
 
@@ -90,12 +104,19 @@ Commands work the same on every interface:
 ```
 !help              list commands
 !status            what is running and queued in this conversation
-!stop              cancel the current turn
+!stop              stop the current turn and clear your queued messages
+!cancel            clear your queued messages; the turn keeps running
+!reset             your next message here starts fresh native sessions
+!chatid            show the conversation's and your IDs as tools see them
 !use <harness>     this conversation uses <harness> until !use default
 !use default       back to the default order
 !<harness> <msg>   only this message goes to <harness>
 !next <msg>        queue as follow-up instead of steering
 ```
+
+`stop`, `cancel` (or `abort`, `nevermind`), `reset` and `chatid` alone in a
+message work without the `!`. Only the turn's sender or the owner can stop
+a turn; the owner's `stop` and `cancel` clear everyone's queued messages.
 
 A conversation is a chat, or one thread in it: `!use` in a thread changes
 neither the other threads nor the chat itself. Each verified caller has

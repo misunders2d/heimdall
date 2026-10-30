@@ -102,16 +102,20 @@ usernames and tokens live only outside the repository.
 - **AgentNet principal format is deferred to phase 2** (TODO in
   `identity.go`). Do not invent one.
 - **Unknown callers** are ignored silently with a metadata log line.
-- **Telegram** (answers 3-6):
+- **Telegram** (answers 3-6, then the parity brief of 2026-10-30):
   - Private chat: always handled. Group/supergroup: handled only if the text
-    contains `@<bot username>` or the message replies to one of the bot's own
-    messages (copy of the hub's `isMentioned`); `!` commands follow the same
-    rule. Everything else is ignored silently and never stored (no ambient
-    context in phase 1).
-  - `/start` and `/start@<bot>` map to `!help`. Implementation choice: also
-    with a deep-link payload (`/start abc`).
-  - Text, else caption; neither: ignored with one log line. Attachments are
-    not in phase 1.
+    contains `@<bot username>`, the message replies to one of the bot's own
+    messages (the hub's `isMentioned`), or it is a later part of an album
+    whose first part, from the same sender within a minute, was handled;
+    `!` commands and control words follow the same rule.
+  - Every other group message from a person is *ambient*: never run or
+    answered, kept as context (orchestrator reversed "no ambient context").
+    Bounds in [`docs/hub-parity.md`](hub-parity.md) (Telegram).
+  - `/start` and `/start@<bot>` map to `!help` (also with a deep-link
+    payload); `/help`, `/status`, `/stop`, `/cancel`, `/reset`, `/chatid`
+    (alone or `@<bot>`) are those commands.
+  - Text, else caption, plus reply/forward context. Neither text nor a file:
+    ignored with one log line.
   - Token only from `HEIMDALL_TELEGRAM_TOKEN`; config `telegram.bot_username`
     (5-32 letters, digits, `_`; a leading `@` is dropped); `getMe` must
     report that username (case-insensitive) before any `getUpdates`, or `Run`
@@ -127,23 +131,31 @@ usernames and tokens live only outside the repository.
     update was deliberately ignored; an `accept` error stops the batch and
     re-polls from that update after 1 s. The offset is not stored: Telegram
     keeps unconfirmed updates, and the store deduplicates by (interface,
-    chat, message ID).
+    chat, message ID); a duplicate's new download is removed at once.
   - `getMe` failure at start: exit (fail fast). `getUpdates` 401/404 (token
     revoked or malformed): exit. 409: logged as "another poller or a webhook"
     and retried with backoff 1 s → 60 s. 429: wait `retry_after`. Other
     errors: backoff.
-  - `sendMessage`: plain text (no `parse_mode`), `message_thread_id` for
-    topics, `reply_parameters{message_id, allow_sending_without_reply}` on the
-    first part only; parts of at most 4096 UTF-16 units, cut at a line break
-    in the second half of a part when there is one. 429 sleeps
-    `min(retry_after, 60 s)` inside `Send`, then reports a transient failure
-    (the router's retry API takes no hint). Other 4xx: `PermanentError`. 5xx
-    and network: transient. A failure in a later part makes the retry resend
-    every part (at-least-once).
-  - Thread = `message_thread_id` only when `is_topic_message`.
+  - `sendMessage`: a harness's answer with `parse_mode` Markdown (the hub's
+    legacy dialect; the prompt carries the hub's transport note), sent again
+    as plain text on a 400; Heimdall's own text plain. `message_thread_id`
+    for topics, `reply_parameters{message_id, allow_sending_without_reply}`
+    on the first part only. Parts as the hub's `splitTelegramText`: at most
+    3500 UTF-16 units, cut at a paragraph, line or space break that keeps
+    at least half the part, `(i/n)` appended. Each request is retried in
+    place up to 5 times (429: after `retry_after`, at most 60 s; 5xx and
+    network: short backoff), so a rate limit never resends earlier parts.
+    Then: other 4xx `PermanentError`; else transient, and the router's retry
+    resends every part (at-least-once). The router fails a reply after 50
+    delivery attempts (about 3.6 h).
+  - Thread = `message_thread_id` only when `is_topic_message`; a reply to a
+    forum topic's root message is not a reply.
   - Skipped: no `from`, `from.is_bot`, `sender_chat`,
     `is_automatic_forward`, channel chats, `allowed_updates` is `["message"]`
     only (no channel posts, no edits).
+  - Accepted limitation (review finding 6): which group albums addressed
+    the bot is kept in memory only. After a restart, the not yet received
+    parts of such an album arrive unaddressed and become ambient context.
 - Not decided yet, do not act: whether Heimdall keeps its own adapters or
   hands turns to T3 (the orchestrator raises this when phase 1 closes);
   claude.ai connectors for the employee user are not phase 1.

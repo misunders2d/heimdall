@@ -102,7 +102,10 @@ Its whole job, per message:
   per-turn directory owned by the turn's OS user; pictures also go natively
   to harnesses that take images. Album parts are held 1.5 s and run as one
   message. Answers go as Telegram Markdown with a plain retry; a harness may
-  end one with `[react: <ref> <emoji>]` lines to react. Before polling,
+  end one with `[react: <ref> <emoji>]` lines to react. A harness sends
+  files by leaving them in its turn's `out/` directory; Heimdall checks and
+  copies them itself (never a path the model names) and sends them after
+  the answer. Before polling,
   `getMe` must report the configured `telegram.bot_username`; Heimdall never
   calls `deleteWebhook` or `setWebhook`. The token comes only from
   `HEIMDALL_TELEGRAM_TOKEN` and never appears in errors or logs.
@@ -123,9 +126,13 @@ Its whole job, per message:
   between a successful platform send and its local acknowledgement can repeat
   that one message. Say so; never claim exactly-once.
 - **Commands** use the `!` prefix on every interface (Slack forbids `/` in
-  threads): `!help`, `!status`, `!stop`, `!use <harness>` (sticky per
-  conversation: chat + thread), `!use default`, `!<harness> <msg>` (that
-  message only), `!next <msg>`.
+  threads): `!help`, `!status`, `!stop`, `!cancel`, `!reset`, `!chatid`,
+  `!use <harness>` (sticky per conversation: chat + thread), `!use default`,
+  `!<harness> <msg>` (that message only), `!next <msg>`. The hub's control
+  words work alone in a message without the `!`: `stop`, `cancel`
+  (`abort`, `nevermind`), `reset`, `chatid`; `stop` and `cancel` follow
+  the `!stop` rule (the turn's caller or an owner). `reset` forgets only
+  the caller's own sessions in that conversation.
   Unknown `!word` commands are answered with help, never sent to a harness.
 
 ## Harness adapters
