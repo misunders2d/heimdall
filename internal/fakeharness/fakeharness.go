@@ -12,7 +12,9 @@
 //	SLEEP          stay busy for 30 seconds
 //	ASK_HUMAN      request native approval/input
 //
-// The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" last="LAST LINE".
+// The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" last="LAST LINE" ext="IDENTITY"
+// where IDENTITY lists the PI_EXTERNAL_*, A2A_CALLER_* and PI_RESTRICTED_*
+// variables the process received, sorted.
 package fakeharness
 
 import (
@@ -23,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -117,7 +120,14 @@ func (f *fake) failPost() {
 
 func (f *fake) answer() string {
 	lines := strings.Split(strings.TrimSpace(f.prompt), "\n")
-	return fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s head=%q last=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[0], lines[len(lines)-1])
+	var ext []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "PI_EXTERNAL_") || strings.HasPrefix(kv, "A2A_CALLER_") || strings.HasPrefix(kv, "PI_RESTRICTED_") {
+			ext = append(ext, kv)
+		}
+	}
+	sort.Strings(ext)
+	return fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s head=%q last=%q ext=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[0], lines[len(lines)-1], strings.Join(ext, " "))
 }
 
 // session advances the turn counter stored at path; create says whether

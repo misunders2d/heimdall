@@ -260,7 +260,8 @@ type conv struct {
 type turn struct {
 	id         int64
 	role       core.Role
-	who        string // verified caller: the turn runs in their own session
+	from       core.Principal // verified caller, passed to the harness process
+	who        string         // from.Key(): the turn runs in the caller's own session
 	candidates []string
 	explicit   bool
 	replyTo    string
@@ -495,7 +496,7 @@ func (c *conv) start(ctx context.Context) {
 		return
 	}
 	c.queue = c.queue[n:]
-	t := &turn{id: id, role: first.role, who: who, replyTo: first.row.MsgID, started: time.Now()}
+	t := &turn{id: id, role: first.role, from: first.row.From, who: who, replyTo: first.row.MsgID, started: time.Now()}
 	switch sticky, _ := c.r.store.ChatHarness(c.key); {
 	case first.harness != "":
 		t.candidates, t.explicit = []string{first.harness}, true
@@ -555,7 +556,8 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 				notes = append(notes, "new "+h+" session: the previous turn there did not finish cleanly")
 			}
 		}
-		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Session: sess, Launch: launch})
+		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key}
+		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Session: sess, Launch: launch, Caller: caller})
 		if err != nil {
 			notes = append(notes, err.Error())
 			continue
@@ -695,9 +697,10 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	<-c.r.sem
 }
 
-// frame carries the verified identity with every message handed to a
-// harness. Authority is enforced by the OS user the turn runs as, not by
-// this text.
+// frame shows the verified identity with every message handed to a
+// harness. Tools read the caller from the process environment
+// (harness.WithIdentity) and the OS user the turn runs as, never from this
+// text.
 func frame(it item) string {
 	name := sanitizeName(it.row.From.Name)
 	if name == "" {

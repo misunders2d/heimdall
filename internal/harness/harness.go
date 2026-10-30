@@ -111,6 +111,7 @@ type Spec struct {
 	Prompt  string
 	Session Session
 	Launch  Launch
+	Caller  Caller // required: the process carries the caller's identity
 }
 
 // Result is how a turn ended. Exactly one of Answer, Failure, NeedsHuman is
@@ -193,9 +194,13 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	env, err := WithIdentity(spec.Launch.Env, spec.Caller)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", spec.Harness, err)
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(runCtx, spec.Launch.Path, append(slices.Clone(d.args), extra...)...)
-	cmd.Dir, cmd.Env = spec.Launch.Dir, spec.Launch.Env
+	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
 	r := &Run{harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{})}

@@ -1,0 +1,112 @@
+package harness
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/misunders2d/heimdall/internal/core"
+)
+
+// Caller is who a turn runs for: the interface-verified principal, the role
+// it was given and the conversation the turn belongs to.
+type Caller struct {
+	Principal core.Principal
+	Role      core.Role
+	Conv      core.ConvKey
+}
+
+// identityPrefixes name variables that claim who the caller is. Inherited
+// ones are dropped from every harness environment before the turn's own are
+// set, so neither Heimdall's environment nor anything a sender wrote can
+// supply them. BIGQUERY_CALLER_PRINCIPAL is an older caller claim that a hub
+// tool still reads.
+var identityPrefixes = []string{"PI_EXTERNAL_", "A2A_CALLER_", "PI_RESTRICTED_", "BIGQUERY_CALLER_PRINCIPAL="}
+
+// identityVars maps a caller to the Pi hub's identity variables, in the
+// hub's names and formats (misunderstood-pi-pack ec72c7d,
+// extensions/.shared/external-pi-runner.ts and external-omp-runner.ts;
+// access-control.ts canonUser/canonChat), so tools that gate on the hub's
+// identity read the same values. This is the only place the mapping lives;
+// docs/hub-parity.md lists every hub variable and its readers.
+//
+// The variables tell tools who is calling. Heimdall adds no tool flags:
+// PI_RESTRICTED_EXTERNAL_USER is 1 for employees and every AgentNet caller,
+// as the hub sets it for callers who are not admins, and 0 for the owner.
+func identityVars(c Caller) ([]string, error) {
+	p := c.Principal
+	if p.Platform == "" || p.ID == "" || c.Conv.Chat == "" {
+		return nil, errors.New("turn without a verified caller and chat")
+	}
+	restricted := "1"
+	if c.Role == core.RoleOwner {
+		restricted = "0"
+	}
+	var platform, user, chat, email string
+	switch p.Platform {
+	case "telegram":
+		platform, user, chat = "telegram", "tg_user_"+p.ID, "tg_chat_"+c.Conv.Chat
+	case "slack":
+		// Slack principals are TEAM/USER; the hub's ID is the user part, or
+		// the verified email when Slack supplied one.
+		uid := p.ID
+		if _, u, ok := strings.Cut(p.ID, "/"); ok {
+			uid = u
+		}
+		platform, user, chat = "slack", "sl_user_"+uid, "sl_channel_"+c.Conv.Chat
+		if e := strings.ToLower(strings.TrimSpace(p.Email)); e != "" {
+			user, email = e, e
+		}
+	case "agentnet":
+		// TODO(phase 2, AgentNet interface): set PI_EXTERNAL_USER_ID,
+		// PI_EXTERNAL_CHAT_ID, A2A_CALLER_PRINCIPAL, A2A_CALLER_SOURCE=a2a_signed
+		// and A2A_CALLER_KEY_ID (p.KeyID) once the AgentNet principal format
+		// is settled. Until then hub tools see an unverified A2A caller and
+		// fail closed (a2a-external-identity.ts).
+		return []string{"PI_EXTERNAL_PLATFORM=a2a", "PI_RESTRICTED_EXTERNAL_USER=1"}, nil
+	default:
+		// No hub equivalent (local test interface). Never a bare "local" or
+		// "system": hub guards trust those as the hub's own admin.
+		platform, user, chat = p.Platform, p.Platform+"_user_"+p.ID, p.Platform+"_chat_"+c.Conv.Chat
+	}
+	vars := []string{
+		"PI_EXTERNAL_PLATFORM=" + platform,
+		"PI_EXTERNAL_USER_ID=" + user,
+		"PI_EXTERNAL_CHAT_ID=" + chat,
+		"PI_RESTRICTED_EXTERNAL_USER=" + restricted,
+	}
+	if email != "" {
+		vars = append(vars, "PI_EXTERNAL_USER_EMAIL="+email)
+	}
+	for _, kv := range vars {
+		if strings.ContainsFunc(kv, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return nil, fmt.Errorf("caller identity %s contains a control character", strings.SplitN(kv, "=", 2)[0])
+		}
+	}
+	return vars, nil
+}
+
+// WithIdentity returns env without inherited identity variables and with
+// the caller's own.
+func WithIdentity(env []string, c Caller) ([]string, error) {
+	vars, err := identityVars(c)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(env)+len(vars))
+	for _, kv := range env {
+		if !hasIdentityPrefix(kv) {
+			out = append(out, kv)
+		}
+	}
+	return append(out, vars...), nil
+}
+
+func hasIdentityPrefix(kv string) bool {
+	for _, p := range identityPrefixes {
+		if strings.HasPrefix(kv, p) {
+			return true
+		}
+	}
+	return false
+}

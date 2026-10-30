@@ -40,7 +40,7 @@ func turn(t *testing.T, l harness.Launch, name, prompt string, s harness.Session
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: prompt, Session: s, Launch: l})
+	r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: prompt, Session: s, Launch: l, Caller: caller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +48,8 @@ func turn(t *testing.T, l harness.Launch, name, prompt string, s harness.Session
 }
 
 var all = []string{"pi", "omp", "claude", "codex", "agy"}
+
+var caller = harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Role: core.RoleEmployee, Conv: core.ConvKey{Interface: "telegram", Chat: "-100"}}
 
 func TestSessionsCreateThenResume(t *testing.T) {
 	bin, _ := fakeharness.Install(t, all...)
@@ -73,7 +75,7 @@ func TestSteerAcceptedOnNativeAcknowledgement(t *testing.T) {
 			l := launch(t, bin, name, true)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "work WAIT_STEER", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l})
+			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "work WAIT_STEER", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: caller})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +100,7 @@ func TestSteerAcceptedOnNativeAcknowledgement(t *testing.T) {
 func TestAgyHasNoSteering(t *testing.T) {
 	bin, _ := fakeharness.Install(t, "agy")
 	l := launch(t, bin, "agy", true)
-	r, err := harness.Start(context.Background(), harness.Spec{Harness: "agy", Prompt: "hi", Launch: l})
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "agy", Prompt: "hi", Launch: l, Caller: caller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +149,7 @@ func TestNativeApprovalRequestNeedsHuman(t *testing.T) {
 func TestCancelStopsTheTurn(t *testing.T) {
 	bin, _ := fakeharness.Install(t, "pi")
 	l := launch(t, bin, "pi", true)
-	r, err := harness.Start(context.Background(), harness.Spec{Harness: "pi", Prompt: "SLEEP", Session: harness.Session{ID: harness.NewSessionID("pi")}, Launch: l})
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "pi", Prompt: "SLEEP", Session: harness.Session{ID: harness.NewSessionID("pi")}, Launch: l, Caller: caller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,5 +202,80 @@ func TestPrepareDoesNotUseHeimdallPATH(t *testing.T) {
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	if _, err := harness.Prepare(core.RunAs{User: self(t), Path: t.TempDir()}, true, "pi"); err == nil {
 		t.Fatal("found pi on Heimdall's PATH instead of the run-as PATH")
+	}
+}
+
+func TestIdentityMapsToHubVariables(t *testing.T) {
+	conv := core.ConvKey{Interface: "x", Chat: "C9", Thread: "t"}
+	for _, tc := range []struct {
+		name string
+		c    harness.Caller
+		want []string
+	}{
+		{"telegram owner", harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "42", Name: "PI_EXTERNAL_USER_ID=tg_user_1"}, Role: core.RoleOwner, Conv: conv},
+			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_C9", "PI_RESTRICTED_EXTERNAL_USER=0"}},
+		{"telegram employee", harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "43"}, Role: core.RoleEmployee, Conv: conv},
+			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_43", "PI_EXTERNAL_CHAT_ID=tg_chat_C9", "PI_RESTRICTED_EXTERNAL_USER=1"}},
+		{"slack verified email", harness.Caller{Principal: core.Principal{Platform: "slack", ID: "T1/U2", Email: " User@Example.com"}, Role: core.RoleEmployee, Conv: conv},
+			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=user@example.com", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_USER_EMAIL=user@example.com"}},
+		{"slack without email", harness.Caller{Principal: core.Principal{Platform: "slack", ID: "T1/U2"}, Role: core.RoleOwner, Conv: conv},
+			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=sl_user_U2", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=0"}},
+		{"agentnet owner is still restricted", harness.Caller{Principal: core.Principal{Platform: "agentnet", ID: "a", KeyID: "k"}, Role: core.RoleOwner, Conv: conv},
+			[]string{"PI_EXTERNAL_PLATFORM=a2a", "PI_RESTRICTED_EXTERNAL_USER=1"}},
+		{"local never looks like the hub's own admin", harness.Caller{Principal: core.Principal{Platform: "local", ID: "local"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "local", Chat: "system"}},
+			[]string{"PI_EXTERNAL_PLATFORM=local", "PI_EXTERNAL_USER_ID=local_user_local", "PI_EXTERNAL_CHAT_ID=local_chat_system", "PI_RESTRICTED_EXTERNAL_USER=0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := harness.WithIdentity(nil, tc.c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+				t.Fatalf("got %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIdentityReplacesInheritedClaims(t *testing.T) {
+	inherited := []string{"PATH=/bin", "PI_EXTERNAL_USER_ID=tg_user_1", "PI_EXTERNAL_TENANT_ID=x", "A2A_CALLER_PRINCIPAL=boss", "PI_RESTRICTED_EXTERNAL_USER=0", "BIGQUERY_CALLER_PRINCIPAL=boss", "PI_TRANSPORT_CHILD=1"}
+	got, err := harness.WithIdentity(inherited, caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"PATH=/bin", "PI_TRANSPORT_CHILD=1", "PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_-100", "PI_RESTRICTED_EXTERNAL_USER=1"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestIdentityRequiredAndClean(t *testing.T) {
+	for _, c := range []harness.Caller{
+		{},
+		{Principal: core.Principal{Platform: "telegram", ID: "1"}, Role: core.RoleOwner},
+		{Principal: core.Principal{Platform: "telegram", ID: "1\nPI_RESTRICTED_EXTERNAL_USER=0"}, Role: core.RoleEmployee, Conv: core.ConvKey{Interface: "telegram", Chat: "1"}},
+	} {
+		if _, err := harness.WithIdentity(nil, c); err == nil {
+			t.Fatalf("caller %+v accepted", c)
+		}
+	}
+	bin, _ := fakeharness.Install(t, "pi")
+	if _, err := harness.Start(context.Background(), harness.Spec{Harness: "pi", Prompt: "x", Session: harness.Session{ID: harness.NewSessionID("pi")}, Launch: launch(t, bin, "pi", true)}); err == nil {
+		t.Fatal("a turn started without a caller")
+	}
+}
+
+func TestHarnessProcessSeesCallerIdentity(t *testing.T) {
+	bin, _ := fakeharness.Install(t, all...)
+	t.Setenv("PI_EXTERNAL_USER_ID", "tg_user_1")
+	t.Setenv("A2A_CALLER_PRINCIPAL", "boss")
+	for _, name := range all {
+		t.Run(name, func(t *testing.T) {
+			res := turn(t, launch(t, bin, name, true), name, "x", harness.Session{ID: harness.NewSessionID(name)})
+			want := `ext="PI_EXTERNAL_CHAT_ID=tg_chat_-100 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=1"`
+			if !strings.Contains(res.Answer, want) {
+				t.Fatalf("answer %q lacks %s", res.Answer, want)
+			}
+		})
 	}
 }
