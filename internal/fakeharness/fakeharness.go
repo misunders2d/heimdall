@@ -26,7 +26,8 @@
 //	               completes the turn
 //	LINGER=SECONDS keep running that long after the final answer, with
 //	               STATE/lingering present; a fake started meanwhile
-//	               creates STATE/overlap
+//	               creates STATE/overlap. SIGTERM then creates
+//	               STATE/terminated and exits, unless NOTERM ignores it
 //
 // The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" frame="FIRST HEIMDALL FRAME LINE" last="LAST LINE" ext="IDENTITY" home="HOME"
 // where IDENTITY lists the PI_EXTERNAL_*, A2A_CALLER_*, PI_RESTRICTED_* and
@@ -41,11 +42,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -189,7 +192,17 @@ func (f *fake) linger() {
 		return
 	}
 	n, _ := strconv.Atoi(strings.Fields(rest + " ")[0])
-	time.Sleep(time.Duration(n) * time.Second)
+	term := make(chan os.Signal, 1)
+	if f.has("NOTERM") {
+		signal.Ignore(syscall.SIGTERM)
+	} else {
+		signal.Notify(term, syscall.SIGTERM)
+	}
+	select {
+	case <-time.After(time.Duration(n) * time.Second):
+	case <-term:
+		_ = os.WriteFile(filepath.Join(f.state, "terminated"), nil, 0o600)
+	}
 	_ = os.Remove(filepath.Join(f.state, "lingering"))
 }
 

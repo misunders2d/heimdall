@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -278,24 +279,90 @@ func TestAnswerIsFinalBeforeTheProcessExits(t *testing.T) {
 	}
 }
 
-// A process still running ExitGrace after its answer is stopped.
-func TestLingeringProcessIsStoppedAfterGrace(t *testing.T) {
-	old := harness.ExitGrace
-	harness.ExitGrace = 300 * time.Millisecond
-	t.Cleanup(func() { harness.ExitGrace = old })
-	bin, _ := fakeharness.Install(t, "omp")
+// lingers starts an omp turn whose process keeps running after its answer
+// (LINGER=30 plus words), logging what Heimdall logs about it.
+func lingers(t *testing.T, words string) (*harness.Run, string, *logLines) {
+	t.Helper()
+	bin, state := fakeharness.Install(t, "omp")
 	l := launch(t, bin, "omp", true)
-	r, err := harness.Start(context.Background(), harness.Spec{Harness: "omp", Prompt: "hello LINGER=30", Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: l, Caller: caller})
+	logs := &logLines{}
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "omp", Prompt: "hello LINGER=30 " + words, Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: l, Caller: caller, Log: logs.add})
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-r.Exited():
-	case <-time.After(10 * time.Second):
-		t.Fatal("process kept running past the grace")
-	}
+	t.Cleanup(r.Cancel)
 	if res := r.Result(); !strings.HasPrefix(res.Answer, "omp#1 ") || res.Failure != "" {
 		t.Fatalf("result %+v", res)
+	}
+	return r, state, logs
+}
+
+type logLines struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logLines) add(s string) { l.mu.Lock(); l.lines = append(l.lines, s); l.mu.Unlock() }
+
+func (l *logLines) all() []string { l.mu.Lock(); defer l.mu.Unlock(); return slices.Clone(l.lines) }
+
+func exitsWithin(t *testing.T, r *harness.Run, d time.Duration) {
+	t.Helper()
+	select {
+	case <-r.Exited():
+	case <-time.After(d):
+		t.Fatalf("process still running after %s", d)
+	}
+}
+
+func setGrace(t *testing.T, exit, term time.Duration) {
+	oldExit, oldTerm := harness.ExitGrace, harness.TermGrace
+	harness.ExitGrace, harness.TermGrace = exit, term
+	t.Cleanup(func() { harness.ExitGrace, harness.TermGrace = oldExit, oldTerm })
+}
+
+// A process still running ExitGrace after its answer gets SIGTERM, so it
+// can finish its shutdown, and the stop is logged (metadata only). Before,
+// it was SIGKILLed at once, silently.
+func TestLingeringProcessGetsSIGTERMAfterGrace(t *testing.T) {
+	setGrace(t, 300*time.Millisecond, 10*time.Second)
+	r, state, logs := lingers(t, "")
+	exitsWithin(t, r, 5*time.Second)
+	if _, err := os.Stat(state + "/terminated"); err != nil {
+		t.Fatal("the process did not get SIGTERM")
+	}
+	if got := logs.all(); len(got) != 1 || got[0] != "omp process still running 300ms after its answer: SIGTERM to its process group" {
+		t.Fatalf("log %q", got)
+	}
+}
+
+// A process that ignores SIGTERM is killed TermGrace later.
+func TestLingeringProcessIgnoringSIGTERMIsKilled(t *testing.T) {
+	setGrace(t, 300*time.Millisecond, 300*time.Millisecond)
+	r, state, logs := lingers(t, "NOTERM")
+	exitsWithin(t, r, 5*time.Second)
+	if _, err := os.Stat(state + "/terminated"); err == nil {
+		t.Fatal("NOTERM fake handled SIGTERM")
+	}
+	if got := logs.all(); len(got) != 2 || !strings.HasSuffix(got[1], "still running 300ms after SIGTERM: SIGKILL") {
+		t.Fatalf("log %q", got)
+	}
+	if res := r.Result(); !strings.HasPrefix(res.Answer, "omp#1 ") || res.Failure != "" {
+		t.Fatalf("the kill changed the answer: %+v", res)
+	}
+}
+
+// Stop ends the wait at once (the router's !stop after an answer).
+func TestStopEndsTheExitGraceNow(t *testing.T) {
+	setGrace(t, 30*time.Second, 10*time.Second)
+	r, state, logs := lingers(t, "")
+	r.Stop("after its answer, stopped by stop")
+	exitsWithin(t, r, 3*time.Second)
+	if _, err := os.Stat(state + "/terminated"); err != nil {
+		t.Fatal("Stop did not send SIGTERM")
+	}
+	if got := logs.all(); len(got) != 1 || !strings.Contains(got[0], "stopped by stop: SIGTERM") {
+		t.Fatalf("log %q", got)
 	}
 }
 

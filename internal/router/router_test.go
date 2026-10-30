@@ -137,12 +137,27 @@ type env struct {
 	seq     atomic.Int64 // message IDs stay unique across restarts
 	uploads string       // the fake interface's upload directory
 	guard   string       // the prompt-injection log
+	logs    *syncBuffer  // the router's log
 }
+
+// syncBuffer is a log destination tests can read while the router writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
 func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *env {
 	t.Helper()
 	bin, state := fakeharness.Install(t, installed...)
-	e := &env{t: t, bin: bin, state: state, dbPath: filepath.Join(t.TempDir(), "h.db"), uploads: t.TempDir(), guard: filepath.Join(t.TempDir(), "prompt-guard.log")}
+	e := &env{t: t, bin: bin, state: state, dbPath: filepath.Join(t.TempDir(), "h.db"), uploads: t.TempDir(), guard: filepath.Join(t.TempDir(), "prompt-guard.log"), logs: &syncBuffer{}}
 	u, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +171,7 @@ func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *e
 		Order:       order,
 		MaxParallel: 4,
 		Accounts:    accounts,
-		Log:         log.New(io.Discard, "", 0),
+		Log:         log.New(e.logs, "", 0),
 		OutboxDir:   filepath.Join(t.TempDir(), "outbox"),
 		GuardLog:    e.guard,
 	}
@@ -1616,4 +1631,74 @@ func TestReplyKeepsEveryAnswerClaudeCodex(t *testing.T) {
 			}
 		})
 	}
+}
+
+func setGrace(t *testing.T, exit, term time.Duration) {
+	oldExit, oldTerm := harness.ExitGrace, harness.TermGrace
+	harness.ExitGrace, harness.TermGrace = exit, term
+	t.Cleanup(func() { harness.ExitGrace, harness.TermGrace = oldExit, oldTerm })
+}
+
+// A stop after the answer, while the harness process is still shutting
+// down, stops that process now (SIGTERM) instead of after ExitGrace, so
+// the next turn need not wait; queued messages are cleared as by any stop.
+// Before, stop said nothing was running and the next turn waited.
+func TestStopEndsTheExitWaitAtOnce(t *testing.T) {
+	setGrace(t, 30*time.Second, 10*time.Second)
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "hello LINGER=30")
+	want(t, e.reply(), "omp#1")
+	e.send(owner, "c1", "!status")
+	want(t, e.reply(), "Running: nothing", "Exiting: the last turn's omp process (answered)")
+	e.send(employee, "c1", "!stop")
+	want(t, e.reply(), "Nothing is running in this conversation.")
+	e.send(owner, "c1", "queued meanwhile")
+	e.send(owner, "c1", "!stop")
+	want(t, e.reply(), "The last turn has answered; stopping its harness process, which was still running. Cleared 1 queued message(s).")
+	start := time.Now()
+	e.send(owner, "c1", "next")
+	want(t, e.reply(), "omp#2 resumed=true", `last="next"`)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("the next turn waited %s", d)
+	}
+	if _, err := os.Stat(filepath.Join(e.state, "terminated")); err != nil {
+		t.Fatal("the lingering process was not sent SIGTERM")
+	}
+	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
+		t.Fatal("the next turn started while the last turn's process still ran")
+	}
+	if !regexp.MustCompile(`turn 1 in fake/c1: omp process still running after its answer, stopped by stop: SIGTERM to its process group`).MatchString(e.logs.String()) {
+		t.Fatalf("stop not logged:\n%s", e.logs.String())
+	}
+}
+
+// max_parallel counts live harness processes: a turn's slot is free only
+// once its process exited, not at its answer (review of 5b3c62f, finding 4).
+func TestMaxParallelCountsLingeringProcesses(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.opt.MaxParallel = 1
+	e.start()
+	e.send(owner, "c1", "hello LINGER=2")
+	want(t, e.reply(), "omp#1")
+	if _, err := os.Stat(filepath.Join(e.state, "lingering")); err != nil {
+		t.Fatal("the process did not linger")
+	}
+	e.send(owner, "c2", "other chat")
+	want(t, e.reply(), "omp#1", `last="other chat"`)
+	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
+		t.Fatal("a second harness process ran with max_parallel 1")
+	}
+}
+
+// The ExitGrace stop is logged with the turn (finding 6).
+func TestExitGraceStopIsLogged(t *testing.T) {
+	setGrace(t, 300*time.Millisecond, 10*time.Second)
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "hello LINGER=30")
+	want(t, e.reply(), "omp#1")
+	eventuallyTrue(t, "the stop logged", func() bool {
+		return strings.Contains(e.logs.String(), "turn 1 in fake/c1: omp process still running 300ms after its answer: SIGTERM to its process group")
+	})
 }

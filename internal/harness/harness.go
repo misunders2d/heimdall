@@ -47,8 +47,12 @@ const (
 
 // ExitGrace bounds how long a harness process may keep running after its
 // answer (its own shutdown work: OMP took 6-28 s on the development
-// machine); then its process group is stopped. A variable for tests.
-var ExitGrace = 60 * time.Second
+// machine); then its process group gets SIGTERM, and SIGKILL TermGrace
+// later if it is still running. Variables for tests.
+var (
+	ExitGrace = 60 * time.Second
+	TermGrace = 5 * time.Second
+)
 
 type sessionStyle int
 
@@ -119,6 +123,9 @@ type Spec struct {
 	Session Session
 	Launch  Launch
 	Caller  Caller // required: the process carries the caller's identity
+	// Log, if set, gets one metadata line (never native output) when the
+	// process is stopped after its answer.
+	Log func(string)
 }
 
 // Image is a picture passed to the harness natively, as the hub passes
@@ -166,8 +173,11 @@ type Run struct {
 	done    chan struct{} // Result is final
 	exited  chan struct{} // the process has exited
 	grace   time.Duration // ExitGrace when started
+	term    time.Duration // TermGrace when started
 	settle  sync.Once
 	result  Result
+	log     func(string)
+	stop    sync.Once
 }
 
 type outcome struct {
@@ -240,7 +250,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
-	r := &Run{harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace}
+	r := &Run{harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
 	r.stderr.max = 4 << 10
 	cmd.Stderr = &r.stderr
 	expected := ""
@@ -316,7 +326,7 @@ func (r *Run) wait() {
 // hub resolves a turn at agent_end: the process may take a while to exit
 // after its answer, and nothing it does then changes the outcome (wait
 // already ranks an observed native outcome above the exit status). The
-// process gets ExitGrace to exit by itself.
+// process gets ExitGrace to exit by itself, then is stopped.
 func (r *Run) early() {
 	select {
 	case <-r.bridge.answeredCh():
@@ -328,9 +338,44 @@ func (r *Run) early() {
 		return // published as the process exited: wait settles it with the exit status
 	}
 	r.finalize(Result{Answer: o.answer, SessionID: o.session, Ready: true, Warning: o.warning, Unclean: o.unclean})
-	t := time.AfterFunc(r.grace, r.cancel)
-	<-r.exited
-	t.Stop()
+	t := time.NewTimer(r.grace)
+	defer t.Stop()
+	select {
+	case <-r.exited:
+	case <-t.C:
+		r.Stop(fmt.Sprintf("%s after its answer", r.grace))
+	}
+}
+
+// Stop ends a turn that has answered: SIGTERM to its process group now, and
+// SIGKILL TermGrace later if it is still running. why is logged ("60s after
+// its answer"). Before the answer, use Cancel.
+func (r *Run) Stop(why string) {
+	r.stop.Do(func() { go r.terminate(why) })
+}
+
+func (r *Run) terminate(why string) {
+	select {
+	case <-r.exited:
+		return
+	default:
+	}
+	r.logf("%s process still running %s: SIGTERM to its process group", r.harness, why)
+	termGroup(r.cmd)
+	t := time.NewTimer(r.term)
+	defer t.Stop()
+	select {
+	case <-r.exited:
+	case <-t.C:
+		r.logf("%s process still running %s after SIGTERM: SIGKILL", r.harness, r.term)
+		r.cancel()
+	}
+}
+
+func (r *Run) logf(format string, args ...any) {
+	if r.log != nil {
+		r.log(fmt.Sprintf(format, args...))
+	}
 }
 
 func (r *Run) finalize(res Result) {

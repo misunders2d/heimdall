@@ -16,6 +16,13 @@ func setProcAttr(cmd *exec.Cmd, cred *syscall.Credential) {
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 }
 
+// termGroup asks cmd's process group to exit.
+func termGroup(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	}
+}
+
 // stopGroup kills what is left of cmd's process group once cmd has exited.
 func stopGroup(cmd *exec.Cmd) {
 	if cmd.Process != nil {

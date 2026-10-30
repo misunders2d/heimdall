@@ -348,9 +348,11 @@ type conv struct {
 
 	queue   []item
 	turn    *turn
-	waiting bool // a goroutine is waiting for a parallelism slot
+	waiting bool // a goroutine is waiting for the last process to exit, then for a parallelism slot
 	albums  map[string]*album
 	exited  <-chan struct{} // the last turn's harness process has exited
+	last    *harness.Run    // the last turn's harness run, which may still be exiting after its answer
+	lastWho string          // its caller
 }
 
 // album is a caller's parts of one grouped message, held until none has
@@ -397,7 +399,6 @@ type turn struct {
 	dir      *harness.TurnDir  // the turn's directory, once created (t.mu)
 	refs     map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
 	batch    []item            // the messages the turn started with
-	after    <-chan struct{}   // the previous turn's harness process has exited
 }
 
 type readyEvent struct {
@@ -491,7 +492,18 @@ func (c *conv) loop(ctx context.Context) {
 		}
 		if c.turn == nil && len(c.queue) > 0 && !c.waiting {
 			c.waiting = true
+			// A turn ends at the harness's answer, and its process may still
+			// be shutting down: the next turn takes a slot only once it
+			// exited, so two processes never share a native session.
+			exited := c.exited
 			go func() {
+				if exited != nil {
+					select {
+					case <-exited:
+					case <-ctx.Done():
+						return
+					}
+				}
 				select {
 				case c.r.sem <- struct{}{}:
 					select {
@@ -648,10 +660,14 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 func (c *conv) stop(role core.Role, who string) string {
 	t := c.turn
 	if t == nil || t.done != nil {
-		if n := c.cancelQueued(role, who, "cancelled by stop"); n > 0 {
-			return fmt.Sprintf("Nothing is running in this conversation. Cleared %d queued message(s).", n)
+		text := "Nothing is running in this conversation."
+		if c.stopExiting(role, who) {
+			text = "The last turn has answered; stopping its harness process, which was still running."
 		}
-		return "Nothing is running in this conversation."
+		if n := c.cancelQueued(role, who, "cancelled by stop"); n > 0 {
+			return fmt.Sprintf("%s Cleared %d queued message(s).", text, n)
+		}
+		return text
 	}
 	if role != core.RoleOwner && who != t.who {
 		return "Only the person who started this turn, or the owner, can stop it."
@@ -662,6 +678,39 @@ func (c *conv) stop(role core.Role, who string) string {
 		return fmt.Sprintf("Stopping the current turn. Cleared %d queued message(s).", n)
 	}
 	return "Stopping the current turn."
+}
+
+// exiting is the harness run of a turn that answered and whose process is
+// still running, and its caller.
+func (c *conv) exiting() (*harness.Run, string) {
+	run, who := c.last, c.lastWho
+	if t := c.turn; t != nil && t.done != nil {
+		// Answered; ended once its last steer's outcome is in.
+		t.mu.Lock()
+		run, who = t.run, t.who
+		t.mu.Unlock()
+	}
+	if run == nil {
+		return nil, ""
+	}
+	select {
+	case <-run.Exited():
+		return nil, ""
+	default:
+		return run, who
+	}
+}
+
+// stopExiting stops, now rather than after ExitGrace, the process of a turn
+// that already answered, if the caller may stop that turn (its sender or
+// the owner).
+func (c *conv) stopExiting(role core.Role, who string) bool {
+	run, owner := c.exiting()
+	if run == nil || role != core.RoleOwner && who != owner {
+		return false
+	}
+	run.Stop("after its answer, stopped by stop")
+	return true
 }
 
 func (c *conv) cancelTurn(t *turn) {
@@ -780,6 +829,9 @@ func (c *conv) status() string {
 	} else {
 		b.WriteString("Running: nothing\n")
 	}
+	if run, _ := c.exiting(); run != nil {
+		fmt.Fprintf(&b, "Exiting: the last turn's %s process (answered)\n", run.Harness())
+	}
 	held := 0
 	for _, a := range c.albums {
 		held += len(a.rows)
@@ -820,7 +872,7 @@ func (c *conv) start(ctx context.Context) {
 		return
 	}
 	c.queue = c.queue[n:]
-	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, after: c.exited}
+	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch}
 	switch sticky, _ := c.r.store.ChatHarness(c.key); {
 	case first.harness != "":
 		t.candidates, t.explicit = []string{first.harness}, true
@@ -912,15 +964,6 @@ func (c *conv) send(ctx context.Context, ev any) {
 // turn is ready did nothing, so the next one may take over; once a harness
 // is ready the turn is committed to it.
 func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
-	if t.after != nil {
-		// A turn ends at the harness's answer, and its process may still be
-		// shutting down (at most harness.ExitGrace): two processes never
-		// share a native session.
-		select {
-		case <-t.after:
-		case <-ctx.Done():
-		}
-	}
 	var notes []string
 	var prompt string
 	var images []harness.Image
@@ -968,7 +1011,8 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			break
 		}
 		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}
-		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller})
+		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
+		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf})
 		if err != nil {
 			c.unbind(t, h, prev, clean)
 			notes = append(notes, err.Error())
@@ -1139,10 +1183,11 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		close(t.typing)
 	}
 	t.mu.Lock()
-	if t.run != nil {
-		c.exited = t.run.Exited()
-	}
+	run := t.run
 	t.mu.Unlock()
+	if run != nil {
+		c.exited, c.last, c.lastWho = run.Exited(), run, t.who
+	}
 	c.requeue(t.steerQ...)
 	t.steerQ = nil
 	res := d.res
@@ -1214,7 +1259,16 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	c.r.wake(c.key.Interface)
 	c.r.log.Printf("turn %d in %s ended: %s (harness %q, %s)", t.id, c.key, e.State, d.harness, time.Since(t.started).Round(time.Millisecond))
 	c.turn = nil
-	<-c.r.sem
+	if run == nil {
+		<-c.r.sem
+		return
+	}
+	// max_parallel counts live harness processes: the slot is free once
+	// this one exited (at most ExitGrace plus TermGrace after its answer).
+	go func() {
+		<-run.Exited()
+		<-c.r.sem
+	}()
 }
 
 // frame shows the verified identity with every message handed to a

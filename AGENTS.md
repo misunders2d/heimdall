@@ -103,7 +103,8 @@ Its whole job, per message:
   anyone else's message queues. Only the turn's caller or an owner can
   `!stop` it.
 - **Conversations.** Key = interface + chat + thread. Same key: one turn at a
-  time. Different keys run in parallel up to `max_parallel`.
+  time. Different keys run in parallel up to `max_parallel` live harness
+  processes.
 - **Telegram** (as the hub's connector). A private chat is always handled.
   In a group, a message (`!` commands and control words included) is handled
   only if it mentions `@<bot username>`, replies to one of the bot's
@@ -136,7 +137,10 @@ Its whole job, per message:
   prompt, then each accepted steer), never only the last answer. A turn
   ends, and its reply goes out, at the harness's answer, not when its
   process exits; the conversation's next turn starts only after that
-  process exited (it gets 60 s), so two processes never share a session.
+  process exited, so two processes never share a session. It gets 60 s,
+  then SIGTERM to its process group and SIGKILL 5 s later (logged with the
+  turn); a stop by the turn's caller or an owner sends the SIGTERM at
+  once. A process holds its `max_parallel` slot until it exits.
 - **Reliability.** Inbound and outbound queues are persisted (SQLite) before
   an interface acknowledges a message upstream. A turn interrupted by a
   restart is reported to its chat and never re-run; messages that never

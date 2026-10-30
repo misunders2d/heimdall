@@ -125,6 +125,10 @@ Commands work the same on every interface:
 `stop`, `cancel` (or `abort`, `nevermind`), `reset` and `chatid` alone in a
 message work without the `!`. Only the turn's sender or the owner can stop
 a turn; the owner's `stop` and `cancel` clear everyone's queued messages.
+A turn's reply goes out at the harness's answer; its process may take a
+while to exit, and the conversation's next turn waits for that (at most
+60 s, then SIGTERM, then SIGKILL 5 s later). `stop` then ends that wait at
+once. `max_parallel` counts harness processes until they exit.
 
 A conversation is a chat, or one thread in it: `!use` in a thread changes
 neither the other threads nor the chat itself. Each verified caller has
