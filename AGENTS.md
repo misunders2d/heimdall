@@ -193,10 +193,13 @@ thinking stream and live-session reply registration.
   note and the session is not resumed. Codex folds a steer taken while it works into one final
   answer; a steer it accepts after a final answer, before the turn
   completed, gets a final answer of its own (both checked live, 0.166.0),
-  and both are kept.
+  and both are kept. A steer Codex acknowledges only after the turn
+  completed counts as unknown: the sender is told, nothing is replayed.
 - Heimdall keeps its own adapters. T3 Code is for coding only, never a
   route for chat turns (owner, 2026-10-30).
-- The turn's ready signal is the side-effect boundary used for fallback.
+- The turn's ready signal is the side-effect boundary used for fallback. A
+  harness that answers or asks for an approval before it took the turn
+  too: no fallback.
 
 ## Code layout
 

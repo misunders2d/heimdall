@@ -1,4 +1,4 @@
-# Heimdall handoff (2026-10-30, fifth session)
+# Heimdall handoff (2026-10-30, sixth session)
 
 Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
 records where the work stands, what was decided, and what comes next. It
@@ -6,11 +6,11 @@ supersedes the earlier handoffs of the same day.
 
 ## State
 
-- `main` = the code HEAD (the Codex steer-ack guard after `32bd194`; see
-  "Fifth session"). Pushed, tree clean. No WIP branch.
+- `main` = the code HEAD (the review fixes of `fd72734..d05b748`; see
+  "Sixth session"). Pushed, tree clean. No WIP branch.
 - `go vet ./...` clean. `go test -race -count=1 ./...` all pass at that HEAD
   (config, core, harness, iface/slack, iface/telegram, router, store). The
-  router package takes about 100 s, harness about 35 s, store and
+  router package takes about 100-110 s, harness about 35 s, store and
   iface/telegram about 13 s each.
 - Store schema: steps 1-9 are shipped (5 `inbound.private`, 6
   `outbound.extra`, 7 `inbound.extra`, 8 `ambient`, 9 `callers`). Steps are
@@ -21,9 +21,12 @@ supersedes the earlier handoffs of the same day.
   except the live Telegram chat check with a human (see "Remaining work" 1).
 - The live dev instance runs as its own systemd user unit `heimdall-live`
   (started by the orchestrator with `systemd-run --user`, so it outlives
-  T3 sessions), binary `~/.cache/heimdall-live/heimdall`, the test bot.
-  Restart it with `systemctl --user restart heimdall-live` only when its
-  log shows no turn running; never `setsid nohup`.
+  T3 sessions), binary `~/.cache/heimdall-live/heimdall`, the test bot,
+  config `~/.cache/heimdall-live/config.json` (mode 600) with
+  `max_parallel` 3, the hub's `PI_CHAT_MAX_CONCURRENT=3` (orchestrator,
+  sixth session; it was 2). Restart it with `systemctl --user restart
+  heimdall-live` only when its log shows no turn running; never `setsid
+  nohup`. A stop now waits for its harness processes (at most 65 s).
 
 ## Incident: steering in the owner's live test (2026-10-30 21:13)
 
@@ -59,7 +62,22 @@ starts only after it exited; steers that become follow-ups are logged.
 
 ## Done
 
-### Fifth session (this one): guard, review of the steering fix, lingering processes
+### Sixth session (this one): review of `fd72734..d05b748`
+
+| Commit | What |
+|---|---|
+| `edd06ea` | Finding 1: a Codex steer acknowledged after `turn/completed` is unknown (the "may or may not have reached" notice, never replayed); acknowledged before completion it is accepted (bridge tests for both). |
+| `1901028` | Finding 2: harness processes run in the router's own context and count as live until they exit. `Idle` is false while one runs, so `heimdall local` exits after the last. At shutdown each gets `Run.Stop` (SIGTERM to its group, SIGKILL `TermGrace` later); `Router.Run` waits up to `ExitGrace` + `TermGrace` (65 s, under systemd's default 90 s stop timeout), then kills the groups left. Nothing starts once shutdown began. |
+| `fd31af4` | Finding 3: an answer or approval request before ready commits the turn to that harness (no fallback; `Result.Ready` set). Its reply goes out at process exit: no ExitGrace timer runs before ready (a rare case). Also a router guard test that a fallback starts only after the failed process exited (fake `BADLINE`). It does not fail when the router's wait is removed today: before ready, Done closes only once the process exited. |
+| `a9e25fe` | Finding 4: Claude replayed a late steer, then exited 0 without that turn's result: the answers stand with a note and the session is not resumed (was clean, no note). |
+| `80cc95b` | Finding 5: guard patterns fold case between ASCII letters only, as JavaScript `/i` without `u` (RE2 `(?i)` also folded `ſ` and the Kelvin sign); checked against node. |
+| this file | State, decisions, the orchestrator's answers. |
+
+Each fix's test fails on the old code (checked by putting the old file
+back): 1 `accepted`; 2 no SIGTERM at shutdown, idle while the process ran;
+3 fell back to codex; 4 clean, no note; 5 score 4.
+
+### Fifth session: guard, review of the steering fix, lingering processes
 
 | Commit | What |
 |---|---|
@@ -70,7 +88,7 @@ starts only after it exited; steers that become follow-ups are logged.
 | `311b605` | Review finding 5: reactions are parsed per answer (`Result.Answers`). |
 | `6379042` | Review finding 7: an answer before ready never ends a turn early; a fallback waits for the failed candidate's exit. |
 | `32bd194` | Step 2: steers that wait while another is handed over go as one steer, in order, with all their images. |
-| next commit | Regression of `47135e8`: a Codex steer acknowledged after `turn/completed` emptied the published answer; guarded (bridge-level test). A steer Codex acknowledges after the turn completed still counts as accepted though its answer is not in the reply (as before this session). |
+| `d05b748` | Regression of `47135e8`: a Codex steer acknowledged after `turn/completed` emptied the published answer; guarded (bridge-level test). Such a steer still counted as accepted (made unknown in the sixth session). |
 | this file | State and decisions. |
 
 Each has a test that fails on the old code (checked by putting the old
@@ -310,14 +328,37 @@ usernames and tokens live only outside the repository.
   the turn. A stop by the turn's caller or an owner after the answer sends
   the SIGTERM at once (`Run.Stop`) and clears queued messages as any stop.
   The process holds its `max_parallel` slot until it exits; the
-  conversation's next turn takes a slot only after it exited.
+  conversation's next turn takes a slot only after it exited. At shutdown
+  every live process gets `Run.Stop` at once and is waited for (65 s at
+  most), then its group is killed; `Idle` counts live processes.
+- **Answer before ready** (sixth session): a harness that answers or asks
+  for an approval before it signalled ready took the turn; no fallback.
+- **Codex late acknowledgement** (orchestrator, sixth session): a steer
+  Codex acknowledges after `turn/completed` is unknown: the sender gets
+  the notice, nothing is replayed.
+- **Guard case folding**: ASCII letters only, as the hub's JavaScript
+  `/i` without `u`.
 - **Steers that wait go together**: every steer waiting while another is
   handed over is one steer (frames in order, images capped at 10 per
   input as before). An unknown outcome is one notice to the first message.
 - **Claude drain**: a stop is a stop (Cancelled, session not resumed); a
   late turn that fails keeps the answers given, notes why, and leaves the
-  session unclean (`Result.Unclean`, `Result.Warning`). Exit 0 without
-  answering the pending input stays clean.
+  session unclean (`Result.Unclean`, `Result.Warning`). So does an exit
+  after Claude replayed a late steer but before its result (sixth
+  session). Exit 0 with a steer never replayed stays clean; the steer is
+  reported unknown.
+- **Orchestrator answers, sixth session** (to the fifth session's
+  questions):
+  - More than 10 images in one combined steer: the rest go as file paths.
+    OK.
+  - A stop on an exiting process clears the caller's queue, as any stop
+    does. OK.
+  - SIGTERM before SIGKILL on `!stop`: confirmed.
+  - Leftover rows in Codex's sqlite files: leave them.
+  - Live config `max_parallel` 3, to match the hub's
+    `PI_CHAT_MAX_CONCURRENT=3`; the file stays mode 600, nothing else
+    changed. Done.
+  - A Codex steer acknowledged after `turn/completed`: unknown (above).
 - claude.ai connectors for the employee user are not phase 1.
 
 ### Memento intake: what exists (on hold for the orchestrator)
@@ -475,13 +516,18 @@ are in `docs/hub-parity.md`.
     prompt's result; with `LATEHANG`, `LATECRASH`, `LATEFAIL`, `LATEASK`
     that late turn hangs, exits 4, ends in an error result or asks for
     approval), `FINALFIRST` (codex: a final answer before steers are
-    taken), `LINGER=<s>` (the process stays after its answer with
-    `STATE/lingering`; a fake started meanwhile writes `STATE/overlap`;
-    SIGTERM writes `STATE/terminated` and exits, unless `NOTERM`). The fake
-    harness also records the images it got.
-  - Router tests keep the router's log in `env.logs` and the
-    prompt-injection log at `env.guard`; `setGrace` shortens ExitGrace and
-    TermGrace for one test.
+    taken), `BADLINE=<name>` (an unreadable protocol line before ready,
+    then 1 s with `STATE/lingering`, then exit 3), `EARLYRESULT` and
+    `EARLYASK` (claude: a result or an approval request before the prompt's
+    replay), `LATEEXIT` (claude, with `STEERLATE`: exit 0 after the late
+    steer's replay, without its result), `LINGER=<s>` (the process stays
+    after its answer with `STATE/lingering`; a fake started meanwhile
+    writes `STATE/overlap`; SIGTERM writes `STATE/terminated` and exits,
+    unless `NOTERM`). The fake harness also records the images it got.
+  - Router tests keep the router's log in `env.logs`, the
+    prompt-injection log at `env.guard` and the running router at `env.r`;
+    `setGrace` shortens ExitGrace and TermGrace for one test. `env.stop`
+    now waits for the harness processes still running (SIGTERM).
   - A process started with `setsid nohup` from a T3 session stays in that
     session's systemd scope and is stopped with it.
   - The router's `fakeIface` opts in to each optional interface with an
