@@ -236,6 +236,16 @@ type Outbound struct {
 	// Reactions are set on messages of the conversation, after Text (which
 	// may then be empty).
 	Reactions []Reaction
+	// File is a file to send instead of text.
+	File *File
+}
+
+// File is a file a harness left for the chat: Heimdall's own copy, which
+// the router removes once the reply is sent or has failed.
+type File struct {
+	Path string `json:"path"`
+	Name string `json:"name"` // as the harness named it; display only
+	MIME string `json:"mime,omitempty"`
 }
 
 // Reaction is an emoji reaction on one interface message.

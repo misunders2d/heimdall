@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -88,7 +89,25 @@ func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		// An upload: fields as strings, files as {name, type, data}.
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			fail(w, http.StatusBadRequest, "Bad Request: "+err.Error(), 0)
+			return
+		}
+		body = map[string]any{}
+		for k, v := range r.MultipartForm.Value {
+			body[k] = v[0]
+		}
+		for k, fh := range r.MultipartForm.File {
+			file, _ := fh[0].Open()
+			b, _ := io.ReadAll(file)
+			file.Close()
+			body[k] = map[string]any{"name": fh[0].Filename, "type": fh[0].Header.Get("Content-Type"), "data": string(b)}
+		}
+	} else {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, method)
 	h := f.handle[method]
@@ -1084,5 +1103,62 @@ func TestAmbientMessages(t *testing.T) {
 	}
 	if api.called("getFile") {
 		t.Fatal("a context message's file was downloaded")
+	}
+}
+
+// A file goes as a multipart upload: a small picture as a photo, anything
+// else as a document, in the topic, replying to the turn's message. A file
+// that is gone fails permanently; Bot API errors follow the text rules.
+func TestFilesAreUploaded(t *testing.T) {
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	i := newIface(t, api.srv.URL, botName, &logs)
+	var mu sync.Mutex
+	got := map[string]map[string]any{}
+	for _, m := range []string{"sendPhoto", "sendDocument"} {
+		api.set(m, func(w http.ResponseWriter, b map[string]any) bool {
+			mu.Lock()
+			got[m] = b
+			mu.Unlock()
+			if b["chat_id"] == "500" {
+				fail(w, 400, "Bad Request: chat not found", 0)
+				return true
+			}
+			ok(w, map[string]any{"message_id": 9})
+			return true
+		})
+	}
+	dir := t.TempDir()
+	file := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	conv := core.ConvKey{Interface: "telegram", Chat: "-1002", Thread: "5"}
+	if err := i.Send(context.Background(), core.Outbound{Conv: conv, ReplyTo: "3", File: &core.File{Path: file("c1", "png bytes"), Name: "../chart 1.png", MIME: "image/png"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := i.Send(context.Background(), core.Outbound{Conv: conv, ReplyTo: "3", File: &core.File{Path: file("c2", "pdf bytes"), Name: "report.pdf", MIME: "application/pdf"}}); err != nil {
+		t.Fatal(err)
+	}
+	p, d := got["sendPhoto"], got["sendDocument"]
+	if p["chat_id"] != "-1002" || p["message_thread_id"] != "5" || p["reply_parameters"] != `{"allow_sending_without_reply":true,"message_id":3}` ||
+		fmt.Sprint(p["photo"]) != "map[data:png bytes name:chart_1.png type:image/png]" {
+		t.Fatalf("photo %v", p)
+	}
+	if fmt.Sprint(d["document"]) != "map[data:pdf bytes name:report.pdf type:application/pdf]" {
+		t.Fatalf("document %v", d)
+	}
+	var perm router.PermanentError
+	if err := i.Send(context.Background(), core.Outbound{Conv: conv, File: &core.File{Path: filepath.Join(dir, "gone"), Name: "x.txt"}}); !errors.As(err, &perm) {
+		t.Fatalf("missing file: %v", err)
+	}
+	if err := i.Send(context.Background(), core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "500"}, File: &core.File{Path: file("c3", "x"), Name: "x.txt"}}); !errors.As(err, &perm) {
+		t.Fatalf("400: %v", err)
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Fatal("token in logs")
 	}
 }

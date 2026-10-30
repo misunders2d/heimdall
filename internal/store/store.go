@@ -134,18 +134,21 @@ func (x inExtra) apply(in *core.Inbound) {
 type outExtra struct {
 	Formatted bool            `json:"formatted,omitempty"`
 	Reactions []core.Reaction `json:"reactions,omitempty"`
+	File      *core.File      `json:"file,omitempty"`
 }
 
 func outExtraOf(out core.Outbound) (string, error) {
-	x := outExtra{Formatted: out.Formatted, Reactions: out.Reactions}
-	if !x.Formatted && len(x.Reactions) == 0 {
+	x := outExtra{Formatted: out.Formatted, Reactions: out.Reactions, File: out.File}
+	if !x.Formatted && len(x.Reactions) == 0 && x.File == nil {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
 	return string(b), err
 }
 
-func (x outExtra) apply(out *core.Outbound) { out.Formatted, out.Reactions = x.Formatted, x.Reactions }
+func (x outExtra) apply(out *core.Outbound) {
+	out.Formatted, out.Reactions, out.File = x.Formatted, x.Reactions, x.File
+}
 
 type Store struct{ db *sql.DB }
 
@@ -371,6 +374,7 @@ type TurnEnd struct {
 	Clean     bool   // the session may be resumed
 	Forget    bool   // the caller reset their sessions: keep none for this conversation
 	Reply     *core.Outbound
+	Files     []core.Outbound // sent after Reply
 }
 
 // EndTurn settles a turn, its messages, its session binding and its reply
@@ -399,6 +403,11 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 	}
 	if e.Reply != nil {
 		if replyID, err = enqueue(tx, *e.Reply); err != nil {
+			return 0, err
+		}
+	}
+	for _, f := range e.Files {
+		if _, err = enqueue(tx, f); err != nil {
 			return 0, err
 		}
 	}

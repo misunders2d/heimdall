@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -63,6 +64,7 @@ type Options struct {
 	Log         *log.Logger
 	TypingEvery time.Duration // how often Typing repeats while a turn runs; default 4s
 	AlbumWait   time.Duration // how long a grouped message's parts are held after the last; default 1.5s
+	OutboxDir   string        // Heimdall's copies of files to send; "" sends none
 }
 
 type Router struct {
@@ -119,6 +121,7 @@ func (r *Router) Run(parent context.Context) error {
 	r.mu.Lock()
 	r.ctx = ctx
 	r.mu.Unlock()
+	r.pruneOutbox()
 	var wg sync.WaitGroup
 	for _, i := range r.ifaces {
 		wg.Add(1)
@@ -256,9 +259,15 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		switch {
 		case err == nil:
 			err = r.store.Sent(row.ID)
+			if row.File != nil {
+				os.Remove(row.File.Path)
+			}
 		case errors.As(err, &perm):
 			r.log.Printf("reply %d to %s failed permanently: %v", row.ID, row.Conv, err)
 			err = r.store.Failed(row.ID, err.Error())
+			if row.File != nil {
+				os.Remove(row.File.Path)
+			}
 		default:
 			backoff := min(time.Second<<min(row.Attempts, 9), 5*time.Minute)
 			r.log.Printf("reply %d to %s: retry in %s: %v", row.ID, row.Conv, backoff, err)
@@ -362,6 +371,8 @@ type doneEvent struct {
 	harness string // "" when no harness became ready
 	res     harness.Result
 	notes   []string
+	files   []harness.OutFile // collected from the outbox after an answer
+	skipped []string          // outbox files not taken, "name: reason"
 }
 
 func (c *conv) push(row store.InboundRow) {
@@ -758,6 +769,9 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 			parts = append(parts, note)
 		}
 	}
+	if note := c.outboxNote(t); note != "" {
+		parts = append(parts, note)
+	}
 	if recent := c.ambient(t, batch); recent != "" {
 		parts = append(parts, recent)
 	}
@@ -893,7 +907,11 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				c.r.log.Printf("turn %d: native session ID not recorded: %v", t.id, err)
 			}
 			c.send(ctx, readyEvent{t: t, harness: h})
-			c.send(ctx, doneEvent{t: t, harness: h, res: run.Result(), notes: notes})
+			done := doneEvent{t: t, harness: h, res: run.Result(), notes: notes}
+			if r := done.res; r.Failure == "" && r.NeedsHuman == "" && !r.Cancelled {
+				done.files, done.skipped = c.collect(t)
+			}
+			c.send(ctx, done)
 			return
 		default:
 		}
@@ -1037,9 +1055,13 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	if tag == "" {
 		tag = "heimdall"
 	}
+	notes := d.notes
+	for _, s := range d.skipped {
+		notes = append(notes, "file not sent: "+s)
+	}
 	footer := "\n\n— " + tag
-	if len(d.notes) > 0 {
-		footer += " (" + strings.Join(clipAll(d.notes, 160), "; ") + ")"
+	if len(notes) > 0 {
+		footer += " (" + strings.Join(clipAll(notes, 160), "; ") + ")"
 	}
 	e := store.TurnEnd{Harness: d.harness, Session: res.SessionID, Forget: t.reset}
 	var text string
@@ -1079,6 +1101,11 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	}
 	if text+footer != "" {
 		e.Reply.Text = scrub(text + footer)
+	}
+	if e.State == store.TurnDone {
+		e.Files = c.fileReplies(t, d.files)
+	} else {
+		removeFiles(d.files)
 	}
 	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
 		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)

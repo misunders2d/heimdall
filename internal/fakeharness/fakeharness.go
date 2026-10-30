@@ -154,6 +154,7 @@ func (f *fake) failPre() {
 }
 
 func (f *fake) failPost() {
+	f.writeOut()
 	if f.has("FAILPOST=" + f.name) {
 		fmt.Fprintln(os.Stderr, "fake: crashed mid-turn")
 		os.Exit(4)
@@ -178,6 +179,23 @@ func (f *fake) answer() string {
 	}
 	answer := fmt.Sprintf("%s#%d resumed=%v steers=%d mem=%s head=%q frame=%q last=%q ext=%q home=%q", f.name, f.turn, f.resumed, len(f.steers), os.Getenv("MEMENTO_PROCESSING"), lines[0], frame, lines[len(lines)-1], strings.Join(ext, " "), os.Getenv("HOME"))
 	return f.react(answer)
+}
+
+var outbox = regexp.MustCompile(`save them in (\S+) before`)
+
+// writeOut saves WRITE=<name>:<content> files (no spaces) into the outbox
+// the prompt names, as a harness's own tools would.
+func (f *fake) writeOut() {
+	m := outbox.FindStringSubmatch(f.prompt)
+	if m == nil {
+		return
+	}
+	for _, w := range strings.Fields(f.prompt) {
+		if spec, ok := strings.CutPrefix(w, "WRITE="); ok {
+			name, body, _ := strings.Cut(spec, ":")
+			_ = os.WriteFile(filepath.Join(m[1], name), []byte(body), 0o600)
+		}
+	}
 }
 
 var reactRef = regexp.MustCompile(`\[react: ([a-f0-9-]{36}) <emoji>\]`)

@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -20,7 +24,8 @@ const TurnsDir = ".local/state/heimdall/turns"
 const TurnRetention = 7 * 24 * time.Hour
 
 // TurnDir is one turn's directory, ~/.local/state/heimdall/turns/NAME in
-// the turn's OS user's home: in/ holds copies of the message's attachments.
+// the turn's OS user's home: in/ holds copies of the message's attachments,
+// out/ the files the harness leaves to be sent to the chat.
 // Everything Heimdall creates there belongs to that user, so the harness can
 // read it. Heimdall works on the user's home only through os.Root, so a
 // symbolic link the user made can never send it outside that home.
@@ -52,7 +57,7 @@ func NewTurnDir(l Launch, name string) (*TurnDir, error) {
 		}
 	}
 	d.prune(root)
-	for _, p := range []string{d.rel, d.rel + "/in"} {
+	for _, p := range []string{d.rel, d.rel + "/in", d.rel + "/out"} {
 		if err := d.mkdir(root, p, true); err != nil {
 			return nil, err
 		}
@@ -89,6 +94,117 @@ func (d *TurnDir) prune(root *os.Root) {
 			_ = root.RemoveAll(path.Join(TurnsDir, e.Name()))
 		}
 	}
+}
+
+// Outbox is the absolute path of out/.
+func (d *TurnDir) Outbox() string { return filepath.Join(d.Path(), "out") }
+
+// OutFile is a file collected from out/: Heimdall's own copy.
+type OutFile struct {
+	Path string // the copy, in Heimdall's directory
+	Name string // the name the harness gave it
+	Size int64
+}
+
+// Collect copies the files the harness left in out/ into dst, Heimdall's
+// own directory: top level only, in name order, at most max files, each 1
+// to limit bytes. A file counts only if, once opened (through os.Root, so
+// within the user's home), it is a regular file owned by the turn's user
+// with a single link: never a hard link to a file the user cannot read.
+// Dot files are ignored; every other file not taken is listed in skipped
+// as "name: reason".
+func (d *TurnDir) Collect(dst string, max int, limit int64) (files []OutFile, skipped []string) {
+	root, err := os.OpenRoot(d.home)
+	if err != nil {
+		return nil, []string{"outbox: " + err.Error()}
+	}
+	defer root.Close()
+	dir, err := root.Open(path.Join(d.rel, "out"))
+	if err != nil {
+		return nil, []string{"outbox: " + err.Error()}
+	}
+	entries, err := dir.ReadDir(-1)
+	dir.Close()
+	if err != nil {
+		return nil, []string{"outbox: " + err.Error()}
+	}
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	uid := d.uid
+	if uid < 0 {
+		uid = os.Getuid()
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if len(files) == max {
+			skipped = append(skipped, fmt.Sprintf("%s: more than %d files", name, max))
+			continue
+		}
+		f, err := d.collect(root, dst, name, uid, limit)
+		if err != nil {
+			skipped = append(skipped, name+": "+err.Error())
+			continue
+		}
+		files = append(files, f)
+	}
+	return files, skipped
+}
+
+func (d *TurnDir) collect(root *os.Root, dst, name string, uid int, limit int64) (OutFile, error) {
+	// O_NONBLOCK: opening a FIFO must not wait for a writer.
+	in, err := root.OpenFile(path.Join(d.rel, "out", name), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return OutFile{}, errors.New("cannot be opened")
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return OutFile{}, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	switch {
+	case !info.Mode().IsRegular():
+		return OutFile{}, errors.New("not a regular file")
+	case !ok || int(st.Uid) != uid:
+		return OutFile{}, errors.New("not owned by the turn's user")
+	case st.Nlink != 1:
+		return OutFile{}, errors.New("has more than one link")
+	case info.Size() == 0:
+		return OutFile{}, errors.New("empty")
+	case info.Size() > limit:
+		return OutFile{}, errors.New("larger than " + sizeLabel(limit))
+	}
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		return OutFile{}, err
+	}
+	b := make([]byte, 6)
+	_, _ = rand.Read(b)
+	copyPath := filepath.Join(dst, fmt.Sprintf("%d-%x", time.Now().UnixMilli(), b))
+	out, err := os.OpenFile(copyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return OutFile{}, err
+	}
+	n, err := io.Copy(out, io.LimitReader(in, limit+1))
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && n > limit {
+		err = errors.New("larger than " + sizeLabel(limit))
+	}
+	if err != nil {
+		os.Remove(copyPath)
+		return OutFile{}, err
+	}
+	return OutFile{Path: copyPath, Name: name, Size: n}, nil
+}
+
+func sizeLabel(n int64) string {
+	if n >= 1<<20 && n%(1<<20) == 0 {
+		return fmt.Sprintf("%d MB", n>>20)
+	}
+	return fmt.Sprintf("%d bytes", n)
 }
 
 // Path is the turn directory's absolute path.

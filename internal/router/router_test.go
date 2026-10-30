@@ -38,9 +38,12 @@ type fakeIface struct {
 	note  atomic.Value // PromptNote, a string
 	react atomic.Bool  // offer reactions
 	group atomic.Bool  // keep group context
+	files atomic.Bool  // send files
 }
 
 func (f *fakeIface) GroupContext() bool { return f.group.Load() }
+
+func (f *fakeIface) SendsFiles() bool { return f.files.Load() }
 
 func (f *fakeIface) Typing(context.Context, core.ConvKey) { f.typed.Add(1) }
 
@@ -123,6 +126,7 @@ func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *e
 		MaxParallel: 4,
 		Accounts:    accounts,
 		Log:         log.New(io.Discard, "", 0),
+		OutboxDir:   filepath.Join(t.TempDir(), "outbox"),
 	}
 	e.start()
 	return e
@@ -1252,5 +1256,54 @@ func TestAmbientBudget(t *testing.T) {
 	text := fakeharness.Inputs(e.state)[0].Text
 	if !strings.Contains(text, "[Earlier injected chat context trimmed]\n- [") || strings.Count(text, "fake:coworker: m") != 3 || !strings.Contains(text, ": m49 ") || strings.Contains(text, ": m46 ") {
 		t.Fatalf("prompt has %d messages: %.300s", strings.Count(text, "fake:coworker: m"), text)
+	}
+}
+
+// Files the harness leaves in the turn's outbox are sent after its answer,
+// one reply each, from Heimdall's own copy, which goes once sent; a file
+// not taken is named in the answer's footer. Failed turns send none.
+func TestOutboxFilesAreSentAfterTheAnswer(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.f.files.Store(true)
+	id := e.send(owner, "c1", "make WRITE=b.txt:second WRITE=a.png:first WRITE=empty:")
+	out := e.reply()
+	want(t, out, "omp#1", "— omp (file not sent: empty: empty)")
+	var sent []string
+	for range 2 {
+		f := e.reply()
+		if f.File == nil || f.ReplyTo != id || f.Text != "" {
+			t.Fatalf("file reply %+v", f)
+		}
+		b, err := os.ReadFile(f.File.Path)
+		if err != nil || filepath.Dir(f.File.Path) != e.opt.OutboxDir {
+			t.Fatalf("copy %+v: %v", f.File, err)
+		}
+		sent = append(sent, f.File.Name+"="+string(b)+"="+f.File.MIME)
+	}
+	if strings.Join(sent, ",") != "a.png=first=image/png,b.txt=second=text/plain" {
+		t.Fatalf("sent %v", sent)
+	}
+	eventuallyTrue(t, "copies removed once sent", func() bool { entries, _ := os.ReadDir(e.opt.OutboxDir); return len(entries) == 0 })
+	in := fakeharness.Inputs(e.state)[0].Text
+	if !regexp.MustCompile(`^\[Files: to send files to this chat, save them in /\S+/\.local/state/heimdall/turns/1-[0-9a-f]{8}/out before your final answer\. Heimdall sends the files it finds there after your answer: at most 5, up to 50 MB each\.`).MatchString(in) {
+		t.Fatalf("prompt %q", in)
+	}
+
+	e.send(owner, "c1", "fail WRITE=c.txt:x FAILPOST=omp")
+	want(t, e.reply(), "omp failed")
+	e.noReply(500 * time.Millisecond)
+	if entries, _ := os.ReadDir(e.opt.OutboxDir); len(entries) != 0 {
+		t.Fatalf("a failed turn's file was collected: %v", entries)
+	}
+	if m, _ := filepath.Glob(filepath.Join(os.Getenv("HOME"), harness.TurnsDir, "2-*", "out", "c.txt")); len(m) != 1 {
+		t.Fatal("the fake did not write the failed turn's file")
+	}
+
+	// Without a file-sending interface there is no outbox.
+	e.f.files.Store(false)
+	e.send(owner, "c1", "plain")
+	want(t, e.reply(), "omp#")
+	if in := fakeharness.Inputs(e.state); strings.Contains(in[len(in)-1].Text, "[Files:") {
+		t.Fatalf("prompt %q", in[len(in)-1].Text)
 	}
 }

@@ -24,7 +24,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -170,13 +173,18 @@ func (t *Interface) call(ctx context.Context, method string, body any, result an
 	if err != nil {
 		return err
 	}
+	return t.post(ctx, method, "application/json", raw, result, timeout)
+}
+
+// post sends one Bot API request body and reads its result.
+func (t *Interface) post(ctx context.Context, method, contentType string, raw []byte, result any, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.opt.API+"/bot"+t.opt.Token+"/"+method, bytes.NewReader(raw))
 	if err != nil {
 		return t.scrubbed(method, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	res, err := t.http.Do(req)
 	if err != nil {
 		return t.scrubbed(method, err)
@@ -508,6 +516,9 @@ func (t *Interface) command(text string) string {
 // transient failure; any other 4xx is permanent. Delivery is at-least-once:
 // if a later part fails, the retry sends every part again.
 func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
+	if out.File != nil {
+		return t.sendFile(ctx, out)
+	}
 	parts := splitText(out.Text, chunkText) // none for a reaction-only answer
 	for i, part := range parts {
 		if len(parts) > 1 {
@@ -562,6 +573,53 @@ func (t *Interface) react(ctx context.Context, out core.Outbound) error {
 	}
 	return nil
 }
+
+// SendsFiles reports that Telegram sends the files a harness leaves in its
+// turn's outbox.
+func (t *Interface) SendsFiles() bool { return true }
+
+// sendFile uploads one file a harness left, as the hub's sendLocalArtifact:
+// a JPEG, PNG or WebP picture up to 10 MB as a photo, anything else as a
+// document, in the conversation's topic, replying to the turn's message.
+func (t *Interface) sendFile(ctx context.Context, out core.Outbound) error {
+	data, err := os.ReadFile(out.File.Path)
+	if err != nil {
+		// Gone: already sent before a lost acknowledgement, or removed.
+		return router.PermanentError{Err: fmt.Errorf("file to send unreadable: %w", err)}
+	}
+	method, field := "sendDocument", "document"
+	if photoMIME[out.File.MIME] && len(data) <= 10<<20 {
+		method, field = "sendPhoto", "photo"
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for k, v := range target(out.Conv) {
+		_ = w.WriteField(k, fmt.Sprint(v))
+	}
+	if id, err := strconv.ParseInt(out.ReplyTo, 10, 64); err == nil {
+		rp, _ := json.Marshal(map[string]any{"message_id": id, "allow_sending_without_reply": true})
+		_ = w.WriteField("reply_parameters", string(rp))
+	}
+	h := textproto.MIMEHeader{}
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, field, safeName(out.File.Name)))
+	h.Set("Content-Type", or(out.File.MIME, "application/octet-stream"))
+	part, err := w.CreatePart(h)
+	if err != nil {
+		return err
+	}
+	if _, err := part.Write(data); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	if err := t.post(ctx, method, w.FormDataContentType(), buf.Bytes(), nil, 2*time.Minute); err != nil {
+		return t.sendError(ctx, err)
+	}
+	return nil
+}
+
+var photoMIME = map[string]bool{"image/jpeg": true, "image/png": true, "image/webp": true}
 
 // reactionEmoji are the hub's TELEGRAM_REACTION_EMOJI: the standard
 // emoji Telegram's ReactionTypeEmoji takes, without variation selectors.

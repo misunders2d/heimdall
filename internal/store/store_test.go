@@ -263,12 +263,12 @@ func TestOutboundKeepsFormatted(t *testing.T) {
 	if _, err := s.Enqueue(core.Outbound{Conv: conv, Text: "*rich*", Formatted: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Enqueue(core.Outbound{Conv: conv, Reactions: []core.Reaction{{MsgID: "7", Emoji: "👍"}}}); err != nil {
+	if _, err := s.Enqueue(core.Outbound{Conv: conv, Reactions: []core.Reaction{{MsgID: "7", Emoji: "👍"}}, File: &core.File{Path: "/x/1", Name: "a.png", MIME: "image/png"}}); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range []bool{false, true, false} {
 		r, ok, err := s.NextOutbound(conv.Interface)
-		if err != nil || !ok || r.Formatted != want || (i == 2) != (len(r.Reactions) == 1 && r.Reactions[0] == core.Reaction{MsgID: "7", Emoji: "👍"}) {
+		if err != nil || !ok || r.Formatted != want || (i == 2) != (len(r.Reactions) == 1 && r.Reactions[0] == core.Reaction{MsgID: "7", Emoji: "👍"}) || (i == 2) != (r.File != nil && *r.File == core.File{Path: "/x/1", Name: "a.png", MIME: "image/png"}) {
 			t.Fatalf("next = %+v %v %v, want formatted %v", r, ok, err, want)
 		}
 		if err := s.Sent(r.ID); err != nil {
