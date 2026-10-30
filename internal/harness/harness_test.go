@@ -1,8 +1,10 @@
 package harness_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"os"
 	"os/user"
 	"slices"
@@ -338,6 +340,27 @@ func TestEmployeeAccountNeverRootOrOwner(t *testing.T) {
 	a, _ := stubAccounts(t, 0, map[string]int{"boss": 0, "emp": 1001})
 	if err := a.Check(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEmployeeGroupLookupFailureIsLogged(t *testing.T) {
+	a, _ := stubAccounts(t, 0, map[string]int{"boss": 0, "emp": 1001})
+	a.GroupIDs = func(*user.User) ([]string, error) { return []string{"1001", "27"}, nil }
+	l, err := a.Prepare(core.RoleEmployee, true, "sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Cred == nil || !slices.Equal(l.Cred.Groups, []uint32{1001, 27}) {
+		t.Fatalf("employee groups: %+v", l.Cred)
+	}
+	var logs bytes.Buffer
+	a.Log = log.New(&logs, "", 0)
+	a.GroupIDs = func(*user.User) ([]string, error) { return nil, errors.New("group database unreadable") }
+	if l, err = a.Prepare(core.RoleEmployee, true, "sh"); err != nil {
+		t.Fatal(err)
+	}
+	if l.Cred == nil || len(l.Cred.Groups) != 0 || !strings.Contains(logs.String(), `OS user "emp"`) || !strings.Contains(logs.String(), "group database unreadable") {
+		t.Fatalf("groups %+v, log %q", l.Cred, logs.String())
 	}
 }
 

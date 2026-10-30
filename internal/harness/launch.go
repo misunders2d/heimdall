@@ -3,6 +3,7 @@ package harness
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -36,9 +37,12 @@ func accountErr(format string, args ...any) error {
 // Accounts are the OS accounts each role's turns run as.
 type Accounts struct {
 	RunAs map[core.Role]core.RunAs
-	// Lookup and Getuid replace os/user.Lookup and os.Getuid in tests.
-	Lookup func(name string) (*user.User, error)
-	Getuid func() int
+	// Lookup, Getuid and GroupIDs replace os/user.Lookup, os.Getuid and
+	// (*user.User).GroupIds in tests.
+	Lookup   func(name string) (*user.User, error)
+	Getuid   func() int
+	GroupIDs func(u *user.User) ([]string, error)
+	Log      *log.Logger // warnings; nil: the standard logger
 }
 
 type account struct {
@@ -148,12 +152,20 @@ func (a Accounts) Prepare(role core.Role, memory bool, bin string) (Launch, erro
 		}
 	case int(acct.uid) == self || self == 0:
 		if int(acct.uid) != self {
+			groupIDs := a.GroupIDs
+			if groupIDs == nil {
+				groupIDs = (*user.User).GroupIds
+			}
 			var groups []uint32
-			if ids, err := u.GroupIds(); err == nil {
-				for _, id := range ids {
-					if g, err := strconv.ParseUint(id, 10, 32); err == nil {
-						groups = append(groups, uint32(g))
-					}
+			ids, err := groupIDs(u)
+			if err != nil {
+				// Fewer privileges, never more: the turn runs with the
+				// account's primary group only, and the owner is told why.
+				a.logf("OS user %q: supplementary groups not found, so this turn runs with its primary group only: %v", r.User, err)
+			}
+			for _, id := range ids {
+				if g, err := strconv.ParseUint(id, 10, 32); err == nil {
+					groups = append(groups, uint32(g))
 				}
 			}
 			l.Cred = &syscall.Credential{Uid: acct.uid, Gid: acct.gid, Groups: groups}
@@ -190,6 +202,14 @@ func (a Accounts) Prepare(role core.Role, memory bool, bin string) (Launch, erro
 		return Launch{}, fmt.Errorf("%s not found on the PATH of OS user %q", bin, r.User)
 	}
 	return l, nil
+}
+
+func (a Accounts) logf(format string, args ...any) {
+	if a.Log != nil {
+		a.Log.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // lookPath finds bin on path without consulting Heimdall's own PATH.

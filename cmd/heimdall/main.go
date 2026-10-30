@@ -89,7 +89,8 @@ func runLocal(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	l := local.New(os.Stdin, os.Stdout, *as, *chat)
-	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs}, Log: log.New(os.Stderr, "heimdall: ", log.LstdFlags)}, st, l)
+	logger := log.New(os.Stderr, "heimdall: ", log.LstdFlags)
+	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger}, st, l)
 	go func() {
 		select {
 		case <-l.EOF():
