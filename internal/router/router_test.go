@@ -1554,3 +1554,44 @@ func TestOwnersAreToldOfANewCaller(t *testing.T) {
 	e.send(coworker, "c2", "!help")
 	want(t, replies(2)["dm-owner"], "fake:coworker")
 }
+
+// waitSteered waits until the owner's running turn in chat took n steers.
+func (e *env) waitSteered(chat string, n int) {
+	e.t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		e.send(owner, chat, "!status")
+		if strings.Contains(e.reply().Text, fmt.Sprintf(", %d steered message(s)", n)) {
+			return
+		}
+	}
+	e.t.Fatalf("%d steer(s) never accepted", n)
+}
+
+// A Claude turn stopped while it runs a late steer is stopped, and its
+// session is not resumed (review of 5b3c62f, finding 1: the reply was an
+// empty "— claude" and the killed session was kept as clean).
+func TestStopDuringClaudeDrain(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
+	e.send(owner, "c1", "work STEERLATE LATEHANG")
+	e.waitReadyOn("c1", "claude")
+	e.send(owner, "c1", "also CHARLIE")
+	e.waitSteered("c1", 1)
+	e.send(owner, "c1", "!stop")
+	want(t, e.reply(), "Stopping the current turn")
+	want(t, e.reply(), "⏹ Stopped.", "— claude")
+	e.send(owner, "c1", "after")
+	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
+}
+
+// A late Claude turn that fails keeps the first answer with a note, and the
+// next turn starts a fresh session (finding 2).
+func TestClaudeLateTurnFailureKeepsTheAnswer(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
+	e.send(owner, "c1", "work STEERLATE LATEFAIL")
+	e.waitReadyOn("c1", "claude")
+	e.send(owner, "c1", "also CHARLIE")
+	out := e.reply()
+	want(t, out, "claude#1 resumed=false", "— claude (a later message was not answered: Claude reported an error: fake late failure)")
+	e.send(owner, "c1", "after")
+	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
+}

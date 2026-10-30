@@ -157,6 +157,70 @@ func TestClaudeLateSteerIsAnsweredNotDropped(t *testing.T) {
 	}
 }
 
+// lateSteer starts a Claude turn whose steer runs as Claude's next turn
+// (STEERLATE plus the late turn's ending in prompt) and returns it once the
+// steer was accepted, while Claude drains.
+func lateSteer(t *testing.T, prompt string) *harness.Run {
+	t.Helper()
+	bin, _ := fakeharness.Install(t, "claude")
+	l := launch(t, bin, "claude", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	r, err := harness.Start(ctx, harness.Spec{Harness: "claude", Prompt: "work STEERLATE " + prompt, Session: harness.Session{ID: harness.NewSessionID("claude")}, Launch: l, Caller: caller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-r.Ready()
+	if got := r.Steer(ctx, "s1", "also CHARLIE", nil); got != harness.SteerAccepted {
+		t.Fatalf("late steer: %s, want accepted", got)
+	}
+	return r
+}
+
+// A turn stopped while Claude drains is cancelled, never an empty answer
+// with a resumable session (review of 5b3c62f, finding 1).
+func TestClaudeDrainCancelled(t *testing.T) {
+	r := lateSteer(t, "LATEHANG")
+	r.Cancel()
+	select {
+	case <-r.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancel did not end the turn")
+	}
+	if res := r.Result(); !res.Cancelled || res.Answer != "" || res.Failure != "" {
+		t.Fatalf("result %+v, want cancelled", res)
+	}
+}
+
+// When the turn Claude runs for a late steer ends badly, the answer it
+// already gave stands, with a note, and the session is not resumed
+// (finding 2): a crash, an error result, an approval request.
+func TestClaudeDrainBadEndKeepsTheAnswer(t *testing.T) {
+	for word, note := range map[string]string{
+		"LATECRASH": "claude exited: exit status 4",
+		"LATEFAIL":  "a later message was not answered: Claude reported an error: fake late failure",
+		"LATEASK":   "a later message was not answered: Claude needs native approval or input",
+	} {
+		t.Run(word, func(t *testing.T) {
+			res := lateSteer(t, word).Result()
+			if !strings.HasPrefix(res.Answer, "claude#1 ") || strings.Contains(res.Answer, "late reply") || res.Failure != "" || res.NeedsHuman != "" {
+				t.Fatalf("result %+v, want the first answer", res)
+			}
+			if !res.Unclean || !strings.Contains(res.Warning, note) {
+				t.Fatalf("unclean %v, warning %q, want %q", res.Unclean, res.Warning, note)
+			}
+		})
+	}
+}
+
+// A late steer whose turn answers leaves a clean session.
+func TestClaudeDrainCleanEnd(t *testing.T) {
+	res := lateSteer(t, "").Result()
+	if res.Unclean || res.Warning != "" || !strings.HasSuffix(res.Answer, "\n\nlate reply: also CHARLIE") {
+		t.Fatalf("result %+v", res)
+	}
+}
+
 // A turn ends at the harness's answer, as the hub resolves at agent_end,
 // not when the process exits: live, OMP took up to 28 s more to exit.
 func TestAnswerIsFinalBeforeTheProcessExits(t *testing.T) {

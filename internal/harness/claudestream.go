@@ -36,6 +36,8 @@ type claudeStreamBridge struct {
 	answer               string
 	answers              []string // each result's text, in order
 	draining             bool     // a result came with steers pending: no new input, wait for theirs
+	warning              string   // the late turn ended badly: the answers stand, the session is not resumed
+	atExit               bool     // published when the process exited during a drain
 	pending              map[string]*pendingSteer
 	seen                 map[string]string
 }
@@ -105,6 +107,14 @@ func (b *claudeStreamBridge) stopLocked(why string, human bool) {
 	if b.done && !b.failed {
 		return
 	}
+	if b.drained() && !b.failed {
+		// The turn Claude ran for input written during its result ended
+		// badly: the answers it already gave stand, with a note, and the
+		// session is not resumed.
+		b.warning = "a later message was not answered: " + why
+		b.publishLocked()
+		return
+	}
 	if !b.failed {
 		b.failed = true
 		if human {
@@ -126,12 +136,19 @@ func (b *claudeStreamBridge) endLocked() {
 	}
 }
 
+// drained reports a result that came while steers were pending, in a turn
+// that was not cancelled: its answers stand whatever Claude does next.
+func (b *claudeStreamBridge) drained() bool {
+	return b.draining && len(b.answers) > 0 && b.ctx.Err() == nil
+}
+
 // settled reports a terminal native outcome; closing the bridge is not one.
-// A result that came while steers were pending is one.
+// A result that came while steers were pending is one, unless the turn was
+// cancelled: a stopped turn is never an answer.
 func (b *claudeStreamBridge) settled() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.published || b.failed || b.draining && len(b.answers) > 0
+	return b.published || b.failed || b.drained()
 }
 
 func (b *claudeStreamBridge) finish() {
@@ -139,9 +156,11 @@ func (b *claudeStreamBridge) finish() {
 	defer b.mu.Unlock()
 	switch {
 	case b.done:
-	case b.draining && len(b.answers) > 0:
-		// Claude exited without running the pending input: the answers it
-		// gave stand; the pending steers are reported unknown.
+	case b.drained():
+		// Claude exited without answering the pending input: the answers it
+		// gave stand; the pending steers are reported unknown. A failed exit
+		// makes the session unclean (Run.wait).
+		b.atExit = true
 		b.publishLocked()
 	default:
 		b.failLocked("Claude ended before its request settled")
@@ -153,7 +172,7 @@ func (b *claudeStreamBridge) outcome() outcome {
 	defer b.mu.Unlock()
 	o := outcome{failure: b.failure, human: b.human, session: b.session}
 	if b.published {
-		o.answer = b.answer
+		o.answer, o.warning, o.unclean, o.atExit = b.answer, b.warning, b.warning != "", b.atExit
 	}
 	return o
 }

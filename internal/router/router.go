@@ -1151,6 +1151,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		tag = "heimdall"
 	}
 	notes := d.notes
+	if res.Warning != "" {
+		notes = append(notes, res.Warning)
+	}
 	for _, s := range d.skipped {
 		notes = append(notes, "file not sent: "+s)
 	}
@@ -1177,7 +1180,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, res.Failure
 		text = "⚠ " + d.harness + " failed: " + failureReason(res.Failure) + ". Please retry, or send reset if this keeps happening."
 	default:
-		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, true
+		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, !res.Unclean
 		text = strings.TrimSpace(res.Answer)
 	}
 	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Formatted: e.State == store.TurnDone}

@@ -148,6 +148,11 @@ type Result struct {
 	Cancelled  bool
 	Ready      bool   // the harness accepted the turn: side effects were possible
 	SessionID  string // native session to resume next time, if known
+	// Unclean marks an answer whose native session must not be resumed: the
+	// harness's work after the answers it kept ended badly (Warning says
+	// how), so its session may hold a half-finished turn.
+	Unclean bool
+	Warning string
 }
 
 // Run is one started native turn.
@@ -167,6 +172,9 @@ type Run struct {
 
 type outcome struct {
 	answer, failure, human, session string
+	warning                         string // with an answer: what went wrong after it
+	unclean                         bool   // with an answer: do not resume the session
+	atExit                          bool   // the answer was published when the process exited, so its exit status counts
 }
 
 // bridge is one native protocol adapter: it reads the harness's stdout and
@@ -273,7 +281,7 @@ func (r *Run) wait() {
 	r.bridge.close()
 	stopGroup(r.cmd)
 	o := r.bridge.outcome()
-	res := Result{Answer: o.answer, Failure: o.failure, NeedsHuman: o.human, SessionID: o.session}
+	res := Result{Answer: o.answer, Failure: o.failure, NeedsHuman: o.human, SessionID: o.session, Warning: o.warning, Unclean: o.unclean}
 	select {
 	case <-r.bridge.readyCh():
 		res.Ready = true
@@ -282,6 +290,10 @@ func (r *Run) wait() {
 	switch {
 	case r.ctx.Err() != nil && !settled:
 		res = Result{Cancelled: true, Ready: res.Ready, SessionID: res.SessionID}
+	case settled && res.Failure == "" && o.atExit && runErr != nil:
+		// The answers stand; the work after them ended in a failed exit.
+		res.Unclean = true
+		res.Warning = joinWarnings(res.Warning, fmt.Sprintf("%s exited: %v", r.harness, runErr))
 	case settled && res.Failure == "":
 	case runErr != nil:
 		why := fmt.Sprintf("%s exited: %v", r.harness, runErr)
@@ -312,7 +324,10 @@ func (r *Run) early() {
 		return
 	}
 	o := r.bridge.outcome()
-	r.finalize(Result{Answer: o.answer, SessionID: o.session, Ready: true})
+	if o.atExit {
+		return // published as the process exited: wait settles it with the exit status
+	}
+	r.finalize(Result{Answer: o.answer, SessionID: o.session, Ready: true, Warning: o.warning, Unclean: o.unclean})
 	t := time.AfterFunc(r.grace, r.cancel)
 	<-r.exited
 	t.Stop()
@@ -396,6 +411,13 @@ func keepAnswer(answers []string, text string) []string {
 // joinAnswers is a turn's answer: the final text for each input it was
 // given (the prompt, then each accepted steer), in order.
 func joinAnswers(answers []string) string { return strings.Join(answers, "\n\n") }
+
+func joinWarnings(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "; " + b
+}
 
 func clip(b []byte) string {
 	s := strings.TrimSpace(string(b))

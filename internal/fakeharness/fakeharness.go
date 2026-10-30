@@ -18,7 +18,9 @@
 //	               it its own final text, "reply N: LAST LINE", as OMP
 //	               answers the prompt and then each steer
 //	STEERLATE      (claude) take the first steer only after the prompt's
-//	               result, as Claude's next turn in the stream
+//	               result, as Claude's next turn in the stream; that turn
+//	               then hangs (LATEHANG), exits 4 (LATECRASH), ends with an
+//	               error result (LATEFAIL) or asks for approval (LATEASK)
 //	LINGER=SECONDS keep running that long after the final answer, with
 //	               STATE/lingering present; a fake started meanwhile
 //	               creates STATE/overlap
@@ -431,7 +433,20 @@ func (f *fake) claude() {
 		result(f.answer())
 		replay("u1", sm["content"])
 		f.steers = append(f.steers, text)
-		result("late reply: " + lastLine(text))
+		switch {
+		case f.has("LATEHANG"):
+			time.Sleep(30 * time.Second)
+			return
+		case f.has("LATECRASH"):
+			fmt.Fprintln(os.Stderr, "fake: crashed in the late turn")
+			os.Exit(4)
+		case f.has("LATEFAIL"):
+			f.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "session_id": id, "is_error": true, "result": "fake late failure"})
+		case f.has("LATEASK"):
+			f.emit(map[string]any{"type": "control_request", "session_id": id})
+		default:
+			result("late reply: " + lastLine(text))
+		}
 		for ok {
 			_, ok = f.read()
 		}
