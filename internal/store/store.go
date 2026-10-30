@@ -230,9 +230,11 @@ func (s *Store) StartTurn(conv core.ConvKey, role core.Role, who, replyTo string
 	return id, tx.Commit()
 }
 
-// CommitTurn records the harness whose turn became ready and marks its
-// native session in progress (not clean) until the turn ends.
-func (s *Store) CommitTurn(turn int64, conv core.ConvKey, who, harness, session string) error {
+// BindTurn records the harness taking a turn and marks its native session
+// in progress (not clean) until the turn ends. It runs before the harness
+// gets any input, so a crash from then on never resumes that session, and
+// again once the turn is ready, when a new session's native ID is known.
+func (s *Store) BindTurn(turn int64, conv core.ConvKey, who, harness, session string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -242,6 +244,24 @@ func (s *Store) CommitTurn(turn int64, conv core.ConvKey, who, harness, session 
 		return err
 	}
 	if err := saveSession(tx, conv, who, harness, session, false); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// UnbindTurn undoes BindTurn for a harness that failed before its turn
+// was ready, so nothing can have happened: the session gets back its
+// previous binding.
+func (s *Store) UnbindTurn(turn int64, conv core.ConvKey, who, harness, prevSession string, prevClean bool) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE turns SET harness='' WHERE id=? AND harness=?`, turn, harness); err != nil {
+		return err
+	}
+	if err := saveSession(tx, conv, who, harness, prevSession, prevClean); err != nil {
 		return err
 	}
 	return tx.Commit()

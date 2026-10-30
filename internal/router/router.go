@@ -563,9 +563,16 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 				notes = append(notes, "new "+h+" session: the previous turn there did not finish cleanly")
 			}
 		}
+		// Recorded before the harness gets any input: a crash from here on
+		// leaves this session not resumable.
+		if err := c.r.store.BindTurn(t.id, c.key, t.who, h, sess.ID); err != nil {
+			notes = append(notes, "turn not recordable, so it did not run: "+err.Error())
+			break
+		}
 		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key}
 		run, err := harness.Start(ctx, harness.Spec{Harness: h, Prompt: prompt, Session: sess, Launch: launch, Caller: caller})
 		if err != nil {
+			c.unbind(t, h, prev, clean)
 			notes = append(notes, err.Error())
 			continue
 		}
@@ -581,14 +588,18 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 		}
 		select {
 		case <-run.Ready():
-			if err := c.r.store.CommitTurn(t.id, c.key, t.who, h, run.SessionID()); err != nil {
-				c.r.log.Printf("turn %d: session binding not recorded: %v", t.id, err)
+			if err := c.r.store.BindTurn(t.id, c.key, t.who, h, run.SessionID()); err != nil {
+				// The session is already recorded as in progress; only a new
+				// session's native ID is missing, so a crash now means the
+				// next turn starts a fresh one.
+				c.r.log.Printf("turn %d: native session ID not recorded: %v", t.id, err)
 			}
 			c.send(ctx, readyEvent{t: t, harness: h})
 			c.send(ctx, doneEvent{t: t, harness: h, res: run.Result(), notes: notes})
 			return
 		default:
 		}
+		c.unbind(t, h, prev, clean)
 		res := run.Result()
 		if res.Cancelled {
 			break
@@ -600,6 +611,15 @@ func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 		notes = append(notes, h+" failed before starting: "+why)
 	}
 	c.send(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes})
+}
+
+// unbind restores h's session binding after h failed before its turn was
+// ready. If that cannot be recorded the session stays not resumable, which
+// only costs a fresh session.
+func (c *conv) unbind(t *turn, h, prev string, clean bool) {
+	if err := c.r.store.UnbindTurn(t.id, c.key, t.who, h, prev, clean); err != nil {
+		c.r.log.Printf("turn %d: %s session binding not restored: %v", t.id, h, err)
+	}
 }
 
 // steerNext hands the oldest waiting steer to the running turn, one at a

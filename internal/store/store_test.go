@@ -54,7 +54,7 @@ func TestRecoverInterruptsRunningTurnsOnce(t *testing.T) {
 	c, _, _ := s.AddInbound(msg("3"))
 	d, _, _ := s.AddInbound(msg("4"))
 	turn, _ := s.StartTurn(conv, core.RoleOwner, "x:u", "1", []int64{a.ID})
-	if err := s.CommitTurn(turn, conv, "x:u", "omp", "sess"); err != nil {
+	if err := s.BindTurn(turn, conv, "x:u", "omp", "sess"); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []int64{b.ID, c.ID, d.ID} {

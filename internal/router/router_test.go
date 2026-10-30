@@ -202,25 +202,17 @@ func want(t *testing.T, out core.Outbound, parts ...string) {
 	}
 }
 
-// waitTurnRunning waits until conv has a turn whose harness is ready.
+// waitReady waits until the owner's turn in chat is running on omp, as
+// !status reports it once the harness is ready.
 func (e *env) waitReady(chat string) {
 	e.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if countReady(e, chat) > 0 {
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		e.send(owner, chat, "!status")
+		if strings.Contains(e.reply().Text, "Running: omp turn") {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 	e.t.Fatal("turn never became ready")
-}
-
-func countReady(e *env, chat string) int {
-	id, _, err := e.st.Session(core.ConvKey{Interface: "fake", Chat: chat}, owner, "omp")
-	if err != nil || id == "" {
-		return 0
-	}
-	return 1
 }
 
 func TestReplyTaggedAndSessionResumed(t *testing.T) {
@@ -538,19 +530,48 @@ func TestRestartDuringSteerHandoverNeverReplays(t *testing.T) {
 	e.waitReady("c1")
 	e.send(owner, "c1", "NOACK also this")
 	// The harness has the message; Heimdall dies before recording its answer.
-	held := filepath.Join(e.state, "steer-held")
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		if _, err := os.Stat(held); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("steer never reached the harness")
-		}
-	}
+	e.waitFile("steer-held")
 	e.stop()
 	stopOnce.Delete(e.st)
 	e.start()
 	want(t, e.reply(), "Heimdall restarted while omp was working")
 	want(t, e.reply(), "may or may not have reached it", "will not be re-sent")
 	e.noReply(time.Second)
+}
+
+// waitFile waits for the fake harness to create name in its state directory.
+func (e *env) waitFile(name string) {
+	e.t.Helper()
+	path := filepath.Join(e.state, name)
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+	}
+	e.t.Fatalf("fake harness never created %s", name)
+}
+
+func TestRestartBeforeReadyNeverResumesSession(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "hi")
+	want(t, e.reply(), "omp#1 resumed=false")
+	// omp has the input but is not ready yet when Heimdall dies.
+	e.send(owner, "c1", "x HANGPRE=omp")
+	e.waitFile("hang-pre")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.start()
+	want(t, e.reply(), "Heimdall restarted while omp was working")
+	e.send(owner, "c1", "next")
+	want(t, e.reply(), "omp#1 resumed=false", "new omp session")
+}
+
+func TestFailureBeforeReadyKeepsSessionResumable(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+	e.send(owner, "c1", "hi")
+	want(t, e.reply(), "omp#1 resumed=false")
+	e.send(owner, "c1", "x FAILPRE=omp")
+	want(t, e.reply(), "codex#1", "omp failed before starting")
+	e.send(owner, "c1", "again")
+	want(t, e.reply(), "omp#2 resumed=true")
 }

@@ -8,6 +8,7 @@
 //
 //	FAILPRE=NAME   exit with an error before the turn is ready
 //	FAILPOST=NAME  exit with an error after the turn is ready
+//	HANGPRE=NAME   create STATE/hang-pre and hang before the turn is ready
 //	WAIT_STEER     wait for steering input until one contains FINISH (10s cap)
 //	NOACK          (in a pi/omp steer) take the steer, create STATE/steer-held
 //	               and never acknowledge it
@@ -107,6 +108,11 @@ func (f *fake) read() (map[string]any, bool) {
 func (f *fake) has(word string) bool { return strings.Contains(f.prompt, word) }
 
 func (f *fake) failPre() {
+	if f.has("HANGPRE=" + f.name) {
+		_ = os.WriteFile(filepath.Join(f.state, "hang-pre"), nil, 0o600)
+		time.Sleep(30 * time.Second)
+		os.Exit(3)
+	}
 	if f.has("FAILPRE=" + f.name) {
 		fmt.Fprintln(os.Stderr, "fake: not logged in")
 		os.Exit(3)
