@@ -24,8 +24,7 @@ var DefaultOrder = []string{"omp", "codex", "claude", "pi"}
 type Config struct {
 	DataDir      string                   `json:"data_dir"`
 	Mode         core.Mode                `json:"mode"`
-	Owners       []string                 `json:"owners"`    // principal keys, platform:id
-	Employees    []string                 `json:"employees"` // principal keys, platform:id
+	Owners       []string                 `json:"owners"` // principal keys, platform:id; everyone else is non-root
 	HarnessOrder []string                 `json:"harness_order,omitempty"`
 	MaxParallel  int                      `json:"max_parallel,omitempty"`
 	RunAs        map[core.Role]core.RunAs `json:"run_as"`
@@ -72,19 +71,14 @@ func (c *Config) fill() error {
 	if len(c.Owners) == 0 {
 		return errors.New("owners must list at least one verified principal (platform:id)")
 	}
-	seen := map[string]string{}
-	for _, list := range []struct {
-		name string
-		keys []string
-	}{{"owners", c.Owners}, {"employees", c.Employees}} {
-		for _, k := range list.keys {
-			if _, err := core.ParsePrincipalKey(k); err != nil {
-				return fmt.Errorf("%s: %w", list.name, err)
-			}
-			if prev, dup := seen[k]; dup {
-				return fmt.Errorf("principal %q is listed in both %s and %s", k, prev, list.name)
-			}
-			seen[k] = list.name
+	for i, k := range c.Owners {
+		p, err := core.ParsePrincipalKey(k)
+		if err != nil {
+			return fmt.Errorf("owners: %w", err)
+		}
+		c.Owners[i] = p.Key()
+		if slices.Contains(c.Owners[:i], p.Key()) {
+			return fmt.Errorf("owners: %q listed twice", k)
 		}
 	}
 	if len(c.HarnessOrder) == 0 {
@@ -121,8 +115,9 @@ func (c *Config) fill() error {
 	if _, ok := c.RunAs[core.RoleOwner]; !ok {
 		return errors.New("run_as.owner is required")
 	}
-	if _, ok := c.RunAs[core.RoleEmployee]; len(c.Employees) > 0 && !ok {
-		return errors.New("run_as.employee is required when employees are listed")
+	// Every verified caller who is not an owner runs as the employee account.
+	if _, ok := c.RunAs[core.RoleEmployee]; !ok {
+		return errors.New("run_as.employee is required: every caller who is not an owner runs as it")
 	}
 	// The employee's account must be neither root nor the owner's, by uid.
 	if err := (harness.Accounts{RunAs: c.RunAs, Lookup: lookupUser}).Check(); err != nil {
@@ -134,14 +129,11 @@ func (c *Config) fill() error {
 // lookupUser resolves OS accounts; tests replace it.
 var lookupUser = user.Lookup
 
-// Access is the config's verified-principal access list.
+// Access is the config's owner list.
 func (c *Config) Access() core.Access {
-	a := core.Access{Mode: c.Mode, Owners: map[string]bool{}, Employees: map[string]bool{}}
+	a := core.Access{Mode: c.Mode, Owners: map[string]bool{}}
 	for _, k := range c.Owners {
 		a.Owners[k] = true
-	}
-	for _, k := range c.Employees {
-		a.Employees[k] = true
 	}
 	return a
 }

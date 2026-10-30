@@ -36,11 +36,15 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | Key | Meaning |
 |---|---|
 | `data_dir` | SQLite queues and state |
-| `mode` | `corporate` (employees get memory) or `personal` (only the owner does) |
-| `owners`, `employees` | verified principals as `platform:id` (e.g. `telegram:123`, `slack:T1/U2`); everyone else is rejected |
+| `mode` | `corporate` (the owner and Slack callers get memory) or `personal` (only the owner does); Telegram callers who are not owners never do |
+| `owners` | root callers as `platform:id`: `telegram:<numeric user ID>`, `slack:<verified email>` |
 | `harness_order` | default order, `omp, codex, claude, pi` |
 | `max_parallel` | conversations running a turn at once |
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
+
+Every other caller the interface verified is non-root: any Telegram user who
+is not an owner, any Slack caller with a verified email. A Slack message
+without a verified email is ignored. There is no allowlist beyond `owners`.
 
 Owner turns run as the owner OS user (root in production) with everything
 the native harness setup allows. Employee turns always run as a separate
@@ -78,9 +82,9 @@ heimdall local -config my.json -as owner
 ```
 
 Type one message per line. Prefix `@user` and `#chat/thread` to switch the
-sender and conversation for that line (e.g. `@employee #team/7 hello`). The
-local interface trusts whoever types, so list `local:...` principals only in
-test configs.
+sender and conversation for that line (e.g. `@employee #team/7 hello`); any
+sender not listed in `owners` is non-root. The local interface trusts
+whoever types, so list `local:...` owners only in test configs.
 
 ## Reliability
 

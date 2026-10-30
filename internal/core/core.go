@@ -14,43 +14,87 @@ import (
 type Role string
 
 const (
-	RoleOwner    Role = "owner"
-	RoleEmployee Role = "employee"
+	RoleOwner    Role = "owner"    // root: listed in the config's owners
+	RoleEmployee Role = "employee" // every other verified caller: non-root
 )
 
 // Mode decides who gets memory.
 type Mode string
 
 const (
-	ModeCorporate Mode = "corporate" // owner and employees get memory
+	ModeCorporate Mode = "corporate" // owner and Slack callers get memory
 	ModePersonal  Mode = "personal"  // only the owner gets memory
 )
 
-// Memory reports whether a turn of role gets Memento in mode.
-func Memory(mode Mode, role Role) bool { return role == RoleOwner || mode == ModeCorporate }
+// Memory reports whether a turn for p in role gets Memento in mode: always
+// for the owner; in corporate mode also for Slack callers, whose verified
+// email identifies them. Other non-root callers, Telegram users included,
+// get none in either mode (a safe default pending the owner's decision).
+func Memory(mode Mode, role Role, p Principal) bool {
+	return role == RoleOwner || mode == ModeCorporate && p.Platform == PlatformSlack && p.Email != ""
+}
+
+// Platforms with identity rules of their own.
+const (
+	PlatformTelegram = "telegram"
+	PlatformSlack    = "slack"
+)
 
 // Principal is a caller as verified by its interface: the platform's
-// authenticated user ID, never a display name or anything a sender wrote.
-// Access is decided by Key alone; Email and KeyID only travel with the
-// caller to the harness process.
+// authenticated identity, never a display name or anything a sender wrote.
+// Telegram: the numeric user ID. Slack: the verified email, which is the
+// Slack identity (see SlackPrincipal); a Slack caller without one cannot be
+// identified. Email and KeyID also travel with the caller to the harness.
 type Principal struct {
 	Platform string `json:"platform"`         // telegram, slack, agentnet, local
-	ID       string `json:"id"`               // verified user ID; Slack: TEAM/USER
+	ID       string `json:"id"`               // verified identity; Slack: the email
 	Name     string `json:"name,omitempty"`   // display only, never authority
 	Email    string `json:"email,omitempty"`  // interface-verified email (Slack), or ""
 	KeyID    string `json:"key_id,omitempty"` // verified signing key ID (AgentNet), or ""
 }
 
-// Key is the principal's access-list form, platform:id.
+// Key is the principal's identity, platform:id: what the owner list holds
+// and what sessions are kept per.
 func (p Principal) Key() string { return p.Platform + ":" + p.ID }
 
-// ParsePrincipalKey validates an access-list entry of the form platform:id.
+// SlackPrincipal is a Slack caller identified by the email Slack verified.
+func SlackPrincipal(email, name string) Principal {
+	e := NormalizeEmail(email)
+	return Principal{Platform: PlatformSlack, ID: e, Name: name, Email: e}
+}
+
+// NormalizeEmail is the form emails are compared in.
+func NormalizeEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// ParsePrincipalKey validates an owner-list entry of the form platform:id.
+// Telegram IDs are numeric; Slack IDs are emails, returned normalized.
 func ParsePrincipalKey(key string) (Principal, error) {
 	platform, id, ok := strings.Cut(key, ":")
 	if !ok || !validToken(platform) || id == "" || strings.ContainsAny(id, " \t\r\n") {
 		return Principal{}, fmt.Errorf("principal %q must be platform:id", key)
 	}
+	switch platform {
+	case PlatformTelegram:
+		if !numeric(id) {
+			return Principal{}, fmt.Errorf("principal %q: a Telegram ID is the numeric user ID", key)
+		}
+	case PlatformSlack:
+		p := SlackPrincipal(id, "")
+		if !strings.Contains(p.ID, "@") {
+			return Principal{}, fmt.Errorf("principal %q: a Slack principal is the caller's verified email", key)
+		}
+		return p, nil
+	}
 	return Principal{Platform: platform, ID: id}, nil
+}
+
+func numeric(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 func validToken(s string) bool {
@@ -65,25 +109,34 @@ func validToken(s string) bool {
 	return true
 }
 
-// Access maps verified principals to roles. Anyone not listed is rejected.
+// Access maps verified principals to roles: listed owners are root, every
+// other caller its interface identified is non-root.
 type Access struct {
-	Mode      Mode
-	Owners    map[string]bool // principal keys
-	Employees map[string]bool
+	Mode   Mode
+	Owners map[string]bool // principal keys
 }
 
-// Role returns p's role, or false when p is unknown (fail closed).
+// Role returns p's role, or false when p cannot be identified (fail
+// closed): no verified identity, a Telegram ID that is not numeric, or a
+// Slack caller without a verified email that is its ID.
 func (a Access) Role(p Principal) (Role, bool) {
 	if p.Platform == "" || p.ID == "" {
 		return "", false
 	}
-	switch k := p.Key(); {
-	case a.Owners[k]:
-		return RoleOwner, true
-	case a.Employees[k]:
-		return RoleEmployee, true
+	switch p.Platform {
+	case PlatformTelegram:
+		if !numeric(p.ID) {
+			return "", false
+		}
+	case PlatformSlack:
+		if p.Email == "" || p.ID != NormalizeEmail(p.Email) {
+			return "", false
+		}
 	}
-	return "", false
+	if a.Owners[p.Key()] {
+		return RoleOwner, true
+	}
+	return RoleEmployee, true
 }
 
 // ConvKey identifies a conversation: interface + chat + thread. One turn

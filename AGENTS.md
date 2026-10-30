@@ -17,7 +17,8 @@ form those tools read, never only as prompt text.
 Its whole job, per message:
 
 1. receive it from an interface;
-2. attach the interface-verified caller identity and reject unknown callers;
+2. attach the interface-verified caller identity and ignore callers it
+   cannot identify;
 3. pick the harness (default order or a `!` override);
 4. call that harness with the correct native session for this conversation;
 5. pass messages that arrive mid-turn to the running turn as steer or
@@ -37,18 +38,28 @@ Its whole job, per message:
   injects no tool exclusions, sandbox changes or permission overrides, and
   runs no extra services.
 - **Identity comes from the interface, never from text.** Callers never log
-  in. Each interface supplies a platform-verified principal (Telegram user
-  ID, Slack team + user ID, AgentNet verified key). Display names are never
-  authority. Unknown callers are rejected (fail closed). The verified
-  identity is carried on every message handed to a harness, including
-  scheduled jobs (later phase), which store their creator and run under that
-  creator's role and mode evaluated at fire time.
+  in. Each interface supplies a platform-verified principal: the numeric
+  Telegram user ID; for Slack the verified email, which is the Slack
+  identity (a Slack user ID alone never counts); the AgentNet verified key.
+  Display names, usernames and message text are never identity. A caller
+  the interface cannot identify (a Slack message without a verified email)
+  is ignored and logged, fail closed. The verified identity is carried on
+  every message handed to a harness, and to the harness process in the
+  hub's identity variables (`docs/hub-parity.md`), including scheduled jobs
+  (later phase), which store their creator and run under that creator's
+  role and mode evaluated at fire time.
 - **Roles.**
-  - *Owner*: recognised only by verified platform IDs listed in the config.
-    Owner turns run as the owner OS user (root in production) with
-    everything enabled; Heimdall never restricts owner turns.
-  - *Employees*: listed verified platform IDs. Employee turns always run as a
-    separate non-privileged OS user, with all of that user's tools.
+  - *Owner (root)*: only the principals listed in the config's `owners`
+    (Telegram user IDs, Slack verified emails). Owner turns run as the owner
+    OS user (root in production) with everything enabled; Heimdall never
+    restricts owner turns.
+  - *Employee (non-root)*: every other caller the interface identified, with
+    no allowlist: any Telegram user who is not an owner, any Slack caller
+    with a verified email that is not an owner's. Employee turns always run
+    as a separate non-privileged OS user, with all of that user's tools, and
+    tell tools they are restricted (`PI_RESTRICTED_EXTERNAL_USER=1`).
+  - The employee OS account is checked by uid: never root's or the
+    owner's, at startup and on every turn.
   - When Heimdall cannot switch to a turn's OS user (it is not root and the
     user differs from its own), the turn is refused. An employee turn never
     runs as the owner.
@@ -56,8 +67,10 @@ Its whole job, per message:
     Heimdall never copies credentials and never reuses one user's home or
     environment for another (the employee environment is rebuilt from that
     user's account).
-- **Modes.** `corporate`: employees also get memory. `personal`: only the
-  owner gets memory. Memory means Memento's native integration for that
+- **Modes.** `corporate`: the owner and Slack callers (verified email) get
+  memory. `personal`: only the owner gets memory. Telegram callers who are
+  not owners get no memory in either mode (safe default until the owner
+  decides). Memory means Memento's native integration for that
   harness run; for a no-memory turn Heimdall sets `MEMENTO_PROCESSING=1`,
   which suppresses Memento's own hooks/extensions. Heimdall never enables
   memory the native setup lacks. Memento MCP tools configured natively for

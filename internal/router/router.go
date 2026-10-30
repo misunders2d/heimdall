@@ -124,7 +124,7 @@ func (r *Router) Run(ctx context.Context) error {
 }
 
 // accept persists one verified message and hands it to its conversation.
-// Unknown senders are rejected without storing their text.
+// Senders who cannot be identified are ignored without storing their text.
 func (r *Router) accept(_ context.Context, in core.Inbound) error {
 	if in.Origin == "" {
 		in.Origin = core.OriginLive
@@ -133,7 +133,7 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 		return err
 	}
 	if _, ok := r.opt.Access.Role(in.From); !ok {
-		r.log.Printf("rejected message from unknown caller %s in %s", in.From.Key(), in.Conv)
+		r.log.Printf("ignored message from an unidentified %s caller in %s", in.From.Platform, in.Conv)
 		return nil
 	}
 	row, dup, err := r.store.AddInbound(in)
@@ -534,7 +534,7 @@ func (c *conv) send(ctx context.Context, ev any) {
 // is ready the turn is committed to it.
 func (c *conv) runTurn(ctx context.Context, t *turn, prompt string) {
 	var notes []string
-	memory := core.Memory(c.r.opt.Access.Mode, t.role)
+	memory := core.Memory(c.r.opt.Access.Mode, t.role, t.from)
 	for _, h := range t.candidates {
 		if ctx.Err() != nil || t.stopped.Load() {
 			break

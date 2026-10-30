@@ -44,19 +44,16 @@ func identityVars(c Caller) ([]string, error) {
 	}
 	var platform, user, chat, email string
 	switch p.Platform {
-	case "telegram":
+	case core.PlatformTelegram:
 		platform, user, chat = "telegram", "tg_user_"+p.ID, "tg_chat_"+c.Conv.Chat
-	case "slack":
-		// Slack principals are TEAM/USER; the hub's ID is the user part, or
-		// the verified email when Slack supplied one.
-		uid := p.ID
-		if _, u, ok := strings.Cut(p.ID, "/"); ok {
-			uid = u
+	case core.PlatformSlack:
+		// The verified email is the Slack identity; the hub uses it as the
+		// user ID when Slack supplies one.
+		e := core.NormalizeEmail(p.Email)
+		if e == "" {
+			return nil, errors.New("slack caller without a verified email")
 		}
-		platform, user, chat = "slack", "sl_user_"+uid, "sl_channel_"+c.Conv.Chat
-		if e := strings.ToLower(strings.TrimSpace(p.Email)); e != "" {
-			user, email = e, e
-		}
+		platform, user, chat, email = "slack", e, "sl_channel_"+c.Conv.Chat, e
 	case "agentnet":
 		// TODO(phase 2, AgentNet interface): set PI_EXTERNAL_USER_ID,
 		// PI_EXTERNAL_CHAT_ID, A2A_CALLER_PRINCIPAL, A2A_CALLER_SOURCE=a2a_signed

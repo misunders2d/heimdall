@@ -24,7 +24,7 @@ func init() {
 }
 
 func TestParseDefaultsAndAccess(t *testing.T) {
-	c, err := Parse([]byte(`{"data_dir":"/tmp/h","mode":"personal","owners":["telegram:1"],"employees":["slack:T/U"],
+	c, err := Parse([]byte(`{"data_dir":"/tmp/h","mode":"personal","owners":["telegram:1","slack:Owner@Example.com"],
 "run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -34,30 +34,33 @@ func TestParseDefaultsAndAccess(t *testing.T) {
 	}
 	a := c.Access()
 	if r, ok := a.Role(core.Principal{Platform: "telegram", ID: "1", Name: "anything"}); !ok || r != core.RoleOwner {
-		t.Fatal("owner not recognised by platform ID")
+		t.Fatal("owner not recognised by Telegram user ID")
 	}
-	if r, ok := a.Role(core.Principal{Platform: "slack", ID: "T/U"}); !ok || r != core.RoleEmployee {
-		t.Fatal("employee not recognised")
+	if r, ok := a.Role(core.SlackPrincipal("owner@example.com", "")); !ok || r != core.RoleOwner {
+		t.Fatal("owner not recognised by verified Slack email")
 	}
-	if _, ok := a.Role(core.Principal{Platform: "telegram", ID: "2", Name: "telegram:1"}); ok {
-		t.Fatal("unknown caller accepted (display name must never count)")
+	if r, ok := a.Role(core.Principal{Platform: "telegram", ID: "2", Name: "telegram:1"}); !ok || r != core.RoleEmployee {
+		t.Fatal("a Telegram caller who is not an owner must be non-root (display name never counts)")
 	}
 }
 
 func TestParseRejects(t *testing.T) {
 	base := `"data_dir":"/tmp/h","mode":"corporate","run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
 	for name, doc := range map[string]string{
-		"no owners":        `{` + base + `}`,
-		"bad principal":    `{` + base + `,"owners":["nocolon"]}`,
-		"owner+employee":   `{` + base + `,"owners":["t:1"],"employees":["t:1"]}`,
-		"unknown harness":  `{` + base + `,"owners":["t:1"],"harness_order":["vim"]}`,
-		"unknown field":    `{` + base + `,"owners":["t:1"],"token":"x"}`,
-		"bad mode":         `{"data_dir":"/tmp/h","mode":"x","owners":["t:1"],"run_as":{"owner":{"user":"root"}}}`,
-		"same OS user":     `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"root"},"employee":{"user":"root"}}}`,
-		"employee no user": `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"root"}}}`,
-		"employee is root": `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"boss"},"employee":{"user":"toor"}}}`,
-		"employee=owner":   `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"boss"},"employee":{"user":"boss2"}}}`,
-		"unknown OS user":  `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"employees":["t:2"],"run_as":{"owner":{"user":"root"},"employee":{"user":"nobody-here"}}}`,
+		"no owners":           `{` + base + `}`,
+		"bad principal":       `{` + base + `,"owners":["nocolon"]}`,
+		"telegram name":       `{` + base + `,"owners":["telegram:@boss"]}`,
+		"slack user ID":       `{` + base + `,"owners":["slack:T1/U2"]}`,
+		"owner twice":         `{` + base + `,"owners":["slack:a@b.c","slack:A@B.C"]}`,
+		"employee allowlist":  `{` + base + `,"owners":["t:1"],"employees":["t:2"]}`,
+		"unknown harness":     `{` + base + `,"owners":["t:1"],"harness_order":["vim"]}`,
+		"unknown field":       `{` + base + `,"owners":["t:1"],"token":"x"}`,
+		"bad mode":            `{"data_dir":"/tmp/h","mode":"x","owners":["t:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}}`,
+		"same OS user":        `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"root"}}}`,
+		"no employee account": `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"run_as":{"owner":{"user":"root"}}}`,
+		"employee is root":    `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"run_as":{"owner":{"user":"boss"},"employee":{"user":"toor"}}}`,
+		"employee=owner":      `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"run_as":{"owner":{"user":"boss"},"employee":{"user":"boss2"}}}`,
+		"unknown OS user":     `{"data_dir":"/tmp/h","mode":"corporate","owners":["t:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"nobody-here"}}}`,
 	} {
 		if _, err := Parse([]byte(doc)); err == nil {
 			t.Errorf("%s: accepted", name)

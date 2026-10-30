@@ -224,10 +224,10 @@ func TestIdentityMapsToHubVariables(t *testing.T) {
 			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_C9", "PI_RESTRICTED_EXTERNAL_USER=0"}},
 		{"telegram employee", harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "43"}, Role: core.RoleEmployee, Conv: conv},
 			[]string{"PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_43", "PI_EXTERNAL_CHAT_ID=tg_chat_C9", "PI_RESTRICTED_EXTERNAL_USER=1"}},
-		{"slack verified email", harness.Caller{Principal: core.Principal{Platform: "slack", ID: "T1/U2", Email: " User@Example.com"}, Role: core.RoleEmployee, Conv: conv},
+		{"slack verified email", harness.Caller{Principal: core.SlackPrincipal(" User@Example.com", ""), Role: core.RoleEmployee, Conv: conv},
 			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=user@example.com", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_USER_EMAIL=user@example.com"}},
-		{"slack without email", harness.Caller{Principal: core.Principal{Platform: "slack", ID: "T1/U2"}, Role: core.RoleOwner, Conv: conv},
-			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=sl_user_U2", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=0"}},
+		{"slack owner", harness.Caller{Principal: core.SlackPrincipal("owner@example.com", ""), Role: core.RoleOwner, Conv: conv},
+			[]string{"PI_EXTERNAL_PLATFORM=slack", "PI_EXTERNAL_USER_ID=owner@example.com", "PI_EXTERNAL_CHAT_ID=sl_channel_C9", "PI_RESTRICTED_EXTERNAL_USER=0", "PI_EXTERNAL_USER_EMAIL=owner@example.com"}},
 		{"agentnet owner is still restricted", harness.Caller{Principal: core.Principal{Platform: "agentnet", ID: "a", KeyID: "k"}, Role: core.RoleOwner, Conv: conv},
 			[]string{"PI_EXTERNAL_PLATFORM=a2a", "PI_RESTRICTED_EXTERNAL_USER=1"}},
 		{"local never looks like the hub's own admin", harness.Caller{Principal: core.Principal{Platform: "local", ID: "local"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "local", Chat: "system"}},
@@ -261,6 +261,7 @@ func TestIdentityRequiredAndClean(t *testing.T) {
 	for _, c := range []harness.Caller{
 		{},
 		{Principal: core.Principal{Platform: "telegram", ID: "1"}, Role: core.RoleOwner},
+		{Principal: core.Principal{Platform: "slack", ID: "T1/U2"}, Role: core.RoleEmployee, Conv: core.ConvKey{Interface: "slack", Chat: "C1"}},
 		{Principal: core.Principal{Platform: "telegram", ID: "1\nPI_RESTRICTED_EXTERNAL_USER=0"}, Role: core.RoleEmployee, Conv: core.ConvKey{Interface: "telegram", Chat: "1"}},
 	} {
 		if _, err := harness.WithIdentity(nil, c); err == nil {

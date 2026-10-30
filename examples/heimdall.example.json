@@ -1,8 +1,7 @@
 {
   "data_dir": "~/.local/state/heimdall",
   "mode": "corporate",
-  "owners": ["telegram:OWNER_TELEGRAM_USER_ID", "local:owner"],
-  "employees": ["telegram:EMPLOYEE_TELEGRAM_USER_ID", "local:employee"],
+  "owners": ["telegram:OWNER_TELEGRAM_USER_ID", "slack:owner@example.com", "local:owner"],
   "harness_order": ["omp", "codex", "claude", "pi"],
   "max_parallel": 4,
   "run_as": {

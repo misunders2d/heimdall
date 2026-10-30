@@ -119,9 +119,9 @@ func listHarnesses(args []string) error {
 		if !ok {
 			continue
 		}
-		fmt.Printf("%s (OS user %s, memory %v):\n", role, runAs.User, core.Memory(cfg.Mode, role))
+		fmt.Printf("%s (OS user %s):\n", role, runAs.User)
 		for _, h := range harness.Names() {
-			l, err := accounts.Prepare(role, core.Memory(cfg.Mode, role), harness.Binary(h))
+			l, err := accounts.Prepare(role, role == core.RoleOwner, harness.Binary(h))
 			if err != nil {
 				fmt.Printf("  %-7s unavailable: %v\n", h, err)
 				continue
