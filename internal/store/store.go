@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,6 +100,13 @@ ALTER TABLE inbound ADD COLUMN user_key_id TEXT NOT NULL DEFAULT '';`,
 	`ALTER TABLE outbound ADD COLUMN extra TEXT NOT NULL DEFAULT '';`,
 	// What an interface adds to a message beyond its text (inExtra, JSON).
 	`ALTER TABLE inbound ADD COLUMN extra TEXT NOT NULL DEFAULT '';`,
+	// Recent group messages, kept as context for later turns (Ambient).
+	`CREATE TABLE ambient(
+	id INTEGER PRIMARY KEY,
+	iface TEXT NOT NULL, chat TEXT NOT NULL, thread TEXT NOT NULL, msg_id TEXT NOT NULL,
+	at INTEGER NOT NULL, who TEXT NOT NULL, name TEXT NOT NULL, text TEXT NOT NULL, file TEXT NOT NULL,
+	UNIQUE(iface, chat, msg_id));
+CREATE INDEX ambient_conv ON ambient(iface, chat, thread, id);`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -692,4 +700,74 @@ func clip(s string) string {
 		s = s[:300]
 	}
 	return s
+}
+
+// AmbientKeep is how many recent messages a conversation keeps as context
+// (the hub's PI_TELEGRAM_CONTEXT_MAX_LINES).
+const AmbientKeep = 1000
+
+// Ambient is one recent message of a group conversation, kept as context.
+type Ambient struct {
+	ID    int64
+	Conv  core.ConvKey
+	MsgID string
+	At    time.Time
+	Who   string // verified principal key
+	Name  string // display name, untrusted
+	Text  string // already scrubbed and clipped
+	File  string // attachment label, if any
+}
+
+// AddAmbient keeps one message as context, once, and forgets the
+// conversation's messages beyond the newest AmbientKeep.
+func (s *Store) AddAmbient(a Ambient) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO ambient(iface,chat,thread,msg_id,at,who,name,text,file) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHING`,
+		a.Conv.Interface, a.Conv.Chat, a.Conv.Thread, a.MsgID, a.At.UnixMilli(), a.Who, a.Name, a.Text, a.File)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(`DELETE FROM ambient WHERE iface=? AND chat=? AND thread=? AND id <= (
+	SELECT id FROM ambient WHERE iface=? AND chat=? AND thread=? ORDER BY id DESC LIMIT 1 OFFSET ?)`,
+		a.Conv.Interface, a.Conv.Chat, a.Conv.Thread, a.Conv.Interface, a.Conv.Chat, a.Conv.Thread, AmbientKeep); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RecentAmbient is the conversation's newest limit messages kept as
+// context, oldest first, without the messages in skip.
+func (s *Store) RecentAmbient(conv core.ConvKey, skip []string, limit int) ([]Ambient, error) {
+	q := `SELECT id,msg_id,at,who,name,text,file FROM ambient WHERE iface=? AND chat=? AND thread=?`
+	args := []any{conv.Interface, conv.Chat, conv.Thread}
+	if len(skip) > 0 {
+		q += ` AND msg_id NOT IN (?` + strings.Repeat(",?", len(skip)-1) + `)`
+		for _, id := range skip {
+			args = append(args, id)
+		}
+	}
+	rows, err := s.db.Query(q+` ORDER BY id DESC LIMIT ?`, append(args, limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Ambient
+	for rows.Next() {
+		a := Ambient{Conv: conv}
+		var at int64
+		if err := rows.Scan(&a.ID, &a.MsgID, &at, &a.Who, &a.Name, &a.Text, &a.File); err != nil {
+			return nil, err
+		}
+		a.At = time.UnixMilli(at)
+		out = append(out, a)
+	}
+	slices.Reverse(out)
+	return out, rows.Err()
 }

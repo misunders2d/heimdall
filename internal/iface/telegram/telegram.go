@@ -284,7 +284,9 @@ func (t *Interface) Run(ctx context.Context, accept func(context.Context, core.I
 				continue
 			}
 			if in, m, ok := t.inbound(u); ok {
-				in.Attachments = t.attachments(ctx, m)
+				if !in.Ambient {
+					in.Attachments = t.attachments(ctx, m)
+				}
 				if ctx.Err() != nil {
 					return nil
 				}
@@ -331,7 +333,7 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 	replied := repliedTo(m)
 	addressed := private || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
 	if !addressed {
-		return core.Inbound{}, nil, false // group traffic not for the bot: not stored
+		return t.ambient(u, m, text)
 	}
 	if m.MediaGroupID != "" && !private {
 		t.rememberAlbum(m)
@@ -394,6 +396,39 @@ func (t *Interface) rememberAlbum(m *message) {
 	}
 	t.albums[albumKey(m)] = time.Now()
 }
+
+// ambient is a group message not addressed to the bot, kept by the router
+// as context for the group's later turns (the hub's appendTelegramContext):
+// its text and the label of the file it or the message it replies to
+// carries, which is not downloaded.
+func (t *Interface) ambient(u update, m *message, text string) (core.Inbound, *message, bool) {
+	in := core.Inbound{
+		Conv:    core.ConvKey{Interface: core.PlatformTelegram, Chat: strconv.FormatInt(m.Chat.ID, 10)},
+		MsgID:   strconv.FormatInt(m.MessageID, 10),
+		From:    core.Principal{Platform: core.PlatformTelegram, ID: strconv.FormatInt(m.From.ID, 10), Name: strings.TrimSpace(m.From.FirstName + " " + m.From.LastName)},
+		Origin:  core.OriginLive,
+		Text:    text,
+		At:      time.Unix(m.Date, 0),
+		Ambient: true,
+	}
+	if m.IsTopicMessage && m.MessageThreadID != 0 {
+		in.Conv.Thread = strconv.FormatInt(m.MessageThreadID, 10)
+	}
+	for _, c := range []*message{m, repliedTo(m)} {
+		if a := detect(c); a != nil && a.FileID != "" {
+			in.Attachments = []core.Attachment{{Kind: a.Kind, Name: safeName(a.Name), MIME: a.MIME}}
+			break
+		}
+	}
+	if strings.TrimSpace(text) == "" && len(in.Attachments) == 0 || in.Validate() != nil {
+		return core.Inbound{}, nil, false
+	}
+	return in, m, true
+}
+
+// GroupContext reports that Telegram group messages not addressed to the
+// bot are sent as Ambient, for context.
+func (t *Interface) GroupContext() bool { return true }
 
 // mentions reports whether text mentions @<bot username>: not merely a
 // longer username that starts with it. Telegram usernames are

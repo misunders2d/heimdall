@@ -2,6 +2,8 @@ package store
 
 import (
 	"path/filepath"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -288,5 +290,45 @@ func TestPendingKeepsContext(t *testing.T) {
 	p, err := s.Pending()
 	if err != nil || len(p) != 1 || p[0].Context != in.Context || p[0].Group != in.Group {
 		t.Fatalf("pending = %+v, %v", p, err)
+	}
+}
+
+// A conversation keeps its newest AmbientKeep context messages, each once;
+// other conversations, forum topics included, are separate.
+func TestAmbient(t *testing.T) {
+	s := open(t)
+	topic := core.ConvKey{Interface: conv.Interface, Chat: conv.Chat, Thread: "7"}
+	add := func(c core.ConvKey, id string) {
+		t.Helper()
+		if err := s.AddAmbient(Ambient{Conv: c, MsgID: id, At: time.UnixMilli(1000), Who: "fake:x", Text: "t" + id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 1; i <= AmbientKeep+5; i++ {
+		add(conv, strconv.Itoa(i))
+	}
+	add(conv, "3000")
+	add(conv, "3000")
+	add(topic, "t1")
+	got, err := s.RecentAmbient(conv, []string{"3000", "1004"}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, a := range got {
+		ids = append(ids, a.MsgID)
+	}
+	if !slices.Equal(ids, []string{"1002", "1003", "1005"}) || got[0].Text != "t1002" || got[0].Who != "fake:x" || !got[0].At.Equal(time.UnixMilli(1000)) {
+		t.Fatalf("recent %v %+v", ids, got)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM ambient WHERE thread=?`, conv.Thread).Scan(&n); err != nil || n != AmbientKeep {
+		t.Fatalf("kept %d, %v", n, err)
+	}
+	if all, _ := s.RecentAmbient(conv, nil, 2*AmbientKeep); len(all) != AmbientKeep || all[0].MsgID != "7" {
+		t.Fatalf("oldest kept %+v", all[0])
+	}
+	if got, _ := s.RecentAmbient(topic, nil, 40); len(got) != 1 || got[0].MsgID != "t1" {
+		t.Fatalf("topic %+v", got)
 	}
 }

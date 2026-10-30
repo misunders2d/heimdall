@@ -190,6 +190,10 @@ type Inbound struct {
 	// parts of one group until none has arrived for a moment, then handles
 	// them as one message.
 	Group string
+	// Ambient marks a group chat message not addressed to the bot. It is
+	// never run or answered; it is kept, bounded, as untrusted context for
+	// the conversation's next turns (the hub's recent group context).
+	Ambient bool
 }
 
 // Attachment is a file a message carried. The interface downloads it into

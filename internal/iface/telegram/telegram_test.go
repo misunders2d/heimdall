@@ -401,8 +401,18 @@ func TestIgnoredUpdatesAreAcknowledgedButNeverAccepted(t *testing.T) {
 	stop := run(t, newIface(t, api.srv.URL, botName, &logs), c.accept)
 	eventually(t, "offset past every update", func() bool { return api.lastOffset() == 12 })
 	stop()
-	if got := c.list(); len(got) != 1 || got[0].Text != "the only one" {
-		t.Fatalf("accepted %+v", got)
+	// Group messages from people that are not for the bot are context
+	// only (Ambient); everything else is dropped.
+	var run, ambient []string
+	for _, in := range c.list() {
+		if in.Ambient {
+			ambient = append(ambient, in.MsgID)
+		} else {
+			run = append(run, in.Text)
+		}
+	}
+	if !slices.Equal(run, []string{"the only one"}) || !slices.Equal(ambient, []string{"6", "8", "9"}) {
+		t.Fatalf("accepted %v, context %v", run, ambient)
 	}
 	if !strings.Contains(logs.String(), "update 7 in chat 42 ignored: no text, caption or attachment") {
 		t.Errorf("logs: %q", logs.String())
@@ -947,15 +957,19 @@ func TestAlbumParts(t *testing.T) {
 	stop := run(t, i, c.accept)
 	eventually(t, "offset past all", func() bool { return api.lastOffset() == 6 })
 	stop()
-	var ids []string
+	var ids, ambient []string
 	for _, in := range c.list() {
+		if in.Ambient {
+			ambient = append(ambient, in.MsgID)
+			continue
+		}
 		if in.Group != "A1" || len(in.Attachments) != 1 || in.Attachments[0].Stored == "" {
 			t.Errorf("part %+v", in)
 		}
 		ids = append(ids, in.MsgID)
 	}
-	if !slices.Equal(ids, []string{"1", "2", "5"}) {
-		t.Fatalf("accepted %v", ids)
+	if !slices.Equal(ids, []string{"1", "2", "5"}) || !slices.Equal(ambient, []string{"3", "4"}) {
+		t.Fatalf("accepted %v, context %v", ids, ambient)
 	}
 }
 
@@ -1040,5 +1054,35 @@ func TestReactionEmoji(t *testing.T) {
 	}
 	if n := i.ReactionNote("REF"); !strings.Contains(n, "Optional final line: [react: REF <emoji>].") {
 		t.Fatalf("note %q", n)
+	}
+}
+
+// A group message not for the bot is context: its text and its (or its
+// replied-to message's) file label, never downloaded; a topic is its own
+// conversation.
+func TestAmbientMessages(t *testing.T) {
+	api := newFakeAPI(t)
+	c := &collector{}
+	var logs syncBuffer
+	i := newIface(t, api.srv.URL, botName, &logs)
+	i.opt.UploadDir = filepath.Join(t.TempDir(), "uploads")
+	photo := msg(1, -1002, "supergroup", 43, "")
+	photo["caption"] = "holiday"
+	photo["photo"] = []any{map[string]any{"file_id": "id:p/1.jpg", "file_unique_id": "u1"}}
+	api.files["p/1.jpg"] = []byte("jpeg")
+	topic := msg(2, -1002, "supergroup", 43, "in a topic")
+	topic["is_topic_message"], topic["message_thread_id"] = true, 7
+	empty := msg(3, -1002, "supergroup", 43, "")
+	api.push(upd(1, photo), upd(2, topic), upd(3, empty))
+	stop := run(t, i, c.accept)
+	eventually(t, "offset past all", func() bool { return api.lastOffset() == 4 })
+	stop()
+	got := c.list()
+	if len(got) != 2 || !got[0].Ambient || got[0].Text != "holiday" || len(got[0].Attachments) != 1 || got[0].Attachments[0].Stored != "" || got[0].Attachments[0].Kind != "photo" ||
+		!got[1].Ambient || got[1].Conv.Thread != "7" || got[1].Text != "in a topic" {
+		t.Fatalf("accepted %+v", got)
+	}
+	if api.called("getFile") {
+		t.Fatal("a context message's file was downloaded")
 	}
 }

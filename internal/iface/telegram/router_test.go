@@ -99,7 +99,8 @@ func TestTelegramThroughRouter(t *testing.T) {
 			t.Errorf("%s reply parameters %v", name, tc.b["reply_parameters"])
 		}
 	}
-	// The unaddressed group message was acknowledged, never stored or run.
+	// The unaddressed group message was acknowledged and kept as context
+	// only: never run, never logged.
 	eventually(t, "offset past every update", func() bool { return api.lastOffset() == 4 })
 	time.Sleep(200 * time.Millisecond)
 	if n := len(api.sentBodies()); n != 2 {

@@ -165,9 +165,18 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 		r.log.Printf("ignored message from an unidentified %s caller in %s", in.From.Platform, in.Conv)
 		return nil
 	}
+	if in.Ambient {
+		r.keepAmbient(in)
+		return nil
+	}
 	row, dup, err := r.store.AddInbound(in)
 	if err != nil || dup {
 		return err
+	}
+	if g, ok := r.ifaces[in.Conv.Interface].(GroupContext); ok && g.GroupContext() && !in.Private && in.Origin == core.OriginLive && parseCommand(in.Text).Kind == cmdMessage {
+		// Addressed group messages are context for later turns too, as
+		// in the hub; commands are not.
+		r.keepAmbient(in)
 	}
 	r.dispatch(row)
 	return nil
@@ -748,6 +757,9 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 		if note := strings.TrimSpace(p.PromptNote()); note != "" {
 			parts = append(parts, note)
 		}
+	}
+	if recent := c.ambient(t, batch); recent != "" {
+		parts = append(parts, recent)
 	}
 	c.react(t, batch)
 	for _, it := range batch {

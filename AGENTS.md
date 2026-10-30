@@ -89,13 +89,22 @@ Its whole job, per message:
   `!stop` it.
 - **Conversations.** Key = interface + chat + thread. Same key: one turn at a
   time. Different keys run in parallel up to `max_parallel`.
-- **Telegram** (as the hub's `isMentioned`). A private chat is always
-  handled. In a group, a message (`!` commands included) is handled only if
-  it mentions `@<bot username>` or replies to one of the bot's messages;
-  everything else is ignored and never stored. `/start` is `!help`. The text,
-  else the caption; attachments are not handled yet. Before polling, `getMe`
-  must report the configured `telegram.bot_username`; Heimdall never calls
-  `deleteWebhook` or `setWebhook`. The token comes only from
+- **Telegram** (as the hub's connector). A private chat is always handled.
+  In a group, a message (`!` commands and control words included) is handled
+  only if it mentions `@<bot username>`, replies to one of the bot's
+  messages, or is a later part of an album whose first part did. Every other
+  group message from a person is never run or answered; it is kept only as
+  bounded, untrusted context for that conversation's later turns (the newest
+  1000 kept, 40 shown, 4000 chars each and 16000 in all, scrubbed; files
+  only by label). `/start` is `!help`. The text, else the caption. Files
+  (the message's and the replied-to message's, at most 20 MB) are downloaded
+  into Heimdall's 0700 upload directory and, at turn start, copied into a
+  per-turn directory owned by the turn's OS user; pictures also go natively
+  to harnesses that take images. Album parts are held 1.5 s and run as one
+  message. Answers go as Telegram Markdown with a plain retry; a harness may
+  end one with `[react: <ref> <emoji>]` lines to react. Before polling,
+  `getMe` must report the configured `telegram.bot_username`; Heimdall never
+  calls `deleteWebhook` or `setWebhook`. The token comes only from
   `HEIMDALL_TELEGRAM_TOKEN` and never appears in errors or logs.
 - **Harness choice.** Default order `omp → codex → claude → pi`
   (configurable). Fall back to the next harness only when the previous one
