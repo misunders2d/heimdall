@@ -13,8 +13,24 @@ The historic sixth-session description of pre-ready answers is superseded.
 Regression cases cover pre-ready publication/deadline, SIGTERM delivery,
 ignored SIGTERM/grace, and clean exit during active cancellation.
 
-Slack transport remains unfinished. No live Slack connection made;
-`heimdall-live` untouched.
+Slack transport remains unfinished. On `wip/slack-parity`, Web API and safe
+formatting, Socket Mode receiver and SQLite event staging groundwork are
+tested. Inventory and independently checked corrections are in
+`docs/slack-parity.md`. File transport, lifecycle progress, reconciliation,
+inbound event processing and CLI/config wiring are not built. Schema step 10
+adds interface_events only on this WIP branch.
+No live Slack connection made; `heimdall-live` untouched.
+
+Verification on WIP: `go vet ./...`, `go test -race ./...` (all packages),
+and `CGO_ENABLED=0 go build ./cmd/heimdall` pass. Fake API/Socket Mode
+tests require localhost permission in the sandbox. These are not live Slack
+checks and do not establish full transport parity.
+
+Next implementation: startup/config and lock; wire event staging to Socket
+Mode; verify and process staged payloads; thread/context/attachments; optional
+router lifecycle hook and durable progress; stable outbound IDs, formatting,
+chunking/reconciliation; files/reactions/notices; fake end-to-end coverage.
+Build the three undecided flags last.
 
 ## Phase 2 owner decisions (2026-10-31)
 

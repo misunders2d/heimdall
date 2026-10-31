@@ -111,6 +111,16 @@ CREATE INDEX ambient_conv ON ambient(iface, chat, thread, id);`,
 	// Callers who wrote before this step are not new.
 	`CREATE TABLE callers(principal TEXT PRIMARY KEY, first_at INTEGER NOT NULL);
 INSERT INTO callers SELECT platform || ':' || user_id, MIN(received_at) FROM inbound GROUP BY platform, user_id;`,
+	// Interface payloads committed before upstream ack. Slow verification,
+	// history and downloads happen after this boundary; only verified callers
+	// are admitted into inbound. Completed keys remain for redelivery dedupe,
+	// with payload erased once router acceptance has committed.
+	`CREATE TABLE interface_events(
+ id INTEGER PRIMARY KEY,
+ iface TEXT NOT NULL, event_key TEXT NOT NULL, payload BLOB,
+ received_at INTEGER NOT NULL, complete INTEGER NOT NULL DEFAULT 0,
+ UNIQUE(iface,event_key));
+ CREATE INDEX interface_events_pending ON interface_events(iface,complete,id);`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
