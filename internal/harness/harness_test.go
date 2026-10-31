@@ -296,6 +296,16 @@ func lingers(t *testing.T, words string) (*harness.Run, string, *logLines) {
 	if res := r.Result(); !strings.HasPrefix(res.Answer, "omp#1 ") || res.Failure != "" {
 		t.Fatalf("result %+v", res)
 	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(state + "/signal-ready"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake did not install signal handler")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	return r, state, logs
 }
 
@@ -660,5 +670,58 @@ func TestEmployeeEnvironmentRebuiltByRole(t *testing.T) {
 	}
 	if l.Cred != nil || !slices.Contains(l.Env, "OWNER_SECRET=x") || slices.Contains(l.Env, "HEIMDALL_UNRELATED=x") {
 		t.Fatalf("owner launch as root: cred %+v", l.Cred)
+	}
+}
+
+func TestCancelSendsSIGTERMBeforeKill(t *testing.T) {
+	setGrace(t, 30*time.Second, 300*time.Millisecond)
+	r, state, _ := lingers(t, "")
+	r.Cancel()
+	exitsWithin(t, r, 3*time.Second)
+	if _, err := os.Stat(state + "/terminated"); err != nil {
+		t.Fatal("Cancel skipped SIGTERM")
+	}
+}
+func TestCancelKillsAfterTermGrace(t *testing.T) {
+	setGrace(t, 30*time.Second, 300*time.Millisecond)
+	r, _, logs := lingers(t, "NOTERM")
+	start := time.Now()
+	r.Cancel()
+	exitsWithin(t, r, 3*time.Second)
+	if time.Since(start) < 300*time.Millisecond {
+		t.Fatal("Cancel skipped grace")
+	}
+	if got := logs.all(); len(got) != 2 {
+		t.Fatalf("termination log %q", got)
+	}
+}
+
+// Active stop uses the same group termination path and remains cancelled,
+// even when SIGTERM produces a clean process exit.
+func TestActiveCancelSendsSIGTERMAndMarksCancelled(t *testing.T) {
+	setGrace(t, time.Hour, 300*time.Millisecond)
+	bin, state := fakeharness.Install(t, "omp")
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "omp", Prompt: "HANGTERM", Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: launch(t, bin, "omp", true), Caller: caller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Cancel)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(state + "/signal-ready"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake never ready for signal")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	r.Cancel()
+	exitsWithin(t, r, 3*time.Second)
+	if _, err := os.Stat(state + "/terminated"); err != nil {
+		t.Fatal("active Cancel skipped SIGTERM")
+	}
+	if res := r.Result(); !res.Cancelled || res.Answer != "" || res.Failure != "" {
+		t.Fatalf("result %+v", res)
 	}
 }

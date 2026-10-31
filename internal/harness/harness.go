@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -165,20 +166,21 @@ type Result struct {
 
 // Run is one started native turn.
 type Run struct {
-	harness string
-	cmd     *exec.Cmd
-	bridge  bridge
-	ctx     context.Context
-	cancel  context.CancelFunc
-	stderr  limitedBuffer
-	done    chan struct{} // Result is final
-	exited  chan struct{} // the process has exited
-	grace   time.Duration // ExitGrace when started
-	term    time.Duration // TermGrace when started
-	settle  sync.Once
-	result  Result
-	log     func(string)
-	stop    sync.Once
+	harness   string
+	cmd       *exec.Cmd
+	bridge    bridge
+	ctx       context.Context
+	cancel    context.CancelFunc
+	stderr    limitedBuffer
+	done      chan struct{} // Result is final
+	exited    chan struct{} // the process has exited
+	grace     time.Duration // ExitGrace when started
+	term      time.Duration // TermGrace when started
+	settle    sync.Once
+	result    Result
+	log       func(string)
+	stop      sync.Once
+	cancelled atomic.Bool
 }
 
 type outcome struct {
@@ -300,7 +302,7 @@ func (r *Run) wait() {
 	default:
 	}
 	switch {
-	case r.ctx.Err() != nil && !settled:
+	case r.cancelled.Load() || r.ctx.Err() != nil && !settled:
 		res = Result{Cancelled: true, Ready: res.Ready, SessionID: res.SessionID}
 	case settled && res.Failure == "" && o.atExit && runErr != nil:
 		// The answers stand; the work after them ended in a failed exit.
@@ -338,15 +340,10 @@ func (r *Run) early() {
 	case <-r.exited:
 		return
 	}
-	select {
-	case <-r.bridge.readyCh():
-	default:
-		// An answer before the turn was ready is no turn the router may
-		// commit to: wait settles it once the process exited, so a fallback
-		// never runs beside a live process.
+	o := r.bridge.outcome()
+	if r.cancelled.Load() {
 		return
 	}
-	o := r.bridge.outcome()
 	if o.atExit {
 		return // published as the process exited: wait settles it with the exit status
 	}
@@ -363,7 +360,7 @@ func (r *Run) early() {
 // Stop ends a turn's process: SIGTERM to its process group now, and SIGKILL
 // TermGrace later if it is still running. why is logged ("60s after its
 // answer"). For a turn that has answered, and for every turn at shutdown;
-// to stop a turn before its answer, use Cancel.
+// Cancel also marks an active turn as cancelled.
 func (r *Run) Stop(why string) {
 	r.stop.Do(func() { go r.terminate(why) })
 }
@@ -453,7 +450,10 @@ func (r *Run) Result() Result { <-r.done; return r.result }
 func (r *Run) SessionID() string { return r.bridge.outcome().session }
 
 // Cancel stops the turn and its process group.
-func (r *Run) Cancel() { r.cancel() }
+func (r *Run) Cancel() {
+	r.cancelled.Store(true)
+	r.Stop("on cancellation")
+}
 
 // Steer passes text, and images where the harness takes them, into the
 // running turn. id must be unique per input.

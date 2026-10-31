@@ -8,6 +8,7 @@
 //
 //	FAILPRE=NAME   exit with an error before the turn is ready
 //	FAILPOST=NAME  exit with an error after the turn is ready
+//	HANGTERM       wait before ready, recording SIGTERM (NOTERM ignores it)
 //	HANGPRE=NAME   create STATE/hang-pre and hang before the turn is ready
 //	BADLINE=NAME   before the turn is ready, send an unreadable protocol
 //	               line, then stay 1 s with STATE/lingering present and
@@ -173,6 +174,10 @@ func (f *fake) read() (map[string]any, bool) {
 func (f *fake) has(word string) bool { return strings.Contains(f.prompt, word) }
 
 func (f *fake) failPre() {
+	if f.has("HANGTERM") {
+		f.waitForTerm(30 * time.Second)
+		os.Exit(0)
+	}
 	if f.has("HANGPRE=" + f.name) {
 		_ = os.WriteFile(filepath.Join(f.state, "hang-pre"), nil, 0o600)
 		time.Sleep(30 * time.Second)
@@ -207,18 +212,23 @@ func (f *fake) linger() {
 		return
 	}
 	n, _ := strconv.Atoi(strings.Fields(rest + " ")[0])
+	f.waitForTerm(time.Duration(n) * time.Second)
+	_ = os.Remove(filepath.Join(f.state, "lingering"))
+}
+
+func (f *fake) waitForTerm(d time.Duration) {
 	term := make(chan os.Signal, 1)
 	if f.has("NOTERM") {
 		signal.Ignore(syscall.SIGTERM)
 	} else {
 		signal.Notify(term, syscall.SIGTERM)
 	}
+	_ = os.WriteFile(filepath.Join(f.state, "signal-ready"), nil, 0o600)
 	select {
-	case <-time.After(time.Duration(n) * time.Second):
+	case <-time.After(d):
 	case <-term:
 		_ = os.WriteFile(filepath.Join(f.state, "terminated"), nil, 0o600)
 	}
-	_ = os.Remove(filepath.Join(f.state, "lingering"))
 }
 
 func lastLine(s string) string {
