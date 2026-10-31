@@ -1,9 +1,10 @@
 module github.com/misunders2d/heimdall
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/coder/websocket v1.8.15
+	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.59.0
 )
 

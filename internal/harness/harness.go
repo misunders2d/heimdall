@@ -118,6 +118,8 @@ type Session struct {
 
 // Spec is one turn.
 type Spec struct {
+	Progress func(Progress)
+
 	Harness string
 	Prompt  string
 	Images  []Image // pictures passed natively, besides their paths in Prompt
@@ -245,6 +247,9 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	if spec.Harness == "claude" && spec.Progress != nil {
+		extra = append(extra, "--include-partial-messages")
+	}
 	env, err := WithIdentity(spec.Launch.Env, spec.Caller)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", spec.Harness, err)
@@ -274,6 +279,14 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("%s transport unavailable: %w", spec.Harness, err)
+	}
+	switch b := r.bridge.(type) {
+	case *piRPCBridge:
+		b.progress = spec.Progress
+	case *claudeStreamBridge:
+		b.progress = spec.Progress
+	case *codexBridge:
+		b.progress = spec.Progress
 	}
 	cmd.Stdout = r.bridge
 	if err := cmd.Start(); err != nil {

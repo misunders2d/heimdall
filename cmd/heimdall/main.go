@@ -18,6 +18,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/iface/local"
+	"github.com/misunders2d/heimdall/internal/iface/slack"
 	"github.com/misunders2d/heimdall/internal/iface/telegram"
 	"github.com/misunders2d/heimdall/internal/router"
 	"github.com/misunders2d/heimdall/internal/store"
@@ -27,8 +28,8 @@ var version = "dev"
 
 const usage = `usage:
   heimdall run -config FILE
-      route messages from the configured interfaces (Telegram) until stopped
-      by SIGINT/SIGTERM. The bot token is read from HEIMDALL_TELEGRAM_TOKEN.
+      route messages from the configured interfaces (Telegram and Slack) until stopped
+      by SIGINT/SIGTERM. Tokens come from HEIMDALL_TELEGRAM_TOKEN and HEIMDALL_SLACK_{BOT,APP}_TOKEN.
       Logs go to stderr.
   heimdall local -config FILE [-as USER] [-chat CHAT]
       route messages typed on stdin (one per line; optional "@user #chat/thread"
@@ -89,22 +90,33 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Telegram == nil {
-		return errors.New("no interface configured: add a \"telegram\" block with bot_username")
+	if cfg.Telegram == nil && cfg.Slack == nil {
+		return errors.New("no interface configured: add telegram or slack")
 	}
 	logger := log.New(os.Stderr, "heimdall: ", log.LstdFlags)
-	tg, err := telegram.New(telegram.Options{Token: os.Getenv(telegram.TokenEnv), BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
-	if err != nil {
-		return err
-	}
 	st, err := openStore(cfg)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	var interfaces []router.Interface
+	if cfg.Telegram != nil {
+		tg, err := telegram.New(telegram.Options{UnmentionedCommands: cfg.UnmentionedCommands(), Token: os.Getenv(telegram.TokenEnv), BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
+		if err != nil {
+			return err
+		}
+		interfaces = append(interfaces, tg)
+	}
+	if c := cfg.Slack; c != nil {
+		sl, err := slack.New(slack.Options{BotToken: os.Getenv(slack.BotTokenEnv), AppToken: os.Getenv(slack.AppTokenEnv), TeamID: c.TeamID, DataDir: cfg.DataDir, Store: st, UnmentionedCommands: cfg.UnmentionedCommands(), MaxFileBytes: c.MaxFileBytes, StatusName: c.StatusName, StatusUpdates: c.StatusUpdates, Log: logger})
+		if err != nil {
+			return err
+		}
+		interfaces = append(interfaces, sl)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, tg)
+	r := router.New(router.Options{Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")

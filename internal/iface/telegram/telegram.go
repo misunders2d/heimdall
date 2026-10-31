@@ -54,6 +54,8 @@ const (
 
 // Options configure the interface.
 type Options struct {
+	UnmentionedCommands []string // nil: stop/cancel, empty: every command needs addressing
+
 	Token       string        // bot token; never logged
 	BotUsername string        // the bot getMe must report, without "@"
 	API         string        // Bot API base URL; default DefaultAPI
@@ -349,7 +351,7 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		text = m.Caption
 	}
 	replied := repliedTo(m)
-	addressed := private || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
+	addressed := private || router.UnmentionedCommand(text, t.command(text), t.botName, t.opt.UnmentionedCommands) || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
 	if !addressed {
 		return t.ambient(u, m, text)
 	}

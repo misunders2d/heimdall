@@ -273,7 +273,7 @@ func (f *fake) writeOut() {
 	}
 }
 
-var reactRef = regexp.MustCompile(`\[react: ([a-f0-9-]{36}) <emoji>\]`)
+var reactRef = regexp.MustCompile(`\[react: ([a-f0-9-]{36}) (?:<emoji>|emoji_name)\]`)
 
 // react ends the answer with a reaction directive for each message ref the
 // harness was given (REACT=<emoji>), or answers with the directives only
@@ -387,6 +387,11 @@ func (f *fake) piRPC() {
 	f.emit(map[string]any{"type": "extension_ui_request", "id": "x1", "method": "setStatus"})
 	f.emit(map[string]any{"type": "response", "id": id, "command": "prompt", "success": true})
 	f.emit(map[string]any{"type": "agent_start"})
+	if f.has("PROGRESS") {
+		for _, event := range []map[string]any{{"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_start", "contentIndex": 0}}, {"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_delta", "contentIndex": 0, "delta": "Checking public sources"}}, {"type": "tool_execution_start", "toolName": "web_search"}} {
+			f.emit(event)
+		}
+	}
 	f.failPost()
 	if f.has("ASK_HUMAN") {
 		f.emit(map[string]any{"type": "extension_ui_request", "id": "x2", "method": "select"})

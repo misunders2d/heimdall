@@ -383,6 +383,7 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 			sleep(ctx, time.Second)
 			continue
 		}
+		row.Outbound.ID, row.Outbound.Attempt = row.ID, row.Attempts
 		err = i.Send(ctx, row.Outbound)
 		var perm PermanentError
 		switch {
@@ -698,6 +699,10 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		c.r.release(row.Inbound)
 		return false
 	}
+	if row.InterfaceReply != "" {
+		c.answer(row, store.CommandEnd{Detail: "interface warning"}, row.InterfaceReply)
+		return false
+	}
 	cmd := parseCommand(row.Text)
 	switch cmd.Kind {
 	case cmdInvalid:
@@ -720,6 +725,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		c.answer(row, store.CommandEnd{Detail: "stop"}, c.stop(role, row.From.Key()))
 		return false
 	case cmdCancel:
+
 		n := c.cancelQueued(role, row.From.Key(), "cancelled by cancel")
 		text := fmt.Sprintf("Cancelled %d queued message(s).", n)
 		if n == 0 {
@@ -811,6 +817,7 @@ func (c *conv) stopExiting(role core.Role, who string) bool {
 }
 
 func (c *conv) cancelTurn(t *turn) {
+	c.observe(c.r.ctx, t, "cancelled", harness.Progress{})
 	t.stopped.Store(true)
 	t.mu.Lock()
 	run := t.run
@@ -1061,6 +1068,7 @@ func (c *conv) send(ctx context.Context, ev any) {
 // turn is ready did nothing, so the next one may take over; once a harness
 // is ready the turn is committed to it.
 func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
+	c.observe(ctx, t, "start", harness.Progress{})
 	var notes []string
 	var prompt string
 	var images []harness.Image
@@ -1109,7 +1117,11 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}
 		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
-		run, err := c.r.startRun(harness.Spec{Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf})
+		var progress func(harness.Progress)
+		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok {
+			progress = func(p harness.Progress) { c.observe(ctx, t, "progress", p) }
+		}
+		run, err := c.r.startRun(harness.Spec{Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress})
 		if err != nil {
 			c.unbind(t, h, prev, clean)
 			notes = append(notes, err.Error())
@@ -1136,8 +1148,8 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			// start reports the turn and never resumes the session.
 			break
 		}
-		// Not ready: the next candidate never runs beside this process.
-		<-run.Exited()
+		// An answer commits before ready too; only a failed candidate must exit
+		// before fallback.
 		res := run.Result()
 		if res.Answer != "" || res.NeedsHuman != "" {
 			// It answered, or asked for an approval, without signalling
@@ -1146,6 +1158,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			c.commit(ctx, t, h, run, notes)
 			return
 		}
+		<-run.Exited()
 		c.unbind(t, h, prev, clean)
 		if res.Cancelled {
 			break
@@ -1162,6 +1175,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 // commit ends the turn with harness h's outcome: h took the turn, so no
 // other harness runs it.
 func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, notes []string) {
+	c.observe(ctx, t, "progress", harness.Progress{Phase: "running"})
 	if err := c.r.store.BindTurn(t.id, c.key, t.who, h, run.SessionID()); err != nil {
 		// The session is already recorded as in progress; only a new
 		// session's native ID is missing, so a crash now means the next
@@ -1237,6 +1251,7 @@ func (c *conv) steerDone(ctx context.Context, ev steerEvent) {
 	t.steering = false
 	switch ev.outcome {
 	case harness.SteerAccepted:
+		c.observe(ctx, t, "steer", harness.Progress{})
 		t.steered += messages(ev.items)
 		for _, it := range ev.items {
 			if err := c.r.store.Steered(t.id, it.row.ID); err != nil {
@@ -1319,6 +1334,20 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	c.requeue(t.steerQ...)
 	t.steerQ = nil
 	res := d.res
+	if cleaner, ok := c.r.ifaces[c.key.Interface].(AnswerCleaner); ok {
+		t.mu.Lock()
+		dir := t.dir
+		t.mu.Unlock()
+		if dir != nil {
+			inDir, outDir := dir.Path()+"/in", dir.Outbox()
+			res.Answer = cleaner.CleanAnswer(res.Answer, inDir, outDir)
+			answers := make([]string, len(res.Answers))
+			for i, a := range res.Answers {
+				answers[i] = cleaner.CleanAnswer(a, inDir, outDir)
+			}
+			res.Answers = answers
+		}
+	}
 	tag := d.harness
 	if tag == "" {
 		tag = "heimdall"
@@ -1356,7 +1385,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, !res.Unclean
 		text = strings.TrimSpace(res.Answer)
 	}
-	e.Reply = &core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Formatted: e.State == store.TurnDone}
+	e.Reply = &core.Outbound{TurnID: t.id, Conv: c.key, ReplyTo: t.replyTo, Formatted: e.State == store.TurnDone}
 	if r, ok := c.r.ifaces[c.key.Interface].(Reactor); ok && e.State == store.TurnDone {
 		t.mu.Lock()
 		var directives bool
@@ -1369,6 +1398,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		case directives:
 			text, e.Reply.Formatted = "Could not confirm reaction delivery.", false
 		}
+	}
+	if e.State == store.TurnDone && text == "" && len(e.Reply.Reactions) == 0 && len(d.files) > 0 {
+		text = "Attachment"
 	}
 	if text+footer != "" {
 		e.Reply.Text = scrub(text + footer)
@@ -1384,6 +1416,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	for _, it := range t.batch {
 		c.r.release(it.row.Inbound)
 	}
+	c.observe(ctx, t, e.State, harness.Progress{})
 	c.r.wake(c.key.Interface)
 	c.r.log.Printf("turn %d in %s ended: %s (harness %q, %s)", t.id, c.key, e.State, d.harness, time.Since(t.started).Round(time.Millisecond))
 	c.turn = nil

@@ -1,11 +1,12 @@
+// Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
 package harness
 
 // Ported from AgentNet internal/client/claudestream.go. Changes: answer,
 // failure and needs-human reason are fields instead of an output stream; input
 // written while a result was being produced, which Claude runs as its next
 // turn in the same stream, is waited for and its result kept with the first;
-// the --include-partial-messages probe, activity and thinking telemetry are
-// not ported; launch arguments are built by the caller.
+// public thinking and tool telemetry are optional; launch arguments are
+// built by the caller, including --include-partial-messages.
 
 import (
 	"bytes"
@@ -21,6 +22,9 @@ import (
 
 // claudeStreamBridge owns one fresh native process and one initial request.
 type claudeStreamBridge struct {
+	progress  func(Progress)
+	telemetry progressTracker
+
 	writes               sync.WaitGroup
 	ctx                  context.Context
 	input                io.WriteCloser
@@ -242,6 +246,9 @@ func (b *claudeStreamBridge) event(raw []byte) {
 	}
 	// Optional stream events cannot establish or change the owned session.
 	if e.Type == "stream_event" {
+		if e.Session == "" || e.Session == b.session {
+			b.telemetry.event("claude", raw, b.progress)
+		}
 		return
 	}
 	if e.Session != "" {
@@ -251,6 +258,7 @@ func (b *claudeStreamBridge) event(raw []byte) {
 		}
 		b.session = e.Session
 	}
+	b.telemetry.event("claude", raw, b.progress)
 	switch e.Type {
 	case "user":
 		if b.session == "" || e.Session != b.session || e.UUID == "" || !e.Replay || string(e.Parent) != "null" || e.Message.Role != "user" {

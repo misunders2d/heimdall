@@ -42,3 +42,40 @@ func (s *Store) CompleteEvent(id int64) error {
 	_, err := s.db.Exec(`UPDATE interface_events SET complete=1,payload=NULL WHERE id=?`, id)
 	return err
 }
+
+// PendingEvents is a startup snapshot, before the socket starts receiving.
+func (s *Store) PendingEvents(iface string) ([]InterfaceEvent, error) {
+	rows, err := s.db.Query(`SELECT id,payload FROM interface_events WHERE iface=? AND complete=0 ORDER BY id`, iface)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []InterfaceEvent
+	for rows.Next() {
+		var e InterfaceEvent
+		if err = rows.Scan(&e.ID, &e.Payload); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+func (s *Store) Event(iface, key string) (InterfaceEvent, bool, error) {
+	var e InterfaceEvent
+	err := s.db.QueryRow(`SELECT id,payload FROM interface_events WHERE iface=? AND event_key=? AND complete=0`, iface, key).Scan(&e.ID, &e.Payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return e, false, nil
+	}
+	return e, err == nil, err
+}
+
+// EventPending rechecks a queued payload against durable completion. The
+// channel-ordered worker calls this immediately before processing a copy.
+func (s *Store) EventPending(id int64) (bool, error) {
+	var complete int
+	err := s.db.QueryRow(`SELECT complete FROM interface_events WHERE id=?`, id).Scan(&complete)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return complete == 0, err
+}

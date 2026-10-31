@@ -17,12 +17,11 @@ Heimdall does not do memory (use [Memento](https://github.com/misunders2d/mement
 agent-to-agent work (use [AgentNet](https://github.com/misunders2d/agentnet)),
 business connectors or tool restrictions (each harness's native configuration).
 
-**Status:** framework. The core router, identity and modes, persisted queues,
-session store, `!` commands, steer/follow-up, delivery, the harness adapters,
-a local terminal interface and the Telegram interface work (Telegram is
-tested against a fake Bot API and checked live for start-up and polling;
-real chats are next). Slack interface and the scheduler come
-next. Linux only.
+**Status:** Telegram and Slack interfaces, durable queues, caller identity,
+native sessions, steering and file delivery are implemented. Slack is tested
+against fake Web API/Socket Mode servers and fake native harnesses; the live
+Slack window is arranged separately by the orchestrator. Scheduler is phase 3.
+Linux only.
 
 ## Build
 
@@ -43,6 +42,10 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | `harness_order` | default order, `omp, codex, claude, pi` |
 | `max_parallel` | conversations running a turn at once |
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
+| `commands.unmentioned` | shared addressing policy; default `["stop","cancel"]`, `["all"]` allows every command, `[]` requires addressing for every command |
+| `slack.team_id` | workspace the bot token must belong to; checked with `auth.test` before Socket Mode |
+| `slack.max_file_bytes` | inbound cap per file, default `200000000` (200 MB); downloads also reserve 1 GiB free disk space across concurrent downloads |
+| `slack.status_name`, `slack.status_updates` | optional progress display name; set `status_updates: false` to disable progress messages |
 | `telegram.bot_username` | the bot the token must belong to; checked with `getMe` before polling |
 | `prompt_guard.log_max_bytes` | optional: size of the prompt-injection log before it is rotated to one `.1` file (default 1 MiB, at least 4096) |
 
@@ -84,8 +87,9 @@ token shows as a logged conflict. Use a separate bot for testing; two
 pollers on one token conflict.
 
 On Telegram, a private chat with the bot is always answered. In a group,
-Heimdall answers only messages that mention `@<bot username>`, reply to one
-of its messages, or are later parts of an album whose first part did. It
+commands allowed by `commands.unmentioned` work without addressing. Other
+messages must mention `@<bot username>`, reply to one
+of its messages, or be later parts of an album whose first part did. It
 never answers other group messages; it keeps the recent ones (the newest
 1000, scrubbed, files by label only) and shows the newest 40, marked
 untrusted, to the group's next turns. With Telegram's privacy mode on, a
@@ -104,6 +108,65 @@ Telegram cannot parse it), cut into parts of 3500 characters. A harness may
 react to a message with an emoji, and can send files back by saving them in
 its turn's outbox (`out/`, named in its prompt): Heimdall sends up to 5
 files of at most 50 MB after the answer.
+
+## Shared-chat commands
+
+`commands.unmentioned` applies to Slack channels/threads and Telegram groups.
+The default `["stop","cancel"]` admits only the exact standalone control words
+`stop`, `cancel`, and their `/stop`, `/stop@<bot>`, `/cancel`, `abort`,
+`nevermind` aliases without addressing. Reset, chatid, start, help, status,
+harness choice and follow-ups still require a mention (or Telegram reply to
+the bot). `["all"]` allows every recognized command without a mention;
+`[]` requires addressing for every command. Private chats and DMs always work.
+A Telegram `/command@<bot>` is itself addressed to that bot.
+
+Stop remains limited to the running turn's requester or an owner. Cancel
+clears the caller's own queued work, including while another caller runs;
+only the owner can clear everybody's queue. Reset stops only the caller's
+own turn, forgets their bindings, and preserves queued messages.
+
+## Slack live window
+
+```json
+"slack": {"team_id": "T_PLACEHOLDER", "max_file_bytes": 200000000},
+"commands": {"unmentioned": ["stop", "cancel"]}
+```
+
+Use an internal custom Slack app with Socket Mode enabled, an app-level
+token with `connections:write`, and bot event subscriptions `message.channels`,
+`message.groups`, `message.im`, `message.mpim`. Enable App Home's Messages tab
+and invite the bot into the intended channels. No slash-command registration
+or interactivity is required. Bot scopes:
+
+`chat:write`, `channels:history`, `groups:history`, `im:history`, `mpim:history`,
+`users:read`, `users:read.email`, `files:read`, `files:write`, `reactions:write`,
+`im:write`.
+
+Set `HEIMDALL_SLACK_BOT_TOKEN` and `HEIMDALL_SLACK_APP_TOKEN` in the launch
+environment, then use `heimdall run -config FILE`. Either interface block
+may be omitted. Slack refuses a workspace mismatch and locks its data directory.
+Owners use `slack:<verified email>` in `owners`; other live same-workspace
+members run as the employee OS user. Slack Connect externals are silent.
+
+Every message, including DMs, replies in its root thread. Shared messages
+need a bot mention (`<@bot-user-id>` on the wire), except permitted commands;
+replying in a bot thread alone does not address the bot. Non-addressed messages
+are bounded ambient context. Live history, stored ambient context and recent
+assistant deliveries share one 16000-character budget. Embedded/forwarded
+content is untrusted and cannot supply commands or caller identity.
+
+Progress shows phases, tool labels and filtered public thinking summaries
+where the native protocol supplies them. Final answers are fresh thread messages,
+escaped against pings and chunked with code fences preserved. Stable outbound
+row metadata reconciles uncertain posts and retries; delivery remains
+at-least-once. Files enter through allowlisted Slack file hosts and leave
+through the checked per-turn outbox using Slack's external-upload flow.
+
+Development uses fakes only. The production app is shared with the hub:
+only the orchestrator arranges a live window with a single consumer. Never
+connect an additional Socket Mode client during normal hub operation and
+never touch `heimdall-live`. Live checks (including token scopes and metadata
+visibility) remain unverified until that window. See [parity evidence](docs/slack-parity.md).
 
 ## Use
 

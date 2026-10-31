@@ -1,3 +1,4 @@
+// Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
 package harness
 
 // Ported from AgentNet internal/client/codexroom.go (codexRoomBridge).
@@ -23,6 +24,9 @@ import (
 const clientVersion = "0.1.0"
 
 type codexBridge struct {
+	progress  func(Progress)
+	telemetry progressTracker
+
 	ctx                  context.Context
 	input                io.WriteCloser
 	writeMu              sync.Mutex
@@ -276,6 +280,9 @@ func (b *codexBridge) event(raw []byte) {
 	}
 	if json.Unmarshal(m.Params, &p) != nil {
 		return
+	}
+	if p.ThreadID == b.thread && p.TurnID == b.turn {
+		b.telemetry.event("codex", raw, b.progress)
 	}
 	switch m.Method {
 	case "turn/started":

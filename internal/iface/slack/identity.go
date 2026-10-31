@@ -1,6 +1,5 @@
-// Package slack is Heimdall's Slack interface. For now it holds the caller
-// verification every Slack message must pass; the interface itself comes
-// in phase 2.
+// Package slack is Heimdall's Socket Mode Slack interface. Every admitted
+// caller must pass live same-workspace identity verification.
 package slack
 
 import (

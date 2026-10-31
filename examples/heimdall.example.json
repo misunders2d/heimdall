@@ -1,13 +1,41 @@
 {
   "data_dir": "~/.local/state/heimdall",
   "mode": "corporate",
-  "owners": ["telegram:OWNER_TELEGRAM_USER_ID", "slack:owner@example.com", "local:owner"],
-  "harness_order": ["omp", "codex", "claude", "pi"],
+  "owners": [
+    "telegram:OWNER_TELEGRAM_USER_ID",
+    "slack:owner@example.com",
+    "local:owner"
+  ],
+  "harness_order": [
+    "omp",
+    "codex",
+    "claude",
+    "pi"
+  ],
   "max_parallel": 4,
   "run_as": {
-    "owner": {"user": "root", "dir": "/root"},
-    "employee": {"user": "heimdall-employee"}
+    "owner": {
+      "user": "root",
+      "dir": "/root"
+    },
+    "employee": {
+      "user": "heimdall-employee"
+    }
   },
-  "telegram": {"bot_username": "example_heimdall_bot"},
-  "prompt_guard": {"log_max_bytes": 1048576}
+  "telegram": {
+    "bot_username": "example_heimdall_bot"
+  },
+  "prompt_guard": {
+    "log_max_bytes": 1048576
+  },
+  "commands": {
+    "unmentioned": [
+      "stop",
+      "cancel"
+    ]
+  },
+  "slack": {
+    "team_id": "T_PLACEHOLDER",
+    "max_file_bytes": 200000000
+  }
 }

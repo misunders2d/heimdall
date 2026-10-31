@@ -107,8 +107,8 @@ the `heimdall-live` unit.
   time. Different keys run in parallel up to `max_parallel` live harness
   processes.
 - **Telegram** (as the hub's connector). A private chat is always handled.
-  In a group, a message (`!` commands and control words included) is handled
-  only if it mentions `@<bot username>`, replies to one of the bot's
+  In a group, exact controls allowed by `commands.unmentioned` work without
+  addressing. Other messages are handled only if they mention `@<bot username>`, replies to one of the bot's
   messages, or is a later part of an album whose first part did. Every other
   group message from a person is never run or answered; it is kept only as
   bounded, untrusted context for that conversation's later turns (the newest
@@ -127,6 +127,34 @@ the `heimdall-live` unit.
   `getMe` must report the configured `telegram.bot_username`; Heimdall never
   calls `deleteWebhook` or `setWebhook`. The token comes only from
   `HEIMDALL_TELEGRAM_TOKEN` and never appears in errors or logs.
+- **Shared addressing** (owner, phase 2): one config list,
+  `commands.unmentioned`, controls Slack channels/threads and Telegram groups.
+  Default `["stop","cancel"]`: exact standalone `stop`, `cancel`, `/stop`,
+  `/stop@<bot>`, `/cancel`, `abort`, `nevermind` need no mention. Everything
+  else needs addressing. `["all"]` permits every recognized command without
+  a mention; `[]` requires addressing for every command. Private chats/DMs
+  never require a mention. Stop affects only the requester's turn (or the
+  owner's target); cancel preserves current behavior: callers may clear their
+  own queued work while someone else runs, never that other turn or queue.
+- **Slack**: Socket Mode only; `auth.test` must match `slack.team_id` before
+  connecting. Tokens only from `HEIMDALL_SLACK_BOT_TOKEN` and
+  `HEIMDALL_SLACK_APP_TOKEN`. One data-directory lock; no live connection
+  during development. Every reply uses the root thread, DMs included. A
+  shared message needs a bot mention unless the shared command policy
+  admits it; replying in a bot thread alone does not count. Persist the raw
+  event before ack; verify callers and fetch history/files after ack. Only
+  verified same-workspace humans enter the router. Message subtypes are
+  allowlisted. Live history, stored ambient and recent assistant deliveries
+  share one bounded untrusted context budget. Inbound files default to
+  200000000 bytes each (`slack.max_file_bytes`), reserving 1 GiB free disk
+  space across concurrent downloads; bearer tokens go only to allowlisted
+  Slack file hosts. Progress includes hub-filtered public thinking summaries
+  (NFKC, privacy filters and display budgets), tools and phases via optional
+  native telemetry. Final replies are fresh, escaped, chunked thread messages;
+  outbound row IDs reconcile ambiguous sends. Delivery remains at-least-once.
+  Status is deleted after confirmed text/reaction delivery, compacted if
+  deletion fails, and recovered after restart. Files out use checked outboxes
+  and the supported external-upload flow; reactions use Slack names.
 - **Harness choice.** Default order `omp → codex → claude → pi`
   (configurable). Fall back to the next harness only when the previous one
   failed before its turn started (before any side effect is possible).
@@ -161,8 +189,9 @@ the `heimdall-live` unit.
   `!use <harness>` (sticky per conversation: chat + thread), `!use default`,
   `!<harness> <msg>` (that message only), `!next <msg>`. The hub's control
   words work alone in a message without the `!`: `stop`, `cancel`
-  (`abort`, `nevermind`), `reset`, `chatid`; `stop` and `cancel` follow
-  the `!stop` rule (the turn's caller or an owner). `reset` forgets only
+  (`abort`, `nevermind`), `reset`, `chatid`. Stop is limited to the turn's
+  caller or an owner; cancel clears only the caller's queued work (the owner
+  may clear everyone's). `reset` forgets only
   the caller's own sessions in that conversation.
   Unknown `!word` commands are answered with help, never sent to a harness.
 
@@ -214,7 +243,7 @@ thinking stream and live-session reply registration.
 | `internal/router` | conversations, `!` commands, steer/follow-up, fallback, delivery |
 | `internal/iface/local` | local stdin/stdout interface for end-to-end tests |
 | `internal/iface/telegram` | Telegram Bot API long-poll interface (`heimdall run`) |
-| `internal/iface/slack` | Slack caller verification (the interface comes in phase 2) |
+| `internal/iface/slack` | Socket Mode, live identity, context, progress, delivery and files |
 | `docs/` | `HANDOFF.md` (state and next steps), `hub-parity.md` (hub variables) |
 
 ## Working rules
@@ -228,7 +257,8 @@ thinking stream and live-session reply registration.
   documents stay outside the repository.
 - Logs carry metadata only (conversation, turn, harness, state), never
   message text or native output.
-- Keep it lean: standard library plus pure-Go SQLite (static binary,
+- Keep it lean: standard library, pure-Go SQLite, pinned coder/websocket
+  and owner-approved x/text for NFKC (static binary,
   `CGO_ENABLED=0`). Add a dependency only when a requirement needs it.
 - Tests: `go vet ./...` and `go test -race ./...` (fake harnesses speak each
   real protocol). Live harness checks are manual: `heimdall local` (or

@@ -174,6 +174,10 @@ func fileText(path, mime, name string) string {
 	if !strings.HasPrefix(strings.ToLower(mime), "text/") && !textFile.MatchString(name) {
 		return ""
 	}
+	st, err := os.Stat(path)
+	if err != nil || st.Size() > 20<<20 {
+		return ""
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return ""

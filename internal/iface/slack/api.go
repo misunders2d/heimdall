@@ -36,6 +36,7 @@ var transientCodes = map[string]bool{"fatal_error": true, "internal_error": true
 
 type apiClient struct {
 	base, token string
+	authScopes  string
 	http        *http.Client
 	timeout     time.Duration
 	pause       func(context.Context, time.Duration) error
@@ -113,6 +114,9 @@ func (a *apiClient) once(parent context.Context, method string, data []byte, out
 		return &apiError{Code: "transport_error", Ambiguous: true}, true, 0
 	}
 	defer res.Body.Close()
+	if method == "auth.test" {
+		a.authScopes = res.Header.Get("x-oauth-scopes")
+	}
 	if res.StatusCode != 200 {
 		ambiguous := res.StatusCode == 408 || res.StatusCode == 429 || res.StatusCode >= 500
 		e := &apiError{Code: "http_error", Status: res.StatusCode, Ambiguous: ambiguous}

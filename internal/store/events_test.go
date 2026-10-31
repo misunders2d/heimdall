@@ -1,6 +1,7 @@
 package store
 
 import (
+	"github.com/misunders2d/heimdall/internal/core"
 	"path/filepath"
 	"testing"
 )
@@ -47,5 +48,28 @@ func TestInterfaceEventSurvivesRestartAndDedupesCompletion(t *testing.T) {
 	}
 	if _, ok, err = s.NextEvent("other"); err != nil || !ok {
 		t.Fatal("interface keys not independent")
+	}
+}
+
+func TestInterfaceWarningAndTurnMetadataSurviveStore(t *testing.T) {
+	s := open(t)
+	in := msg("warning")
+	in.InterfaceReply = "Use private DM"
+	row, _, err := s.AddInbound(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.Pending()
+	if err != nil || len(pending) != 1 || pending[0].InterfaceReply != in.InterfaceReply {
+		t.Fatal("trusted warning lost")
+	}
+	_ = row
+	id, err := s.Enqueue(core.Outbound{Conv: conv, TurnID: 9, Text: "answer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, ok, err := s.NextOutbound(conv.Interface)
+	if err != nil || !ok || out.ID != id || out.TurnID != 9 || out.CreatedAt.IsZero() {
+		t.Fatalf("outbound metadata %+v %v", out, err)
 	}
 }

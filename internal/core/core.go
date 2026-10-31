@@ -182,6 +182,8 @@ type Inbound struct {
 	// as the message being replied to or a forward's origin. It is shown
 	// before Text and is never parsed for commands or identity.
 	Context string
+	// InterfaceReply is a trusted adapter warning, answered durably without a harness.
+	InterfaceReply string
 	// Attachments are the files the message carried (and the message it
 	// replies to), as the interface stored them.
 	Attachments []Attachment
@@ -231,6 +233,12 @@ func (in Inbound) Validate() error {
 
 // Outbound is one reply to deliver.
 type Outbound struct {
+	CreatedAt time.Time // durable queue creation time, bounds reconciliation
+
+	ID      int64 // stable outbound row ID, set by delivery
+	TurnID  int64 // originating turn, zero for commands
+	Attempt int   // prior delivery attempts
+
 	Conv    ConvKey
 	ReplyTo string // interface message ID being answered, if any
 	Text    string

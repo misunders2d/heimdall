@@ -1,7 +1,8 @@
 # Hub parity
 
-Two parts: the environment of a harness turn (below), and the Telegram
-connector ([Telegram](#telegram)).
+Harness environment and Telegram behavior are recorded below. The complete
+Slack inventory, source references, decisions and fake-test evidence are in
+[Slack parity](slack-parity.md).
 
 ## The environment of a harness turn
 
@@ -133,7 +134,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 
 | Hub behaviour | Heimdall |
 |---|---|
-| Private chat always handled; in a group only a mention or a reply to the bot (`isMentioned` ~L724) | Same; `!` commands and control words too. Later parts of an addressed album count. |
+| Private chat always handled; group addressing (`isMentioned` ~L724) | A mention, reply to the bot, later addressed album part, or exact unmentioned control allowed by shared `commands.unmentioned` (default stop/cancel aliases). Other commands still need addressing. |
 | `/start` | `!help` (also `/start@bot`, deep-link payload). |
 | Typing | `sendChatAction typing` at turn start and every 4 s while it runs. |
 | Answers as legacy Markdown, plain retry on a parse error, transport note in the prompt | Same, note verbatim; Heimdall's own text is always plain. |
@@ -143,7 +144,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 | Images to the model | JPEG/PNG/GIF/WebP up to 3.75 MB, at most 10 per input, natively: Pi/OMP RPC `images`, Claude content blocks, Codex `localImage` (start and steer). AGY gets the path only. |
 | Albums (`media_group_id`, 1.5 s) | Held 1.5 s after the last part, run as one message (or one steer); the first part's `!harness`/`!next` applies to every part. |
 | Reactions (`[react: <ref> <emoji>]`) | The hub's note, its 73 emoji, its all-or-nothing parse, applied to each answer of a steered turn (the prompt's, then each steer's); set after the text; the hub's failure notices. |
-| Control words | `stop`, `/stop`, `cancel`/`abort`/`nevermind`, `reset`, `/reset`, `chatid`, `/chatid`, alone in a message; stop and cancel only by the turn's caller or an owner. |
+| Control words | Shared `commands.unmentioned` defaults to stop/cancel and their exact aliases, including in groups without a mention (owner phase-2 decision); `stop`, `/stop`, `cancel`/`abort`/`nevermind`, `reset`, `/reset`, `chatid`, `/chatid`, alone in a message; stop and cancel only by the turn's caller or an owner. |
 | Group chat history as context | Newest 1000 kept per conversation, the 40 latest not in the turn shown at its start, 4000 characters each and 16000 in all (oldest trimmed, the hub's marker), secrets scrubbed, files by label, under the hub's untrusted header. |
 | Failure message | `⚠ <harness> failed: <reason>. Please retry, or send reset if this keeps happening.`, secrets scrubbed. |
 | Sending files back (`sendLocalArtifact`) | Per-turn outbox instead of tool telemetry; see "Design: outbound files" in [HANDOFF](HANDOFF.md). `sendPhoto` up to 10 MB, else `sendDocument`; at most 5 files, 50 MB each. |

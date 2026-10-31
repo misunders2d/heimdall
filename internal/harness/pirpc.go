@@ -1,10 +1,11 @@
+// Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
 package harness
 
 // Ported from AgentNet internal/client/pirpc.go. Changes: the answer, failure
 // and needs-human reason are kept as fields instead of written to an output
 // stream; the answer keeps the final text given for each input (the prompt
-// and every accepted steer), not only the last one; activity and thinking
-// telemetry are not ported; launch arguments are built by the caller
+// and every accepted steer), not only the last one. Optional public progress
+// is emitted without changing outcomes; launch arguments are built by the caller
 // (--mode rpc plus session flags).
 
 import (
@@ -24,6 +25,9 @@ const initialID = "heimdall-initial"
 // piRPCBridge owns one fresh native process and one initial request. Native
 // settings/extensions remain the run-as user's; no interactive session is attached.
 type piRPCBridge struct {
+	progress  func(Progress)
+	telemetry progressTracker
+
 	writes               sync.WaitGroup
 	ctx                  context.Context
 	input                io.WriteCloser
@@ -253,6 +257,7 @@ func (b *piRPCBridge) event(raw []byte) {
 		_ = b.input.Close()
 		return
 	}
+	b.telemetry.event("pi", raw, b.progress)
 	switch e.Type {
 	case "agent_start":
 		if b.omp && b.ended {

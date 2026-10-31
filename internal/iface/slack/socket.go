@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ type socketEnvelope struct {
 	Reason       string          `json:"reason"`
 	Payload      json.RawMessage `json:"payload"`
 	RetryAttempt int             `json:"retry_attempt"`
+	RetryReason  string          `json:"retry_reason"`
 }
 
 var errLinkDisabled = errors.New("slack: Socket Mode link disabled")
@@ -27,6 +29,9 @@ var errLinkDisabled = errors.New("slack: Socket Mode link disabled")
 // the event before returning nil. History fetches/downloads/agent routing
 // belong after this durable boundary, outside the receiver callback.
 type socketTransport struct {
+	log func(string)
+
+	acknowledged    func(json.RawMessage) error
 	app             *apiClient
 	allowTestSocket bool // injected only by package tests, never configuration
 }
@@ -110,6 +115,9 @@ func (s *socketTransport) run(ctx context.Context, persist func(context.Context,
 			_ = conn.CloseNow()
 			conn = replacement
 		case "events_api":
+			if envelope.RetryAttempt > 0 && s.log != nil {
+				s.log(fmt.Sprintf("slack: event redelivery attempt %d", envelope.RetryAttempt))
+			}
 			if envelope.ID == "" || len(envelope.Payload) == 0 {
 				continue
 			}
@@ -123,6 +131,13 @@ func (s *socketTransport) run(ctx context.Context, persist func(context.Context,
 			if err != nil {
 				_ = conn.CloseNow()
 				conn = nil
+			}
+			// A failed write has unknown acknowledgement status. The event is
+			// durable and must still be processed; redelivery is deduped.
+			if s.acknowledged != nil {
+				if err = s.acknowledged(envelope.Payload); err != nil {
+					return err
+				}
 			}
 		}
 	}

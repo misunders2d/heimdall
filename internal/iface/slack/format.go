@@ -14,6 +14,7 @@ func escapeText(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
+var nativeLink = regexp.MustCompile(`^<(https?://[^\s<>|]+)(?:\|([^<>\n]+))?>`)
 var markdownLink = regexp.MustCompile(`^\[([^\]\n]+)\]\((https?://[^\s)]+)\)`)
 
 // mrkdwn preserves code and existing underscores. It emits angle brackets
@@ -74,7 +75,23 @@ func plainMrkdwn(s string) string {
 				continue
 			}
 		}
+		if m := nativeLink.FindStringSubmatch(s); m != nil && len([]rune(m[0])) <= 2000 {
+			out.WriteString("<" + escapeText(m[1]))
+			if m[2] != "" {
+				out.WriteString("|" + escapeText(strings.ReplaceAll(m[2], "|", "¦")))
+			}
+			out.WriteString(">")
+			s = s[len(m[0]):]
+			previous = '>'
+			lineStart = false
+			continue
+		}
 		if m := markdownLink.FindStringSubmatch(s); m != nil {
+			if len([]rune(m[0])) > 2000 {
+				out.WriteString(escapeText(m[0]))
+				s = s[len(m[0]):]
+				continue
+			}
 			out.WriteString("<" + escapeText(m[2]) + "|" + escapeText(strings.ReplaceAll(m[1], "|", "¦")) + ">")
 			s = s[len(m[0]):]
 			previous = ')'
@@ -115,4 +132,26 @@ func plainMrkdwn(s string) string {
 		lineStart = r == '\n'
 	}
 	return out.String()
+}
+
+func (s *Slack) CleanAnswer(text, inDir, outDir string) string {
+	original := text
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		bare := strings.Trim(strings.TrimSpace(line), "`'\".,;:")
+		if outDir != "" && strings.HasPrefix(bare, outDir+"/") && !strings.ContainsAny(strings.TrimPrefix(bare, outDir+"/"), "/\n") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	text = strings.Join(kept, "\n")
+	for _, prefix := range []string{inDir, outDir} {
+		if prefix != "" {
+			text = strings.ReplaceAll(text, prefix+"/", "")
+		}
+	}
+	if text != original {
+		text = regexp.MustCompile("```[A-Za-z0-9_-]*\\s*\\n\\s*```").ReplaceAllString(text, "")
+	}
+	return strings.TrimSpace(text)
 }

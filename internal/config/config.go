@@ -22,12 +22,14 @@ import (
 var DefaultOrder = []string{"omp", "codex", "claude", "pi"}
 
 type Config struct {
+	Commands     *Commands                `json:"commands,omitempty"`
 	DataDir      string                   `json:"data_dir"`
 	Mode         core.Mode                `json:"mode"`
 	Owners       []string                 `json:"owners"` // principal keys, platform:id; everyone else is non-root
 	HarnessOrder []string                 `json:"harness_order,omitempty"`
 	MaxParallel  int                      `json:"max_parallel,omitempty"`
 	RunAs        map[core.Role]core.RunAs `json:"run_as"`
+	Slack        *Slack                   `json:"slack,omitempty"`
 	Telegram     *Telegram                `json:"telegram,omitempty"`
 	PromptGuard  *PromptGuard             `json:"prompt_guard,omitempty"`
 }
@@ -55,6 +57,27 @@ type Telegram struct {
 	// BotUsername is the bot the token must belong to: getMe is checked
 	// against it before polling, so a wrong token is never used.
 	BotUsername string `json:"bot_username"`
+}
+
+// Commands controls addressing on every shared interface.
+type Commands struct {
+	Unmentioned []string `json:"unmentioned"`
+}
+
+func (c *Config) UnmentionedCommands() []string {
+	if c.Commands == nil || c.Commands.Unmentioned == nil {
+		return []string{"stop", "cancel"}
+	}
+	return c.Commands.Unmentioned
+}
+
+// Slack configures Socket Mode; both tokens come only from HEIMDALL_SLACK_*.
+type Slack struct {
+	TeamID string `json:"team_id"`
+
+	MaxFileBytes  int64  `json:"max_file_bytes,omitempty"`
+	StatusName    string `json:"status_name,omitempty"`
+	StatusUpdates *bool  `json:"status_updates,omitempty"`
 }
 
 // Load reads and validates the config at path.
@@ -117,6 +140,24 @@ func (c *Config) fill() error {
 		}
 		if slices.Contains(c.HarnessOrder[:i], h) {
 			return fmt.Errorf("harness_order: %q listed twice", h)
+		}
+	}
+	if c.Commands != nil {
+		for _, name := range c.Commands.Unmentioned {
+			if !slices.Contains([]string{"stop", "cancel", "reset", "chatid", "help", "status", "use", "next", "all"}, name) {
+				return errors.New("commands.unmentioned contains an unknown command")
+			}
+		}
+	}
+	if c.Slack != nil {
+		if c.Slack.TeamID == "" || strings.ContainsAny(c.Slack.TeamID, " \t\r\n") {
+			return errors.New("slack.team_id is required")
+		}
+		if c.Slack.MaxFileBytes == 0 {
+			c.Slack.MaxFileBytes = 200_000_000
+		}
+		if c.Slack.MaxFileBytes < 1 {
+			return errors.New("slack.max_file_bytes must be positive")
 		}
 	}
 	if c.Telegram != nil {

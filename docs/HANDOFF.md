@@ -1,49 +1,71 @@
-# Heimdall handoff (2026-10-30, sixth session)
+# Heimdall handoff (2026-11-01, phase 2)
 
 Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
 records where the work stands, what was decided, and what comes next. It
 supersedes the earlier handoffs of the same day.
 
-## Phase 2 implementation checkpoint
+## Phase 2 implementation (2026-11-01)
 
-Lifecycle leftovers fixed: an answer before ready now publishes as Ready and
-gets the same 60 s exit deadline. Active cancellation marks the result
-cancelled, sends SIGTERM to the group immediately, then SIGKILL after 5 s.
-The historic sixth-session description of pre-ready answers is superseded.
-Regression cases cover pre-ready publication/deadline, SIGTERM delivery,
-ignored SIGTERM/grace, and clean exit during active cancellation.
+Slack is complete, developed on `wip/slack-parity` and merged to `main`,
+with fake Web API/Socket Mode and native-protocol end-to-end tests. No live Slack connection was made; `heimdall-live` was not touched.
+[Parity table](slack-parity.md) covers all 97 numbered inventory items, six
+business-policy rows and all 16 independent amendments with code evidence.
 
-Slack transport remains unfinished. On `wip/slack-parity`, Web API and safe
-formatting, Socket Mode receiver and SQLite event staging groundwork are
-tested. Inventory and independently checked corrections are in
-`docs/slack-parity.md`. File transport, lifecycle progress, reconciliation,
-inbound event processing and CLI/config wiring are not built. Schema step 10
-adds interface_events only on this WIP branch.
-No live Slack connection made; `heimdall-live` untouched.
+- Startup/config/workspace validation and per-data-directory lock; raw events
+  commit to SQLite before ack. Four bounded post-ack workers preserve channel
+  order, verify live same-workspace email, and fetch history/download files.
+- Live history plus stored ambient plus recent delivered assistant outputs
+  share one 16000-character untrusted context budget. Embedded content cannot
+  supply identity/commands; OAuth callbacks are hidden from context.
+- Inbound files default to 200000000 bytes each, configurable, with 1 GiB
+  reserved free disk and concurrent reservations. File tokens only reach the
+  allowed Slack file hosts; checked per-user turn staging remains generic.
+- Optional generic lifecycle hook; Pi/OMP RPC, Claude stream-json and Codex
+  public-summary/tool progress. Thinking stays, using hub NFKC/privacy/display
+  rules. `golang.org/x/text v0.43.0` was explicitly approved for normalization;
+  `github.com/coder/websocket v1.8.15` is pinned. Telegram receives no telemetry
+  callback or extra Claude streaming flag unless it implements the hook.
+- Fresh final posts, escaping/chunking, stable outbound row/part IDs and
+  reconciliation before resend. Rejected posts fall back to existing status
+  when the complete answer fits Slack's update limit. At-least-once remains.
+  Progress timestamps/phase persist and restart recovery tidies them.
+- Native outbox uploads, reactions, verified owner DM notices and generic
+  commands. Schema 10 stages interface events; 11 persists progress. No
+  migration rewrites existing shipped steps.
+- Lifecycle leftovers fixed in main: early answers get the post-answer exit
+  deadline; active stop sends group SIGTERM then SIGKILL after five seconds.
 
-Verification on WIP: `go vet ./...`, `go test -race ./...` (all packages),
-and `CGO_ENABLED=0 go build ./cmd/heimdall` pass. Fake API/Socket Mode
-tests require localhost permission in the sandbox. These are not live Slack
-checks and do not establish full transport parity.
+### Final verification
 
-Next implementation: startup/config and lock; wire event staging to Socket
-Mode; verify and process staged payloads; thread/context/attachments; optional
-router lifecycle hook and durable progress; stable outbound IDs, formatting,
-chunking/reconciliation; files/reactions/notices; fake end-to-end coverage.
-Build the three undecided flags last.
+- `go vet ./...` and uncached `go test -race -count=1 ./...` passed.
+- `CGO_ENABLED=0 go build ./cmd/heimdall` passed with its output in temporary
+  storage; no generated binaries or test state are committed.
+- Seven behavioral mutation checks caught regressions in shared command
+  defaults, NFKC filtering, escaping, final reconciliation, concurrent disk
+  reservations, native progress and persist-before-ack ordering. The lifecycle
+  fixes were also checked against the original code and failed there.
+- Final duplicate-event regression queues a redelivery before the first copy
+  finishes, and proves a completed event is not processed again.
+- Live Slack/harness validation is unverified; orchestrator owns that window.
 
-## Phase 2 owner decisions (2026-10-31)
+### Owner decisions in force
 
-- Slack only; AgentNet remains separate. No Heimdall memory capture or
-  intake; native harness memory and `MEMENTO_PROCESSING=1` stay.
-- Slack owner by configured verified email; every other live verified
-  same-workspace caller runs non-root. Unverified/external callers silent.
-- Fakes only. Production Slack app must not be connected during development.
-  Orchestrator owns live window. Never touch `heimdall-live`.
-- Pending: command mention gate, thinking summary, inbound cap. Build last
-  behind configuration, with hub defaults until owner answers.
+- Slack only; AgentNet stays separate, never a Heimdall interface. No Heimdall
+  memory capture/intake; native hooks and `MEMENTO_PROCESSING=1` remain.
+- Shared `commands.unmentioned` controls Slack channels/threads and Telegram
+  groups: default `["stop","cancel"]`, `["all"]`, or `[]`. Exact stop/cancel
+  aliases work unmentioned under the default; other commands need addressing.
+  DMs/private chats always work. This supersedes the earlier Telegram rule.
+- Cancel preserves existing behavior: callers can clear only their own queued
+  work even while another caller runs; only owners can clear everyone's queue.
+  It never cancels another caller's running turn. Confirmed by orchestrator.
+- Thinking summaries stay with no thinking flag. Inbound cap is 200 MB by
+  default with the hub's 1 GiB free-space reserve. No pending transport flags.
+- Fakes only during development. Production Slack app is shared with the hub;
+  orchestrator arranges a single-consumer live window. Exact scopes/settings,
+  secret names and config are in README's Slack live-window section.
 
-## State
+## Earlier phase-1 state (historical)
 
 - `main` = the code HEAD (the review fixes of `fd72734..d05b748`; see
   "Sixth session"). Pushed, tree clean. No WIP branch.

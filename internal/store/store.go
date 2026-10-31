@@ -121,19 +121,21 @@ INSERT INTO callers SELECT platform || ':' || user_id, MIN(received_at) FROM inb
  received_at INTEGER NOT NULL, complete INTEGER NOT NULL DEFAULT 0,
  UNIQUE(iface,event_key));
  CREATE INDEX interface_events_pending ON interface_events(iface,complete,id);`,
+	`CREATE TABLE interface_progress(turn_id INTEGER PRIMARY KEY,iface TEXT NOT NULL,chat TEXT NOT NULL,thread TEXT NOT NULL,ts TEXT NOT NULL,phase TEXT NOT NULL);`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
 // text.
 type inExtra struct {
-	Context     string            `json:"context,omitempty"`
-	Attachments []core.Attachment `json:"attachments,omitempty"`
-	Group       string            `json:"group,omitempty"`
+	Context        string            `json:"context,omitempty"`
+	InterfaceReply string            `json:"interface_reply,omitempty"`
+	Attachments    []core.Attachment `json:"attachments,omitempty"`
+	Group          string            `json:"group,omitempty"`
 }
 
 func inExtraOf(in core.Inbound) (string, error) {
-	x := inExtra{Context: in.Context, Attachments: in.Attachments, Group: in.Group}
-	if x.Context == "" && len(x.Attachments) == 0 && x.Group == "" {
+	x := inExtra{InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group}
+	if x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -141,19 +143,20 @@ func inExtraOf(in core.Inbound) (string, error) {
 }
 
 func (x inExtra) apply(in *core.Inbound) {
-	in.Context, in.Attachments, in.Group = x.Context, x.Attachments, x.Group
+	in.Context, in.Attachments, in.Group, in.InterfaceReply = x.Context, x.Attachments, x.Group, x.InterfaceReply
 }
 
 // outExtra is the outbound extra column: delivery details beyond the text.
 type outExtra struct {
+	TurnID    int64           `json:"turn_id,omitempty"`
 	Formatted bool            `json:"formatted,omitempty"`
 	Reactions []core.Reaction `json:"reactions,omitempty"`
 	File      *core.File      `json:"file,omitempty"`
 }
 
 func outExtraOf(out core.Outbound) (string, error) {
-	x := outExtra{Formatted: out.Formatted, Reactions: out.Reactions, File: out.File}
-	if !x.Formatted && len(x.Reactions) == 0 && x.File == nil {
+	x := outExtra{TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File}
+	if x.TurnID == 0 && !x.Formatted && len(x.Reactions) == 0 && x.File == nil {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -161,7 +164,7 @@ func outExtraOf(out core.Outbound) (string, error) {
 }
 
 func (x outExtra) apply(out *core.Outbound) {
-	out.Formatted, out.Reactions, out.File = x.Formatted, x.Reactions, x.File
+	out.Formatted, out.Reactions, out.File, out.TurnID = x.Formatted, x.Reactions, x.File, x.TurnID
 }
 
 type Store struct{ db *sql.DB }
@@ -551,11 +554,12 @@ type OutboundRow struct {
 func (s *Store) NextOutbound(iface string) (OutboundRow, bool, error) {
 	var r OutboundRow
 	var extra string
-	err := s.db.QueryRow(`SELECT o.id,o.chat,o.thread,o.reply_to,o.text,o.extra,o.attempts FROM outbound o
+	var created int64
+	err := s.db.QueryRow(`SELECT o.id,o.chat,o.thread,o.reply_to,o.text,o.extra,o.attempts,o.created_at FROM outbound o
 WHERE o.iface=? AND o.state=? AND o.next_at<=?
 AND NOT EXISTS(SELECT 1 FROM outbound p WHERE p.iface=o.iface AND p.chat=o.chat AND p.id<o.id AND p.state IN (?,?))
 ORDER BY o.id LIMIT 1`, iface, OutPending, now(), OutPending, OutSending).
-		Scan(&r.ID, &r.Conv.Chat, &r.Conv.Thread, &r.ReplyTo, &r.Text, &extra, &r.Attempts)
+		Scan(&r.ID, &r.Conv.Chat, &r.Conv.Thread, &r.ReplyTo, &r.Text, &extra, &r.Attempts, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, false, nil
 	}
@@ -563,6 +567,7 @@ ORDER BY o.id LIMIT 1`, iface, OutPending, now(), OutPending, OutSending).
 		return r, false, err
 	}
 	r.Conv.Interface = iface
+	r.CreatedAt = time.UnixMilli(created)
 	if extra != "" {
 		var x outExtra
 		if err := json.Unmarshal([]byte(extra), &x); err != nil {

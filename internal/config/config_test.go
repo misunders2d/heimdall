@@ -104,3 +104,21 @@ func TestPromptGuardBlock(t *testing.T) {
 		}
 	}
 }
+
+func TestSlackAndSharedCommandConfig(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"personal","owners":["slack:owner@example.test"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
+	for _, tc := range []struct{ commands, want string }{{"", "stop,cancel"}, {`,"commands":{"unmentioned":["all"]}`, "all"}, {`,"commands":{"unmentioned":[]}`, ""}} {
+		c, err := Parse([]byte(`{` + base + `,"slack":{"team_id":"Ttest"}` + tc.commands + `}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Slack.MaxFileBytes != 200_000_000 || strings.Join(c.UnmentionedCommands(), ",") != tc.want {
+			t.Fatalf("wrong defaults %+v", c)
+		}
+	}
+	for _, block := range []string{`"slack":{}`, `"slack":{"team_id":"Ttest","token":"private"}`, `"slack":{"team_id":"Ttest","max_file_bytes":-1}`, `"commands":{"unmentioned":["unknown"]}`} {
+		if _, err := Parse([]byte(`{` + base + `,` + block + `}`)); err == nil {
+			t.Fatalf("accepted %s", block)
+		}
+	}
+}
