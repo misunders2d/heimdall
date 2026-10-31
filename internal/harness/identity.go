@@ -82,11 +82,8 @@ func callerVars(c Caller) ([]string, error) {
 		}
 		platform, user, chat, email = "slack", e, "sl_channel_"+c.Conv.Chat, e
 	case "agentnet":
-		// TODO(phase 2, AgentNet interface): set PI_EXTERNAL_USER_ID,
-		// PI_EXTERNAL_CHAT_ID, A2A_CALLER_PRINCIPAL, A2A_CALLER_SOURCE=a2a_signed
-		// and A2A_CALLER_KEY_ID (p.KeyID) once the AgentNet principal format
-		// is settled. Until then hub tools see an unverified A2A caller and
-		// fail closed (a2a-external-identity.ts).
+		// Inert compatibility only: AgentNet is a separate module, never
+		// a Heimdall interface. Hub A2A tools fail closed without identity.
 		return []string{"PI_EXTERNAL_PLATFORM=a2a", "PI_RESTRICTED_EXTERNAL_USER=1"}, nil
 	default:
 		// No hub equivalent (local test interface). Never a bare "local" or

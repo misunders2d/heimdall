@@ -1,11 +1,11 @@
 # AGENTS.md — working on Heimdall
 
 Heimdall is a thin, reliable message router between chat interfaces
-(Telegram, Slack, AgentNet, future UIs) and agent harnesses (OMP, Codex,
+(Telegram, Slack, future UIs) and agent harnesses (OMP, Codex,
 Claude, Pi, AGY). One static Go binary, one config file, optional systemd
 unit. It is one of three independent universal-install modules: Heimdall
-routes, AgentNet connects agents, Memento remembers. Anyone installs
-Heimdall, connects their own AgentNet and Memento, and goes.
+routes, AgentNet connects agents, Memento remembers. AgentNet stays
+separate; memory belongs to each harness's native hooks.
 
 **Goal:** replace the Pi hub integration (today's always-on assistant) as the
 single interface for every agent installed on the server, so any compatible
@@ -31,6 +31,12 @@ Its whole job, per message:
 
 ## Product rules that code must keep
 
+Owner, phase 2: Heimdall has no memory intake or capture; memory belongs
+only to harness native hooks. No-memory turns retain `MEMENTO_PROCESSING=1`.
+Slack tests use fakes only; live app is shared with the hub and must never
+be connected without the orchestrator arranging a live window. Never touch
+the `heimdall-live` unit.
+
 - **Keep it thin.** No invented subsystems: no activity boards, registries,
   job trackers or delegation layers. Memory is Memento's job; agent-to-agent
   work and job tracking are AgentNet's job; business connectors and tool
@@ -43,8 +49,8 @@ Its whole job, per message:
 - **Identity comes from the interface, never from text.** Callers never log
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack
-  identity (a Slack user ID alone never counts); the AgentNet verified key.
-  A Slack caller is verified only as the Pi hub checks it
+  identity (a Slack user ID alone never counts).
+  A Slack caller needs the Pi hub live check plus a workspace check
   (`internal/iface/slack`): users.info returned a live email, the user is
   not deleted and not a bot, and belongs to the bot's own workspace
   (auth.test team ID). Slack Connect guests from other workspaces, and
@@ -91,11 +97,6 @@ Its whole job, per message:
   line: score, pattern names, interface, chat, thread, caller key and
   message ID, never the text, to `<data_dir>/prompt-guard.log`, rotated to
   one `.1` file at `prompt_guard.log_max_bytes` (default 1 MiB).
-- **Memento intake is a per-chat opt-in** (owner, 2026-10-30; not built:
-  Memento has no intake contract yet, see `docs/HANDOFF.md`). Only chats
-  listed in the config, none by default, independent of the memory mode;
-  each admitted message, addressed or ambient, is written durably before
-  the interface acknowledges it; nothing for any other chat.
 - **Sessions per verified caller.** Native sessions are kept per
   (conversation, verified caller, harness), as the Pi hub does. A harness
   process serves exactly one caller: a mid-turn message steers only the
@@ -245,6 +246,6 @@ thinking stream and live-session reply registration.
    session store, harness selection and `!` commands, steer/follow-up,
    delivery, ported adapters, local CLI interface, and the Telegram
    interface (end to end on the development machine).
-2. Slack and AgentNet interfaces.
+2. Slack interface. AgentNet stays separate and is never a Heimdall interface.
 3. Scheduler (jobs carry and run as their creator).
 4. Production cutover.

@@ -74,19 +74,10 @@ own scope. Employees share one OS user, so their jobs are separated only by
 that scope. Revisit when Heimdall's own scheduler arrives (phase 3); the
 owner may overrule.
 
-#### AgentNet (phase 2)
+#### AgentNet
 
-AgentNet turns set only `PI_EXTERNAL_PLATFORM=a2a`,
-`PI_RESTRICTED_EXTERNAL_USER=1`, `PI_EXTERNAL_MCP_PRIVATE=0` and
-`PI_TRANSPORT_CHILD=1`. `extensions/.shared/a2a-external-identity.ts` verifies
-an A2A caller only with platform `a2a`, `A2A_CALLER_PRINCIPAL`,
-`A2A_CALLER_SOURCE=a2a_signed`, `A2A_CALLER_KEY_ID`,
-`PI_EXTERNAL_USER_ID == A2A_CALLER_PRINCIPAL` and restricted `1`, so hub tools
-treat Heimdall's AgentNet callers as unverified and fail closed. The
-principal format is decided with the AgentNet interface; nothing in pi-pack
-`ec72c7d` or agentnet `22cb8c1` sets `A2A_CALLER_*` today (only
-`scripts/omp-a2a-agent-run.sh` checks them). Its admin list accepts only
-entries containing `@`.
+Separate module, never a Heimdall interface. Inert fail-closed identity
+compatibility remains; no AgentNet transport is planned.
 
 ### Variables Heimdall does not set
 
@@ -125,7 +116,7 @@ hooks); `src/memento/native_shared.ts:153` makes the Pi/OMP extension install
 nothing. Heimdall sets it on every turn without memory and never sets it
 otherwise; an owner turn on Heimdall's own uid inherits Heimdall's value, so
 setting it for Heimdall itself (as live tests do) suppresses memory for every
-turn. **Not verified live**: that each harness passes its environment
+turn. Heimdall has no memory capture or intake integration. **Not verified live**: that each harness passes its environment
 to its hook processes.
 
 ## Telegram
@@ -172,7 +163,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 | `deleteWebhook` | AGENTS.md: Heimdall never calls `deleteWebhook` or `setWebhook`; a webhook shows as a logged 409. |
 | Channel posts (`channel_post`) | A channel post has no verified user, and identity is per user (fail closed). `allowed_updates` is `["message"]`. |
 | Injection-line removal (`sanitizeUntrustedText`) | Untrusted text is wrapped as the hub wraps it, and Heimdall's own frame markers in it are defanged, but lines are not removed by pattern (see recommendation 1). |
-| Prompt-injection guard's block, Memento Telegram intake | Decided by the owner: see "Decisions" below (the guard logs, never blocks). |
+| Prompt-injection guard's block | Decided by the owner: see "Decisions" below (the guard logs, never blocks). |
 
 ### Improved over the hub
 
@@ -207,16 +198,10 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
    `prompt_guard.log_max_bytes` (default 1 MiB). Scored as the hub does: the
    message's text (else caption), ambient messages included, logged at the
    hub's block score 4; JavaScript's Unicode `\s` is kept.
-2. **Memento intake: per chat, off by default.** A config list of enabled
-   conversations, empty by default, independent of the memory mode; for
-   those chats every admitted message (addressed and ambient) is written to
-   Memento's intake before acknowledgement; nothing for other chats. On
-   hold: Memento (`29dc07b`) has no intake contract; the hub's format and
-   worker live in pi-pack (see HANDOFF).
-3. **Groups**: the current Pi Telegram bot is the reference: it answers in
+2. **Groups**: the current Pi Telegram bot is the reference: it answers in
    a group only when mentioned or when someone replies to its message.
    Ported as such (table above); no change.
-4. **T3 Code is for coding only.** Heimdall keeps its own adapters.
+3. **T3 Code is for coding only.** Heimdall keeps its own adapters.
 
 ### Earlier recommendations (kept for the reasoning)
 
@@ -229,17 +214,6 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
    text (group context, replies, forwards, files) is already marked
    untrusted. If the owner wants visibility, a log-only port is cheap:
    score and pattern names, never text.
-2. **Memento Telegram intake** (`createTelegramIntake`: every message of one
-   configured supergroup written durably to a queue before the update is
-   acknowledged, delivered by a Python worker every 15 s). Recommendation:
-   keep Memento's logic in Memento, and only if the owner wants group
-   intake add one generic, interface-agnostic hook: per configured chat,
-   each accepted or ambient message written as an untrusted event file into
-   a 0700 spool directory before acknowledgement; Memento's own worker
-   (today's `telegram-memento-delivery.py`) delivers it. It needs an owner
-   decision first: it stores non-owner Telegram text in memory, which
-   today's mode rules never do.
-
 ### Further improvements, not built
 
 | Idea | Recommendation |

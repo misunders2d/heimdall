@@ -4,6 +4,29 @@ Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
 records where the work stands, what was decided, and what comes next. It
 supersedes the earlier handoffs of the same day.
 
+## Phase 2 implementation checkpoint
+
+Lifecycle leftovers fixed: an answer before ready now publishes as Ready and
+gets the same 60 s exit deadline. Active cancellation marks the result
+cancelled, sends SIGTERM to the group immediately, then SIGKILL after 5 s.
+The historic sixth-session description of pre-ready answers is superseded.
+Regression cases cover pre-ready publication/deadline, SIGTERM delivery,
+ignored SIGTERM/grace, and clean exit during active cancellation.
+
+Slack transport remains unfinished. No live Slack connection made;
+`heimdall-live` untouched.
+
+## Phase 2 owner decisions (2026-10-31)
+
+- Slack only; AgentNet remains separate. No Heimdall memory capture or
+  intake; native harness memory and `MEMENTO_PROCESSING=1` stay.
+- Slack owner by configured verified email; every other live verified
+  same-workspace caller runs non-root. Unverified/external callers silent.
+- Fakes only. Production Slack app must not be connected during development.
+  Orchestrator owns live window. Never touch `heimdall-live`.
+- Pending: command mention gate, thinking summary, inbound cap. Build last
+  behind configuration, with hub defaults until owner answers.
+
 ## State
 
 - `main` = the code HEAD (the review fixes of `fd72734..d05b748`; see
@@ -252,8 +275,8 @@ usernames and tokens live only outside the repository.
   resumed.
 - **Launch flags stay** (OMP `--auto-approve`, Claude `--permission-mode
   auto`, Codex `approvalsReviewer: auto_review`).
-- **AgentNet principal format is deferred to phase 2** (TODO in
-  `identity.go`). Do not invent one.
+- **AgentNet stays separate**, never a Heimdall interface. The inert
+  identity branch is retained for compatibility, with no planned transport.
 - **Unknown callers** are ignored silently with a metadata log line.
 - **Telegram** (answers 3-6, then the parity brief of 2026-10-30):
   - Private chat: always handled. Group/supergroup: handled only if the text
@@ -315,8 +338,8 @@ usernames and tokens live only outside the repository.
      capped dedicated log file (score, pattern names, conversation, caller
      key, message ID; never text). Built (`2269945`): every admitted
      message, ambient included, logged at the hub's block score 4.
-  2. Memento intake: per-chat opt-in, empty by default, independent of the
-     memory mode, durable before acknowledgement. On hold, see below.
+  2. Superseded: memory belongs only to native harness hooks; Heimdall
+     performs no capture or intake.
   3. Groups: the Pi Telegram bot is the reference (mention or reply to the
      bot); already ported.
   4. T3 Code is for coding only; Heimdall keeps its own harness adapters.
@@ -361,32 +384,8 @@ usernames and tokens live only outside the repository.
   - A Codex steer acknowledged after `turn/completed`: unknown (above).
 - claude.ai connectors for the employee user are not phase 1.
 
-### Memento intake: what exists (on hold for the orchestrator)
-
-- Memento `29dc07b` has no intake or Telegram code. Its contract is the
-  bridge (`src/memento/bridge.py`: `read_config` L83, `Spool` L250,
-  `Spool.episode` L398, `commit` L634, `upload` L650), which queues
-  `/episodes` requests in a private SQLite outbox next to the client config
-  and uploads them to the Memento service.
-- The hub's intake is pi-pack code (`ec72c7d`):
-  `extensions/.shared/telegram-memento.ts` writes one JSON event per
-  message (`version 1`, `conversationId`, `eventId`, `occurredAt`, `text`,
-  `metadata` with `untrusted`, `platform: "telegram"`, `chatId`
-  `tg_chat_-100…`, `threadId`, `messageId`, `authorId` `tg_user_…`,
-  `authorName`, `username`, `textKind`, `media`) to
-  `<state>/memento-intake/<sha256(eventId)>.json` (0600, fsync, rename)
-  before the update offset advances; a policy file
-  (`~/.pi/agent/memento/telegram-intake.json`: one supergroup, a cutover
-  time, the bridge, client config and python paths) enables it; the hub
-  runs `scripts/telegram-memento-delivery.py` every 15 s, which loads the
-  installed `bridge.py`, calls `Spool.episode('telegram', …)` and `upload`.
-- So the format and worker are the hub's, Telegram-only (one supergroup),
-  and the delivery needs a process that Heimdall would have to run.
-
 ## Remaining work, in order
 
-0. **Memento intake** once the orchestrator decides among its options
-   (a), (b) and (c) (decision 2). Not started.
 1. **Live Telegram chat check with a human** (orchestrator runs it with the
    owner). Scratch config outside the repo: `data_dir` in a scratch dir,
    `mode` `personal`, `owners` = `telegram:<owner numeric ID>`,
@@ -423,8 +422,7 @@ usernames and tokens live only outside the repository.
 4. **Employee turns live** need Heimdall running as root (production) or a
    dedicated dev setup. No OS users were created; decision is the owner's.
 5. Phase 2: Slack interface (verification exists in `internal/iface/slack`;
-   set `Inbound.Private` for DMs), AgentNet interface and its principal
-   format (`identity.go` TODO).
+   set `Inbound.Private` for DMs). AgentNet stays separate.
 6. Phase 3: scheduler (revisit `PI_RESTRICTED_EXTERNAL_USER` and
    `PI_EXTERNAL_DEFAULT_DELIVERY`).
 

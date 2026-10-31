@@ -9,7 +9,7 @@ with mid-turn messages, and delivers the reply back to the same chat.
 ```
 Telegram ─┐                      ┌─ OMP
 Slack    ─┼─► Heimdall ──────────┼─ Codex
-AgentNet ─┤  (identity, harness, ├─ Claude
+Future UI─┤  (identity, harness, ├─ Claude
 local CLI ┘   session, delivery) └─ Pi / AGY
 ```
 
@@ -21,7 +21,7 @@ business connectors or tool restrictions (each harness's native configuration).
 session store, `!` commands, steer/follow-up, delivery, the harness adapters,
 a local terminal interface and the Telegram interface work (Telegram is
 tested against a fake Bot API and checked live for start-up and polling;
-real chats are next). Slack, AgentNet interfaces and the scheduler come
+real chats are next). Slack interface and the scheduler come
 next. Linux only.
 
 ## Build
