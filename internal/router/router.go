@@ -679,13 +679,13 @@ func (c *conv) armAlbum(ctx context.Context, key string, a *album, wait time.Dur
 }
 
 func (c *conv) reply(row store.InboundRow, text string) {
-	c.r.enqueue(core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: scrub(text)})
+	c.r.enqueue(core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: c.r.scrub(text)})
 }
 
 // answer settles a ! command and its reply together. If that cannot be
 // recorded the message stays pending and is answered after a restart.
 func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
-	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: scrub(text) + "\n— heimdall"}
+	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: c.r.scrub(text) + "\n— heimdall"}
 	if err := c.r.store.AnswerCommand(row.ID, c.key, e); err != nil {
 		c.r.log.Printf("message %d: command %s not recorded: %v", row.ID, e.Detail, err)
 		return
@@ -770,7 +770,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 	if choice != nil && cmd.Harness == "" && !cmd.Next {
 		cmd.Harness, cmd.Next = choice.Harness, choice.Next
 	}
-	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next || strings.HasPrefix(cmd.Text, "/mcp "), text: cmd.Text}
+	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next || row.MCPControl, text: cmd.Text}
 	// Steer only the sender's own turn: sessions are per verified caller, so
 	// nobody steers another person's turn.
 	if t := c.turn; t != nil && t.done == nil && !it.next && it.harness == "" && row.From.Key() == t.who {
@@ -978,7 +978,7 @@ func (c *conv) start(ctx context.Context) {
 	}
 	first := c.queue[0]
 	n := 1
-	for n < len(c.queue) && !strings.HasPrefix(first.text, "/mcp ") && !strings.HasPrefix(c.queue[n].text, "/mcp ") && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
+	for n < len(c.queue) && !first.row.MCPControl && !c.queue[n].row.MCPControl && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
 		n++
 	}
 	batch := append([]item(nil), c.queue[:n]...)
@@ -1019,7 +1019,7 @@ func (c *conv) start(ctx context.Context) {
 // framed with its caller, context and attachments. It runs once the turn's
 // OS account is known, which the attachments are copied for.
 func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
-	if len(batch) == 1 && strings.HasPrefix(batch[0].text, "/mcp ") {
+	if len(batch) == 1 && batch[0].row.MCPControl {
 		return batch[0].text, nil
 	}
 	var parts []string
@@ -1393,6 +1393,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	}
 	footer := "\n\n— " + tag
 	if len(notes) > 0 {
+		for i := range notes {
+			notes[i] = c.r.scrub(notes[i])
+		}
 		footer += " (" + strings.Join(clipAll(notes, 160), "; ") + ")"
 	}
 	e := store.TurnEnd{Harness: d.harness, Session: res.SessionID, Forget: t.reset}
@@ -1412,7 +1415,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		text = "⏹ The turn was cancelled."
 	case res.Failure != "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, res.Failure
-		text = "⚠ " + d.harness + " failed: " + failureReason(res.Failure) + ". Please retry, or send reset if this keeps happening."
+		text = "⚠ " + d.harness + " failed: " + failureReason(c.r.scrub(res.Failure)) + ". Please retry, or send reset if this keeps happening."
 	default:
 		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, !res.Unclean
 		text = strings.TrimSpace(res.Answer)
@@ -1435,7 +1438,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		text = "Attachment"
 	}
 	if text+footer != "" {
-		e.Reply.Text = scrub(text + footer)
+		e.Reply.Text = c.r.scrub(text + footer)
 	}
 	if e.State == store.TurnDone {
 		e.Files = c.fileReplies(t, d.files)

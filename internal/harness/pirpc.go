@@ -258,8 +258,15 @@ func (b *piRPCBridge) event(raw []byte) {
 		b.fail(b.nativeName() + " sent an unreadable protocol line; no answer was used")
 		return
 	}
+	var notice string
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer func() {
+		notify := b.mcpNotify
+		b.mu.Unlock()
+		if notice != "" && notify != nil {
+			go notify(notice)
+		}
+	}()
 	if b.done {
 		return
 	}
@@ -380,7 +387,7 @@ func (b *piRPCBridge) event(raw []byte) {
 					}
 				}
 
-				b.mcpNotify(message + "\nPaste the callback URL in this private chat.")
+				notice = message + "\nPaste the callback URL in this private chat."
 				return
 			}
 			if e.Method == "input" && e.ID != "" && strings.HasPrefix(e.Title, "Waiting for sign-in to ") {
@@ -411,11 +418,11 @@ func (b *piRPCBridge) event(raw []byte) {
 				return
 			}
 			if e.Method == "notify" && strings.HasPrefix(message, "Sign-in failed:") {
-				b.mcpNotify("MCP sign-in failed. Retry mcp login in this private chat.")
+				notice = "MCP sign-in failed. Retry mcp login in this private chat."
 				return
 			}
 			if e.Method == "notify" && (strings.HasPrefix(message, "Signed in to MCP server ") || message == "Sign-in cancelled.") {
-				b.mcpNotify(message)
+				notice = message
 
 				return
 			}

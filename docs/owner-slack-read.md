@@ -67,6 +67,8 @@ http://127.0.0.1:18767/callback
 
 Keep listeners local. Do not expose or publicly forward callback ports. Preserve
 PKCE and token rotation. Confirm consent contains only the configured read scopes.
+Owner Slack requires the bot scope `im:read` in addition to README bot scopes.
+Default deployment DM privacy uses `channel_type=im`, without this API call.
 Slack bot `conversations.info` must return `is_im=true`, `is_mpim=false` and the
 verified caller's user ID before owner Slack access is granted in a Slack DM.
 
@@ -84,6 +86,14 @@ The actor must resolve through native `access/identities.json` and be in
 uses the hub's `mcp.linear` capability/admin rules, and Mellanni remains approved
 for identified callers. Heimdall never copies tokens or credentials.
 
+Non-root homes currently use the hub deny path with an empty approved-server
+list. `PI_CODING_AGENT_DIR` selects config but does not change the seam's OAuth
+scope root. Heimdall pins the config directory to each non-root turn home.
+See HANDOFF hub-side follow-ups; employee Pi turns continue without
+MCP. Unsafe or inaccessible OAuth directories also disable MCP for that turn
+and produce a metadata-only log, rather than refusing the turn. Directories
+writable by another user are never used.
+
 Root uses the existing `/root/.pi/agent/mcp-oauth-users/sha256-*` directories.
 Telegram digest input is `telegram:tg_user_<id>`; Slack uses
 `slack:sl_user_<bot>:sl_user_<caller>:servers=helium10`. The legacy label must stay.
@@ -94,6 +104,9 @@ Enable `owner_slack`, then send `mcp login slack` in an owner private chat.
 Open the native browser link and paste the loopback callback into that same
 private chat. `mcp logout [server]` and `mcp reconnect [server]` also route to Pi.
 Callback input is ephemeral, never queued, logged, echoed or shown to the model.
+Slack filters non-person/subtype/shared callbacks before identity calls, acks
+without network work, then relays asynchronously. 429/5xx/transport failures
+drop callbacks; no callback failure can stop Socket Mode or the router.
 The native input expires after 300 seconds. A restart loses the pending login;
 start it again. Telegram and Slack use separate stores and require separate
 consents. Existing hub Telegram consent is reused when actor/home/config match.
@@ -119,6 +132,9 @@ Heimdall supplies matching server JSON via `--mcp-config` only for eligible turn
 plus read/search `--allowedTools` and a PreToolUse hook invoking the same
 Heimdall binary. Unknown/write Slack tools fail closed. Every other Claude turn
 gets `--disallowedTools 'mcp__slack__*'`.
+
+Require Claude 2.1.295+ for `onFailure: "block"`; installed binary checked
+2026-11-01: 2.1.314. Hook execution failures must block tool use.
 
 Claude 2.1.314 mock spike: local-scope registration and PTY `--no-browser` login
 performed one synthetic token exchange. A print invocation from another cwd,
@@ -157,9 +173,14 @@ codex mcp login slack --no-browser -c mcp_servers.slack.enabled=true
 Heimdall starts a fresh app-server process for each turn. Eligible processes get
 `enabled=true`, exact read/search tool allowlist, pinned scopes, URL, callback
 port and automatic tool approval. Every other process explicitly gets
-`enabled=false` and an inert HTTP URL, even if native config drifted or no Slack
-entry exists. Native 0.166.0 rejects an enabled-only entry without a transport;
-a disposable-home CLI check verified this behavior. Sessions remain per conversation,
+`enabled=false` for existing entries, preserving stdio or HTTP transport.
+Heimdall runs native `codex mcp get slack --json` as the turn OS user (10 s
+bound), without printing its output. If Slack is absent, it supplies a valid
+disabled placeholder; configuration inspection failure refuses the launch.
+A fake-only native CLI regression checked absent, stdio and HTTP configurations
+on Codex 0.166.0. Source `codex-rs/config/src/{merge,mcp_types,overrides}.rs`
+at rust-v0.166.0 confirms recursive table merging and mandatory transport
+validation even when disabled. Sessions remain per conversation,
 verified caller and harness; processes never move between conversations. Native
 approval/input requests still end as needs-human; Heimdall never waits for an
 operator response or invents one. Live Slack approval/refresh remains unverified.

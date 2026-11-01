@@ -21,6 +21,7 @@ type TurnEvent struct {
 
 func (c *conv) observe(ctx context.Context, t *turn, phase string, p harness.Progress) {
 	if i, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok {
+		p.Text, p.Tool, p.Phase = c.r.scrub(p.Text), c.r.scrub(p.Tool), c.r.scrub(p.Phase)
 		i.ObserveTurn(ctx, TurnEvent{ID: t.id, Conv: c.key, Phase: phase, Progress: p})
 	}
 }

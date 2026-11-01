@@ -73,6 +73,10 @@ func Main() {
 	if name == "" {
 		return
 	}
+	if len(os.Args) > 3 && os.Args[1] == "mcp" && os.Args[2] == "get" {
+		fmt.Fprintln(os.Stderr, "No MCP server named 'slack' found.")
+		os.Exit(1)
+	}
 	if capture := os.Getenv("FAKE_CAPTURE_LAUNCH"); capture != "" {
 		data, _ := json.Marshal(map[string]any{"args": os.Args[1:], "oauth": os.Getenv("MCP_OAUTH_DIR"), "servers": os.Getenv("PI_MCP_OAUTH_SERVERS"), "client": os.Getenv("SLACK_CLIENT_ID"), "secret": os.Getenv("SLACK_CLIENT_SECRET")})
 		_ = os.WriteFile(capture, data, 0600)
@@ -397,6 +401,9 @@ func (f *fake) piRPC() {
 		}
 	}
 	f.failPost()
+	if f.has("MCP_UI") {
+		f.emit(map[string]any{"type": "extension_ui_request", "method": "notify", "message": "Sign in to MCP server slack in your browser: https://example.invalid/?state=x"})
+	}
 	if f.has("ASK_HUMAN") {
 		f.emit(map[string]any{"type": "extension_ui_request", "id": "x2", "method": "select"})
 		f.read()

@@ -13,12 +13,18 @@ const mcpNotice = "MCP sign-in through Heimdall is available only to owners in p
 func (r *Router) mcpControl(ctx context.Context, in *core.Inbound, role core.Role) bool {
 	callback := core.MCPCallback(in.Text)
 	text := strings.TrimSpace(in.Text)
+	if strings.HasPrefix(text, "!pi ") {
+		text = strings.TrimSpace(strings.TrimPrefix(text, "!pi "))
+	}
 	command := strings.TrimPrefix(text, "/")
 	isCommand := strings.HasPrefix(command, "mcp ") && (strings.HasPrefix(command, "mcp login ") || command == "mcp logout" || strings.HasPrefix(command, "mcp logout ") || command == "mcp reconnect" || strings.HasPrefix(command, "mcp reconnect "))
 	if !callback && !isCommand {
 		return false
 	}
 	eligible := role == core.RoleOwner && in.Private && !in.Ambient && in.Origin == core.OriginLive && (in.Conv.Interface == "telegram" || in.Conv.Interface == "slack")
+	if in.Conv.Interface == "slack" {
+		eligible = eligible && in.SlackReadVerified
+	}
 	if callback {
 		if in.Ambient {
 			return true
@@ -48,6 +54,7 @@ func (r *Router) mcpControl(ctx context.Context, in *core.Inbound, role core.Rol
 			in.InterfaceReply = "Owner Slack is disabled."
 			return false
 		}
+		in.MCPControl = true
 		in.Text = "!pi /" + command
 	} else {
 		in.Text = "[Private native MCP sign-in UI omitted]"

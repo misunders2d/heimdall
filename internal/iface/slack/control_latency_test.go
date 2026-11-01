@@ -51,7 +51,7 @@ func TestControlIdentityPacerPriority(t *testing.T) {
 	f := newSlackFake(t)
 	s, _ := testSlack(t, f)
 	s.botID = "Ubot"
-	p := &apiPacer{interval: 20 * time.Millisecond, next: map[string]time.Time{"users.info": time.Now().Add(time.Second)}}
+	p := &apiPacer{interval: time.Hour, next: map[string]time.Time{"users.info": time.Now().Add(time.Hour)}}
 	s.bot.pacer = p
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -71,11 +71,11 @@ func TestControlIdentityPacerPriority(t *testing.T) {
 		result <- s.process(ctx, e, func(context.Context, core.Inbound) error { return nil })
 	}()
 	registered := false
-	deadline := time.Now().Add(750 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if p.mu.TryLock() {
 			q := p.queues["users.info"]
-			registered = q != nil && len(q.priority) > 0
+			registered = q != nil && len(q.priority) > 0 && len(q.ordinary) == 8
 			p.mu.Unlock()
 			if registered {
 				break
@@ -86,8 +86,20 @@ func TestControlIdentityPacerPriority(t *testing.T) {
 	if !registered {
 		t.Fatal("control identity did not register priority while ordinary readers waited")
 	}
-	if err := <-result; err != nil {
-		t.Fatal(err)
+	// Release exactly one slot after both classes have registered. HTTP
+	// arrival order cannot prove pacing order if later slots are released
+	// while the first request is descheduled under race-test CPU contention.
+	p.mu.Lock()
+	p.next["users.info"] = time.Now().Add(-time.Second)
+	p.queues["users.info"].notify()
+	p.mu.Unlock()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("control did not receive first released identity slot")
 	}
 
 	calls := f.all("users.info")

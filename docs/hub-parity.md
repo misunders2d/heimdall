@@ -90,8 +90,12 @@ uses its canonical numeric actor; Slack carries live user ID and auth.test bot
 ID separately from email authority. Scope SHA-256 preserves the hub legacy
 label and existing root stores. Linear approval follows native admin/capability
 files, Mellanni is approved for identified callers, Slack only through the
-private-owner gate. Invalid scope gets the hub deny path. Directories must
-be owned by the turn uid with mode 0700; symlinks fail closed.
+private-owner gate, for the existing root scope. Employee/non-root homes
+currently use the hub deny path and no MCP; employee MCP parity awaits the
+hub scope-root change in HANDOFF. Invalid or unsafe directories also get the
+deny path without refusing the turn. Directories must be owned by the turn
+uid, with no group/other writes on ancestors and mode 0700 on scope dirs;
+symlinks fail closed.
 
 Owner Pi MCP login/logout/reconnect and pasted callbacks now relay privately.
 Claude/Codex use separate native logins and per-turn controls. See

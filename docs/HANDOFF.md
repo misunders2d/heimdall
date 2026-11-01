@@ -4,6 +4,90 @@ Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
 records where the work stands, what was decided, and what comes next. It
 supersedes the earlier handoffs of the same day.
 
+## PAUSED by owner: CPU needed (2026-11-01)
+
+Work saved on `wip/owner-slack-review-fixes`; do not merge/push main until the
+orchestrator resumes and accepts final verification. No live Slack, real OAuth,
+production tests or heimdall-live operations occurred.
+
+| Brief item | Done | Left |
+|---|---|---|
+| 1 | Callback bypass before staging; post-ack async verification/relay; early filters; API failures drop input. Router survival/redaction regressions and mutations passed. | Final full verification. |
+| 2 | Event-based DM privacy restored; separate persisted read gate; enabled-only extra verification; stop/cancel bypass; im:read documented. | Final full verification. |
+| 3 | Non-root Pi config pinned to its own home, OAuth deny path with empty servers; unsafe directories degrade to no MCP with metadata log. | Hub scopeRoot follow-up below; employee MCP parity remains deferred. Final full verification. |
+| 4 | Notices copied under lock, dispatched after unlock; slow notice cannot block callback/close/stdout reader. | Final full verification. |
+| 5 | Only eligibility-rewritten, persisted MCP controls receive native unframed prompts; explicit !pi commands checked. | Final full verification. |
+| 6 | Claude hook onFailure=block; installed 2.1.314 checked; minimum 2.1.295 documented. | Final full verification. |
+| 7 | Existing Codex Slack transport preserved via enabled=false after native config-only get; absent entry gets disabled placeholder. Native stdio/HTTP/absent regressions passed on 0.166.0. | Final full verification. |
+| 8 | Configured client-secret name scrubbed in router replies and before truncation/progress. | Final full verification. |
+| 9 | M8/M13/M5b/M14/M15 wiring regressions kill all requested mutations. | Final full verification. |
+
+21 distinct reversible mutations were caught by assertion failures, including
+all requested wiring mutations, Pi config isolation, command-argument callback
+redaction and the existing control-priority test. Sources restored. Earlier
+full vet/race runs and a CGO_ENABLED=0 static build passed, before final refinements.
+The final candidate has NOT completed the required two full default-parallel
+race runs and final static build. One full attempt exposed an existing pacer
+test's HTTP arrival-order assumption. Its fixture now holds slots from waiter
+registration, waits for both classes and explicitly releases one slot;
+production limiter is unchanged. Twenty race-enabled targeted repetitions passed.
+
+At pause, the latest full run had passed harness, Slack and Telegram; router
+was still running. Owner requested immediate drain: parent validation script,
+go test and descendants stopped; no automatic continuation remains. Next owner:
+resume only when CPU is available, run go vet ./... and go test -race -count=1
+./... twice at default parallelism, then CGO_ENABLED=0 build; review and integrate
+the WIP branch only with orchestrator authorization. Temporary reference clones,
+cache/build outputs and task scratch files are removed during pause handoff.
+
+## Owner Slack independent-review corrections (2026-11-01)
+
+Callbacks now bypass staging before ack without network I/O; post-ack workers
+filter, verify and relay ephemeral input. Identity/API/accept errors never
+terminate Socket Mode. Workers are joined at shutdown. Embedded callbacks are
+redacted before durable staging. Default owner DM privacy remains event-based;
+a separate persisted live-verification bit gates Slack reads and sign-in when
+owner_slack is enabled. Stop/cancel bypass extra DM verification.
+
+Pi notifications copy text under the bridge mutex and dispatch after unlock,
+so slow delivery cannot block stop, callback response or stdout processing.
+Only router-rewritten eligible MCP controls get unframed native prompts.
+Claude hook execution failures block (minimum 2.1.295; installed 2.1.314).
+Codex native config inspection selects transport-neutral disable for
+existing Slack entries and a disabled placeholder only when absent. Custom
+client-secret references are scrubbed from router outbound replies.
+
+Regression map: Slack `mcp_review_test.go` (router survival, pre-ack ordering,
+filters, persistence/redaction and default privacy); router `mcp_ui_test.go`
+(explicit Pi eligibility, marked prompt, ambient silence, caller role/surface,
+custom secret); harness `owner_slack_test.go` (scope deny/degradation, writable
+ancestors, slow notice, hook, native Codex configurations) and
+`owner_slack_launch_test.go` (Start notification gate); store OAuth round trip
+also checks gate/marker persistence. Fakes only; no live Slack/OAuth or unit changes.
+
+### hub-side follow-ups
+
+Hub inspected at af9ffff. `pi-native-cli.mjs:20` honors
+`PI_CODING_AGENT_DIR`, but `createHubNativeMcpOptions` independently passes
+`scopeRoot` to `mcpOAuthScopePath`; undefined falls back to
+`/root/.pi/agent/mcp-oauth-users`. Setting agentDir alone cannot fix employees.
+Until pack changes, Heimdall gives non-root homes
+`MCP_OAUTH_DIR=/dev/null/pi-mcp-oauth-denied` and `PI_MCP_OAUTH_SERVERS=[]`.
+Heimdall also pins `PI_CODING_AGENT_DIR` to the non-root turn home's `.pi/agent`,
+so the wrapper never selects root's native config. Pi turns continue without MCP. Inaccessible/unsafe scope directories similarly
+log a metadata-only denial and continue, without using another user's directory.
+
+Exact required pack change: in `scripts/pi-native-cli.mjs`, pass
+`scopeRoot: join(agentDir, "mcp-oauth-users")` alongside `agentDir` in the
+`createHubNativeFactories` options (import `join` from `node:path` if absent).
+Ensure `createHubNativeFactories` forwards that option unchanged to
+`createHubNativeMcpOptions`, and use that same root wherever the wrapper builds
+its worker OAuth environment. Add a non-root temporary-home worker seam test
+proving path equality and no root credential access. After pack release,
+Heimdall can remove the non-root deny fallback and set
+`PI_CODING_AGENT_DIR=<turn home>/.pi/agent` consistently with the OAuth root.
+No hub files changed in this task.
+
 ## Owner Slack read implementation (2026-11-01)
 
 Opt-in `owner_slack` is disabled by default. Read/search is restricted to

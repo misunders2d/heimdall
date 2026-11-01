@@ -17,6 +17,7 @@ func TestOwnerSlackLiveDMVerification(t *testing.T) {
 			f := newSlackFake(t)
 			s, _ := testSlack(t, f)
 			s.botID = "Ubot"
+			s.opt.OwnerSlackEnabled = true
 			s.opt.Owners = []string{"slack:uowner@example.test"}
 			f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 				if r.URL.Path != "/conversations.info" {
@@ -35,7 +36,7 @@ func TestOwnerSlackLiveDMVerification(t *testing.T) {
 			})
 			var got core.Inbound
 			directEvent(t, s, f.event("D1", "im", "Uowner", "hello", ""), func(_ context.Context, in core.Inbound) error { got = in; return nil })
-			if got.Private != (kind == "im") || got.OAuthActor != "sl_user_Uowner" || got.OAuthInstallation != "sl_user_Ubot" {
+			if !got.Private || got.SlackReadVerified != (kind == "im") || got.OAuthActor != "sl_user_Uowner" || got.OAuthInstallation != "sl_user_Ubot" {
 				t.Fatal(got)
 			}
 		})
@@ -45,6 +46,7 @@ func TestOwnerSlackCallbackNeverStaged(t *testing.T) {
 	f := newSlackFake(t)
 	s, st := testSlack(t, f)
 	s.botID = "Ubot"
+	s.opt.OwnerSlackEnabled = true
 	s.opt.Owners = []string{"slack:uowner@example.test"}
 	f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 		if r.URL.Path != "/conversations.info" {

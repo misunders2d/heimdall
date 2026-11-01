@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,35 +70,31 @@ func TestPiMCPScopeEnvAndHubPolicy(t *testing.T) {
 			t.Fatal("inherited OAuth claim or secret survived")
 		}
 	}
-	env, err = piMCPEnv(Launch{Home: home}, c, env)
+	env, err = piMCPEnv(Launch{Home: home}, c, append(env, "PI_CODING_AGENT_DIR=/another-account/.pi/agent"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if envValue(env, "PI_MCP_OAUTH_SERVERS") != `["linear","mellanni","slack"]` {
+	if envValue(env, "PI_MCP_OAUTH_SERVERS") != `[]` {
 		t.Fatal(env)
 	}
 	path := envValue(env, "MCP_OAUTH_DIR")
-	if !strings.HasSuffix(path, "e6162cda1c270a6a8f129fa49f55f20152501f673d14068f6fea03c46b59f02c") {
-		t.Fatal(path)
+	if path != mcpDenyPath {
+		t.Fatal("non-root home must use hub deny path", path)
 	}
-	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0700 {
-		t.Fatal("scope not private", err)
-	}
-	// Existing hub record remains at exactly the same path, no copying.
-	if err := os.WriteFile(filepath.Join(path, "mcp-auth.json"), []byte("synthetic"), 0600); err != nil {
-		t.Fatal(err)
+	if envValue(env, "PI_CODING_AGENT_DIR") != filepath.Join(home, ".pi", "agent") {
+		t.Fatal("Pi wrapper used another account config directory")
 	}
 	c.SlackRead = false
 	env, err = piMCPEnv(Launch{Home: home}, c, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if envValue(env, "MCP_OAUTH_DIR") != path || envValue(env, "PI_MCP_OAUTH_SERVERS") != `["linear","mellanni"]` {
+	if envValue(env, "MCP_OAUTH_DIR") != path || envValue(env, "PI_MCP_OAUTH_SERVERS") != `[]` {
 		t.Fatal("existing store not reused")
 	}
 	c.Principal.ID = "43"
 	env, err = piMCPEnv(Launch{Home: home}, c, nil)
-	if err != nil || envValue(env, "PI_MCP_OAUTH_SERVERS") != `["mellanni"]` {
+	if err != nil || envValue(env, "PI_MCP_OAUTH_SERVERS") != `[]` {
 		t.Fatal("ungranted linear", err, env)
 	}
 }
@@ -146,6 +143,7 @@ func TestOwnerSlackGateMatrix(t *testing.T) {
 	cfg.Enabled = true
 	base.From = core.SlackPrincipal("owner@example.com", "T1", "")
 	base.Conv.Interface = "slack"
+	base.SlackReadVerified = true
 	base.OAuthActor = "sl_user_U1"
 	base.OAuthInstallation = "sl_user_B1"
 	if !SlackReadAllowed(cfg, base, core.RoleOwner, "pi", "T1") {
@@ -195,11 +193,11 @@ func TestOwnerSlackNativeArgsAndGuard(t *testing.T) {
 			t.Fatal("secret in argv")
 		}
 		if name == "claude" {
-			if strings.Join(off, " ") != "--disallowedTools mcp__slack__*" || !strings.Contains(joined, "slack-guard") || !strings.Contains(joined, "slack_search_*") {
+			if strings.Join(off, " ") != "--disallowedTools mcp__slack__*" || !strings.Contains(joined, `"onFailure":"block"`) || !strings.Contains(joined, "slack-guard") || !strings.Contains(joined, "slack_search_*") {
 				t.Fatal(off, on)
 			}
 		} else {
-			if !strings.Contains(strings.Join(off, " "), "enabled=false") || !strings.Contains(strings.Join(off, " "), "mcp_servers.slack.url=") || !strings.Contains(joined, "enabled_tools=") || !strings.Contains(joined, "scopes=") || !strings.Contains(joined, `approval_mode="auto"`) {
+			if len(off) != 0 || !strings.Contains(joined, "enabled_tools=") || !strings.Contains(joined, "scopes=") || !strings.Contains(joined, `approval_mode="auto"`) {
 				t.Fatal(off, on)
 			}
 		}
@@ -230,11 +228,12 @@ func TestPiNativeMCPUIRelayAndCallerBinding(t *testing.T) {
 	defer cancel()
 	input := &mcpBuffer{}
 	b := &piRPCBridge{ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), closed: make(chan struct{}), pending: map[string]*pendingSteer{}}
-	notices := []string{}
-	b.mcpNotify = func(s string) { notices = append(notices, s) }
+	notices := make(chan string, 4)
+	b.mcpNotify = func(s string) { notices <- s }
 	b.event([]byte(`{"type":"extension_ui_request","method":"notify","message":"Sign in to MCP server \"slack\" in your browser:\nhttps://example.invalid/authorize?state=synthetic"}`))
+	<-notices
 	b.event([]byte(`{"type":"extension_ui_request","method":"input","id":"oauth","title":"Waiting for sign-in to \"slack\"."}`))
-	if b.done || b.mcpInput != "oauth" || len(notices) != 1 {
+	if b.done || b.mcpInput != "oauth" {
 		t.Fatal("native sign-in not held")
 	}
 	caller := Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Role: core.RoleOwner, Private: true, Conv: core.ConvKey{Interface: "telegram", Chat: "42"}}
@@ -325,5 +324,102 @@ func TestHubLinearAdminAndCapabilityRules(t *testing.T) {
 				t.Fatal("hub linear approval differs", got)
 			}
 		})
+	}
+}
+
+func TestMCPDirectoryFailureDeniesOnlyMCP(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".pi")
+	if err := os.WriteFile(root, []byte("blocked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := prepareMCPScope(Launch{Home: home}, root, filepath.Join(root, "scope")); got != mcpDenyPath {
+		t.Fatal(got)
+	}
+	home = t.TempDir()
+	root = filepath.Join(home, "public")
+	if err := os.Mkdir(root, 0777); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(root, 0777)
+	if privateMCPDir(filepath.Join(root, "scope"), Launch{Home: home}) == nil {
+		t.Fatal("writable ancestor accepted")
+	}
+}
+func TestMCPNoticeDoesNotBlockBridge(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &piRPCBridge{ctx: ctx, input: &mcpBuffer{}, ready: make(chan struct{}), answered: make(chan struct{}), closed: make(chan struct{}), pending: map[string]*pendingSteer{}}
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	b.mcpNotify = func(string) { close(entered); <-release }
+	eventDone := make(chan struct{})
+	go func() {
+		b.event([]byte(`{"type":"extension_ui_request","method":"notify","message":"Sign in to MCP server slack in your browser: https://example.invalid/?state=x"}`))
+		close(eventDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("no notice")
+	}
+	select {
+	case <-eventDone:
+	case <-time.After(time.Second):
+		t.Fatal("stdout reader blocked")
+	}
+	b.event([]byte(`{"type":"extension_ui_request","method":"input","id":"oauth","title":"Waiting for sign-in to slack"}`))
+	done := make(chan struct{})
+	go func() {
+		if !b.respondMCP(ctx, "http://localhost:18765/callback?code=x&state=x") {
+			t.Error("callback blocked")
+		}
+		b.close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("callback/stop blocked by notice")
+	}
+}
+func TestCodexDisabledSlackNativeStdio(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(home, ".local", "share", "mise", "installs", "codex", "0.166.0", "bin", "codex")
+	if _, err := os.Stat(binary); err != nil {
+		t.Skip("Codex 0.166.0 not installed")
+	}
+	for _, config := range []string{"", "[mcp_servers.slack]\ncommand='never-run-slack'\nenabled=true\n", "[mcp_servers.slack]\nurl='https://example.invalid/mcp'\nenabled=true\n"} {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0600); err != nil {
+			t.Fatal(err)
+		}
+		l := Launch{Path: binary, Home: home, Dir: home, Env: append(os.Environ(), "CODEX_HOME="+home)}
+		args, err := codexDisabledSlackArgs(context.Background(), l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(binary, append([]string{"mcp", "list", "--json"}, args...)...)
+		cmd.Env = l.Env
+		cmd.Dir = home
+		raw, err := cmd.Output()
+		if err != nil {
+			t.Fatal("disabled config failed", err)
+		}
+		var servers []struct {
+			Name    string
+			Enabled bool
+		}
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			t.Fatal(err)
+		}
+		for _, server := range servers {
+			if server.Name == "slack" && server.Enabled {
+				t.Fatal("Slack enabled")
+			}
+		}
 	}
 }

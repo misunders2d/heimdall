@@ -31,6 +31,7 @@ const diskReserve int64 = 1 << 30
 type Options struct {
 	BotToken, AppToken, TeamID, DataDir, StatusName string
 	Store                                           *store.Store
+	OwnerSlackEnabled                               bool
 	Owners                                          []string
 	UnmentionedCommands                             []string
 	MaxFileBytes                                    int64
@@ -241,7 +242,17 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 	jobs := make(chan store.InterfaceEvent, 1) // wakeups only; SQLite owns backlog
 	done := make(chan error, 1)
 	go func() { done <- s.processEvents(ctx, jobs, accept) }()
+	var callbackWG sync.WaitGroup
+	defer callbackWG.Wait()
 	s.socket.acknowledged = func(raw json.RawMessage) error {
+		if callbackValue(raw) != "" {
+			callbackWG.Add(1)
+			go func() {
+				defer callbackWG.Done()
+				_, _ = s.mcpCallback(ctx, raw, accept)
+			}()
+			return nil
+		}
 		key := eventKey(raw)
 		if key == "" {
 			return nil
@@ -255,8 +266,8 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 	sockDone := make(chan error, 1)
 	go func() {
 		sockDone <- s.socket.run(ctx, func(ctx context.Context, raw json.RawMessage) error {
-			if handled, err := s.mcpCallback(ctx, raw, accept); handled {
-				return err
+			if callbackValue(raw) != "" {
+				return nil // Ephemeral callback: relay only after socket acknowledgement.
 			}
 			raw = redactMCPEvent(raw)
 			key := eventKey(raw)

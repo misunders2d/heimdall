@@ -133,12 +133,12 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	thread := first(m.ThreadTS, m.TS)
 	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: thread}, MsgID: m.TS, From: principal, Origin: core.OriginLive, Text: commandText, Private: m.ChannelType == "im", At: time.Now()}
 	in.OAuthActor, in.OAuthInstallation = "sl_user_"+user.ID, "sl_user_"+s.botID
-	if in.Private && slices.Contains(s.opt.Owners, principal.Key()) {
-		in.Private = s.privateOwner(ctx, m, principal)
+	if in.Private && !s.controlMessage(m) && slices.Contains(s.opt.Owners, principal.Key()) {
+		in.SlackReadVerified = s.privateOwner(ctx, m, principal)
 	}
 	in.Text = hideOAuth(commandText)
 	embedded = hideOAuth(embedded)
-	ownerMCP := mcpCommand.MatchString(commandText) && slices.Contains(s.opt.Owners, principal.Key()) && s.privateOwner(ctx, m, principal)
+	ownerMCP := mcpCommand.MatchString(commandText) && slices.Contains(s.opt.Owners, principal.Key()) && in.SlackReadVerified
 	if ownerMCP {
 		in.Text = commandText
 	}

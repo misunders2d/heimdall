@@ -259,6 +259,12 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	if spec.Harness == "codex" && !spec.Caller.SlackRead {
+		slackArgs, err = codexDisabledSlackArgs(ctx, spec.Launch)
+		if err != nil {
+			return nil, err
+		}
+	}
 	extra = append(extra, slackArgs...)
 	env, err := WithIdentity(spec.Launch.Env, spec.Caller)
 	if err != nil {
@@ -282,6 +288,9 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 			}
 		}
 		env, err = piMCPEnv(spec.Launch, spec.Caller, env)
+		if err == nil && envValue(env, "MCP_OAUTH_DIR") == mcpDenyPath && spec.Log != nil {
+			spec.Log("Pi MCP disabled: caller scope or private directory unavailable")
+		}
 		if err == nil && spec.Caller.SlackRead {
 			if spec.OwnerSlack == nil {
 				return nil, errors.New("missing owner Slack config")

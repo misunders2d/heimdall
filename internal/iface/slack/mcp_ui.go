@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Slack) privateOwner(ctx context.Context, m eventMessage, p core.Principal) bool {
-	if m.ChannelType != "im" || !slices.Contains(s.opt.Owners, p.Key()) {
+	if !s.opt.OwnerSlackEnabled || m.ChannelType != "im" || !slices.Contains(s.opt.Owners, p.Key()) {
 		return false
 	}
 	var result struct {
@@ -27,34 +27,43 @@ func (s *Slack) privateOwner(ctx context.Context, m eventMessage, p core.Princip
 	return result.Channel.IsIM && !result.Channel.IsMPIM && result.Channel.User == m.User
 }
 
-// Callback input is consumed before raw-event persistence. It is ephemeral;
-// the one-time code never enters either durable queue.
+// Relay runs after ack; callbackValue bypasses raw-event persistence first.
+// Input stays ephemeral: the one-time code never enters either durable queue.
 func (s *Slack) mcpCallback(ctx context.Context, raw json.RawMessage, accept func(context.Context, core.Inbound) error) (bool, error) {
 	m := decodeEvent(raw)
-	value := strings.TrimSpace(unescape(m.Text))
-	if strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">") {
-		value = strings.TrimSuffix(strings.TrimPrefix(value, "<"), ">")
-		value, _, _ = strings.Cut(value, "|")
-	}
-	if !core.MCPCallback(value) {
+	value := callbackValue(raw)
+	if value == "" {
 		return false, nil
 	}
-	if m.ChannelType != "im" {
+	if m.Type != "message" || m.BotID != "" || m.Subtype != "" || m.ChannelType != "im" || m.User == "" {
 		return true, nil
 	}
 	u, err := s.liveUser(ctx, m.User)
 	if err != nil {
-		return true, err
+		return true, nil
 	}
 	p, ok := Verify(u, s.opt.TeamID)
 	if !ok {
 		return true, nil
 	}
-	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: first(m.ThreadTS, m.TS)}, From: p, MsgID: m.TS, Origin: core.OriginLive, At: time.Now(), Text: value, Private: s.privateOwner(ctx, m, p), OAuthActor: "sl_user_" + u.ID, OAuthInstallation: "sl_user_" + s.botID}
+	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: first(m.ThreadTS, m.TS)}, From: p, MsgID: m.TS, Origin: core.OriginLive, At: time.Now(), Text: value, Private: true, SlackReadVerified: s.privateOwner(ctx, m, p), OAuthActor: "sl_user_" + u.ID, OAuthInstallation: "sl_user_" + s.botID}
 	if m.Type != "message" || m.BotID != "" || m.Subtype != "" {
 		return true, nil
 	}
-	return true, accept(ctx, in)
+	_ = accept(ctx, in) // Relay errors cannot terminate Socket Mode or the router.
+	return true, nil
+}
+
+func callbackValue(raw json.RawMessage) string {
+	value := strings.TrimSpace(unescape(decodeEvent(raw).Text))
+	if strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">") {
+		value = strings.TrimSuffix(strings.TrimPrefix(value, "<"), ">")
+		value, _, _ = strings.Cut(value, "|")
+	}
+	if core.MCPCallback(value) {
+		return value
+	}
+	return ""
 }
 
 // Scrub callback URLs in all JSON strings before staging raw event data.
@@ -68,7 +77,7 @@ func redactMCPEvent(raw json.RawMessage) json.RawMessage {
 		switch x := v.(type) {
 		case string:
 			if mcpCommand.MatchString(strings.TrimSpace(x)) {
-				return x
+				return core.RedactMCPCallbacks(x)
 			}
 			return hideOAuth(x)
 		case []any:

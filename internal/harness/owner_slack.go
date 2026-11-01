@@ -1,16 +1,20 @@
 package harness
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 )
@@ -81,7 +85,7 @@ func SlackReadAllowed(c *OwnerSlack, in core.Inbound, role core.Role, harness, t
 	case "telegram":
 		return in.Conv.Interface == "telegram" && telegramActor.MatchString("tg_user_"+in.From.ID)
 	case "slack":
-		return in.Conv.Interface == "slack" && team != "" && in.From.Team == team && in.From.Email != "" && slackActor.MatchString(in.OAuthActor) && slackActor.MatchString(in.OAuthInstallation)
+		return in.SlackReadVerified && in.Conv.Interface == "slack" && team != "" && in.From.Team == team && in.From.Email != "" && slackActor.MatchString(in.OAuthActor) && slackActor.MatchString(in.OAuthInstallation)
 	}
 	return false
 }
@@ -104,7 +108,7 @@ func ownerSlackArgs(name string, c Caller, settings *OwnerSlack, env []string) (
 		}
 		// Shell quoting protects installation paths, including spaces and apostrophes.
 		command := "'" + strings.ReplaceAll(executable, "'", "'\\''") + "' hook slack-guard"
-		hooks, _ := json.Marshal(map[string]any{"hooks": map[string]any{"PreToolUse": []any{map[string]any{"matcher": "mcp__slack__.*", "hooks": []any{map[string]any{"type": "command", "command": command}}}}}})
+		hooks, _ := json.Marshal(map[string]any{"hooks": map[string]any{"PreToolUse": []any{map[string]any{"matcher": "mcp__slack__.*", "hooks": []any{map[string]any{"type": "command", "command": command, "onFailure": "block"}}}}}})
 		return []string{"--mcp-config", string(config), "--allowedTools", "mcp__slack__slack_read_*", "mcp__slack__slack_search_*", "--settings", string(hooks)}, nil
 	}
 	if name == "codex" {
@@ -112,11 +116,8 @@ func ownerSlackArgs(name string, c Caller, settings *OwnerSlack, env []string) (
 			return nil, errors.New("missing owner Slack config")
 		}
 		if !c.SlackRead {
-			serverURL := "https://mcp.slack.com/mcp"
-			if settings != nil && settings.ServerURL != "" {
-				serverURL = settings.ServerURL
-			}
-			return []string{"-c", "mcp_servers.slack.enabled=false", "-c", "mcp_servers.slack.url=" + strconv.Quote(serverURL)}, nil
+			// Start inspects native config before applying transport-neutral disable.
+			return nil, nil
 		}
 		scopes, _ := json.Marshal(settings.Scopes)
 		tools, _ := json.Marshal(slackReadTools)
@@ -177,4 +178,29 @@ func validatePiSlackConfig(l Launch, c *OwnerSlack) error {
 		}
 	}
 	return nil
+}
+
+// Native inspection avoids assuming Slack's transport or parsing owner TOML.
+// It runs as the turn user, with no model or MCP auth discovery operation.
+func codexDisabledSlackArgs(ctx context.Context, l Launch) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, l.Path, "mcp", "get", "slack", "--json")
+	cmd.Dir, cmd.Env = l.Dir, l.Env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: l.Cred}
+	raw, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && strings.Contains(string(exit.Stderr), "No MCP server named 'slack' found.") {
+			return []string{"-c", `mcp_servers.slack={enabled=false,url="https://mcp.slack.com/mcp"}`}, nil
+		}
+		return nil, errors.New("cannot inspect native Codex MCP config")
+	}
+	var server struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(raw, &server) != nil || server.Name != "slack" {
+		return nil, errors.New("invalid native Codex MCP config entry")
+	}
+	return []string{"-c", "mcp_servers.slack.enabled=false"}, nil
 }

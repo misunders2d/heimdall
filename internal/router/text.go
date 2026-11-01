@@ -91,3 +91,12 @@ func failureReason(why string) string {
 	}
 	return "provider/model error — " + raw
 }
+
+func (r *Router) scrub(text string) string {
+	if cfg := r.opt.OwnerSlack; cfg != nil {
+		if value := os.Getenv(cfg.ClientSecretEnv); value != "" {
+			text = strings.ReplaceAll(text, value, "[REDACTED]")
+		}
+	}
+	return scrub(text)
+}

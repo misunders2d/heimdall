@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/fakeharness"
@@ -65,7 +67,7 @@ func TestOwnerSlackLaunchIsolationAcrossResumedTurns(t *testing.T) {
 				}
 				switch name {
 				case "pi":
-					if strings.Contains(got.Servers, `"slack"`) != enabled || got.OAuth == "inherited" || got.OAuth == "" {
+					if got.Servers != `[]` || got.OAuth == "inherited" || got.OAuth == "" {
 						t.Fatal("Pi scope not isolated", got)
 					}
 					if enabled {
@@ -80,10 +82,10 @@ func TestOwnerSlackLaunchIsolationAcrossResumedTurns(t *testing.T) {
 						t.Fatal(args)
 					}
 				case "codex":
-					if !strings.Contains(args, "mcp_servers.slack.url=") {
+					if !strings.Contains(args, "url=") {
 						t.Fatal("disabled Slack needs a valid transport even when native config is absent")
 					}
-					if !strings.Contains(args, "mcp_servers.slack.enabled="+map[bool]string{true: "true", false: "false"}[enabled]) {
+					if !strings.Contains(args, "enabled="+map[bool]string{true: "true", false: "false"}[enabled]) {
 						t.Fatal(args)
 					}
 				}
@@ -92,5 +94,36 @@ func TestOwnerSlackLaunchIsolationAcrossResumedTurns(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMCPStartNotifyOwnerPrivateGate(t *testing.T) {
+	bin, _ := fakeharness.Install(t, "pi")
+	for _, tc := range []struct {
+		role    core.Role
+		private bool
+	}{{core.RoleOwner, true}, {core.RoleOwner, false}, {core.RoleEmployee, true}} {
+		l := launch(t, bin, "pi", false)
+		var notices atomic.Int32
+		run, err := harness.Start(context.Background(), harness.Spec{Harness: "pi", Session: harness.Session{ID: harness.NewSessionID("pi")}, Prompt: "MCP_UI", Launch: l, Caller: harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Role: tc.role, Private: tc.private}, MCPNotify: func(string) { notices.Add(1) }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := run.Result()
+		<-run.Exited()
+		if result.Failure != "" {
+			t.Fatal(result)
+		}
+		// All launched notification work has only atomic increment, allow scheduler to finish.
+		if tc.role == core.RoleOwner && tc.private {
+			for i := 0; i < 100 && notices.Load() == 0; i++ {
+				time.Sleep(time.Millisecond)
+			}
+			if notices.Load() != 1 {
+				t.Fatal("owner private notice lost")
+			}
+		} else if notices.Load() != 0 {
+			t.Fatal("notice escaped owner private gate")
+		}
 	}
 }

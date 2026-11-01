@@ -152,17 +152,34 @@ func piMCPEnv(l Launch, c Caller, env []string) ([]string, error) {
 	// Hub's fixed root is deliberately preserved for root; other OS users must
 	// never receive root's home, policy, or credentials.
 	path := mcpOAuthScopePath(root, platform, actor, installation, servers)
-	if path != mcpDenyPath {
-		for _, dir := range []string{root, path} {
-			if err := privateMCPDir(dir, l); err != nil {
-				return nil, err
+	if l.Home != "/root" {
+		// The wrapper also hardcodes its config directory unless explicitly set.
+		// Never let an employee select the owner's native configuration.
+		filtered := env[:0]
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, "PI_CODING_AGENT_DIR=") {
+				filtered = append(filtered, kv)
 			}
 		}
-	} else {
+		env = append(filtered, "PI_CODING_AGENT_DIR="+filepath.Join(l.Home, ".pi", "agent"))
+		path = mcpDenyPath // Hub seam defaults scopeRoot to /root, independently of agentDir.
+	}
+	path = prepareMCPScope(l, root, path)
+	if path == mcpDenyPath {
 		servers = []string{}
 	}
 	data, _ := json.Marshal(servers)
 	return append(env, "MCP_OAUTH_DIR="+path, "PI_MCP_OAUTH_ACTOR="+actor, "PI_MCP_OAUTH_INSTALLATION="+installation, "PI_MCP_OAUTH_SERVERS="+string(data)), nil
+}
+func prepareMCPScope(l Launch, root, path string) string {
+	if path != mcpDenyPath {
+		for _, dir := range []string{root, path} {
+			if privateMCPDir(dir, l) != nil {
+				return mcpDenyPath
+			}
+		}
+	}
+	return path
 }
 func privateMCPDir(path string, l Launch) error {
 	uid, gid := os.Getuid(), os.Getgid()
@@ -197,7 +214,7 @@ func privateMCPDir(path string, l Launch) error {
 			return err
 		}
 		sys, ok := st.Sys().(*syscall.Stat_t)
-		if !st.IsDir() || !ok || int(sys.Uid) != uid {
+		if !st.IsDir() || !ok || int(sys.Uid) != uid || st.Mode().Perm()&0022 != 0 {
 			return fmt.Errorf("MCP OAuth directory must be a real directory owned by turn uid")
 		}
 		if current == rel && st.Mode().Perm() != 0700 {

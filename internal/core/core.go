@@ -168,6 +168,8 @@ const (
 
 // Inbound is one message from an interface.
 type Inbound struct {
+	MCPControl        bool   // set only by router eligibility rewrite
+	SlackReadVerified bool   // extra live 1:1 verification; distinct from private surface
 	OAuthActor        string // interface-verified native OAuth actor; never role authority
 	OAuthInstallation string // bot installation, from auth.test
 

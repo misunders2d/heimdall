@@ -133,6 +133,8 @@ CREATE INDEX interface_events_expiry ON interface_events(iface,completed_at) WHE
 // inExtra is the inbound extra column: what the interface added beyond the
 // text.
 type inExtra struct {
+	MCPControl        bool              `json:"mcp_control,omitempty"`
+	SlackReadVerified bool              `json:"slack_read_verified,omitempty"`
 	OAuthActor        string            `json:"oauth_actor,omitempty"`
 	OAuthInstallation string            `json:"oauth_installation,omitempty"`
 	Context           string            `json:"context,omitempty"`
@@ -143,8 +145,8 @@ type inExtra struct {
 }
 
 func inExtraOf(in core.Inbound) (string, error) {
-	x := inExtra{OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInstallation, ControlIngress: in.ControlIngress, InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group}
-	if x.OAuthActor == "" && x.OAuthInstallation == "" && x.ControlIngress == 0 && x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" {
+	x := inExtra{MCPControl: in.MCPControl, SlackReadVerified: in.SlackReadVerified, OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInstallation, ControlIngress: in.ControlIngress, InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group}
+	if !x.MCPControl && !x.SlackReadVerified && x.OAuthActor == "" && x.OAuthInstallation == "" && x.ControlIngress == 0 && x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -152,6 +154,7 @@ func inExtraOf(in core.Inbound) (string, error) {
 }
 
 func (x inExtra) apply(in *core.Inbound) {
+	in.MCPControl, in.SlackReadVerified = x.MCPControl, x.SlackReadVerified
 	in.OAuthActor, in.OAuthInstallation = x.OAuthActor, x.OAuthInstallation
 	in.ControlIngress = x.ControlIngress
 	in.Context, in.Attachments, in.Group, in.InterfaceReply = x.Context, x.Attachments, x.Group, x.InterfaceReply

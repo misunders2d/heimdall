@@ -143,7 +143,8 @@ or interactivity is required. Bot scopes:
 
 `chat:write`, `channels:history`, `groups:history`, `im:history`, `mpim:history`,
 `users:read`, `users:read.email`, `files:read`, `files:write`, `reactions:write`,
-`im:write`.
+`im:write`. Owner Slack additionally requires bot scope `im:read` for fresh
+1:1 DM verification; default DM privacy does not need that scope.
 
 Set `HEIMDALL_SLACK_BOT_TOKEN` and `HEIMDALL_SLACK_APP_TOKEN` in the launch
 environment, then use `heimdall run -config FILE`. Either interface block
@@ -233,3 +234,12 @@ whoever types, so list `local:...` owners only in test configs.
 Apache-2.0. The harness adapters are ported from AgentNet; see [NOTICE](NOTICE).
 
 Accepted `commands.unmentioned` entries: `stop`, `cancel`, `reset`, `chatid`, `help`, `status`, `all`. Exact standalone controls accept bare/slash forms (including `/abort`, `/nevermind`); `help`/`status` use `/help`, `/status`, `!help`, `!status`. `use` and `next` require addressing unless `all` is selected.
+
+Owner Slack review fixes (2026-11-01): callbacks bypass durable staging and relay
+only after Socket Mode acknowledgement. Identity/API failures drop callback
+input without stopping interfaces. Ordinary DM privacy follows the event surface;
+extra live DM verification is confined to enabled owner Slack access/sign-in.
+Claude requires 2.1.295+ for hook `onFailure: block`. Codex uses native offline
+configuration inspection to disable existing Slack entries without changing
+transport. Non-root Pi homes currently receive no native MCP pending the hub
+scope-root follow-up in [HANDOFF](docs/HANDOFF.md).
