@@ -1,3 +1,41 @@
+## Warm workers — 2026-11-01
+
+Implementation: `internal/harness/warm.go` owns bounded retained transports;
+per-turn adapters/state are replaced on the same pipe, with Codex thread
+initialization performed once. Router releases `max_parallel` on native result,
+retains every process for shutdown, and lists idle workers in status.
+Defaults/config and hook timing: see hub-parity's warm native workers section.
+AGY retains the single-turn adapter because no multi-turn protocol is exposed.
+
+Stop now emits one command acknowledgement across interfaces, suppressing the
+cancelled turn's extra final reply while preserving storage/status completion.
+Router strips repeated matching trailing harness signatures before appending
+its own. The live duplicate's exact native text is unavailable; regression
+covers a native answer ending with the router's signature.
+
+Regression map: harness `warm_test.go` (reuse/latency, launch isolation,
+idle/lifetime/LRU/reset/status, idle crash, native interrupt/run timeout);
+router `warm_test.go` and warm/stop tests in `router_test.go` (slot release,
+status, one stop reply, footer deduplication); existing shutdown/steering/
+queue/session tests retained. Validation: `go vet ./...`, `go test -race -count=1 ./...` with default
+parallelism, and `CGO_ENABLED=0 go build` all pass. Full-suite interface
+checks used loopback fake servers, not live Slack/Telegram connections.
+Development Slack test binary was replaced and its service restarted;
+active/running and clean application startup confirmed. Config unchanged.
+Production/live Telegram unit untouched. Commit remains local for orchestrator
+push. No manual live harness or memory-hook validation was performed. The idle-exit race has a bounded
+cold retry on the same harness only before native ready; regression:
+`TestIdleExitRacingNextTurnRetriesSameHarness`. Unrelated conversations launch
+while a stale worker is being terminated; shutdown accounts for pending
+launches. Regression: `TestWarmCleanupDoesNotBlockAnotherConversation`.
+
+Mutation checks killed: disabling warm reuse, ignoring launch fingerprint,
+retaining OMP agent_end stdin-close, omitting native interrupt, bypassing
+footer normalization at delivery, and restoring the extra stopped final.
+Simulated 3 s startup (latest sample): first Claude turn 3.049885 s,
+second 0.002531 s, one PID. Native warm sessions and hook execution were
+not manually checked against live harnesses in this implementation run.
+
 # Heimdall handoff (2026-11-01, phase 2)
 
 Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
@@ -328,7 +366,7 @@ Evidence (live log, a copy of the live database, OMP's session JSONL):
   its next turn, whose answer Heimdall threw away (and told the sender "may
   or may not have reached"); Codex folded both steers into one answer.
 
-Fix `5b3c62f`: the reply keeps the final text for each input; Claude's
+Historical (process wait superseded by warm workers above): fix `5b3c62f`: the reply keeps the final text for each input; Claude's
 late steer is waited for; a turn ends at the harness's answer, its process
 gets 60 s (`harness.ExitGrace`) to exit, and the conversation's next turn
 starts only after it exited; steers that become follow-ups are logged.
@@ -594,7 +632,7 @@ usernames and tokens live only outside the repository.
      bot); already ported.
   4. T3 Code is for coding only; Heimdall keeps its own harness adapters.
      The earlier open question is closed.
-- **Turn end** (steering fix, then this session): Result is final at the
+- **Historical turn end** (superseded by warm workers above): Result is final at the
   harness's answer (only once the turn is ready); `Run.Exited` follows.
   `harness.ExitGrace` 60 s after the answer the process group gets
   SIGTERM, and SIGKILL `harness.TermGrace` 5 s later; both are logged with

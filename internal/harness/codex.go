@@ -24,6 +24,7 @@ import (
 const clientVersion = "0.1.0"
 
 type codexBridge struct {
+	warm      bool
 	progress  func(Progress)
 	telemetry progressTracker
 
@@ -51,16 +52,20 @@ type codexBridge struct {
 
 func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, s Session) (*codexBridge, error) {
 	// A real OS stdin pipe lets Cmd.Wait finish on process EOF.
-	cmd.Stdin = nil
-	out, err := cmd.StdinPipe()
+	out, err := turnInput(cmd)
 	if err != nil {
 		return nil, err
 	}
-	b := &codexBridge{prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), answered: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
+	b := &codexBridge{warm: isWarmInput(out), prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), answered: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
 	if s.Resume {
 		b.resume = s.ID
 	}
 	go func() {
+		if reuse, ok := out.(*warmInput); ok && reuse.thread != "" {
+			b.thread = reuse.thread
+			b.send(map[string]any{"id": 3, "method": "turn/start", "params": map[string]any{"threadId": b.thread, "cwd": b.cwd, "input": codexInput(prompt, images)}})
+			return
+		}
 		b.send(map[string]any{"id": 1, "method": "initialize", "params": map[string]any{"clientInfo": map[string]any{"name": "heimdall", "version": clientVersion}, "capabilities": map[string]any{"experimentalApi": true}}})
 	}()
 	// Prompt is retained only for this invocation, never in command arguments.
@@ -329,7 +334,9 @@ func (b *codexBridge) event(raw []byte) {
 			return
 		}
 		b.done, b.published = true, true
-		b.close()
+		if !b.warm {
+			b.close()
+		}
 		close(b.answered)
 	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput", "tool/requestUserInput", "mcpServer/elicitation/request":
 		if len(m.ID) > 0 {

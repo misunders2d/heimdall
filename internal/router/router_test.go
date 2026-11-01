@@ -132,20 +132,21 @@ const (
 )
 
 type env struct {
-	t       *testing.T
-	bin     string
-	state   string // fake harness state directory
-	f       *fakeIface
-	st      *store.Store
-	dbPath  string
-	cancel  context.CancelFunc
-	done    chan error
-	opt     Options
-	seq     atomic.Int64 // message IDs stay unique across restarts
-	uploads string       // the fake interface's upload directory
-	guard   string       // the prompt-injection log
-	logs    *syncBuffer  // the router's log
-	r       *Router      // the running router
+	platform string
+	t        *testing.T
+	bin      string
+	state    string // fake harness state directory
+	f        *fakeIface
+	st       *store.Store
+	dbPath   string
+	cancel   context.CancelFunc
+	done     chan error
+	opt      Options
+	seq      atomic.Int64 // message IDs stay unique across restarts
+	uploads  string       // the fake interface's upload directory
+	guard    string       // the prompt-injection log
+	logs     *syncBuffer  // the router's log
+	r        *Router      // the running router
 }
 
 // syncBuffer is a log destination tests can read while the router writes.
@@ -227,7 +228,11 @@ func (e *env) start() {
 	e.f.uploads = e.uploads
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel, e.done = cancel, make(chan error, 1)
-	r := New(e.opt, st, e.f)
+	var iface Interface = e.f
+	if e.platform != "" {
+		iface = namedFakeIface{e.f, e.platform}
+	}
+	r := New(e.opt, st, iface)
 	e.r = r
 	go func() { e.done <- r.Run(ctx) }()
 	e.t.Cleanup(e.stop)
@@ -451,19 +456,7 @@ func TestPhotoThenForwardSteerTheRunningTurn(t *testing.T) {
 // A reply goes out at the harness's answer, not when its process exits
 // (live: OMP took 28 s more, the reply waited, and the owner's next
 // message missed the turn); the next turn starts once that process exited.
-func TestReplyAtAnswerNextTurnAfterProcessExit(t *testing.T) {
-	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
-	e.send(owner, "c1", "hello LINGER=4")
-	want(t, e.reply(), "omp#1")
-	if _, err := os.Stat(filepath.Join(e.state, "lingering")); err != nil {
-		t.Fatal("the reply waited for the harness process to exit")
-	}
-	e.send(owner, "c1", "next")
-	want(t, e.reply(), "omp#2", "resumed=true")
-	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
-		t.Fatal("the next turn started while the last turn's process still ran")
-	}
-}
+func TestReplyAtAnswerNextTurnReusesProcess(t *testing.T) { testRouterWarm(t, false) }
 
 func TestNextQueuesInsteadOfSteering(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
@@ -560,8 +553,7 @@ func TestStopCancelsTurn(t *testing.T) {
 	e.send(owner, "c1", "SLEEP")
 	e.waitReady("c1")
 	e.send(owner, "c1", "!stop")
-	want(t, e.reply(), "Stopping the current turn")
-	want(t, e.reply(), "⏹ Stopped.", "— omp")
+	want(t, e.reply(), "Stopping current run")
 	// The stopped session did not finish cleanly: next turn starts fresh.
 	e.send(owner, "c1", "after")
 	want(t, e.reply(), "omp#1 resumed=false", "new omp session")
@@ -968,11 +960,10 @@ func TestStopClearsQueuedMessages(t *testing.T) {
 	e.send(employee, "c1", "stop")
 	want(t, e.reply(), "Only the person who started this turn")
 	e.send(owner, "c1", "Stop")
-	want(t, e.reply(), "Stopping the current turn. Cleared 2 queued message(s).")
-	want(t, e.reply(), "⏹ Stopped.")
+	want(t, e.reply(), "Stopping current run. Cleared 2 queued item(s).")
 	e.noReply(500 * time.Millisecond)
 	e.send(employee, "c1", "stop")
-	want(t, e.reply(), "Nothing is running in this conversation.")
+	want(t, e.reply(), "No active run to stop.")
 }
 
 // cancel clears only the caller's queued messages; the running turn and
@@ -1022,7 +1013,6 @@ func TestResetStartsAFreshSession(t *testing.T) {
 	e.waitReady("c1")
 	e.send(owner, "c1", "!reset")
 	want(t, e.reply(), "Stopping your running turn. Session reset.")
-	want(t, e.reply(), "⏹ Stopped.")
 	e.send(owner, "c1", "three")
 	out = e.reply()
 	want(t, out, "omp#1 resumed=false")
@@ -1606,8 +1596,7 @@ func TestStopDuringClaudeDrain(t *testing.T) {
 	e.send(owner, "c1", "also CHARLIE")
 	e.waitSteered("c1", 1)
 	e.send(owner, "c1", "!stop")
-	want(t, e.reply(), "Stopping the current turn")
-	want(t, e.reply(), "⏹ Stopped.", "— claude")
+	want(t, e.reply(), "Stopping current run")
 	e.send(owner, "c1", "after")
 	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
 }
@@ -1657,68 +1646,32 @@ func setGrace(t *testing.T, exit, term time.Duration) {
 // down, stops that process now (SIGTERM) instead of after ExitGrace, so
 // the next turn need not wait; queued messages are cleared as by any stop.
 // Before, stop said nothing was running and the next turn waited.
-func TestStopEndsTheExitWaitAtOnce(t *testing.T) {
-	setGrace(t, 30*time.Second, 10*time.Second)
+func TestStopWarmTurnOneReply(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
-	e.send(owner, "c1", "hello LINGER=30")
-	want(t, e.reply(), "omp#1")
-	e.send(owner, "c1", "!status")
-	want(t, e.reply(), "Running: nothing", "Exiting: the last turn's omp process (answered)")
-	e.send(employee, "c1", "!stop")
-	want(t, e.reply(), "Nothing is running in this conversation.")
-	e.send(owner, "c1", "queued meanwhile")
+	e.send(owner, "c1", "work WAIT_STEER")
+	e.waitReady("c1")
 	e.send(owner, "c1", "!stop")
-	want(t, e.reply(), "The last turn has answered; stopping its harness process, which was still running. Cleared 1 queued message(s).")
-	start := time.Now()
-	e.send(owner, "c1", "next")
-	want(t, e.reply(), "omp#2 resumed=true", `last="next"`)
-	if d := time.Since(start); d > 5*time.Second {
-		t.Fatalf("the next turn waited %s", d)
-	}
-	if _, err := os.Stat(filepath.Join(e.state, "terminated")); err != nil {
-		t.Fatal("the lingering process was not sent SIGTERM")
-	}
-	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
-		t.Fatal("the next turn started while the last turn's process still ran")
-	}
-	if !regexp.MustCompile(`turn 1 in fake/c1: omp process still running after its answer, stopped by stop: SIGTERM to its process group`).MatchString(e.logs.String()) {
-		t.Fatalf("stop not logged:\n%s", e.logs.String())
-	}
+	want(t, e.reply(), "Stopping current run.")
+	eventuallyTrue(t, "stopped", e.r.Idle)
+	e.noReply(150 * time.Millisecond)
+	e.send(owner, "c1", "!stop")
+	want(t, e.reply(), "No active run to stop.")
+	e.noReply(50 * time.Millisecond)
 }
 
-// max_parallel counts live harness processes: a turn's slot is free only
-// once its process exited, not at its answer (review of 5b3c62f, finding 4).
-func TestMaxParallelCountsLingeringProcesses(t *testing.T) {
+func TestMaxParallelCountsTurnsNotWarmProcesses(t *testing.T) { testRouterWarm(t, true) }
+
+func TestWarmIdleExpiryIsLogged(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	e.stop()
 	stopOnce.Delete(e.st)
-	e.opt.MaxParallel = 1
+	e.opt.Harness.IdleTimeoutSeconds = 1
 	e.start()
-	e.send(owner, "c1", "hello LINGER=2")
-	want(t, e.reply(), "omp#1")
-	if _, err := os.Stat(filepath.Join(e.state, "lingering")); err != nil {
-		t.Fatal("the process did not linger")
-	}
-	e.send(owner, "c2", "other chat")
-	want(t, e.reply(), "omp#1", `last="other chat"`)
-	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
-		t.Fatal("a second harness process ran with max_parallel 1")
-	}
-}
-
-// The ExitGrace stop is logged with the turn (finding 6).
-func TestExitGraceStopIsLogged(t *testing.T) {
-	setGrace(t, 300*time.Millisecond, 10*time.Second)
-	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	e.send(owner, "c1", "hello LINGER=30")
 	want(t, e.reply(), "omp#1")
-	eventuallyTrue(t, "the stop logged", func() bool {
-		return strings.Contains(e.logs.String(), "turn 1 in fake/c1: omp process still running 300ms after its answer: SIGTERM to its process group")
-	})
+	eventuallyTrue(t, "idle expiry", func() bool { return strings.Contains(e.logs.String(), "warm idle or lifetime expiry: SIGTERM") })
 }
 
-// A reaction that ends one answer counts though another answer follows it
-// (review of 5b3c62f, finding 5: the joined reply dropped every reaction).
 func TestReactionsOfEachAnswer(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
 	e.f.react.Store(true)
@@ -1815,20 +1768,13 @@ func TestShutdownStopsHarnessProcessesAndWaits(t *testing.T) {
 // Idle counts a harness process until it exited, so heimdall local exits
 // only after it (review of d05b748: the turn was cleared at its answer and
 // Idle reported idle while the process still ran).
-func TestIdleWaitsForTheHarnessProcess(t *testing.T) {
+func TestIdleAllowsWarmProcesses(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
-	e.send(owner, "c1", "hello LINGER=2")
+	e.send(owner, "c1", "hello LINGER=30")
 	want(t, e.reply(), "omp#1")
 	eventuallyTrue(t, "idle", e.r.Idle)
-	if _, err := os.Stat(filepath.Join(e.state, "lingering")); err == nil {
-		t.Fatal("idle while the harness process still ran")
-	}
 }
 
-// A harness that answers, or asks for an approval, before it signalled
-// ready took the turn: the next harness never runs the prompt again
-// (review of d05b748, finding 3: it fell back, so side effects could
-// repeat).
 func TestAnswerBeforeReadyNeverFallsBack(t *testing.T) {
 	for word, text := range map[string]string{"EARLYRESULT": "claude#1 resumed=false", "EARLYASK": "⚠ claude needs a native approval"} {
 		t.Run(word, func(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 var DefaultOrder = []string{"omp", "codex", "claude", "pi"}
 
 type Config struct {
+	Harness      harness.WarmConfig       `json:"harness,omitempty"`
 	OwnerSlack   *harness.OwnerSlack      `json:"owner_slack,omitempty"`
 	Commands     *Commands                `json:"commands,omitempty"`
 	DataDir      string                   `json:"data_dir"`
@@ -195,6 +196,9 @@ func (c *Config) fill() error {
 	}
 	if g := c.PromptGuard; g != nil && g.LogMaxBytes != 0 && g.LogMaxBytes < 4096 {
 		return errors.New("prompt_guard.log_max_bytes must be at least 4096 (bytes)")
+	}
+	if err := c.Harness.Validate(); err != nil {
+		return err
 	}
 	if c.MaxParallel == 0 {
 		c.MaxParallel = 4

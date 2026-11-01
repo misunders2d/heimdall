@@ -31,6 +31,7 @@ const initialID = "heimdall-initial"
 // piRPCBridge owns one fresh native process and one initial request. Native
 // settings/extensions remain the run-as user's; no interactive session is attached.
 type piRPCBridge struct {
+	warm       bool
 	mcpNotify  func(string)
 	mcpState   string
 	mcpInput   string
@@ -66,12 +67,11 @@ type pendingSteer struct {
 }
 
 func newPiRPCBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, session string, omp bool) (*piRPCBridge, error) {
-	cmd.Stdin = nil
-	input, err := cmd.StdinPipe()
+	input, err := turnInput(cmd)
 	if err != nil {
 		return nil, err
 	}
-	b := &piRPCBridge{ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), omp: omp, session: session}
+	b := &piRPCBridge{warm: isWarmInput(input), ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), omp: omp, session: session}
 	b.writes.Add(1)
 	go func() {
 		defer b.writes.Done()
@@ -285,7 +285,7 @@ func (b *piRPCBridge) event(raw []byte) {
 		b.activityMessageID = ""
 		b.readyOnce.Do(func() { close(b.ready) })
 	case "agent_end":
-		if b.omp {
+		if b.omp && !b.warm {
 			_ = b.input.Close()
 		}
 		b.ended = true
@@ -466,7 +466,9 @@ func (b *piRPCBridge) publishLocked() {
 	}
 	b.published = true
 	b.endLocked()
-	_ = b.input.Close()
+	if !b.warm {
+		_ = b.input.Close()
+	}
 	close(b.answered)
 }
 

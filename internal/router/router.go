@@ -58,6 +58,7 @@ type Accounts interface {
 }
 
 type Options struct {
+	Harness     harness.WarmConfig
 	OwnerSlack  *harness.OwnerSlack
 	SlackTeam   string
 	Access      core.Access
@@ -74,6 +75,7 @@ type Options struct {
 }
 
 type Router struct {
+	warm        *harness.Pool
 	noticeRetry time.Duration
 	noticeQueue chan core.Inbound
 	opt         Options
@@ -91,6 +93,7 @@ type Router struct {
 
 	// Live harness processes, each until it exited. At shutdown they are
 	// stopped and waited for, so none outlives Heimdall.
+	starting sync.WaitGroup
 	runsMu   sync.Mutex
 	runs     map[*harness.Run]struct{}
 	procCtx  context.Context // harness processes' context: ends only after shutdown waited for them
@@ -116,7 +119,7 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.GuardLogMax <= 0 {
 		opt.GuardLogMax = DefaultGuardLogMax
 	}
-	r := &Router{noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	r := &Router{warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.GuardLog != "" {
 		r.guardLog = &guardLog{path: opt.GuardLog, max: opt.GuardLogMax}
 	}
@@ -200,21 +203,26 @@ func (r *Router) Run(parent context.Context) error {
 // exited. Once shutdown began nothing starts.
 func (r *Router) startRun(spec harness.Spec) (*harness.Run, error) {
 	r.runsMu.Lock()
-	defer r.runsMu.Unlock()
 	if r.stopping {
+		r.runsMu.Unlock()
 		return nil, errors.New("Heimdall is shutting down")
 	}
-	run, err := harness.Start(r.procCtx, spec)
+	r.starting.Add(1)
+	r.runsMu.Unlock()
+	defer r.starting.Done()
+	run, err := r.warm.Start(r.procCtx, spec)
 	if err != nil {
 		return nil, err
 	}
-	r.runs[run] = struct{}{}
-	go func() {
-		<-run.Exited()
-		r.runsMu.Lock()
-		delete(r.runs, run)
+	process := run.Process()
+	r.runsMu.Lock()
+	if _, tracked := r.runs[process]; tracked {
 		r.runsMu.Unlock()
-	}()
+		return run, nil
+	}
+	r.runs[process] = struct{}{}
+	r.runsMu.Unlock()
+	go func() { <-run.Exited(); r.runsMu.Lock(); delete(r.runs, process); r.runsMu.Unlock() }()
 	return run, nil
 }
 
@@ -227,6 +235,9 @@ func (r *Router) startRun(spec harness.Spec) (*harness.Run, error) {
 func (r *Router) stopRuns(kill context.CancelFunc) {
 	r.runsMu.Lock()
 	r.stopping = true
+	r.runsMu.Unlock()
+	r.starting.Wait()
+	r.runsMu.Lock()
 	runs := slices.Collect(maps.Keys(r.runs))
 	r.runsMu.Unlock()
 	if len(runs) == 0 {
@@ -335,15 +346,8 @@ func (r *Router) dispatch(row store.InboundRow) {
 }
 
 // Idle reports whether nothing is queued, running or waiting for delivery,
-// and every harness process has exited (one may still be running after its
-// answer).
+// and every reply has been delivered. Idle workers are stopped at shutdown.
 func (r *Router) Idle() bool {
-	r.runsMu.Lock()
-	live := len(r.runs)
-	r.runsMu.Unlock()
-	if live > 0 {
-		return false
-	}
 	r.mu.Lock()
 	for _, c := range r.convs {
 		if c.busy.Load() {
@@ -465,8 +469,6 @@ type conv struct {
 	waiting bool // a goroutine is waiting for the last process to exit, then for a parallelism slot
 	albums  map[string]*album
 	exited  <-chan struct{} // the last turn's harness process has exited
-	last    *harness.Run    // the last turn's harness run, which may still be exiting after its answer
-	lastWho string          // its caller
 }
 
 // album is a caller's parts of one grouped message, held until none has
@@ -606,9 +608,8 @@ func (c *conv) loop(ctx context.Context) {
 		}
 		if c.turn == nil && len(c.queue) > 0 && !c.waiting {
 			c.waiting = true
-			// A turn ends at the harness's answer, and its process may still
-			// be shutting down: the next turn takes a slot only once it
-			// exited, so two processes never share a native session.
+			// Reuse a warm transport immediately; wait for cleanup when a
+			// turn could not retain its transport.
 			exited := c.exited
 			go func() {
 				if exited != nil {
@@ -731,6 +732,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		c.answer(row, store.CommandEnd{Detail: "status"}, c.status())
 		return false
 	case cmdUse:
+		c.r.warm.Invalidate(c.key, "")
 		text := "This conversation now uses " + cmd.Harness + " (no fallback) until !use default."
 		if cmd.Harness == "" {
 			text = "This conversation is back to the default order: " + strings.Join(c.r.opt.Order, " → ") + "."
@@ -740,7 +742,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 	case cmdStop:
 		text := c.stop(role, row.From.Key())
 		if row.ControlIngress > 0 {
-			text = fmt.Sprintf("Stopped %d earlier ingress message(s). %s", row.ControlIngress, strings.ReplaceAll(text, "Nothing is running in this conversation.", ""))
+			text = fmt.Sprintf("Stopped %d earlier ingress message(s). %s", row.ControlIngress, strings.ReplaceAll(text, "No active run to stop.", ""))
 		}
 		c.answer(row, store.CommandEnd{Detail: "stop"}, strings.TrimSpace(text))
 		return false
@@ -773,7 +775,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next || row.MCPControl, text: cmd.Text}
 	// Steer only the sender's own turn: sessions are per verified caller, so
 	// nobody steers another person's turn.
-	if t := c.turn; t != nil && t.done == nil && !it.next && it.harness == "" && row.From.Key() == t.who {
+	if t := c.turn; t != nil && t.done == nil && !t.stopped.Load() && !it.next && it.harness == "" && row.From.Key() == t.who {
 		t.steerQ = append(t.steerQ, it)
 		return true
 	}
@@ -786,11 +788,8 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 // everyone's), as the hub's stop does.
 func (c *conv) stop(role core.Role, who string) string {
 	t := c.turn
-	if t == nil || t.done != nil {
-		text := "Nothing is running in this conversation."
-		if c.stopExiting(role, who) {
-			text = "The last turn has answered; stopping its harness process, which was still running."
-		}
+	if t == nil || t.done != nil || t.stopped.Load() {
+		text := "No active run to stop."
 		if n := c.cancelQueued(role, who, "cancelled by stop"); n > 0 {
 			return fmt.Sprintf("%s Cleared %d queued message(s).", text, n)
 		}
@@ -802,47 +801,16 @@ func (c *conv) stop(role core.Role, who string) string {
 	n := c.cancelQueued(role, who, "cancelled by stop")
 	c.cancelTurn(t)
 	if n > 0 {
-		return fmt.Sprintf("Stopping the current turn. Cleared %d queued message(s).", n)
+		return fmt.Sprintf("Stopping current run. Cleared %d queued item(s).", n)
 	}
-	return "Stopping the current turn."
-}
-
-// exiting is the harness run of a turn that answered and whose process is
-// still running, and its caller.
-func (c *conv) exiting() (*harness.Run, string) {
-	run, who := c.last, c.lastWho
-	if t := c.turn; t != nil && t.done != nil {
-		// Answered; ended once its last steer's outcome is in.
-		t.mu.Lock()
-		run, who = t.run, t.who
-		t.mu.Unlock()
-	}
-	if run == nil {
-		return nil, ""
-	}
-	select {
-	case <-run.Exited():
-		return nil, ""
-	default:
-		return run, who
-	}
-}
-
-// stopExiting stops, now rather than after ExitGrace, the process of a turn
-// that already answered, if the caller may stop that turn (its sender or
-// the owner).
-func (c *conv) stopExiting(role core.Role, who string) bool {
-	run, owner := c.exiting()
-	if run == nil || role != core.RoleOwner && who != owner {
-		return false
-	}
-	run.Stop("after its answer, stopped by stop")
-	return true
+	return "Stopping current run."
 }
 
 func (c *conv) cancelTurn(t *turn) {
+	if !t.stopped.CompareAndSwap(false, true) {
+		return
+	}
 	c.observe(c.r.ctx, t, "cancelled", harness.Progress{})
-	t.stopped.Store(true)
 	t.mu.Lock()
 	run := t.run
 	t.mu.Unlock()
@@ -903,6 +871,7 @@ func albumItems(a *album) []item {
 // touched; the caller's own running turn is stopped and its session is not
 // kept either. Native session files are left in place.
 func (c *conv) reset(who string) string {
+	c.r.warm.Invalidate(c.key, who)
 	text := "Session reset. Your next message in this conversation starts a fresh session."
 	if t := c.turn; t != nil && t.who == who {
 		t.reset = true
@@ -957,8 +926,9 @@ func (c *conv) status() string {
 	} else {
 		b.WriteString("Running: nothing\n")
 	}
-	if run, _ := c.exiting(); run != nil {
-		fmt.Fprintf(&b, "Exiting: the last turn's %s process (answered)\n", run.Harness())
+
+	for _, w := range c.r.warm.Status(c.key) {
+		fmt.Fprintf(&b, "Warm: %s, idle %s\n", w.Harness, w.Idle.Round(time.Second))
 	}
 	held := 0
 	for _, a := range c.albums {
@@ -1149,7 +1119,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok {
 			progress = func(p harness.Progress) { c.observe(ctx, t, "progress", p) }
 		}
-		run, err := c.r.startRun(harness.Spec{MCPNotify: func(text string) {
+		run, err := c.startCandidate(ctx, t, harness.Spec{MCPNotify: func(text string) {
 			if iface := c.r.ifaces[c.key.Interface]; iface != nil {
 				_ = iface.Send(ctx, core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text})
 			}
@@ -1361,11 +1331,17 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	run := t.run
 	t.mu.Unlock()
 	if run != nil {
-		c.exited, c.last, c.lastWho = run.Exited(), run, t.who
+		c.exited = run.Exited()
+		if run.Warm() {
+			c.exited = nil
+		}
 	}
 	c.requeue(t.steerQ...)
 	t.steerQ = nil
 	res := d.res
+	if t.stopped.Load() {
+		res.Cancelled = true
+	}
 	if cleaner, ok := c.r.ifaces[c.key.Interface].(AnswerCleaner); ok {
 		t.mu.Lock()
 		dir := t.dir
@@ -1438,7 +1414,10 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		text = "Attachment"
 	}
 	if text+footer != "" {
-		e.Reply.Text = c.r.scrub(text + footer)
+		e.Reply.Text = c.r.scrub(stripHarnessTag(text, tag) + footer)
+	}
+	if e.State == store.TurnCancelled && t.stopped.Load() {
+		e.Reply = nil
 	}
 	if e.State == store.TurnDone {
 		e.Files = c.fileReplies(t, d.files)
@@ -1451,20 +1430,14 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	for _, it := range t.batch {
 		c.r.release(it.row.Inbound)
 	}
-	c.observe(ctx, t, e.State, harness.Progress{})
+	if !(e.State == store.TurnCancelled && t.stopped.Load()) {
+		c.observe(ctx, t, e.State, harness.Progress{})
+	}
 	c.r.wake(c.key.Interface)
 	c.r.log.Printf("turn %d in %s ended: %s (harness %q, %s)", t.id, c.key, e.State, d.harness, time.Since(t.started).Round(time.Millisecond))
 	c.turn = nil
-	if run == nil {
-		<-c.r.sem
-		return
-	}
-	// max_parallel counts live harness processes: the slot is free once
-	// this one exited (at most ExitGrace plus TermGrace after its answer).
-	go func() {
-		<-run.Exited()
-		<-c.r.sem
-	}()
+	// A native result ends the running turn; idle/cleanup processes hold no slot.
+	<-c.r.sem
 }
 
 // frame shows the verified identity with every message handed to a
@@ -1531,4 +1504,41 @@ func interruptedNotice(t store.Interrupted) core.Outbound {
 		h = "the harness"
 	}
 	return core.Outbound{Conv: t.Conv, ReplyTo: t.ReplyTo, Text: fmt.Sprintf("⚠ Heimdall restarted while %s was working on this (%d message(s)). The turn was not re-run; resend if still needed.\n— heimdall", h, t.Messages)}
+}
+
+func stripHarnessTag(text, tag string) string {
+	text = strings.TrimSpace(text)
+	for strings.HasSuffix(text, "\n— "+tag) {
+		text = strings.TrimSpace(strings.TrimSuffix(text, "\n— "+tag))
+	}
+	return text
+}
+
+// An idle process may die between pool lookup and its next write. Retry only
+// a reused transport which failed before the native side-effect boundary.
+func (c *conv) startCandidate(ctx context.Context, t *turn, spec harness.Spec) (*harness.Run, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		run, err := c.r.startRun(spec)
+		if err != nil {
+			return nil, err
+		}
+		t.mu.Lock()
+		t.run = run
+		t.mu.Unlock()
+		if t.stopped.Load() {
+			run.Cancel()
+		}
+		select {
+		case <-run.Ready():
+			return run, nil
+		case <-run.Done():
+		}
+		res := run.Result()
+		if attempt == 0 && run.Process() != run && !res.Ready && res.Failure != "" && !res.Cancelled && !t.stopped.Load() && ctx.Err() == nil {
+			<-run.Exited()
+			continue
+		}
+		return run, nil
+	}
+	return nil, errors.New("cold retry did not start")
 }

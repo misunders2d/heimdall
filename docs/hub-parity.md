@@ -249,3 +249,31 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 | Skip the download of a duplicate update | Not worth a router hook: duplicates arrive only after a restart before the offset was confirmed, and their download is removed at once. |
 | Remember addressed albums across a restart (review finding 6) | Accepted limitation; a store row per album would fix it if it matters. |
 | Group context for steers | Leave: messages that arrive mid-turn are context for the next turn. |
+
+## Warm native workers (2026-11-01)
+
+Like the hub's external Pi runner, Heimdall retains Pi/OMP RPC workers for
+15 minutes idle; it also retains Claude stream-json and Codex app-server
+workers. Native result events end turns. Next turns send a fresh RPC prompt,
+Claude user record, or Codex turn/start on the same thread, respectively.
+AGY stays per-turn: its adapter exposes no multi-turn/interrupt protocol.
+
+Optional `harness` config: `idle_timeout_seconds=900`,
+`max_lifetime_seconds=14400`, `max_warm=8`, `run_timeout_seconds=1200`.
+Zero selects defaults; negative values are rejected. Idle workers use no
+turn slot. Least recently idle workers are evicted above the idle cap.
+`!status` lists conversation workers and idle ages. Idle crashes are silent;
+the next process resumes the last clean session. Reset and harness selection
+invalidate retained workers. Config is immutable until restart, which drains
+all workers. Launch fingerprints hash launch account/environment, caller
+scope, owner Slack config, native settings and executable mtime. Secrets in
+environment are hashed only, never logged or persisted by the pool.
+
+Stop uses Pi/OMP abort, Claude's interrupt control request, Codex
+turn/interrupt; stopped workers are discarded and their sessions stay unclean.
+If native interrupt fails to settle, bounded SIGTERM/SIGKILL cleanup remains.
+Slack and Telegram share one stop acknowledgement, without a second stopped
+final; native status still transitions to cancelled. Cancel queue semantics
+are unchanged. Claude Stop and other per-turn native hooks still run per turn;
+session-end hooks now run when the retained process exits. Heimdall does not
+invoke or emulate memory hooks. Live hook execution remains unverified.

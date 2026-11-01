@@ -86,6 +86,10 @@ func Main() {
 	if _, err := os.Stat(filepath.Join(f.state, "lingering")); err == nil {
 		_ = os.WriteFile(filepath.Join(f.state, "overlap"), nil, 0o600)
 	}
+	if os.Getenv("FAKE_WARM") == "1" {
+		f.warm()
+		os.Exit(0)
+	}
 	switch name {
 	case "pi", "omp":
 		f.piRPC()
@@ -331,24 +335,8 @@ func (f *fake) busy(steer func() bool) {
 		time.Sleep(30 * time.Second)
 	}
 	if f.has("WAIT_STEER") {
-		deadline := time.After(10 * time.Second)
-		got := make(chan bool)
-		go func() {
-			for {
-				ok := steer()
-				got <- ok
-				if !ok {
-					return
-				}
-			}
-		}()
-		for {
-			select {
-			case ok := <-got:
-				if !ok || strings.Contains(f.steers[len(f.steers)-1], "FINISH") {
-					return
-				}
-			case <-deadline:
+		for steer() {
+			if len(f.steers) > 0 && strings.Contains(f.steers[len(f.steers)-1], "FINISH") {
 				return
 			}
 		}
@@ -374,173 +362,194 @@ func hasArg(name string) bool {
 }
 
 func (f *fake) piRPC() {
-	omp := f.name == "omp"
-	m, ok := f.read()
-	if !ok || m["type"] != "prompt" {
-		os.Exit(5)
-	}
-	f.prompt, _ = m["message"].(string)
-	f.record("prompt", f.prompt, piImages(m))
-	id, _ := m["id"].(string)
-	f.failPre()
-	dir := arg("--session-dir")
-	if dir == "" || !hasArg("--continue") {
-		fmt.Fprintln(os.Stderr, "fake: expected --session-dir DIR --continue")
-		os.Exit(6)
-	}
-	if err := f.session(filepath.Join(dir, "fake-session"), false); err != nil {
-		os.Exit(7)
-	}
-	f.emit(map[string]any{"type": "ready"})
-	f.emit(map[string]any{"type": "extension_ui_request", "id": "x1", "method": "setStatus"})
-	f.emit(map[string]any{"type": "response", "id": id, "command": "prompt", "success": true})
-	f.emit(map[string]any{"type": "agent_start"})
-	if f.has("PROGRESS") {
-		for _, event := range []map[string]any{{"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_start", "contentIndex": 0}}, {"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_delta", "contentIndex": 0, "delta": "Checking public sources"}}, {"type": "tool_execution_start", "toolName": "web_search"}} {
-			f.emit(event)
-		}
-	}
-	f.failPost()
-	if f.has("MCP_UI") {
-		f.emit(map[string]any{"type": "extension_ui_request", "method": "notify", "message": "Sign in to MCP server slack in your browser: https://example.invalid/?state=x"})
-	}
-	if f.has("ASK_HUMAN") {
-		f.emit(map[string]any{"type": "extension_ui_request", "id": "x2", "method": "select"})
-		f.read()
-		return
-	}
-	f.busy(func() bool {
-		s, ok := f.read()
+	for {
+		f.steers = nil
+
+		omp := f.name == "omp"
+		m, ok := f.read()
 		if !ok {
-			return false
+			return
 		}
-		text, _ := s["message"].(string)
-		f.record("steer", text, piImages(s))
-		if f.has("SLOWACK") {
-			time.Sleep(time.Second)
+		if m["type"] != "prompt" {
+			os.Exit(5)
 		}
-		if strings.Contains(text, "NOACK") {
-			_ = os.WriteFile(filepath.Join(f.state, "steer-held"), nil, 0o600)
-			time.Sleep(30 * time.Second)
-			return false
+		f.prompt, _ = m["message"].(string)
+		f.record("prompt", f.prompt, piImages(m))
+		id, _ := m["id"].(string)
+		f.failPre()
+		dir := arg("--session-dir")
+		if dir == "" || !hasArg("--continue") {
+			fmt.Fprintln(os.Stderr, "fake: expected --session-dir DIR --continue")
+			os.Exit(6)
 		}
-		if f.has("STEERREPLY") {
-			prev := f.prompt
-			if len(f.steers) > 0 {
-				prev = f.steers[len(f.steers)-1]
+		if err := f.session(filepath.Join(dir, "fake-session"), false); err != nil {
+			os.Exit(7)
+		}
+		f.emit(map[string]any{"type": "ready"})
+		f.emit(map[string]any{"type": "extension_ui_request", "id": "x1", "method": "setStatus"})
+		f.emit(map[string]any{"type": "response", "id": id, "command": "prompt", "success": true})
+		f.emit(map[string]any{"type": "agent_start"})
+		if f.has("PROGRESS") {
+			for _, event := range []map[string]any{{"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_start", "contentIndex": 0}}, {"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_delta", "contentIndex": 0, "delta": "Checking public sources"}}, {"type": "tool_execution_start", "toolName": "web_search"}} {
+				f.emit(event)
 			}
-			n := strconv.Itoa(len(f.steers) + 1)
-			f.emit(map[string]any{"type": "message_start", "messageId": "r" + n, "message": map[string]any{"role": "assistant", "content": []any{}}})
-			f.emit(map[string]any{"type": "message_end", "messageId": "r" + n, "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": "reply " + n + ": " + lastLine(prev)}}}})
 		}
-		f.emit(map[string]any{"type": "response", "id": s["id"], "command": "steer", "success": true, "data": map[string]any{"disposition": "queued"}})
-		msg := map[string]any{"role": "user", "content": text}
+		f.failPost()
+		if f.has("MCP_UI") {
+			f.emit(map[string]any{"type": "extension_ui_request", "method": "notify", "message": "Sign in to MCP server slack in your browser: https://example.invalid/?state=x"})
+		}
+		if f.has("ASK_HUMAN") {
+			f.emit(map[string]any{"type": "extension_ui_request", "id": "x2", "method": "select"})
+			f.read()
+			return
+		}
+		f.busy(func() bool {
+			s, ok := f.read()
+			if !ok {
+				return false
+			}
+			text, _ := s["message"].(string)
+			f.record("steer", text, piImages(s))
+			if f.has("SLOWACK") {
+				time.Sleep(time.Second)
+			}
+			if strings.Contains(text, "NOACK") {
+				_ = os.WriteFile(filepath.Join(f.state, "steer-held"), nil, 0o600)
+				time.Sleep(30 * time.Second)
+				return false
+			}
+			if f.has("STEERREPLY") {
+				prev := f.prompt
+				if len(f.steers) > 0 {
+					prev = f.steers[len(f.steers)-1]
+				}
+				n := strconv.Itoa(len(f.steers) + 1)
+				f.emit(map[string]any{"type": "message_start", "messageId": "r" + n, "message": map[string]any{"role": "assistant", "content": []any{}}})
+				f.emit(map[string]any{"type": "message_end", "messageId": "r" + n, "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": "reply " + n + ": " + lastLine(prev)}}}})
+			}
+			f.emit(map[string]any{"type": "response", "id": s["id"], "command": "steer", "success": true, "data": map[string]any{"disposition": "queued"}})
+			msg := map[string]any{"role": "user", "content": text}
+			if omp {
+				msg["steering"], msg["attribution"] = true, "user"
+			}
+			f.emit(map[string]any{"type": "message_start", "messageId": "u" + strconv.Itoa(len(f.steers)), "message": msg})
+			f.steers = append(f.steers, text)
+			return true
+		})
+		f.emit(map[string]any{"type": "message_start", "messageId": "a1", "message": map[string]any{"role": "assistant", "content": []any{}}})
+		f.emit(map[string]any{"type": "message_end", "messageId": "a1", "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": f.answer()}}}})
+		f.emit(map[string]any{"type": "agent_end"})
 		if omp {
-			msg["steering"], msg["attribution"] = true, "user"
+			f.emit(map[string]any{"type": "prompt_result", "id": id, "status": "completed", "sessionSettled": true})
+		} else {
+			f.emit(map[string]any{"type": "agent_settled"})
 		}
-		f.emit(map[string]any{"type": "message_start", "messageId": "u" + strconv.Itoa(len(f.steers)), "message": msg})
-		f.steers = append(f.steers, text)
-		return true
-	})
-	f.emit(map[string]any{"type": "message_start", "messageId": "a1", "message": map[string]any{"role": "assistant", "content": []any{}}})
-	f.emit(map[string]any{"type": "message_end", "messageId": "a1", "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": f.answer()}}}})
-	f.emit(map[string]any{"type": "agent_end"})
-	if omp {
-		f.emit(map[string]any{"type": "prompt_result", "id": id, "status": "completed", "sessionSettled": true})
-	} else {
-		f.emit(map[string]any{"type": "agent_settled"})
+		if f.has("LINGER=") {
+			return
+		}
 	}
 }
 
 func (f *fake) claude() {
-	sid, resume := arg("--session-id"), arg("--resume")
-	m, ok := f.read()
-	if !ok || m["type"] != "user" {
-		os.Exit(5)
-	}
-	msg, _ := m["message"].(map[string]any)
-	var images int
-	f.prompt, images = claudeContent(msg["content"])
-	f.record("prompt", f.prompt, images)
-	f.failPre()
-	id := sid
-	if resume != "" {
-		id = resume
-	}
-	if id == "" || f.session(filepath.Join(f.state, "claude-"+id), resume != "") != nil || sid != "" && f.resumed {
-		fmt.Fprintln(os.Stderr, "fake: session unusable")
-		os.Exit(6)
-	}
-	// Claude replays the user message's content as it was sent.
-	replay := func(uuid string, content any) {
-		f.emit(map[string]any{"type": "user", "session_id": id, "uuid": uuid, "isReplay": true, "parent_tool_use_id": nil, "message": map[string]any{"role": "user", "content": content}})
-	}
-	result := func(text string) {
-		f.emit(map[string]any{"type": "result", "subtype": "success", "session_id": id, "is_error": false, "result": text})
-	}
-	f.emit(map[string]any{"type": "system", "subtype": "init", "session_id": id})
-	switch {
-	case f.has("EARLYRESULT"):
-		result(f.answer())
-		return
-	case f.has("EARLYASK"):
-		f.emit(map[string]any{"type": "control_request", "session_id": id})
-		f.read()
-		return
-	}
-	replay("u0", msg["content"])
-	f.failPost()
-	if f.has("STEERLATE") {
-		s, ok := f.read()
+	for {
+		f.steers = nil
+
+		sid, resume := arg("--session-id"), arg("--resume")
+		m, ok := f.read()
 		if !ok {
+			return
+		}
+		if m["type"] != "user" {
+			os.Exit(5)
+		}
+		msg, _ := m["message"].(map[string]any)
+		var images int
+		f.prompt, images = claudeContent(msg["content"])
+		f.record("prompt", f.prompt, images)
+		f.failPre()
+		id := sid
+		if resume != "" {
+			id = resume
+		}
+		fresh := f.turn == 0
+		if id == "" || f.session(filepath.Join(f.state, "claude-"+id), resume != "") != nil || fresh && sid != "" && f.resumed && f.turn == 1 {
+			fmt.Fprintln(os.Stderr, "fake: session unusable")
+			os.Exit(6)
+		}
+		// Claude replays the user message's content as it was sent.
+		replay := func(uuid string, content any) {
+			f.emit(map[string]any{"type": "user", "session_id": id, "uuid": uuid, "isReplay": true, "parent_tool_use_id": nil, "message": map[string]any{"role": "user", "content": content}})
+		}
+		result := func(text string) {
+			f.emit(map[string]any{"type": "result", "subtype": "success", "session_id": id, "is_error": false, "result": text})
+		}
+		f.emit(map[string]any{"type": "system", "subtype": "init", "session_id": id})
+		switch {
+		case f.has("EARLYRESULT"):
 			result(f.answer())
 			return
-		}
-		sm, _ := s["message"].(map[string]any)
-		text, images := claudeContent(sm["content"])
-		f.record("steer", text, images)
-		result(f.answer())
-		replay("u1", sm["content"])
-		f.steers = append(f.steers, text)
-		switch {
-		case f.has("LATEHANG"):
-			time.Sleep(30 * time.Second)
-			return
-		case f.has("LATECRASH"):
-			fmt.Fprintln(os.Stderr, "fake: crashed in the late turn")
-			os.Exit(4)
-		case f.has("LATEFAIL"):
-			f.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "session_id": id, "is_error": true, "result": "fake late failure"})
-		case f.has("LATEASK"):
+		case f.has("EARLYASK"):
 			f.emit(map[string]any{"type": "control_request", "session_id": id})
-		case f.has("LATEEXIT"):
+			f.read()
 			return
-		default:
-			result("late reply: " + lastLine(text))
 		}
-		for ok {
-			_, ok = f.read()
+		replay("u0", msg["content"])
+		f.failPost()
+		if f.has("STEERLATE") {
+			s, ok := f.read()
+			if !ok {
+				result(f.answer())
+				return
+			}
+			sm, _ := s["message"].(map[string]any)
+			text, images := claudeContent(sm["content"])
+			f.record("steer", text, images)
+			result(f.answer())
+			replay("u1", sm["content"])
+			f.steers = append(f.steers, text)
+			switch {
+			case f.has("LATEHANG"):
+				time.Sleep(30 * time.Second)
+				return
+			case f.has("LATECRASH"):
+				fmt.Fprintln(os.Stderr, "fake: crashed in the late turn")
+				os.Exit(4)
+			case f.has("LATEFAIL"):
+				f.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "session_id": id, "is_error": true, "result": "fake late failure"})
+			case f.has("LATEASK"):
+				f.emit(map[string]any{"type": "control_request", "session_id": id})
+			case f.has("LATEEXIT"):
+				return
+			default:
+				result("late reply: " + lastLine(text))
+			}
+			for ok {
+				_, ok = f.read()
+			}
+			return
 		}
-		return
+		if f.has("ASK_HUMAN") {
+			f.emit(map[string]any{"type": "control_request", "session_id": id})
+			f.read()
+			return
+		}
+		f.busy(func() bool {
+			s, ok := f.read()
+			if !ok {
+				return false
+			}
+			sm, _ := s["message"].(map[string]any)
+			text, images := claudeContent(sm["content"])
+			f.record("steer", text, images)
+			replay("u"+strconv.Itoa(len(f.steers)+1), sm["content"])
+			f.steers = append(f.steers, text)
+			return true
+		})
+		result(f.answer())
+		if f.has("LINGER=") {
+			return
+		}
 	}
-	if f.has("ASK_HUMAN") {
-		f.emit(map[string]any{"type": "control_request", "session_id": id})
-		f.read()
-		return
-	}
-	f.busy(func() bool {
-		s, ok := f.read()
-		if !ok {
-			return false
-		}
-		sm, _ := s["message"].(map[string]any)
-		text, images := claudeContent(sm["content"])
-		f.record("steer", text, images)
-		replay("u"+strconv.Itoa(len(f.steers)+1), sm["content"])
-		f.steers = append(f.steers, text)
-		return true
-	})
-	result(f.answer())
 }
 
 func (f *fake) codex() {
@@ -577,40 +586,55 @@ func (f *fake) codex() {
 		os.Exit(5)
 	}
 	reply(start["id"], map[string]any{"thread": map[string]any{"id": thread}})
-	turnReq, ok := f.read()
-	if !ok || turnReq["method"] != "turn/start" {
-		os.Exit(5)
-	}
-	tp, _ := turnReq["params"].(map[string]any)
-	var images int
-	f.prompt, images = codexInput(tp["input"])
-	f.record("prompt", f.prompt, images)
-	f.failPre()
-	reply(turnReq["id"], map[string]any{"turn": map[string]any{"id": "turn-1"}})
-	f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": "turn-1"}}})
-	f.failPost()
-	if f.has("FINALFIRST") {
-		f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": "turn-1", "item": map[string]any{"id": "i0", "type": "agentMessage", "text": "early answer: " + lastLine(f.prompt), "phase": "final_answer"}}})
-	}
-	if f.has("ASK_HUMAN") {
-		f.emit(map[string]any{"id": 99, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": thread, "turnId": "turn-1", "reason": "fake wants to run a command"}})
-		f.read()
-		return
-	}
-	f.busy(func() bool {
-		s, ok := f.read()
+	seenTurn := false
+	for {
+		f.steers = nil
+		turnReq, ok := f.read()
 		if !ok {
-			return false
+			return
 		}
-		sp, _ := s["params"].(map[string]any)
-		text, images := codexInput(sp["input"])
-		f.record("steer", text, images)
-		reply(s["id"], map[string]any{"turnId": "turn-1"})
-		f.steers = append(f.steers, text)
-		return true
-	})
-	f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": "turn-1", "item": map[string]any{"id": "i1", "type": "agentMessage", "text": f.answer(), "phase": "final_answer"}}})
-	f.emit(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": "turn-1", "status": "completed"}}})
+		if turnReq["method"] != "turn/start" {
+			os.Exit(5)
+		}
+		if seenTurn {
+			_ = f.session(filepath.Join(f.state, "codex-"+thread), true)
+		}
+		seenTurn = true
+		turnID := fmt.Sprintf("turn-%d", f.turn)
+		tp, _ := turnReq["params"].(map[string]any)
+		var images int
+		f.prompt, images = codexInput(tp["input"])
+		f.record("prompt", f.prompt, images)
+		f.failPre()
+		reply(turnReq["id"], map[string]any{"turn": map[string]any{"id": turnID}})
+		f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": turnID}}})
+		f.failPost()
+		if f.has("FINALFIRST") {
+			f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": turnID, "item": map[string]any{"id": "i0", "type": "agentMessage", "text": "early answer: " + lastLine(f.prompt), "phase": "final_answer"}}})
+		}
+		if f.has("ASK_HUMAN") {
+			f.emit(map[string]any{"id": 99, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": thread, "turnId": turnID, "reason": "fake wants to run a command"}})
+			f.read()
+			return
+		}
+		f.busy(func() bool {
+			s, ok := f.read()
+			if !ok {
+				return false
+			}
+			sp, _ := s["params"].(map[string]any)
+			text, images := codexInput(sp["input"])
+			f.record("steer", text, images)
+			reply(s["id"], map[string]any{"turnId": turnID})
+			f.steers = append(f.steers, text)
+			return true
+		})
+		f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": turnID, "item": map[string]any{"id": "i1", "type": "agentMessage", "text": f.answer(), "phase": "final_answer"}}})
+		f.emit(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": turnID, "status": "completed"}}})
+		if f.has("LINGER=") {
+			return
+		}
+	}
 }
 
 func (f *fake) agy() {

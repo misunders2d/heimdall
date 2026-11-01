@@ -122,7 +122,7 @@ func run(args []string) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	r := router.New(router.Options{OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
+	r := router.New(router.Options{Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")
@@ -150,7 +150,7 @@ func runLocal(args []string) error {
 	defer cancel()
 	l := local.New(os.Stdin, os.Stdout, *as, *chat)
 	logger := log.New(os.Stderr, "heimdall: ", log.LstdFlags)
-	r := router.New(router.Options{OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, l)
+	r := router.New(router.Options{Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, l)
 	go func() {
 		select {
 		case <-l.EOF():

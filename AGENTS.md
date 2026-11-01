@@ -108,8 +108,7 @@ the `heimdall-live` unit.
   anyone else's message queues. Only the turn's caller or an owner can
   `!stop` it.
 - **Conversations.** Key = interface + chat + thread. Same key: one turn at a
-  time. Different keys run in parallel up to `max_parallel` live harness
-  processes.
+  time. Different keys run in parallel up to `max_parallel` running turns. Idle warm processes use no turn slot.
 - **Telegram** (as the hub's connector). A private chat is always handled.
   In a group, exact controls allowed by `commands.unmentioned` work without
   addressing. Other messages are handled only if they mention `@<bot username>`, replies to one of the bot's
@@ -172,14 +171,20 @@ the `heimdall-live` unit.
   told and nothing is replayed.
   The reply keeps what the harness answered to every input it took (the
   prompt, then each accepted steer), never only the last answer. A turn
-  ends, and its reply goes out, at the harness's answer, not when its
-  process exits; the conversation's next turn starts only after that
-  process exited, so two processes never share a session. It gets 60 s,
-  then SIGTERM to its process group and SIGKILL 5 s later (logged with the
-  turn); a stop by the turn's caller or an owner sends the SIGTERM at
-  once. A process holds its `max_parallel` slot until it exits. At
-  shutdown every live process gets the SIGTERM at once and is waited for
-  (60 + 5 s at most, then its group is killed); none outlives Heimdall.
+  ends, and its reply goes out, at the native result event. Pi/OMP, Claude
+  and Codex retain a process per conversation + verified caller + harness;
+  AGY remains per-turn because its adapter has no multi-turn protocol.
+  Launch fingerprints cover caller/role/private/Slack scope, OS credentials,
+  environment, executable/directory/home and native settings. Changed launch,
+  reset or harness selection discards the worker. Config reload is restart.
+  `harness.idle_timeout_seconds` defaults to 900, `max_lifetime_seconds`
+  to 14400, `max_warm` to 8 (idle LRU), `run_timeout_seconds` to 1200.
+  Idle workers hold no `max_parallel` slot; native results release slots.
+  Stop sends native interrupt (Pi/OMP abort, Claude control request, Codex
+  turn/interrupt), then discards the unclean process/session with bounded
+  SIGTERM/SIGKILL fallback. Exactly one stop command reply; no duplicate
+  cancelled-turn final. All workers are terminated and waited for at shutdown.
+  Per-turn hooks remain native; session-end hooks move to worker exit.
 - **Reliability.** Inbound and outbound queues are persisted (SQLite) before
   an interface acknowledges a message upstream. A turn interrupted by a
   restart is reported to its chat and never re-run; messages that never

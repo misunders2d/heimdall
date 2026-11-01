@@ -192,13 +192,17 @@ Commands work the same on every interface:
 `stop`, `cancel` (or `abort`, `nevermind`), `reset` and `chatid` alone in a
 message work without the `!`. Only the turn's sender or the owner can stop
 a turn; the owner's `stop` and `cancel` clear everyone's queued messages.
-A turn's reply goes out at the harness's answer; its process may take a
-while to exit, and the conversation's next turn waits for that (at most
-60 s, then SIGTERM, then SIGKILL 5 s later). `stop` then ends that wait at
-once. `max_parallel` counts harness processes until they exit. At shutdown
-every harness process still running gets SIGTERM, and Heimdall waits for
-it (at most 65 s; SIGKILL 5 s after the SIGTERM if needed) before it exits; `heimdall
-local` exits once the last one has exited.
+A turn's reply goes out at its native result. Pi/OMP, Claude and Codex keep
+session processes warm for 15 idle minutes; AGY stays per-turn. `max_parallel`
+counts running turns. Optional `harness` limits: `idle_timeout_seconds` (900),
+`max_lifetime_seconds` (14400), `max_warm` (8 idle workers, LRU),
+`run_timeout_seconds` (1200). Changed launch identity/settings, reset or
+harness selection discards workers. `!status` shows warm harnesses and idle ages.
+Stop uses native interrupt, discards the unclean session and sends one reply.
+At shutdown all processes receive SIGTERM, then SIGKILL after 5 s if needed;
+Heimdall waits for them. Local mode exits once turns and deliveries finish,
+then shuts down idle workers. Native session-end hooks fire at worker exit;
+per-turn hooks still fire per turn.
 
 A conversation is a chat, or one thread in it: `!use` in a thread changes
 neither the other threads nor the chat itself. Each verified caller has

@@ -131,7 +131,7 @@ func TestSlackThroughNativeProtocolsAndRouter(t *testing.T) {
 	f.push(artifact)
 	waitFor(t, "checked outbox upload", func() bool { return len(f.all("files.completeUploadExternal")) > 0 })
 	// Shared stop works without mention; it does not require Slack to supply
-	// slash commands, and still uses the native group termination path.
+	// slash commands, and uses native interrupt before bounded process cleanup.
 	sleeping := f.event("Cstop", "channel", "Uowner", "<@Ubot> SLEEP", "")
 	f.push(sleeping)
 	waitFor(t, "sleep turn ready", func() bool {
@@ -143,8 +143,23 @@ func TestSlackThroughNativeProtocolsAndRouter(t *testing.T) {
 		return false
 	})
 	f.push(f.event("Cstop", "channel", "Uowner", "stop", sleeping.TS))
-	waitFor(t, "unmentioned stop", func() bool { return f.hasText("Stopping the current turn") })
-	waitFor(t, "stopped answer", func() bool { return f.hasText("Stopped.") })
+	waitFor(t, "unmentioned stop", func() bool { return f.hasText("Stopping current run.") })
+	waitFor(t, "stop settled", r.Idle)
+	count := 0
+	for _, call := range f.all("chat.postMessage") {
+		if str(call.Body["channel"]) == "Cstop" {
+			text := str(call.Body["text"])
+			if strings.Contains(text, "Stopping current run.") {
+				count++
+			}
+			if strings.Contains(text, "⏹ Stopped.") {
+				t.Fatal("duplicate terminal reply")
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("stop acknowledgements: %d", count)
+	}
 	f.push(f.event("D1", "im", "Uowner", "reset", dm.TS))
 	waitFor(t, "caller reset", func() bool { return f.hasText("Session reset") })
 	f.push(f.event("D1", "im", "Uowner", "fresh harness", dm.TS))

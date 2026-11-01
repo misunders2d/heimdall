@@ -22,6 +22,7 @@ import (
 
 // claudeStreamBridge owns one fresh native process and one initial request.
 type claudeStreamBridge struct {
+	warm      bool
 	progress  func(Progress)
 	telemetry progressTracker
 
@@ -51,12 +52,11 @@ type claudeStreamBridge struct {
 // expected is the session ID passed with --session-id or --resume; the
 // stream must stay in exactly that session.
 func newClaudeStreamBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, expected string) (*claudeStreamBridge, error) {
-	cmd.Stdin = nil
-	input, err := cmd.StdinPipe()
+	input, err := turnInput(cmd)
 	if err != nil {
 		return nil, err
 	}
-	b := &claudeStreamBridge{ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), prompt: prompt, session: expected}
+	b := &claudeStreamBridge{warm: isWarmInput(input), ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), pending: map[string]*pendingSteer{}, seen: map[string]string{}, closed: make(chan struct{}), prompt: prompt, session: expected}
 	b.writes.Add(1)
 	go func() {
 		defer b.writes.Done()
@@ -319,7 +319,9 @@ func (b *claudeStreamBridge) event(raw []byte) {
 			// next turn in this stream. Send nothing more (Claude exits once
 			// its queue is done) and wait for that turn's replay and result.
 			b.draining = true
-			_ = b.input.Close()
+			if !b.warm {
+				_ = b.input.Close()
+			}
 			return
 		}
 		b.publishLocked()
@@ -340,7 +342,9 @@ func (b *claudeStreamBridge) publishLocked() {
 	}
 	b.published = true
 	b.endLocked()
-	_ = b.input.Close()
+	if !b.warm {
+		_ = b.input.Close()
+	}
 	close(b.answered)
 }
 

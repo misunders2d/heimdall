@@ -1,4 +1,6 @@
-// Package harness runs one native agent turn in a fresh harness process,
+// Package harness runs native agent turns, retaining clean session processes
+// through Pool where the native protocol supports multiple turns. Start
+// alone remains a one-shot API,
 // resuming the conversation's native session, and passes mid-turn input to
 // it where the harness supports steering.
 //
@@ -120,6 +122,7 @@ type Session struct {
 
 // Spec is one turn.
 type Spec struct {
+	warm       bool
 	MCPNotify  func(string)
 	OwnerSlack *OwnerSlack
 	Progress   func(Progress)
@@ -172,22 +175,26 @@ type Result struct {
 
 // Run is one started native turn.
 type Run struct {
-	caller    Caller
-	harness   string
-	cmd       *exec.Cmd
-	bridge    bridge
-	ctx       context.Context
-	cancel    context.CancelFunc
-	stderr    limitedBuffer
-	done      chan struct{} // Result is final
-	exited    chan struct{} // the process has exited
-	grace     time.Duration // ExitGrace when started
-	term      time.Duration // TermGrace when started
-	settle    sync.Once
-	result    Result
-	log       func(string)
-	stop      sync.Once
-	cancelled atomic.Bool
+	pooled       chan struct{}
+	retained     atomic.Bool
+	worker       *worker
+	bridgeCancel context.CancelFunc
+	caller       Caller
+	harness      string
+	cmd          *exec.Cmd
+	bridge       bridge
+	ctx          context.Context
+	cancel       context.CancelFunc
+	stderr       limitedBuffer
+	done         chan struct{} // Result is final
+	exited       chan struct{} // the process has exited
+	grace        time.Duration // ExitGrace when started
+	term         time.Duration // TermGrace when started
+	settle       sync.Once
+	result       Result
+	log          func(string)
+	stop         sync.Once
+	cancelled    atomic.Bool
 }
 
 type outcome struct {
@@ -319,13 +326,27 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	if spec.Session.Resume {
 		expected = spec.Session.ID
 	}
+	var nativeStdin io.Reader
+	if spec.warm {
+		input, e := cmd.StdinPipe()
+		if e != nil {
+			cancel()
+			return nil, e
+		}
+		nativeStdin = cmd.Stdin
+		cmd.Stdin = &warmInput{WriteCloser: input}
+	}
+	bridgeCtx := runCtx
+	if spec.warm {
+		bridgeCtx, r.bridgeCancel = context.WithCancel(runCtx)
+	}
 	switch d.style {
 	case sessionDir:
-		r.bridge, err = newPiRPCBridge(runCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID, spec.Harness == "omp")
+		r.bridge, err = newPiRPCBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID, spec.Harness == "omp")
 	case sessionID:
-		r.bridge, err = newClaudeStreamBridge(runCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
+		r.bridge, err = newClaudeStreamBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
 	case sessionThread:
-		r.bridge, err = newCodexBridge(runCtx, cmd, spec.Prompt, spec.Images, spec.Session)
+		r.bridge, err = newCodexBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session)
 	case sessionConversation:
 		r.bridge = newAgyBridge(runCtx, cmd, spec.Prompt, expected)
 	}
@@ -345,18 +366,34 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		b.progress = spec.Progress
 	}
 	cmd.Stdout = r.bridge
+	if spec.warm {
+		cmd.Stdin = nativeStdin
+		w := &worker{current: r, root: r, cmd: cmd, input: bridgeStdin(r.bridge), exited: r.exited}
+		r.worker = w
+		cmd.Stdout = &workerOutput{w: w}
+	}
 	if err := cmd.Start(); err != nil {
 		r.bridge.close()
 		cancel()
 		return nil, fmt.Errorf("%s did not start: %w", spec.Harness, err)
 	}
-	go r.wait()
+	if r.worker != nil {
+		go r.worker.wait()
+		go r.early()
+	} else {
+		go r.wait()
+	}
+
 	return r, nil
 }
 
 func (r *Run) wait() {
 	go r.early()
 	runErr := r.cmd.Wait()
+	r.finishExit(runErr)
+}
+
+func (r *Run) finishExit(runErr error) {
 	// Only an observed native outcome supersedes a process error; finish's
 	// missing-terminal fallback must not hide an actual exit failure.
 	settled := r.bridge.settled()
@@ -417,6 +454,9 @@ func (r *Run) early() {
 		return // published as the process exited: wait settles it with the exit status
 	}
 	r.finalize(Result{Answer: o.answer, Answers: o.answers, SessionID: o.session, Ready: true, Warning: o.warning, Unclean: o.unclean})
+	if r.worker != nil {
+		return
+	}
 	t := time.NewTimer(r.grace)
 	defer t.Stop()
 	select {
@@ -521,7 +561,18 @@ func (r *Run) SessionID() string { return r.bridge.outcome().session }
 // Cancel stops the turn and its process group.
 func (r *Run) Cancel() {
 	r.cancelled.Store(true)
-	r.Stop("on cancellation")
+	if r.worker != nil {
+		go func() {
+			go r.interrupt()
+			select {
+			case <-r.done:
+			case <-time.After(r.term):
+			}
+			r.Stop("on cancellation")
+		}()
+	} else {
+		r.Stop("on cancellation")
+	}
 }
 
 // Steer passes text, and images where the harness takes them, into the
