@@ -262,28 +262,50 @@ func (w *downloadWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Serialize local copy allocation with download writes/reservations. The free
-// space reading includes completed uploads; only remaining downloads are added.
+// Reserve allocation briefly; disk I/O must not hold the download lock.
 func (s *Slack) WithUploadCopy(dir string, size int64, copyFile func() error) error {
 	s.diskMu.Lock()
-	defer s.diskMu.Unlock()
 	free, err := s.freeBytes(dir)
 	if err != nil {
+		s.diskMu.Unlock()
 		return err
 	}
-	reserved := s.reserved
 	var uploadStat, destStat syscall.Stat_t
 	if err := syscall.Stat(s.UploadDir(), &uploadStat); err != nil {
+		s.diskMu.Unlock()
 		return err
 	}
 	if err := syscall.Stat(dir, &destStat); err != nil {
+		s.diskMu.Unlock()
 		return err
 	}
-	if uploadStat.Dev != destStat.Dev {
-		reserved = 0
+	if s.copyReserved == nil {
+		s.copyReserved = map[uint64]int64{}
+	}
+	dev := uint64(destStat.Dev)
+	reserved := s.copyReserved[dev]
+	if uploadStat.Dev == destStat.Dev {
+		reserved += s.reserved
 	}
 	if free-reserved-size < diskReserve {
+		s.diskMu.Unlock()
 		return errors.New("insufficient disk space for turn copy")
 	}
+	s.copyReserved[dev] += size
+	// Downloads on the upload filesystem must also see this reservation.
+	if uploadStat.Dev == destStat.Dev {
+		s.reserved += size
+		s.copyReserved[dev] -= size
+	}
+	s.diskMu.Unlock()
+	defer func() {
+		s.diskMu.Lock()
+		if uploadStat.Dev == destStat.Dev {
+			s.reserved -= size
+		} else {
+			s.copyReserved[dev] -= size
+		}
+		s.diskMu.Unlock()
+	}()
 	return copyFile()
 }

@@ -1862,3 +1862,14 @@ func TestClaudeLateTurnExitWithoutResult(t *testing.T) {
 	e.send(owner, "c1", "after")
 	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
 }
+
+func TestIngressControlReceiptReplies(t *testing.T) {
+	e := setup(t, core.ModePersonal, []string{"omp"}, "omp")
+	for _, command := range []string{"stop", "cancel"} {
+		e.f.in <- core.Inbound{Conv: core.ConvKey{Interface: "fake", Chat: "receipt"}, MsgID: command, From: core.Principal{Platform: "fake", ID: strings.TrimPrefix(owner, "fake:")}, Origin: core.OriginLive, Text: command, ControlIngress: 2}
+		out := e.reply()
+		if !strings.Contains(out.Text, "2") || strings.Contains(out.Text, "Nothing") || strings.Contains(out.Text, "No queued") {
+			t.Fatalf("misleading control reply %q", out.Text)
+		}
+	}
+}

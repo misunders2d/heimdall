@@ -303,6 +303,12 @@ func (s *Slack) recoverProgress(ctx context.Context) error {
 			ts, _ := s.findDelivery(ctx, p.Conv, fmt.Sprintf("progress-%d", p.Turn), "heimdall_progress")
 			p.TS = ts
 		}
+		if p.TurnState == "done" && p.Pending && p.Phase != "delivery_failed" {
+			p.Phase = "done"
+			if err = s.opt.Store.SaveProgress(p); err != nil {
+				return err
+			}
+		}
 		if p.Phase == "delivery_failed" || (p.TurnState == "done" && p.Pending) {
 			continue
 		}

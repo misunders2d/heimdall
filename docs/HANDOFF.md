@@ -68,6 +68,30 @@ business-policy rows and all 16 independent amendments with code evidence.
   orchestrator arranges a single-consumer live window. Exact scopes/settings,
   secret names and config are in README's Slack live-window section.
 
+## Re-review fixes (2026-11-01)
+
+- Verified stop/cancel fences older ingress messages in the same conversation
+  by event timestamp: own caller only, or every caller for an owner. Later
+  messages remain. Suppression and control receipt persist together; normal
+  admission rechecks completion under the same short lock. Replies count
+  dropped ingress alongside router work. Telegram ingestion is serial and has
+  no bypass lane, so this race does not apply there.
+- Identity retries use single requests and timer rescheduling, three attempts
+  maximum; full queues retain durable backlog without blocking socket ack.
+  User-scoped permanent failures finish silently; token/scope failures log a
+  rate-limited operator alert. No unverified caller is admitted.
+- MCP filtering redacts native HTTP loopback callbacks in place and preserves
+  ordinary URLs and useful surrounding content. Copy I/O runs outside disk
+  reservation lock; recovered done turns normalize stale progress phases
+  before pending delivery, preserving success cleanup and failure status.
+
+Verification: `go vet ./...`, `go test -race -count=1 ./...`, and
+`CGO_ENABLED=0 go build` passed. Seven temporary mutation checks removed each
+fix in turn and the corresponding regression failed. New coverage lives in
+`internal/iface/slack/rereview_test.go`, router ingress-control receipt tests,
+and the strengthened store completion-migration test. Fakes only; live
+validation remains with the orchestrator.
+
 ## Earlier phase-1 state (historical)
 
 - `main` = the code HEAD (the review fixes of `fd72734..d05b748`; see

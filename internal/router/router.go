@@ -722,12 +722,20 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		c.answer(row, store.CommandEnd{Detail: "use", SetHarness: true, Harness: cmd.Harness}, text)
 		return false
 	case cmdStop:
-		c.answer(row, store.CommandEnd{Detail: "stop"}, c.stop(role, row.From.Key()))
+		text := c.stop(role, row.From.Key())
+		if row.ControlIngress > 0 {
+			text = fmt.Sprintf("Stopped %d earlier ingress message(s). %s", row.ControlIngress, strings.ReplaceAll(text, "Nothing is running in this conversation.", ""))
+		}
+		c.answer(row, store.CommandEnd{Detail: "stop"}, strings.TrimSpace(text))
 		return false
 	case cmdCancel:
 
 		n := c.cancelQueued(role, row.From.Key(), "cancelled by cancel")
+		n += row.ControlIngress
 		text := fmt.Sprintf("Cancelled %d queued message(s).", n)
+		if row.ControlIngress > 0 {
+			text = fmt.Sprintf("Cancelled %d queued/ingress message(s).", n)
+		}
 		if n == 0 {
 			text = "No queued message of yours in this conversation."
 			if role == core.RoleOwner {

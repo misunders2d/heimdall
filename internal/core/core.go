@@ -183,6 +183,7 @@ type Inbound struct {
 	// before Text and is never parsed for commands or identity.
 	Context string
 	// InterfaceReply is a trusted adapter warning, answered durably without a harness.
+	ControlIngress int
 	InterfaceReply string
 	// Attachments are the files the message carried (and the message it
 	// replies to), as the interface stored them.

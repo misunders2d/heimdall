@@ -103,3 +103,6 @@ func NormalizeSlash(text, bot string) string {
 type AnswerCleaner interface {
 	CleanAnswer(text, inDir, outDir string) string
 }
+
+// IsControl uses the same parser as router admission.
+func IsControl(text string) bool { k := parseCommand(text).Kind; return k == cmdStop || k == cmdCancel }

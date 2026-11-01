@@ -69,6 +69,9 @@ func TestReviewEventCompletionMigration(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO interface_events(iface,event_key,payload,received_at,complete) VALUES('slack','old',NULL,?,1),('slack','pending','{}',?,0)`, old, old); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO interface_events(iface,event_key,payload,received_at,complete) VALUES('slack','recent',NULL,?,1)`, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
 	db.Close()
 	s, err := Open(path)
 	if err != nil {
@@ -80,7 +83,7 @@ func TestReviewEventCompletionMigration(t *testing.T) {
 	}
 	var count int
 	s.db.QueryRow(`SELECT count(*) FROM interface_events`).Scan(&count)
-	if count != 1 {
+	if count != 2 {
 		t.Fatal("migration retention", count)
 	}
 	if _, ok, _ := s.Event("slack", "pending"); !ok {

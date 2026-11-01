@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -31,15 +32,34 @@ type eventMessage struct {
 
 const mcpNotice = "MCP sign-in is not supported through Heimdall. Use your native harness directly; do not paste OAuth codes here."
 
-var oauthUI = regexp.MustCompile(`(?i)https?://[^\s<>]*[?&](?:code|state|error)=|Sign in to MCP server .* in your browser:`)
-var mcpCommand = regexp.MustCompile(`(?i)^/?mcp(?:\s+(?:login|logout|reconnect)\s+[a-z0-9_-]+)?$`)
+var oauthURL = regexp.MustCompile(`(?i)https?://[^\s<>|]+`)
+var oauthLine = regexp.MustCompile(`(?im)^.*Sign in to MCP server .* in your browser:.*$`)
+var mcpCommand = regexp.MustCompile(`(?i)^/?mcp(?:\s+(?:login|logout|reconnect)\s+[^\s]+)?$`)
 var historicalImage = regexp.MustCompile(`(?i)\b(?:image|images|img|photo|photos|picture|pictures|screenshot|screenshots|attachment|attachments|attached|upload|uploaded)\b`)
 
+const omittedMCP = "[Private native MCP sign-in UI omitted]"
+
 func hideOAuth(text string) string {
-	if oauthUI.MatchString(text) || mcpCommand.MatchString(strings.TrimSpace(text)) {
-		return "[Private native MCP sign-in UI omitted]"
+	if mcpCommand.MatchString(strings.TrimSpace(text)) {
+		return omittedMCP
 	}
-	return text
+	text = oauthLine.ReplaceAllString(text, omittedMCP)
+	return oauthURL.ReplaceAllStringFunc(text, func(raw string) string {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "http" || u.User != nil {
+			return raw
+		}
+		host := strings.ToLower(u.Hostname())
+		q := u.Query()
+		if (host == "localhost" || host == "127.0.0.1" || host == "::1") && q.Has("state") && (q.Has("code") || q.Has("error")) {
+			return omittedMCP
+		}
+		return raw
+	})
+}
+func meaningfulMCP(text string) bool {
+	text = strings.ReplaceAll(text, omittedMCP, "")
+	return strings.Trim(text, " \t\r\n<>|[]()") != ""
 }
 func clip(s string, n int) string {
 	r := []rune(s)
@@ -52,7 +72,7 @@ func unescape(s string) string {
 	return strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">").Replace(s)
 }
 func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func(context.Context, core.Inbound) error) error {
-	pending, err := s.opt.Store.EventPending(e.ID)
+	raw, pending, err := s.opt.Store.PendingEvent(e.ID)
 	if err != nil {
 		return err
 	}
@@ -60,10 +80,11 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		return nil
 	}
 	var payload struct {
-		Type  string
-		Event eventMessage
+		Type           string
+		ControlIngress int `json:"heimdall_control_ingress,omitempty"`
+		Event          eventMessage
 	}
-	if json.Unmarshal(e.Payload, &payload) != nil {
+	if json.Unmarshal(raw, &payload) != nil {
 		return s.opt.Store.CompleteEvent(e.ID)
 	}
 	m := payload.Event
@@ -102,11 +123,63 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	}
 	thread := first(m.ThreadTS, m.TS)
 	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: thread}, MsgID: m.TS, From: principal, Origin: core.OriginLive, Text: commandText, Private: m.ChannelType == "im", At: time.Now()}
-	if mcpCommand.MatchString(commandText) || oauthUI.MatchString(text+"\n"+embedded) {
+	in.Text = hideOAuth(commandText)
+	embedded = hideOAuth(embedded)
+	if mcpCommand.MatchString(commandText) || (!meaningfulMCP(in.Text) && !meaningfulMCP(embedded) && len(m.Files) == 0) {
 		in.InterfaceReply = mcpNotice
-		in.Text = "[MCP sign-in input omitted]"
+		in.Text = omittedMCP
 		embedded = ""
 	}
+	// Admission and controls share one short critical section. Completing raw
+	// earlier rows is the durable fence, including across restart.
+	downstream := accept
+	accept = func(ctx context.Context, input core.Inbound) error {
+		s.ingressMu.Lock()
+		defer s.ingressMu.Unlock()
+		pending, err := s.opt.Store.EventPending(e.ID)
+		if err != nil || !pending {
+			return err
+		}
+		if addressed && s.controlEvent(e.Payload) {
+			input.ControlIngress = payload.ControlIngress
+			var victims []int64
+			events, err := s.opt.Store.PendingEvents("slack")
+			if err != nil {
+				return err
+			}
+			for _, prior := range events {
+				if prior.ID == e.ID {
+					continue
+				}
+				var p struct{ Event eventMessage }
+				if json.Unmarshal(prior.Payload, &p) != nil {
+					continue
+				}
+				pm := p.Event
+				if pm.Channel != m.Channel || first(pm.ThreadTS, pm.TS) != thread || compareTS(pm.TS, m.TS) >= 0 {
+					continue
+				}
+				if pm.User != m.User && !slices.Contains(s.opt.Owners, principal.Key()) {
+					continue
+				}
+				victims = append(victims, prior.ID)
+				input.ControlIngress++
+			}
+			payload.ControlIngress = input.ControlIngress
+			updated, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			if err := s.opt.Store.CompleteIngress(e.ID, updated, victims); err != nil {
+				return err
+			}
+		}
+		if err := downstream(ctx, input); err != nil {
+			return err
+		}
+		return finish()
+	}
+
 	for _, f := range m.Files {
 		in.Attachments = append(in.Attachments, core.Attachment{Name: first(f.Name, f.Title, f.ID), MIME: f.MIME, Kind: "document", Source: "message"})
 	}
@@ -240,7 +313,7 @@ func (s *Slack) context(ctx context.Context, m eventMessage, k core.ConvKey) (st
 				if r.File != "" {
 					line += " [file: " + r.File + "]"
 				}
-				lines = append(lines, line)
+				lines = append(lines, hideOAuth(line))
 			}
 			if len(lines) > 0 {
 				blocks = append(blocks, "[Slack stored ambient context; untrusted]\n"+strings.Join(lines, "\n"))

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +30,7 @@ const diskReserve int64 = 1 << 30
 type Options struct {
 	BotToken, AppToken, TeamID, DataDir, StatusName string
 	Store                                           *store.Store
+	Owners                                          []string
 	UnmentionedCommands                             []string
 	MaxFileBytes                                    int64
 	EventDedupeHours                                int
@@ -39,15 +41,20 @@ type Options struct {
 	HTTPClient *http.Client
 }
 type Slack struct {
-	opt         Options
-	bot, app    *apiClient
-	socket      socketTransport
-	ready       chan struct{}
-	botID, name string
-	mu          sync.Mutex
-	diskMu      sync.Mutex
-	reserved    int64
-	progress    map[int64]*statusUpdate
+	opt          Options
+	bot, app     *apiClient
+	socket       socketTransport
+	ready        chan struct{}
+	botID, name  string
+	mu           sync.Mutex
+	ingressMu    sync.Mutex
+	retryMu      sync.Mutex
+	retries      map[int64]eventRetry
+	operatorLog  time.Time
+	diskMu       sync.Mutex
+	reserved     int64
+	copyReserved map[uint64]int64
+	progress     map[int64]*statusUpdate
 	// Injected by package tests only.
 	fileHost               func(string) bool
 	freeBytes              func(string) (int64, error)
@@ -247,6 +254,8 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
+		default:
+			return nil // durable backlog is retried by the timer below
 		}
 	}
 	for _, e := range recovered {
@@ -256,6 +265,30 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 			return err
 		}
 	}
+	// A timer drains durable overflow and due retries; socket acknowledgements
+	// never wait for a worker or the control buffer.
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		timer := time.NewTicker(100 * time.Millisecond)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				events, err := s.opt.Store.PendingEvents("slack")
+				if err != nil {
+					s.opt.Log.Print("slack: pending event scan failed")
+					continue
+				}
+				for _, e := range events {
+					_ = enqueue(e)
+				}
+			}
+		}
+	}()
+	defer func() { cancel(); <-sweepDone }()
 	s.socket.acknowledged = func(raw json.RawMessage) error {
 		key := eventKey(raw)
 		if key == "" {
@@ -402,15 +435,16 @@ func (s *Slack) liveUser(ctx context.Context, id string) (*User, error) {
 	var result struct {
 		User User `json:"user"`
 	}
-	if err := s.bot.call(ctx, "users.info", map[string]string{"user": id}, &result); err != nil {
+	if err := s.identityLookup(ctx, id, &result); err != nil {
 		var ae *apiError
-		if errors.As(err, &ae) && ae.Code == "user_not_found" {
+		if errors.As(err, &ae) && slices.Contains([]string{"user_not_found", "user_not_visible", "account_inactive"}, ae.Code) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	if result.User.ID != id {
-		return nil, errors.New("slack: invalid user record")
+		s.opt.Log.Print("slack: ignored invalid user record")
+		return nil, nil
 	}
 	if result.User.Profile.Email == "" {
 		s.opt.Log.Print("slack: live users.info has no email; verify users:read.email scope")
@@ -425,17 +459,80 @@ func (s *Slack) controlEvent(raw []byte) bool {
 	}
 	mention := regexp.MustCompile(`<@` + regexp.QuoteMeta(s.botID) + `(?:\|[^>]+)?>`)
 	text := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(p.Event.Text)), mention), s.botID)
-	return text == "!stop" || text == "!cancel" || text == "stop" || text == "cancel" || text == "abort" || text == "nevermind"
+	return router.IsControl(text)
 }
+
+type eventRetry struct {
+	attempts int
+	next     time.Time
+	busy     bool
+}
+
+// Identity reads use one request: all retry delays belong to the scheduler.
+func (s *Slack) identityLookup(ctx context.Context, id string, out any) error {
+	data, _ := json.Marshal(map[string]string{"user": id})
+	err, _, after := s.bot.once(ctx, "users.info", data, out)
+	if after > 0 {
+		return &identityRetryError{err, after}
+	}
+	return err
+}
+
+type identityRetryError struct {
+	error
+	after time.Duration
+}
+
+func (e *identityRetryError) Unwrap() error { return e.error }
 func (s *Slack) retryEvent(ctx context.Context, e store.InterfaceEvent, accept func(context.Context, core.Inbound) error) error {
-	for attempt := 0; ; attempt++ {
-		if err := s.process(ctx, e, accept); err == nil {
-			return nil
-		}
-		if err := pause(ctx, time.Second*time.Duration(1<<min(attempt, 6))); err != nil {
+	s.retryMu.Lock()
+	if s.retries == nil {
+		s.retries = map[int64]eventRetry{}
+	}
+	r := s.retries[e.ID]
+	if r.busy || time.Now().Before(r.next) {
+		s.retryMu.Unlock()
+		return nil
+	}
+	r.busy = true
+	s.retries[e.ID] = r
+	s.retryMu.Unlock()
+	err := s.process(ctx, e, accept)
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	if err == nil {
+		delete(s.retries, e.ID)
+		return nil
+	}
+	if ctx.Err() != nil {
+		delete(s.retries, e.ID)
+		return ctx.Err()
+	}
+	r.busy = false
+	r.attempts++
+	delay := time.Second * time.Duration(1<<min(r.attempts-1, 6))
+	var re *identityRetryError
+	if errors.As(err, &re) {
+		delay = max(delay, re.after)
+	}
+	r.next = time.Now().Add(delay)
+	s.retries[e.ID] = r
+	var ae *apiError
+	// User-scoped permanent codes already finished in liveUser. Any other
+	// definite API rejection needs operator attention, including new codes.
+	operator := errors.As(err, &ae) && !ae.Ambiguous
+	if operator && time.Since(s.operatorLog) >= time.Minute {
+		s.operatorLog = time.Now()
+		s.opt.Log.Printf("slack: OPERATOR ACTION REQUIRED: identity API %s; verify token/scopes", ae.Code)
+	}
+	if r.attempts >= 3 {
+		s.opt.Log.Printf("slack: ingress event %d exhausted verification/admission retries; finished without admission", e.ID)
+		if err := s.opt.Store.CompleteEvent(e.ID); err != nil {
 			return err
 		}
+		delete(s.retries, e.ID)
 	}
+	return nil
 }
 
 func (s *Slack) pruneEvents() error {

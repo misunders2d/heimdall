@@ -86,3 +86,32 @@ func (s *Store) PruneEvents(iface string, before time.Time) error {
 	_, err := s.db.Exec(`DELETE FROM interface_events WHERE iface=? AND complete=1 AND completed_at<?`, iface, before.UnixMilli())
 	return err
 }
+
+// PendingEvent reloads the durable payload, including an ingress control receipt.
+func (s *Store) PendingEvent(id int64) ([]byte, bool, error) {
+	var payload []byte
+	err := s.db.QueryRow(`SELECT payload FROM interface_events WHERE id=? AND complete=0`, id).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	return payload, err == nil, err
+}
+
+// CompleteIngress records a control's receipt and its suppressed events together.
+// Retrying the control after a crash or failed router admission retains its count.
+func (s *Store) CompleteIngress(control int64, payload []byte, ids []int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err = tx.Exec(`UPDATE interface_events SET complete=1,payload=NULL,completed_at=? WHERE id=? AND complete=0`, now(), id); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE interface_events SET payload=? WHERE id=? AND complete=0`, payload, control); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

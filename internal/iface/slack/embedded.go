@@ -32,7 +32,7 @@ func (x *extractor) field(v any) string {
 		x.truncated = true
 		s = clip(s, 12000)
 	}
-	return s
+	return hideOAuth(unescape(s))
 }
 func (x *extractor) rich(v any, depth int) string {
 	if !x.node(depth) {
@@ -172,9 +172,12 @@ func (x *extractor) message(v any, depth int, control string) string {
 func embeddedContent(m eventMessage) string {
 	x := extractor{}
 	v := map[string]any{"text": m.Text, "blocks": m.Blocks, "attachments": m.Attachments}
-	s := x.message(v, 0, strings.TrimSpace(m.Text))
+	s := hideOAuth(x.message(v, 0, strings.TrimSpace(m.Text)))
 	if s == "" {
 		return ""
+	}
+	if !meaningfulMCP(s) {
+		return omittedMCP
 	}
 	const marker = "\n[…Slack embedded content truncated…]"
 	if x.truncated || len([]rune(s)) > 24000 {
