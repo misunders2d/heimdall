@@ -146,7 +146,7 @@ func (s *Slack) statusText(u *statusUpdate) string {
 	case "done":
 		return name + " is ready.\n_Answer prepared._"
 	case "failed", "needs_human":
-		return name + " could not complete this request.\n_Final answer not sent._"
+		return name + " could not complete this request.\n_Work failed; details follow._"
 	case "cancelled":
 		return name + " stopped.\n_Work stopped by request._"
 	case "interrupted":

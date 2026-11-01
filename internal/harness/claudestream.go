@@ -1,3 +1,4 @@
+// Result/readiness handling compared with AgentNet dc39af639f18d8e452a54bf4417f7c60814ebd4d.
 // Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
 package harness
 
@@ -26,27 +27,28 @@ type claudeStreamBridge struct {
 	progress  func(Progress)
 	telemetry progressTracker
 
-	writes               sync.WaitGroup
-	ctx                  context.Context
-	input                io.WriteCloser
-	ready                chan struct{}
-	readyOnce, closeOnce sync.Once
-	mu, writeMu, readMu  sync.Mutex
-	buf                  []byte
-	active, done, failed bool
-	published            bool
-	prompt, session      string
-	failure, human       string
-	closed               chan struct{}
-	answered             chan struct{} // closed once an answer is published
-	answer               string
-	answers              []string // each result's text, in order
-	draining             bool     // a result came with steers pending: no new input, wait for theirs
-	awaiting             int      // steers Claude replayed while draining whose result has not come
-	warning              string   // the late turn ended badly: the answers stand, the session is not resumed
-	atExit               bool     // published when the process exited during a drain
-	pending              map[string]*pendingSteer
-	seen                 map[string]string
+	writes                     sync.WaitGroup
+	ctx                        context.Context
+	input                      io.WriteCloser
+	ready                      chan struct{}
+	readyOnce, closeOnce       sync.Once
+	mu, writeMu, readMu        sync.Mutex
+	buf                        []byte
+	active, done, failed       bool
+	published                  bool
+	prompt, session            string
+	assistantID, assistantText string
+	failure, human             string
+	closed                     chan struct{}
+	answered                   chan struct{} // closed once an answer is published
+	answer                     string
+	answers                    []string // each result's text, in order
+	draining                   bool     // a result came with steers pending: no new input, wait for theirs
+	awaiting                   int      // steers Claude replayed while draining whose result has not come
+	warning                    string   // the late turn ended badly: the answers stand, the session is not resumed
+	atExit                     bool     // published when the process exited during a drain
+	pending                    map[string]*pendingSteer
+	seen                       map[string]string
 }
 
 // expected is the session ID passed with --session-id or --resume; the
@@ -212,8 +214,9 @@ func (b *claudeStreamBridge) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// The same owned stream must replay the exact correlated user input before
-// the original result. A write or assistant echo is never consumption evidence.
+// A steer requires the same owned stream to replay its exact correlated input
+// before the result. Initial native assistant output also commits the turn: it
+// proves work started, even when no exact initial replay was observed.
 func (b *claudeStreamBridge) event(raw []byte) {
 	var e struct {
 		Type    string          `json:"type"`
@@ -223,6 +226,7 @@ func (b *claudeStreamBridge) event(raw []byte) {
 		Replay  bool            `json:"isReplay"`
 		Parent  json.RawMessage `json:"parent_tool_use_id"`
 		Message struct {
+			ID      string          `json:"id"`
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
@@ -260,6 +264,31 @@ func (b *claudeStreamBridge) event(raw []byte) {
 	}
 	b.telemetry.event("claude", raw, b.progress)
 	switch e.Type {
+	case "assistant":
+		// Native output proves this process took the turn even if hooks changed
+		// the replayed prompt. Never admit replay or subagent output as evidence.
+		if e.Session == "" || e.Session != b.session || e.Replay || e.Message.Role != "assistant" || (len(e.Parent) != 0 && string(e.Parent) != "null") {
+			return
+		}
+		b.active = true
+		b.readyOnce.Do(func() { close(b.ready) })
+		// Partial-message mode emits completed blocks separately with one message
+		// ID. Keep only the latest message; commentary before a tool call is not
+		// a final answer. Publication still waits for the native result.
+		if e.Message.ID == "" || e.Message.ID != b.assistantID {
+			b.assistantID, b.assistantText = e.Message.ID, ""
+		}
+		var blocks []struct{ Type, Text string }
+		if json.Unmarshal(e.Message.Content, &blocks) == nil {
+			for _, block := range blocks {
+				switch block.Type {
+				case "text":
+					b.assistantText += block.Text[:min(len(block.Text), max(0, maxAnswer+1-len(b.assistantText)))]
+				case "tool_use":
+					b.assistantText = ""
+				}
+			}
+		}
 	case "user":
 		if b.session == "" || e.Session != b.session || e.UUID == "" || !e.Replay || string(e.Parent) != "null" || e.Message.Role != "user" {
 			return
@@ -309,6 +338,10 @@ func (b *claudeStreamBridge) event(raw []byte) {
 			b.failLocked(why)
 			return
 		}
+		if strings.TrimSpace(e.Result) == "" {
+			e.Result = b.assistantText
+		}
+		b.assistantID, b.assistantText = "", ""
 		if len(e.Result) > maxAnswer+1 {
 			e.Result = e.Result[:maxAnswer+1]
 		}
