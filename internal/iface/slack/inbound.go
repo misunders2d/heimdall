@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"slices"
@@ -16,24 +17,26 @@ import (
 )
 
 type eventMessage struct {
-	Type        string      `json:"type"`
-	Subtype     string      `json:"subtype"`
-	User        string      `json:"user"`
-	Text        string      `json:"text"`
-	Channel     string      `json:"channel"`
-	ChannelType string      `json:"channel_type"`
-	BotID       string      `json:"bot_id"`
-	TS          string      `json:"ts"`
-	ThreadTS    string      `json:"thread_ts"`
-	Files       []slackFile `json:"files"`
-	Blocks      []any       `json:"blocks"`
-	Attachments []any       `json:"attachments"`
+	Type         string      `json:"type"`
+	Subtype      string      `json:"subtype"`
+	User         string      `json:"user"`
+	Text         string      `json:"text"`
+	Channel      string      `json:"channel"`
+	ChannelType  string      `json:"channel_type"`
+	BotID        string      `json:"bot_id"`
+	TS           string      `json:"ts"`
+	ParentUserID string      `json:"parent_user_id"`
+	ThreadTS     string      `json:"thread_ts"`
+	Files        []slackFile `json:"files"`
+	Blocks       []any       `json:"blocks"`
+	Attachments  []any       `json:"attachments"`
 }
 
 const mcpNotice = "MCP sign-in is not supported through Heimdall. Use your native harness directly; do not paste OAuth codes here."
 
 var oauthURL = regexp.MustCompile(`(?i)https?://[^\s<>|]+`)
-var oauthLine = regexp.MustCompile(`(?im)^.*Sign in to MCP server .* in your browser:.*$`)
+var oauthAuthorize = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*\n[ \t]*<?https?://[^\s<>|]+>?`)
+var oauthLine = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*$`)
 var mcpCommand = regexp.MustCompile(`(?i)^/?mcp(?:\s+(?:login|logout|reconnect)\s+[^\s]+)?$`)
 var historicalImage = regexp.MustCompile(`(?i)\b(?:image|images|img|photo|photos|picture|pictures|screenshot|screenshots|attachment|attachments|attached|upload|uploaded)\b`)
 
@@ -43,15 +46,17 @@ func hideOAuth(text string) string {
 	if mcpCommand.MatchString(strings.TrimSpace(text)) {
 		return omittedMCP
 	}
+	text = oauthAuthorize.ReplaceAllString(text, omittedMCP)
 	text = oauthLine.ReplaceAllString(text, omittedMCP)
 	return oauthURL.ReplaceAllStringFunc(text, func(raw string) string {
 		u, err := url.Parse(raw)
 		if err != nil || u.Scheme != "http" || u.User != nil {
 			return raw
 		}
-		host := strings.ToLower(u.Hostname())
-		q := u.Query()
-		if (host == "localhost" || host == "127.0.0.1" || host == "::1") && q.Has("state") && (q.Has("code") || q.Has("error")) {
+		host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+		q, _ := url.ParseQuery(strings.ReplaceAll(u.RawQuery+"&"+u.Fragment, ";", "&"))
+		ip := net.ParseIP(host)
+		if (host == "localhost" || ip.IsLoopback()) && q.Has("state") && (q.Has("code") || q.Has("error")) {
 			return omittedMCP
 		}
 		return raw
@@ -114,7 +119,7 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if text == "" && embedded == "" && len(m.Files) == 0 {
 		return finish()
 	}
-	mention := regexp.MustCompile(`<@` + regexp.QuoteMeta(s.botID) + `(?:\|[^>]+)?>`)
+	mention := s.mention()
 	addressed := m.ChannelType == "im" || mention.MatchString(m.Text)
 	commandText := stripBoundaryMention(text, mention)
 	commandText = router.NormalizeSlash(commandText, s.botID)
@@ -134,8 +139,9 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	// earlier rows is the durable fence, including across restart.
 	downstream := accept
 	accept = func(ctx context.Context, input core.Inbound) error {
-		s.ingressMu.Lock()
-		defer s.ingressMu.Unlock()
+		lock := s.conversationLock(in.Conv)
+		lock.Lock()
+		defer lock.Unlock()
 		pending, err := s.opt.Store.EventPending(e.ID)
 		if err != nil || !pending {
 			return err
@@ -159,6 +165,9 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 				if pm.Channel != m.Channel || first(pm.ThreadTS, pm.TS) != thread || compareTS(pm.TS, m.TS) >= 0 {
 					continue
 				}
+				if !s.turnInput(pm) {
+					continue
+				}
 				if pm.User != m.User && !slices.Contains(s.opt.Owners, principal.Key()) {
 					continue
 				}
@@ -173,6 +182,11 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 			if err := s.opt.Store.CompleteIngress(e.ID, updated, victims); err != nil {
 				return err
 			}
+			s.retryMu.Lock()
+			for _, id := range victims {
+				delete(s.retries, id)
+			}
+			s.retryMu.Unlock()
 		}
 		if err := downstream(ctx, input); err != nil {
 			return err
@@ -364,4 +378,15 @@ func stripBoundaryMention(text string, mention *regexp.Regexp) string {
 		return strings.TrimSpace(text[:last[0]])
 	}
 	return text
+}
+
+func (s *Slack) turnInput(m eventMessage) bool {
+	if m.Type != "message" || m.User == "" || m.User == s.botID || m.BotID != "" || !slices.Contains([]string{"", "file_share", "thread_broadcast"}, m.Subtype) || !s.addressed(m) {
+		return false
+	}
+	text := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), s.mention()), s.botID)
+	if mcpCommand.MatchString(text) || (!meaningfulMCP(hideOAuth(text)) && len(m.Files) == 0 && !meaningfulMCP(embeddedContent(m))) {
+		return false
+	}
+	return router.IsTurnInput(text)
 }

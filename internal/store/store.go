@@ -816,3 +816,39 @@ func (s *Store) FirstMessage(p core.Principal) (bool, error) {
 	n, err := res.RowsAffected()
 	return n == 1, err
 }
+
+// CallerSeen is read-only: failed owner resolution must not consume the notice.
+func (s *Store) CallerSeen(p core.Principal) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM callers WHERE principal=?`, p.Key()).Scan(&n)
+	return n > 0, err
+}
+
+// NotifyCaller commits the seen marker only together with durable deliveries.
+func (s *Store) NotifyCaller(p core.Principal, notices []core.Outbound) error {
+	if len(notices) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO callers(principal,first_at) VALUES(?,?) ON CONFLICT(principal) DO NOTHING`, p.Key(), now())
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	for _, out := range notices {
+		if _, err = enqueue(tx, out); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

@@ -12,8 +12,8 @@ with fake Web API/Socket Mode and native-protocol end-to-end tests. No live Slac
 business-policy rows and all 16 independent amendments with code evidence.
 
 - Startup/config/workspace validation and per-data-directory lock; raw events
-  commit to SQLite before ack. Four bounded post-ack workers preserve normal
-  channel order; a separate verified stop/cancel lane bypasses heavy work.
+  commit to SQLite before ack. Conversation-head post-ack scheduling preserves normal
+  conversation timestamp order; a separate verified stop/cancel lane bypasses heavy work.
   Workers verify live same-workspace email and fetch history/download files.
 - Live history plus stored ambient plus recent delivered assistant outputs
   share one 16000-character untrusted context budget. Embedded content cannot
@@ -68,29 +68,56 @@ business-policy rows and all 16 independent amendments with code evidence.
   orchestrator arranges a single-consumer live window. Exact scopes/settings,
   secret names and config are in README's Slack live-window section.
 
-## Re-review fixes (2026-11-01)
+## Slack ingress redesign (2026-11-01)
 
-- Verified stop/cancel fences older ingress messages in the same conversation
-  by event timestamp: own caller only, or every caller for an owner. Later
-  messages remain. Suppression and control receipt persist together; normal
-  admission rechecks completion under the same short lock. Replies count
-  dropped ingress alongside router work. Telegram ingestion is serial and has
-  no bypass lane, so this race does not apply there.
-- Identity retries use single requests and timer rescheduling, three attempts
-  maximum; full queues retain durable backlog without blocking socket ack.
-  User-scoped permanent failures finish silently; token/scope failures log a
-  rate-limited operator alert. No unverified caller is admitted.
-- MCP filtering redacts native HTTP loopback callbacks in place and preserves
-  ordinary URLs and useful surrounding content. Copy I/O runs outside disk
-  reservation lock; recovered done turns normalize stale progress phases
-  before pending delivery, preserving success cleanup and failure status.
+Supersedes the previous channel-worker/three-attempt ingress model.
 
-Verification: `go vet ./...`, `go test -race -count=1 ./...`, and
-`CGO_ENABLED=0 go build` passed. Seven temporary mutation checks removed each
-fix in turn and the corresponding regression failed. New coverage lives in
-`internal/iface/slack/rereview_test.go`, router ingress-control receipt tests,
-and the strengthened store completion-migration test. Fakes only; live
-validation remains with the orchestrator.
+- SQLite is the sole backlog. Socket post-ack callback issues a nonblocking
+  wakeup only. Dispatcher scans pending events, sorts by Slack timestamp and
+  selects one due normal head per (channel, root thread). Later inputs stay
+  behind a retrying head. Active event IDs prevent duplicate dispatch; waiting
+  retries own no worker. Independent conversations get independent workers,
+  including threads in the same channel. There is no global four-worker cap:
+  simultaneous heavy work is bounded by active conversations, rather than four
+  slow downloads starving unrelated chats. Controls retain a bypass lane and
+  durable fence. Admission locks are per conversation.
+- Transient identity/store/router errors back off 1, 2, 4…64 seconds over
+  `slack.ingress_retry_seconds` (default 600, configurable 1–3600). Token/scope
+  rejections alert at most once/minute and exhaust after three failed attempts.
+  HTTP 429 / ratelimited does not increment failed attempts; Retry-After is
+  honored (API cap five minutes), with a separate 100-rate-limit overall cap
+  and the same elapsed window. Restart reconstructs backlog; in-memory retry
+  delays/counters restart. Definitively unverified callers finish silently.
+- Exhaustion atomically completes the raw event and queues one durable generic
+  thread notice for DMs, mentions, admitted controls and known bot threads.
+  Bot-thread evidence: parent_user_id, prior delivered replies, or a live root
+  lookup. If the root lookup fails, retain the exhausted event for notice classification
+  retries; never silently complete an unknown thread. Admission retries have
+  ended; metadata resolution resumes after backoff until Slack recovers.
+  Notices contain no input text, wake normal outbound delivery and inherit its
+  documented at-least-once platform delivery semantics.
+- Ambient identity choice: retain live users.info even for context-only input,
+  matching the hub. No cached identity ever authorizes turns or controls.
+- Owner lookup retries are bounded again. Caller seen marker and outbound owner
+  notices commit together; delivery failures retry through the durable outbox.
+  Failed owner resolution leaves caller unseen and retries on their next message.
+- Fences drop/count only addressed turn input; ambient, bot messages and
+  non-turn commands survive. Fenced retry entries are removed. Persisted control
+  receipts preserve count across router admission retries.
+- Native HTTP loopback callbacks cover IP.IsLoopback, localhost with a trailing
+  dot, semicolon query separators and fragments. Sign-in header plus following
+  authorize URL are redacted together. Removed per-field embedded hideOAuth;
+  retained a whole-field MCP command guard and one assembled-content call
+  before JSON encoding: inbound filtering
+  cannot reliably match a sign-in header/newline across JSON escapes.
+- Fake server rejects non-API probes before token checks. All newly introduced
+  hook writes use a locked setter; existing locked send-test writes stay intact.
+
+Fakes only; no live Slack/Telegram or heimdall-live operations. Final `go vet ./...`, `go test -race -count=1 ./...` and `CGO_ENABLED=0` build
+passed. Nine reversible mutation checks caught removed isolation, head-order,
+429-budget, exhaustion-notice, owner-lookup retry, owner-seen, fence-scope,
+fence-cleanup and loopback fixes; sources restored afterward. Regression names
+in `internal/iface/slack/scheduling_test.go` and router owner-notice recovery test.
 
 ## Earlier phase-1 state (historical)
 

@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"github.com/misunders2d/heimdall/internal/core"
 	"time"
 )
 
@@ -111,6 +112,30 @@ func (s *Store) CompleteIngress(control int64, payload []byte, ids []int64) erro
 		}
 	}
 	if _, err = tx.Exec(`UPDATE interface_events SET payload=? WHERE id=? AND complete=0`, payload, control); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ExhaustEvent atomically queues one failure notice and completes ingress.
+func (s *Store) ExhaustEvent(id int64, notice *core.Outbound) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var pending int
+	if err = tx.QueryRow(`SELECT 1 FROM interface_events WHERE id=? AND complete=0`, id).Scan(&pending); errors.Is(err, sql.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if notice != nil {
+		if _, err = enqueue(tx, *notice); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE interface_events SET complete=1,payload=NULL,completed_at=? WHERE id=?`, now(), id); err != nil {
 		return err
 	}
 	return tx.Commit()

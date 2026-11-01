@@ -119,6 +119,10 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	for _, i := range ifaces {
 		r.ifaces[i.Name()] = i
 		r.wakeOut[i.Name()] = make(chan struct{}, 1)
+		if w, ok := i.(interface{ SetOutboundWake(func()) }); ok {
+			name := i.Name()
+			w.SetOutboundWake(func() { r.wake(name) })
+		}
 	}
 	return r
 }

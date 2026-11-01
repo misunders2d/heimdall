@@ -22,13 +22,13 @@ func TestReviewIdentityFailureRetried(t *testing.T) {
 	s, st := testSlack(t, f)
 	var fail atomic.Bool
 	fail.Store(true)
-	f.hook = func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+	f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 		if r.URL.Path == "/users.info" && fail.Load() {
 			w.WriteHeader(503)
 			return true
 		}
 		return false
-	}
+	})
 	m := f.event("D1", "im", "Uowner", "hello", "")
 	raw, _ := json.Marshal(map[string]any{"event": m})
 	st.StageEvent("slack", "retry", raw)
@@ -57,13 +57,13 @@ func TestReviewFailureStatusSurvivesRecovery(t *testing.T) {
 	st.SaveProgress(store.Progress{Turn: 71, Conv: k, TS: "status", Phase: "done"})
 	s.progress[71] = &statusUpdate{done: make(chan struct{})}
 	close(s.progress[71].done)
-	f.hook = func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+	f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 		if r.URL.Path == "/chat.postMessage" || r.URL.Path == "/chat.update" {
 			fmt.Fprint(w, `{"ok":false,"error":"not_in_channel"}`)
 			return true
 		}
 		return false
-	}
+	})
 	if s.Send(context.Background(), core.Outbound{ID: 91, TurnID: 71, Conv: k, Text: "answer"}) == nil {
 		t.Fatal("expected rejected answer")
 	}
@@ -120,7 +120,7 @@ func TestReviewControlsBypassBlockedIngress(t *testing.T) {
 	blocked := make(chan struct{})
 	defer close(blocked)
 	var entered atomic.Int32
-	f.hook = func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+	f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 		if r.URL.Path == "/conversations.history" {
 			entered.Add(1)
 			select {
@@ -131,7 +131,7 @@ func TestReviewControlsBypassBlockedIngress(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	got := make(chan core.Inbound, 8)
 	runSlack(t, s, func(_ context.Context, in core.Inbound) error { got <- in; return nil })
 	<-f.connected
@@ -214,13 +214,13 @@ func TestReviewUploadCompletionUncertainAndSafeReason(t *testing.T) {
 	s, _ := readySlack(t, f)
 	path := s.opt.DataDir + "/out.txt"
 	os.WriteFile(path, []byte("ok"), 0600)
-	f.hook = func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+	f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 		if r.URL.Path == "/files.completeUploadExternal" {
 			w.WriteHeader(503)
 			return true
 		}
 		return false
-	}
+	})
 	err := s.Send(context.Background(), core.Outbound{ID: 34, Conv: core.ConvKey{Interface: "slack", Chat: "C1", Thread: "1"}, File: &core.File{Path: path, Name: "out.txt"}})
 	if err != nil {
 		t.Fatal(err)

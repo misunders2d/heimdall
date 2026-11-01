@@ -106,3 +106,6 @@ type AnswerCleaner interface {
 
 // IsControl uses the same parser as router admission.
 func IsControl(text string) bool { k := parseCommand(text).Kind; return k == cmdStop || k == cmdCancel }
+
+// IsTurnInput shares the router command classification with ingress fences.
+func IsTurnInput(text string) bool { return parseCommand(text).Kind == cmdMessage }

@@ -1873,3 +1873,23 @@ func TestIngressControlReceiptReplies(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnerNoticeResolutionFailureRetriedOnNextMessage(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(employee, "c1", "!help")
+	e.reply()
+	if seen, _ := e.st.CallerSeen(core.Principal{Platform: "fake", ID: "employee"}); seen {
+		t.Fatal("failed resolution marked caller seen")
+	}
+	e.f.notify.Store(true)
+	e.send(employee, "c1", "!help")
+	found := false
+	for i := 0; i < 2; i++ {
+		if out := e.reply(); out.Conv.Chat == "dm-owner" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("notice lost after transient resolution failure")
+	}
+}

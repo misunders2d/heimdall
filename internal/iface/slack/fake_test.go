@@ -66,6 +66,14 @@ func newSlackFake(t *testing.T) *slackFake {
 }
 func (f *slackFake) serve(w http.ResponseWriter, r *http.Request) {
 	method := strings.TrimPrefix(r.URL.Path, "/")
+	if r.Method != http.MethodPost && method != "socket" && method != "file" && method != "upload" {
+		http.NotFound(w, r)
+		return
+	}
+	if !strings.Contains(method, ".") && method != "socket" && method != "file" && method != "upload" {
+		http.NotFound(w, r)
+		return
+	}
 	if method == "socket" {
 		f.socket(w, r)
 		return
@@ -302,4 +310,10 @@ func runSlack(t *testing.T, s *Slack, accept func(context.Context, core.Inbound)
 		}
 	})
 	return cancel
+}
+
+func (f *slackFake) setHook(h func(http.ResponseWriter, *http.Request, map[string]any) bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hook = h
 }

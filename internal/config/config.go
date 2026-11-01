@@ -73,8 +73,9 @@ func (c *Config) UnmentionedCommands() []string {
 
 // Slack configures Socket Mode; both tokens come only from HEIMDALL_SLACK_*.
 type Slack struct {
-	EventDedupeHours int    `json:"event_dedupe_hours,omitempty"`
-	TeamID           string `json:"team_id"`
+	IngressRetrySeconds int    `json:"ingress_retry_seconds,omitempty"`
+	EventDedupeHours    int    `json:"event_dedupe_hours,omitempty"`
+	TeamID              string `json:"team_id"`
 
 	MaxFileBytes  int64  `json:"max_file_bytes,omitempty"`
 	StatusName    string `json:"status_name,omitempty"`
@@ -153,6 +154,12 @@ func (c *Config) fill() error {
 	if c.Slack != nil {
 		if c.Slack.TeamID == "" || strings.ContainsAny(c.Slack.TeamID, " \t\r\n") {
 			return errors.New("slack.team_id is required")
+		}
+		if c.Slack.IngressRetrySeconds == 0 {
+			c.Slack.IngressRetrySeconds = 600
+		}
+		if c.Slack.IngressRetrySeconds < 1 || c.Slack.IngressRetrySeconds > 3600 {
+			return errors.New("slack.ingress_retry_seconds must be 1-3600")
 		}
 		if c.Slack.EventDedupeHours == 0 {
 			c.Slack.EventDedupeHours = 72

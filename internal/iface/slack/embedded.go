@@ -32,7 +32,12 @@ func (x *extractor) field(v any) string {
 		x.truncated = true
 		s = clip(s, 12000)
 	}
-	return hideOAuth(unescape(s))
+	s = unescape(s)
+	// Whole-field native commands need filtering before fields are combined.
+	if mcpCommand.MatchString(strings.TrimSpace(s)) {
+		return omittedMCP
+	}
+	return s
 }
 func (x *extractor) rich(v any, depth int) string {
 	if !x.node(depth) {

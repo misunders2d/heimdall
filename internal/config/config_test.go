@@ -147,3 +147,26 @@ func TestReviewUnmentionedAndDedupeConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestSlackIngressRetryWindow(t *testing.T) {
+	for _, seconds := range []int{-1, 0, 1, 600, 3600, 3601} {
+		raw := `{"data_dir":"/tmp/h","mode":"personal","owners":["slack:owner@example.test"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}},"slack":{"team_id":"Ttest","ingress_retry_seconds":` + strconv.Itoa(seconds) + `}}`
+		cfg, err := Parse([]byte(raw))
+		if seconds < 0 || seconds > 3600 {
+			if err == nil {
+				t.Fatal("invalid retry window accepted")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := seconds
+		if want == 0 {
+			want = 600
+		}
+		if cfg.Slack.IngressRetrySeconds != want {
+			t.Fatal("wrong retry window")
+		}
+	}
+}

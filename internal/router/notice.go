@@ -20,12 +20,12 @@ type OwnerNotifier interface {
 // where, never what. Every identified caller is non-root without an
 // allowlist, so this is how the owner learns who uses the bot.
 func (r *Router) newCaller(in core.Inbound) {
-	first, err := r.store.FirstMessage(in.From)
+	seen, err := r.store.CallerSeen(in.From)
 	if err != nil {
 		r.log.Printf("new-caller check for a %s caller failed: %v", in.From.Platform, err)
 		return
 	}
-	if !first {
+	if seen {
 		return
 	}
 	where := in.Conv.String()
@@ -42,6 +42,7 @@ func (r *Router) newCaller(in core.Inbound) {
 		owners = append(owners, key)
 	}
 	slices.Sort(owners)
+	var notices []core.Outbound
 	for _, key := range owners {
 		platform, id, _ := strings.Cut(key, ":")
 		n, ok := r.ifaces[platform].(OwnerNotifier)
@@ -49,7 +50,16 @@ func (r *Router) newCaller(in core.Inbound) {
 			continue
 		}
 		if conv, ok := n.OwnerChat(id); ok {
-			r.enqueue(core.Outbound{Conv: conv, Text: text})
+			notices = append(notices, core.Outbound{Conv: conv, Text: text})
+		} else {
+			return
 		}
+	}
+	if err := r.store.NotifyCaller(in.From, notices); err != nil {
+		r.log.Print("new-caller notice storage failed")
+		return
+	}
+	for _, out := range notices {
+		r.wake(out.Conv.Interface)
 	}
 }

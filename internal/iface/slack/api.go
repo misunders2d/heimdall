@@ -145,7 +145,11 @@ func (a *apiClient) once(parent context.Context, method string, data []byte, out
 		}
 		e := &apiError{Code: code, Status: 200, Ambiguous: transientCodes[code]}
 		if e.Ambiguous {
-			return e, true, 0
+			after := 0
+			if code == "ratelimited" {
+				after, _ = strconv.Atoi(res.Header.Get("Retry-After"))
+			}
+			return e, true, time.Duration(min(max(after, 0), 300)) * time.Second
 		}
 		return router.PermanentError{Err: e}, false, 0
 	}

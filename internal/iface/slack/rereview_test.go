@@ -30,13 +30,13 @@ func TestRereviewIdentityPermanentAndBoundedRetries(t *testing.T) {
 		t.Run(code, func(t *testing.T) {
 			f := newSlackFake(t)
 			s, st := testSlack(t, f)
-			f.hook = func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+			f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 				if r.URL.Path == "/users.info" {
 					fmt.Fprintf(w, `{"ok":false,"error":%q}`, code)
 					return true
 				}
 				return false
-			}
+			})
 			e := stageReview(t, s, f.event("D1", "im", "Uowner", "hello", ""))
 			for i := 0; i < 3; i++ {
 				start := time.Now()
@@ -54,6 +54,9 @@ func TestRereviewIdentityPermanentAndBoundedRetries(t *testing.T) {
 				s.retryMu.Lock()
 				r := s.retries[e.ID]
 				r.next = time.Time{}
+				if i == 1 {
+					r.started = time.Now().Add(-11 * time.Minute)
+				}
 				s.retries[e.ID] = r
 				s.retryMu.Unlock()
 			}
@@ -66,13 +69,13 @@ func TestRereviewIdentityPermanentAndBoundedRetries(t *testing.T) {
 func TestRereviewInvalidRecordFailsClosed(t *testing.T) {
 	f := newSlackFake(t)
 	s, st := testSlack(t, f)
-	f.hook = func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+	f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 		if r.URL.Path == "/users.info" {
 			fmt.Fprint(w, `{"ok":true,"user":{"id":"different"}}`)
 			return true
 		}
 		return false
-	}
+	})
 	e := stageReview(t, s, f.event("D1", "im", "Uowner", "hello", ""))
 	if err := s.process(context.Background(), e, func(context.Context, core.Inbound) error { t.Error("admitted"); return nil }); err != nil {
 		t.Fatal(err)
@@ -191,13 +194,13 @@ func TestRereviewRecoveredDoneStatusDelivery(t *testing.T) {
 				t.Fatal("stale phase", p.Phase)
 			}
 			if fail {
-				f.hook = func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+				f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 					if r.URL.Path == "/chat.postMessage" || r.URL.Path == "/chat.update" {
 						fmt.Fprint(w, `{"ok":false,"error":"not_in_channel"}`)
 						return true
 					}
 					return false
-				}
+				})
 			}
 			err = s.Send(ctx, core.Outbound{ID: 99, TurnID: turn, Conv: k, Text: "answer"})
 			if fail {
@@ -217,7 +220,7 @@ func TestRereviewControlDuringHistoryAndReceiptRetry(t *testing.T) {
 	s, _ := testSlack(t, f)
 	s.botID = "Ubot"
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
-	f.hook = func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+	f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
 		if r.URL.Path == "/conversations.replies" {
 			close(entered)
 			<-release
@@ -225,7 +228,7 @@ func TestRereviewControlDuringHistoryAndReceiptRetry(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	earlier := stageReview(t, s, f.event("D1", "im", "Uowner", "do the thing", "root"))
 	go func() {
 		done <- s.process(context.Background(), earlier, func(context.Context, core.Inbound) error { t.Error("earlier turn started after stop"); return nil })
@@ -272,7 +275,7 @@ func TestRereviewFullControlBufferStillAcks(t *testing.T) {
 	s, _ := testSlack(t, f)
 	blocked := make(chan struct{})
 	defer close(blocked)
-	f.hook = func(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
+	f.setHook(func(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
 		if r.URL.Path == "/users.info" && args["user"] == "Uowner" {
 			select {
 			case <-blocked:
@@ -282,7 +285,7 @@ func TestRereviewFullControlBufferStillAcks(t *testing.T) {
 			return true
 		}
 		return false
-	}
+	})
 	runSlack(t, s, func(context.Context, core.Inbound) error { t.Error("unverified admitted"); return nil })
 	<-f.connected
 	for i := 0; i < 70; i++ {
