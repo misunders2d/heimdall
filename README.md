@@ -44,6 +44,8 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
 | `commands.unmentioned` | shared addressing policy; default `["stop","cancel"]`, `["all"]` allows every command, `[]` requires addressing for every command |
 | `slack.team_id` | workspace the bot token must belong to; checked with `auth.test` before Socket Mode |
+| `slack.dispatch_concurrency` | normal ingress workers, default `8`, range `1`–`128`; one additional reserved control worker |
+| `slack.ingress_retry_seconds` | elapsed ingress retry window from durable receipt, default `600`, range `1`–`3600` seconds |
 | `slack.event_dedupe_hours` | completed-event dedupe retention, default `72` hours, range `1`–`720`; pending events never pruned |
 | `slack.max_file_bytes` | inbound cap per file, default `200000000` (200 MB); downloads also reserve 1 GiB free disk space across concurrent downloads |
 | `slack.status_name`, `slack.status_updates` | optional progress display name; set `status_updates: false` to disable progress messages |

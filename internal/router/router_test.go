@@ -31,16 +31,17 @@ func TestMain(m *testing.M) {
 
 // fakeIface is a chat platform driven by the test.
 type fakeIface struct {
-	in      chan core.Inbound
-	out     chan core.Outbound
-	fails   atomic.Int64 // transient Send failures still to report
-	typed   atomic.Int64 // Typing calls
-	note    atomic.Value // PromptNote, a string
-	react   atomic.Bool  // offer reactions
-	group   atomic.Bool  // keep group context
-	files   atomic.Bool  // send files
-	notify  atomic.Bool  // reach owners privately
-	uploads string       // UploadDir
+	in        chan core.Inbound
+	out       chan core.Outbound
+	fails     atomic.Int64 // transient Send failures still to report
+	typed     atomic.Int64 // Typing calls
+	note      atomic.Value // PromptNote, a string
+	react     atomic.Bool  // offer reactions
+	group     atomic.Bool  // keep group context
+	files     atomic.Bool  // send files
+	ownerHook func(string) (core.ConvKey, bool)
+	notify    atomic.Bool // reach owners privately
+	uploads   string      // UploadDir
 
 	mu   sync.Mutex
 	sent map[string]string // a sent file's content, read when it was sent, by path
@@ -56,6 +57,12 @@ func (f *fakeIface) fileSent(path string) (string, bool) {
 }
 
 func (f *fakeIface) OwnerChat(id string) (core.ConvKey, bool) {
+	f.mu.Lock()
+	hook := f.ownerHook
+	f.mu.Unlock()
+	if hook != nil {
+		return hook(id)
+	}
 	return core.ConvKey{Interface: "fake", Chat: "dm-" + id}, f.notify.Load()
 }
 
@@ -1874,7 +1881,7 @@ func TestIngressControlReceiptReplies(t *testing.T) {
 	}
 }
 
-func TestOwnerNoticeResolutionFailureRetriedOnNextMessage(t *testing.T) {
+func TestOwnerNoticeResolutionFailureRetriedOnLaterAttempt(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	e.send(employee, "c1", "!help")
 	e.reply()
@@ -1882,6 +1889,7 @@ func TestOwnerNoticeResolutionFailureRetriedOnNextMessage(t *testing.T) {
 		t.Fatal("failed resolution marked caller seen")
 	}
 	e.f.notify.Store(true)
+	e.r.notifyCaller(core.Inbound{From: core.Principal{Platform: "fake", ID: "employee"}, Conv: core.ConvKey{Interface: "fake", Chat: "c1"}})
 	e.send(employee, "c1", "!help")
 	found := false
 	for i := 0; i < 2; i++ {

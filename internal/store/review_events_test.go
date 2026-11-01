@@ -57,12 +57,12 @@ func TestReviewEventCompletionMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, step := range steps[:len(steps)-1] {
+	for _, step := range steps[:11] {
 		if _, err := db.Exec(step); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, len(steps)-1)); err != nil {
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, 11)); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-96 * time.Hour).UnixMilli()

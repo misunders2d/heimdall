@@ -17,25 +17,26 @@ import (
 )
 
 type eventMessage struct {
-	Type         string      `json:"type"`
-	Subtype      string      `json:"subtype"`
-	User         string      `json:"user"`
-	Text         string      `json:"text"`
-	Channel      string      `json:"channel"`
-	ChannelType  string      `json:"channel_type"`
-	BotID        string      `json:"bot_id"`
-	TS           string      `json:"ts"`
-	ParentUserID string      `json:"parent_user_id"`
-	ThreadTS     string      `json:"thread_ts"`
-	Files        []slackFile `json:"files"`
-	Blocks       []any       `json:"blocks"`
-	Attachments  []any       `json:"attachments"`
+	ingressControl bool
+	Type           string      `json:"type"`
+	Subtype        string      `json:"subtype"`
+	User           string      `json:"user"`
+	Text           string      `json:"text"`
+	Channel        string      `json:"channel"`
+	ChannelType    string      `json:"channel_type"`
+	BotID          string      `json:"bot_id"`
+	TS             string      `json:"ts"`
+	ParentUserID   string      `json:"parent_user_id"`
+	ThreadTS       string      `json:"thread_ts"`
+	Files          []slackFile `json:"files"`
+	Blocks         []any       `json:"blocks"`
+	Attachments    []any       `json:"attachments"`
 }
 
 const mcpNotice = "MCP sign-in is not supported through Heimdall. Use your native harness directly; do not paste OAuth codes here."
 
 var oauthURL = regexp.MustCompile(`(?i)https?://[^\s<>|]+`)
-var oauthAuthorize = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*\n[ \t]*<?https?://[^\s<>|]+>?`)
+var oauthAuthorize = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*\n\s*<?https?://[^\s<>|]+>?`)
 var oauthLine = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*$`)
 var mcpCommand = regexp.MustCompile(`(?i)^/?mcp(?:\s+(?:login|logout|reconnect)\s+[^\s]+)?$`)
 var historicalImage = regexp.MustCompile(`(?i)\b(?:image|images|img|photo|photos|picture|pictures|screenshot|screenshots|attachment|attachments|attached|upload|uploaded)\b`)
@@ -53,10 +54,10 @@ func hideOAuth(text string) string {
 		if err != nil || u.Scheme != "http" || u.User != nil {
 			return raw
 		}
-		host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+		host := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
 		q, _ := url.ParseQuery(strings.ReplaceAll(u.RawQuery+"&"+u.Fragment, ";", "&"))
 		ip := net.ParseIP(host)
-		if (host == "localhost" || ip.IsLoopback()) && q.Has("state") && (q.Has("code") || q.Has("error")) {
+		if (host == "localhost" || strings.HasPrefix(host, "127.") || ip.IsLoopback()) && q.Has("state") && (q.Has("code") || q.Has("error")) {
 			return omittedMCP
 		}
 		return raw
@@ -139,9 +140,8 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	// earlier rows is the durable fence, including across restart.
 	downstream := accept
 	accept = func(ctx context.Context, input core.Inbound) error {
-		lock := s.conversationLock(in.Conv)
-		lock.Lock()
-		defer lock.Unlock()
+		unlock := s.conversationLock(in.Conv)
+		defer unlock()
 		pending, err := s.opt.Store.EventPending(e.ID)
 		if err != nil || !pending {
 			return err
@@ -172,7 +172,17 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 					continue
 				}
 				victims = append(victims, prior.ID)
-				input.ControlIngress++
+				if pm.User == m.User {
+					input.ControlIngress++
+				} else {
+					u, err := s.liveUser(ctx, pm.User)
+					if err != nil {
+						return err
+					}
+					if _, ok := Verify(u, s.opt.TeamID); ok {
+						input.ControlIngress++
+					}
+				}
 			}
 			payload.ControlIngress = input.ControlIngress
 			updated, err := json.Marshal(payload)

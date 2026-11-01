@@ -73,6 +73,7 @@ func (c *Config) UnmentionedCommands() []string {
 
 // Slack configures Socket Mode; both tokens come only from HEIMDALL_SLACK_*.
 type Slack struct {
+	DispatchConcurrency int    `json:"dispatch_concurrency,omitempty"`
 	IngressRetrySeconds int    `json:"ingress_retry_seconds,omitempty"`
 	EventDedupeHours    int    `json:"event_dedupe_hours,omitempty"`
 	TeamID              string `json:"team_id"`
@@ -154,6 +155,12 @@ func (c *Config) fill() error {
 	if c.Slack != nil {
 		if c.Slack.TeamID == "" || strings.ContainsAny(c.Slack.TeamID, " \t\r\n") {
 			return errors.New("slack.team_id is required")
+		}
+		if c.Slack.DispatchConcurrency == 0 {
+			c.Slack.DispatchConcurrency = 8
+		}
+		if c.Slack.DispatchConcurrency < 1 || c.Slack.DispatchConcurrency > 128 {
+			return errors.New("slack.dispatch_concurrency must be 1-128")
 		}
 		if c.Slack.IngressRetrySeconds == 0 {
 			c.Slack.IngressRetrySeconds = 600

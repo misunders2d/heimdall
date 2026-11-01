@@ -35,6 +35,7 @@ var safeErrorCode = regexp.MustCompile(`^[a-z_]{1,64}$`)
 var transientCodes = map[string]bool{"fatal_error": true, "internal_error": true, "request_timeout": true, "service_unavailable": true, "ratelimited": true}
 
 type apiClient struct {
+	pacer       *apiPacer
 	base, token string
 	authScopes  string
 	http        *http.Client
@@ -43,7 +44,9 @@ type apiClient struct {
 }
 
 func newAPI(base, token string, client *http.Client) *apiClient {
+	var pacer *apiPacer
 	if base == "" {
+		pacer = tier4
 		base = "https://slack.com/api"
 	}
 	if client == nil {
@@ -52,7 +55,7 @@ func newAPI(base, token string, client *http.Client) *apiClient {
 	// Never send API credentials through redirects, including same-host ones.
 	c := *client
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &apiClient{base: strings.TrimRight(base, "/"), token: token, http: &c, timeout: 15 * time.Second, pause: pause}
+	return &apiClient{pacer: pacer, base: strings.TrimRight(base, "/"), token: token, http: &c, timeout: 15 * time.Second, pause: pause}
 }
 func pause(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
@@ -98,6 +101,11 @@ func (a *apiClient) call(ctx context.Context, method string, args any, out any) 
 	return errors.New("slack: retry limit reached")
 }
 func (a *apiClient) once(parent context.Context, method string, data []byte, out any) (error, bool, time.Duration) {
+	if a.pacer != nil {
+		if err := a.pacer.wait(parent, method); err != nil {
+			return err, false, 0
+		}
+	}
 	ctx, cancel := context.WithTimeout(parent, a.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.base+"/"+method, bytes.NewReader(data))

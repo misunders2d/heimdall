@@ -46,7 +46,7 @@ func TestRereviewIdentityPermanentAndBoundedRetries(t *testing.T) {
 				if time.Since(start) > 500*time.Millisecond {
 					t.Fatal("retry held lane")
 				}
-				if i == 0 && (code == "user_not_found" || code == "user_not_visible" || code == "account_inactive") {
+				if i == 0 && (code == "user_not_found" || code == "user_not_visible") {
 					if p, _ := st.EventPending(e.ID); p {
 						t.Fatal("permanent user error retried")
 					}
@@ -54,7 +54,7 @@ func TestRereviewIdentityPermanentAndBoundedRetries(t *testing.T) {
 				s.retryMu.Lock()
 				r := s.retries[e.ID]
 				r.next = time.Time{}
-				if i == 1 {
+				if i == 1 && code == "internal_error" {
 					r.started = time.Now().Add(-11 * time.Minute)
 				}
 				s.retries[e.ID] = r

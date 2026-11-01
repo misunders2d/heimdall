@@ -72,11 +72,13 @@ type Options struct {
 }
 
 type Router struct {
-	opt    Options
-	store  *store.Store
-	ifaces map[string]Interface
-	sem    chan struct{}
-	log    *log.Logger
+	noticeRetry time.Duration
+	noticeQueue chan core.Inbound
+	opt         Options
+	store       *store.Store
+	ifaces      map[string]Interface
+	sem         chan struct{}
+	log         *log.Logger
 	// guardLog records messages the hub's prompt-injection scoring flags.
 	guardLog *guardLog
 
@@ -112,7 +114,7 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.GuardLogMax <= 0 {
 		opt.GuardLogMax = DefaultGuardLogMax
 	}
-	r := &Router{opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	r := &Router{noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.GuardLog != "" {
 		r.guardLog = &guardLog{path: opt.GuardLog, max: opt.GuardLogMax}
 	}
@@ -157,6 +159,8 @@ func (r *Router) Run(parent context.Context) error {
 	r.mu.Unlock()
 	r.pruneOutbox()
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); r.callerNotices(ctx) }()
 	for _, i := range r.ifaces {
 		wg.Add(1)
 		go func() { defer wg.Done(); r.deliver(ctx, i) }()

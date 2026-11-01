@@ -170,3 +170,26 @@ func TestSlackIngressRetryWindow(t *testing.T) {
 		}
 	}
 }
+
+func TestSlackDispatchConcurrency(t *testing.T) {
+	for _, n := range []int{-1, 0, 1, 8, 128, 129} {
+		raw := `{"data_dir":"/tmp/h","mode":"personal","owners":["slack:owner@example.test"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}},"slack":{"team_id":"Ttest","dispatch_concurrency":` + strconv.Itoa(n) + `}}`
+		cfg, err := Parse([]byte(raw))
+		if n < 0 || n > 128 {
+			if err == nil {
+				t.Fatal("invalid cap accepted")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := n
+		if want == 0 {
+			want = 8
+		}
+		if cfg.Slack.DispatchConcurrency != want {
+			t.Fatal("wrong dispatch cap")
+		}
+	}
+}

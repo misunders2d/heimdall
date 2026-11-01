@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ type Options struct {
 	MaxFileBytes                                    int64
 	EventDedupeHours                                int
 	IngressRetryWindow                              time.Duration
+	DispatchConcurrency                             int
 	StatusUpdates                                   *bool
 	Log                                             *log.Logger
 	// Test-only injection; never accepted from config.
@@ -49,7 +51,7 @@ type Slack struct {
 	botID, name  string
 	mu           sync.Mutex
 	ingressMu    sync.Mutex
-	ingressLocks map[core.ConvKey]*sync.Mutex
+	ingressLocks map[core.ConvKey]*ingressLock
 	retryMu      sync.Mutex
 	retries      map[int64]eventRetry
 	operatorLog  time.Time
@@ -74,6 +76,12 @@ func New(opt Options) (*Slack, error) {
 	}
 	if opt.TeamID == "" || opt.Store == nil || opt.DataDir == "" {
 		return nil, errors.New("slack: team_id, store and data directory are required")
+	}
+	if opt.DispatchConcurrency == 0 {
+		opt.DispatchConcurrency = 8
+	}
+	if opt.DispatchConcurrency < 1 || opt.DispatchConcurrency > 128 {
+		return nil, errors.New("slack: dispatch_concurrency must be 1-128")
 	}
 	if opt.MaxFileBytes == 0 {
 		opt.MaxFileBytes = DefaultMaxFileBytes
@@ -296,35 +304,38 @@ func eventChannel(raw []byte) string {
 
 // SQLite owns the backlog. Only due heads run; retries retain their position
 // without occupying a goroutine. Independent conversations have independent
-// workers, so a slow history/download cannot consume another conversation's slot.
+// workers up to the configured cap, plus one reserved control worker.
 func (s *Slack) processEvents(ctx context.Context, jobs <-chan store.InterfaceEvent, accept func(context.Context, core.Inbound) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
-	done := make(chan int64)
+	done := make(chan int64, s.opt.DispatchConcurrency+1)
+	cache := map[int64]eventMessage{}
 	active := map[int64]bool{}
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
+		drainIngressDone(done, active)
 		events, err := s.opt.Store.PendingEvents("slack")
 		if err != nil {
 			s.opt.Log.Print("slack: pending event scan failed")
 		}
-		slices.SortStableFunc(events, func(a, b store.InterfaceEvent) int {
-			return compareTS(decodeEvent(a.Payload).TS, decodeEvent(b.Payload).TS)
-		})
+		s.cacheEvents(events, cache)
 		heads := map[string]bool{}
 		for _, e := range events {
-			m := decodeEvent(e.Payload)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			m := cache[e.ID]
 			key := m.Channel + ":" + first(m.ThreadTS, m.TS)
-			control := s.controlEvent(e.Payload)
+			control := m.ingressControl
 			if !control && heads[key] {
 				continue
 			}
 			if !control {
 				heads[key] = true
 			}
-			if active[e.ID] {
+			if active[e.ID] || (!control && len(active) >= s.opt.DispatchConcurrency) || len(active) >= s.opt.DispatchConcurrency+1 {
 				continue
 			}
 			s.retryMu.Lock()
@@ -410,7 +421,7 @@ func (s *Slack) liveUser(ctx context.Context, id string) (*User, error) {
 	}
 	if err := s.identityLookup(ctx, id, &result); err != nil {
 		var ae *apiError
-		if errors.As(err, &ae) && slices.Contains([]string{"user_not_found", "user_not_visible", "account_inactive"}, ae.Code) {
+		if errors.As(err, &ae) && slices.Contains([]string{"user_not_found", "user_not_visible"}, ae.Code) {
 			return nil, nil
 		}
 		return nil, err
@@ -430,8 +441,18 @@ func (s *Slack) controlEvent(raw []byte) bool {
 	if json.Unmarshal(raw, &p) != nil {
 		return false
 	}
+	return s.controlMessage(p.Event)
+}
+func (s *Slack) controlMessage(m eventMessage) bool {
+	// All stop/cancel aliases contain one of these ASCII words. Avoid regex
+	// matching entire ordinary messages while classifying a cold backlog.
+	lower := strings.ToLower(m.Text)
+	if !strings.Contains(lower, "stop") && !strings.Contains(lower, "cancel") && !strings.Contains(lower, "abort") && !strings.Contains(lower, "nevermind") {
+		return false
+	}
+
 	mention := s.mention()
-	text := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(p.Event.Text)), mention), s.botID)
+	text := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), mention), s.botID)
 	return router.IsControl(text)
 }
 
@@ -471,7 +492,10 @@ func (s *Slack) retryEvent(ctx context.Context, e store.InterfaceEvent, accept f
 		return nil
 	}
 	if r.started.IsZero() {
-		r.started = time.Now()
+		r.started = e.ReceivedAt
+		if r.started.IsZero() {
+			r.started = time.Now()
+		}
 	}
 	r.busy = true
 	s.retries[e.ID] = r
@@ -506,11 +530,10 @@ func (s *Slack) retryEvent(ctx context.Context, e store.InterfaceEvent, accept f
 	if errors.As(err, &re) {
 		delay = max(delay, re.after)
 	}
-	r.next = time.Now().Add(delay)
+	jitter := time.Duration(rand.Int64N(int64(delay/4) + 1))
+	r.next = time.Now().Add(delay + jitter)
 	s.retries[e.ID] = r
-	if r.exhausted {
-		return nil
-	} // Notice classification failed; retry it after backoff.
+
 	// User-scoped permanent codes already finished in liveUser. Any other
 	// definite API rejection needs operator attention, including new codes.
 	operator := errors.As(err, &ae) && !ae.Ambiguous && !rateLimited
@@ -518,14 +541,27 @@ func (s *Slack) retryEvent(ctx context.Context, e store.InterfaceEvent, accept f
 		s.operatorLog = time.Now()
 		s.opt.Log.Printf("slack: OPERATOR ACTION REQUIRED: identity API %s; verify token/scopes", ae.Code)
 	}
-	if r.exhausted || (operator && r.attempts >= 3) || time.Since(r.started) >= s.opt.IngressRetryWindow || r.rateLimits >= 100 {
+	if (operator && r.attempts >= 3) || time.Since(r.started) >= s.opt.IngressRetryWindow || r.rateLimits >= 100 {
 		s.opt.Log.Printf("slack: ingress event %d exhausted verification/admission retries; finished without admission", e.ID)
+		if r.exhausted {
+			s.opt.Log.Printf("slack: OPERATOR ACTION REQUIRED: event %d notice classification exhausted; dropping unknown thread", e.ID)
+			if err := s.opt.Store.CompleteEvent(e.ID); err != nil {
+				return err
+			}
+			delete(s.retries, e.ID)
+			return nil
+		}
 		r.exhausted = true
 		s.retries[e.ID] = r
 		s.retryMu.Unlock()
 		err := s.exhaustEvent(ctx, e)
 		s.retryMu.Lock()
 		if err != nil {
+			var re *identityRetryError
+			if errors.As(err, &re) {
+				r.next = time.Now().Add(max(delay, re.after) + jitter)
+				s.retries[e.ID] = r
+			}
 			return err
 		}
 		delete(s.retries, e.ID)
@@ -574,6 +610,11 @@ func (s *Slack) exhaustEvent(ctx context.Context, e store.InterfaceEvent) error 
 			if after > 0 {
 				return &identityRetryError{err, after}
 			}
+			var ae *apiError
+			if errors.As(err, &ae) && !ae.Ambiguous {
+				s.opt.Log.Printf("slack: OPERATOR ACTION REQUIRED: event %d notice lookup rejected: %s; finishing", e.ID, ae.Code)
+				return s.opt.Store.CompleteEvent(e.ID)
+			}
 			return err // Keep durable event until we can distinguish bot-thread input from ambient.
 		} else {
 			for _, p := range reply.Messages {
@@ -596,17 +637,64 @@ func (s *Slack) exhaustEvent(ctx context.Context, e store.InterfaceEvent) error 
 
 // Admission/fence serialization is local to a conversation; slow router-side
 // owner resolution must not hold admission in another conversation.
-func (s *Slack) conversationLock(k core.ConvKey) *sync.Mutex {
+type ingressLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (s *Slack) conversationLock(k core.ConvKey) func() {
 	s.ingressMu.Lock()
-	defer s.ingressMu.Unlock()
 	if s.ingressLocks == nil {
-		s.ingressLocks = map[core.ConvKey]*sync.Mutex{}
+		s.ingressLocks = map[core.ConvKey]*ingressLock{}
 	}
-	if s.ingressLocks[k] == nil {
-		s.ingressLocks[k] = &sync.Mutex{}
+	l := s.ingressLocks[k]
+	if l == nil {
+		l = &ingressLock{}
+		s.ingressLocks[k] = l
 	}
-	return s.ingressLocks[k]
+	l.refs++
+	s.ingressMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		s.ingressMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(s.ingressLocks, k)
+		}
+		s.ingressMu.Unlock()
+	}
+}
+
+// Cache by durable event ID: immutable event timestamps need decoding only once.
+func (s *Slack) cacheEvents(events []store.InterfaceEvent, cache map[int64]eventMessage) {
+	live := make(map[int64]bool, len(events))
+	for _, e := range events {
+		live[e.ID] = true
+		if _, ok := cache[e.ID]; !ok {
+			m := decodeEvent(e.Payload)
+			m.ingressControl = s.controlMessage(m)
+			cache[e.ID] = m
+		}
+	}
+	for id := range cache {
+		if !live[id] {
+			delete(cache, id)
+		}
+	}
+	slices.SortStableFunc(events, func(a, b store.InterfaceEvent) int { return compareTS(cache[a.ID].TS, cache[b.ID].TS) })
 }
 
 // SetOutboundWake connects interface-generated durable notices to delivery.
 func (s *Slack) SetOutboundWake(wake func()) { s.outboundWake = wake }
+
+func drainIngressDone(done <-chan int64, active map[int64]bool) {
+	for {
+		select {
+		case id := <-done:
+			delete(active, id)
+		default:
+			return
+		}
+	}
+}

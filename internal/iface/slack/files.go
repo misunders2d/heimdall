@@ -35,7 +35,7 @@ func (f slackFile) deleted() bool {
 	return f.Tombstoned || f.Deleted || f.DeletedAt != 0 || f.Mode == "tombstone"
 }
 func (f slackFile) image() bool {
-	return strings.HasPrefix(strings.ToLower(f.MIME), "image/") || regexp.MustCompile(`(?i)^(png|jpg|jpeg|gif|webp)$`).MatchString(f.FileType) || regexp.MustCompile(`(?i)\.(png|jpe?g|gif|webp)$`).MatchString(first(f.Name, f.Title))
+	return strings.HasPrefix(strings.ToLower(f.MIME), "image/") || imageType.MatchString(f.FileType) || imageName.MatchString(first(f.Name, f.Title))
 }
 func slackFileHost(raw string) bool {
 	u, err := url.Parse(raw)
@@ -76,7 +76,7 @@ func (s *Slack) download(ctx context.Context, f slackFile) core.Attachment {
 			if ext == "jpg" {
 				ext = "jpeg"
 			}
-			if regexp.MustCompile(`^(jpeg|png|gif|webp)$`).MatchString(ext) {
+			if imageMIME.MatchString(ext) {
 				a.MIME = "image/" + ext
 			}
 		}
@@ -309,3 +309,9 @@ func (s *Slack) WithUploadCopy(dir string, size int64, copyFile func() error) er
 	}()
 	return copyFile()
 }
+
+var imageType = regexp.MustCompile(`(?i)^(png|jpg|jpeg|gif|webp)$`)
+
+var imageName = regexp.MustCompile(`(?i)\.(png|jpe?g|gif|webp)$`)
+
+var imageMIME = regexp.MustCompile(`^(jpeg|png|gif|webp)$`)

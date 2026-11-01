@@ -11,8 +11,9 @@ import (
 // It is never a verified caller or a runnable input. The transport verifies
 // identity live before building core.Inbound and passing it to the router.
 type InterfaceEvent struct {
-	ID      int64
-	Payload []byte
+	ReceivedAt time.Time
+	ID         int64
+	Payload    []byte
 }
 
 // StageEvent commits before the interface acknowledges the envelope. Stable
@@ -30,7 +31,9 @@ func (s *Store) StageEvent(iface, key string, payload []byte) error {
 // competing instances.
 func (s *Store) NextEvent(iface string) (InterfaceEvent, bool, error) {
 	var e InterfaceEvent
-	err := s.db.QueryRow(`SELECT id,payload FROM interface_events WHERE iface=? AND complete=0 ORDER BY id LIMIT 1`, iface).Scan(&e.ID, &e.Payload)
+	var received int64
+	err := s.db.QueryRow(`SELECT id,payload,received_at FROM interface_events WHERE iface=? AND complete=0 ORDER BY id LIMIT 1`, iface).Scan(&e.ID, &e.Payload, &received)
+	e.ReceivedAt = time.UnixMilli(received)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, false, nil
 	}
@@ -47,7 +50,7 @@ func (s *Store) CompleteEvent(id int64) error {
 
 // PendingEvents is a startup snapshot, before the socket starts receiving.
 func (s *Store) PendingEvents(iface string) ([]InterfaceEvent, error) {
-	rows, err := s.db.Query(`SELECT id,payload FROM interface_events WHERE iface=? AND complete=0 ORDER BY id`, iface)
+	rows, err := s.db.Query(`SELECT id,payload,received_at FROM interface_events WHERE iface=? AND complete=0 ORDER BY id`, iface)
 	if err != nil {
 		return nil, err
 	}
@@ -55,16 +58,20 @@ func (s *Store) PendingEvents(iface string) ([]InterfaceEvent, error) {
 	var events []InterfaceEvent
 	for rows.Next() {
 		var e InterfaceEvent
-		if err = rows.Scan(&e.ID, &e.Payload); err != nil {
+		var received int64
+		if err = rows.Scan(&e.ID, &e.Payload, &received); err != nil {
 			return nil, err
 		}
+		e.ReceivedAt = time.UnixMilli(received)
 		events = append(events, e)
 	}
 	return events, rows.Err()
 }
 func (s *Store) Event(iface, key string) (InterfaceEvent, bool, error) {
 	var e InterfaceEvent
-	err := s.db.QueryRow(`SELECT id,payload FROM interface_events WHERE iface=? AND event_key=? AND complete=0`, iface, key).Scan(&e.ID, &e.Payload)
+	var received int64
+	err := s.db.QueryRow(`SELECT id,payload,received_at FROM interface_events WHERE iface=? AND event_key=? AND complete=0`, iface, key).Scan(&e.ID, &e.Payload, &received)
+	e.ReceivedAt = time.UnixMilli(received)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, false, nil
 	}

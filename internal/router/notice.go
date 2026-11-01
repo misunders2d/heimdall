@@ -1,9 +1,11 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 )
@@ -20,14 +22,54 @@ type OwnerNotifier interface {
 // where, never what. Every identified caller is non-root without an
 // allowlist, so this is how the owner learns who uses the bot.
 func (r *Router) newCaller(in core.Inbound) {
-	seen, err := r.store.CallerSeen(in.From)
-	if err != nil {
-		r.log.Printf("new-caller check for a %s caller failed: %v", in.From.Platform, err)
-		return
+	select {
+	case r.noticeQueue <- in:
+	default:
+		r.log.Print("new-caller notice queue full; retry on next input")
 	}
-	if seen {
-		return
+}
+
+// One worker, bounded pending callers and three attempts spaced one minute.
+// Resolution never owns the accept/conversation lock.
+func (r *Router) callerNotices(ctx context.Context) {
+	type pending struct {
+		in       core.Inbound
+		attempts int
+		next     time.Time
 	}
+	jobs := map[string]pending{}
+	tick := time.NewTicker(min(time.Second, r.noticeRetry))
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case in := <-r.noticeQueue:
+			if _, ok := jobs[in.From.Key()]; !ok && len(jobs) < 1024 {
+				jobs[in.From.Key()] = pending{in: in}
+			}
+		case <-tick.C:
+		}
+		for key, j := range jobs {
+			if j.attempts >= 3 || time.Now().Before(j.next) {
+				continue
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			complete := r.notifyCaller(j.in)
+			j.attempts++
+			j.next = time.Now().Add(r.noticeRetry)
+			if complete {
+				delete(jobs, key)
+			} else {
+				jobs[key] = j
+			}
+		}
+	}
+}
+
+func (r *Router) notifyCaller(in core.Inbound) bool {
 	where := in.Conv.String()
 	if in.Private {
 		where += " (their private chat with the bot)"
@@ -42,24 +84,31 @@ func (r *Router) newCaller(in core.Inbound) {
 		owners = append(owners, key)
 	}
 	slices.Sort(owners)
-	var notices []core.Outbound
+	complete := true
 	for _, key := range owners {
 		platform, id, _ := strings.Cut(key, ":")
 		n, ok := r.ifaces[platform].(OwnerNotifier)
 		if !ok {
 			continue
 		}
+		seen, err := r.store.OwnerNotified(in.From, key)
+		if err != nil {
+			complete = false
+			continue
+		}
+		if seen {
+			continue
+		}
 		if conv, ok := n.OwnerChat(id); ok {
-			notices = append(notices, core.Outbound{Conv: conv, Text: text})
+			if err := r.store.NotifyCallerOwner(in.From, key, core.Outbound{Conv: conv, Text: text}); err != nil {
+				r.log.Print("new-caller notice storage failed")
+				complete = false
+				continue
+			}
+			r.wake(conv.Interface)
 		} else {
-			return
+			complete = false
 		}
 	}
-	if err := r.store.NotifyCaller(in.From, notices); err != nil {
-		r.log.Print("new-caller notice storage failed")
-		return
-	}
-	for _, out := range notices {
-		r.wake(out.Conv.Interface)
-	}
+	return complete
 }

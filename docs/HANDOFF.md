@@ -77,9 +77,10 @@ Supersedes the previous channel-worker/three-attempt ingress model.
   selects one due normal head per (channel, root thread). Later inputs stay
   behind a retrying head. Active event IDs prevent duplicate dispatch; waiting
   retries own no worker. Independent conversations get independent workers,
-  including threads in the same channel. There is no global four-worker cap:
-  simultaneous heavy work is bounded by active conversations, rather than four
-  slow downloads starving unrelated chats. Controls retain a bypass lane and
+  including threads in the same channel. Normal dispatch is bounded by slack.dispatch_concurrency (default 8, range
+  1–128), plus one reserved control worker. users.info calls are paced process-wide
+  at 100/minute without bursts. Each event and its control classification are decoded/cached once by durable ID; completed
+  workers are buffered and fully drained before each scan. Controls retain a bypass lane and
   durable fence. Admission locks are per conversation.
 - Transient identity/store/router errors back off 1, 2, 4…64 seconds over
   `slack.ingress_retry_seconds` (default 600, configurable 1–3600). Token/scope
@@ -87,26 +88,36 @@ Supersedes the previous channel-worker/three-attempt ingress model.
   HTTP 429 / ratelimited does not increment failed attempts; Retry-After is
   honored (API cap five minutes), with a separate 100-rate-limit overall cap
   and the same elapsed window. Restart reconstructs backlog; in-memory retry
-  delays/counters restart. Definitively unverified callers finish silently.
+  delays/counters restart; elapsed window stays anchored to durable received_at.
+  Retry times include additive 0–25% jitter. account_inactive is a loud token
+  error with the three-attempt bound. Definitively unverified callers finish silently.
 - Exhaustion atomically completes the raw event and queues one durable generic
   thread notice for DMs, mentions, admitted controls and known bot threads.
   Bot-thread evidence: parent_user_id, prior delivered replies, or a live root
   lookup. If the root lookup fails, retain the exhausted event for notice classification
-  retries; never silently complete an unknown thread. Admission retries have
-  ended; metadata resolution resumes after backoff until Slack recovers.
+  retries within the same elapsed/attempt/rate-limit caps. Definite permanent
+  lookup errors finish with an operator log; exhausted classification also logs
+  loudly and finishes so later thread input can proceed. Unknown bot-thread
+  status cannot safely authorize a notice; known addressed inputs retain notices.
+  Inline exhaustion honors Retry-After.
   Notices contain no input text, wake normal outbound delivery and inherit its
   documented at-least-once platform delivery semantics.
 - Ambient identity choice: retain live users.info even for context-only input,
   matching the hub. No cached identity ever authorizes turns or controls.
-- Owner lookup retries are bounded again. Caller seen marker and outbound owner
-  notices commit together; delivery failures retry through the durable outbox.
-  Failed owner resolution leaves caller unseen and retries on their next message.
-- Fences drop/count only addressed turn input; ambient, bot messages and
+- Owner resolution runs off accept in one background worker (128 queued inputs,
+  1024 pending callers), with three attempts spaced one minute apart. Failed
+  owners are skipped; successful recipients and caller-seen marker commit
+  atomically per owner. Schema 13 persists recipient dedupe, preserving legacy
+  seen callers. Failed recipients retry independently of new messages; successful
+  ones never receive another notice. Retry counters reset on process restart.
+  Delivery failures retry through the durable outbox.
+- Fences count only live verified same-workspace callers, dropping only addressed turn input; ambient, bot messages and
   non-turn commands survive. Fenced retry entries are removed. Persisted control
   receipts preserve count across router admission retries.
-- Native HTTP loopback callbacks cover IP.IsLoopback, localhost with a trailing
-  dot, semicolon query separators and fragments. Sign-in header plus following
-  authorize URL are redacted together. Removed per-field embedded hideOAuth;
+- Native HTTP loopback callbacks cover IP.IsLoopback, shorthand 127.* and
+  localhost with all trailing dots removed, semicolon query separators and
+  fragments. Sign-in header plus following authorize URL allow blank whitespace.
+  Idle admission locks are reference-counted and removed; file regexes compile once. Removed per-field embedded hideOAuth;
   retained a whole-field MCP command guard and one assembled-content call
   before JSON encoding: inbound filtering
   cannot reliably match a sign-in header/newline across JSON escapes.
@@ -670,3 +681,23 @@ Native authentication/scoping remains owner decision. No credentials copied.
 Regression tests added per correction. Fakes only; no live Slack/Telegram or
 heimdall-live operations. Required vet/race/static verification recorded with
 implementation commit; live transport parity remains unverified.
+
+
+## Final ingress defect corrections (2026-11-01)
+
+Implementation keeps the conversation-head ingress model. New regression suite:
+`final_ingress_test.go` and `final_notice_test.go`. Large-backlog check uses
+2,500 synthetic 2 KB events, a 5 s bound for cold decoding and 500 ms for five cached
+sorts (including race instrumentation), and a blocked fake API to bound simultaneous dispatch. Tests use fake
+Slack/Telegram only; no production services touched. All 25 reversible mutations were caught by named regressions (no survivors;
+sources restored). Coverage includes exhausted-head caps/permanent roots,
+dispatch/cache/completion draining, API pacing/jitter, async/partial/bounded
+owner notices, token and 100-rate-limit bounds, receipt window, inline Retry-After,
+OAuth whitespace/loopback/dots, fence verification, idle locks, all three file
+regexes and config defaults. go vet and CGO_ENABLED=0 static build passed;
+GOFLAGS=-p=1 go test -race -count=1 ./... passed in full. Package serialization
+avoids CPU contention between fake harnesses; the race detector remains enabled
+throughout. Cold decode and cached scan budgets are separate from generous
+worker startup/shutdown deadlines for this large synthetic backlog.
+Targeted race timing: cold 2,500-event decode 847 ms; five cached sorts 20.5 ms after caching control classification.
+Live transport validation remains unverified; orchestrator owns that window.

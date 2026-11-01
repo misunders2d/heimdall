@@ -126,6 +126,8 @@ INSERT INTO callers SELECT platform || ':' || user_id, MIN(received_at) FROM inb
 	`ALTER TABLE interface_events ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0;
 UPDATE interface_events SET completed_at=received_at WHERE complete=1;
 CREATE INDEX interface_events_expiry ON interface_events(iface,completed_at) WHERE complete=1;`,
+	`CREATE TABLE caller_notices(principal TEXT NOT NULL,owner TEXT NOT NULL,PRIMARY KEY(principal,owner));
+ INSERT INTO caller_notices(principal,owner) SELECT principal,'*' FROM callers;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -849,6 +851,38 @@ func (s *Store) NotifyCaller(p core.Principal, notices []core.Outbound) error {
 		if _, err = enqueue(tx, out); err != nil {
 			return err
 		}
+	}
+	return tx.Commit()
+}
+
+// OwnerNotified checks durable per-owner delivery, independent of other owners.
+func (s *Store) OwnerNotified(p core.Principal, owner string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM caller_notices WHERE principal=? AND (owner=? OR owner='*')`, p.Key(), owner).Scan(&n)
+	return n > 0, err
+}
+func (s *Store) NotifyCallerOwner(p core.Principal, owner string, out core.Outbound) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO caller_notices(principal,owner) VALUES(?,?) ON CONFLICT DO NOTHING`, p.Key(), owner)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	if _, err = enqueue(tx, out); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO callers(principal,first_at) VALUES(?,?) ON CONFLICT DO NOTHING`, p.Key(), now()); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
