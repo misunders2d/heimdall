@@ -10,6 +10,11 @@ import (
 	"github.com/misunders2d/heimdall/internal/core"
 )
 
+// ContextOwnerNotifier lets blocking owner resolution follow worker shutdown.
+type ContextOwnerNotifier interface {
+	OwnerChatContext(context.Context, string) (core.ConvKey, bool)
+}
+
 // OwnerNotifier is an optional Interface that can write to an owner
 // privately: OwnerChat is the owner's one-to-one conversation with the bot
 // for the owner's ID on that platform.
@@ -45,19 +50,27 @@ func (r *Router) callerNotices(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case in := <-r.noticeQueue:
-			if _, ok := jobs[in.From.Key()]; !ok && len(jobs) < 1024 {
-				jobs[in.From.Key()] = pending{in: in}
+			if _, ok := jobs[in.From.Key()]; !ok {
+				if len(jobs) < 1024 {
+					jobs[in.From.Key()] = pending{in: in}
+				} else {
+					r.log.Print("new-caller pending map full; retry on next input")
+				}
 			}
 		case <-tick.C:
 		}
 		for key, j := range jobs {
-			if j.attempts >= 3 || time.Now().Before(j.next) {
+			if time.Now().Before(j.next) {
+				continue
+			}
+			if j.attempts >= 3 {
+				delete(jobs, key)
 				continue
 			}
 			if ctx.Err() != nil {
 				return
 			}
-			complete := r.notifyCaller(j.in)
+			complete := r.notifyCallerContext(ctx, j.in)
 			j.attempts++
 			j.next = time.Now().Add(r.noticeRetry)
 			if complete {
@@ -70,6 +83,10 @@ func (r *Router) callerNotices(ctx context.Context) {
 }
 
 func (r *Router) notifyCaller(in core.Inbound) bool {
+	return r.notifyCallerContext(context.Background(), in)
+}
+
+func (r *Router) notifyCallerContext(ctx context.Context, in core.Inbound) bool {
 	where := in.Conv.String()
 	if in.Private {
 		where += " (their private chat with the bot)"
@@ -86,6 +103,9 @@ func (r *Router) notifyCaller(in core.Inbound) bool {
 	slices.Sort(owners)
 	complete := true
 	for _, key := range owners {
+		if ctx.Err() != nil {
+			return false
+		}
 		platform, id, _ := strings.Cut(key, ":")
 		n, ok := r.ifaces[platform].(OwnerNotifier)
 		if !ok {
@@ -99,7 +119,14 @@ func (r *Router) notifyCaller(in core.Inbound) bool {
 		if seen {
 			continue
 		}
-		if conv, ok := n.OwnerChat(id); ok {
+		var conv core.ConvKey
+		var resolved bool
+		if cn, ok := n.(ContextOwnerNotifier); ok {
+			conv, resolved = cn.OwnerChatContext(ctx, id)
+		} else {
+			conv, resolved = n.OwnerChat(id)
+		}
+		if resolved {
 			if err := r.store.NotifyCallerOwner(in.From, key, core.Outbound{Conv: conv, Text: text}); err != nil {
 				r.log.Print("new-caller notice storage failed")
 				complete = false

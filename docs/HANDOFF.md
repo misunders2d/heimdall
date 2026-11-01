@@ -79,7 +79,11 @@ Supersedes the previous channel-worker/three-attempt ingress model.
   retries own no worker. Independent conversations get independent workers,
   including threads in the same channel. Normal dispatch is bounded by slack.dispatch_concurrency (default 8, range
   1–128), plus one reserved control worker. users.info calls are paced process-wide
-  at 100/minute without bursts. Each event and its control classification are decoded/cached once by durable ID; completed
+  at 100/minute without bursts. Control identity checks take the next available
+  users.info slot ahead of waiting ordinary checks; pacing sleeps hold no mutex.
+  users.lookupByEmail is separately paced at 50/minute (Slack Tier 3,
+  https://docs.slack.dev/reference/methods/users.lookupByEmail/, checked 2026-11-01).
+  Each event and its control classification are decoded/cached once by durable ID; completed
   workers are buffered and fully drained before each scan. Controls retain a bypass lane and
   durable fence. Admission locks are per conversation.
 - Transient identity/store/router errors back off 1, 2, 4…64 seconds over
@@ -109,9 +113,17 @@ Supersedes the previous channel-worker/three-attempt ingress model.
   owners are skipped; successful recipients and caller-seen marker commit
   atomically per owner. Schema 13 persists recipient dedupe, preserving legacy
   seen callers. Failed recipients retry independently of new messages; successful
-  ones never receive another notice. Retry counters reset on process restart.
+  ones never receive another notice. After the third failed attempt and one final
+  minute cooldown, the pending caller is removed; a later message can enqueue
+  another bounded retry cycle. Queue-full and pending-map-full drops are logged.
+  Slack owner resolution receives the worker context, so shutdown cancels its
+  API calls and waits. Retry counters reset on process restart.
   Delivery failures retry through the durable outbox.
-- Fences count only live verified same-workspace callers, dropping only addressed turn input; ambient, bot messages and
+- Fences never resolve earlier callers: unknown queued callers count
+  conservatively; callers already definitively rejected by identity verification
+  are excluded from the displayed count. Rejection evidence is bounded to 1024
+  IDs (cleared on overflow) and never authorizes admission. Each actual admitted
+  caller still needs fresh live verification. Fences drop only addressed turn input; ambient, bot messages and
   non-turn commands survive. Fenced retry entries are removed. Persisted control
   receipts preserve count across router admission retries.
 - Native HTTP loopback callbacks cover IP.IsLoopback, shorthand 127.* and
@@ -701,3 +713,23 @@ throughout. Cold decode and cached scan budgets are separate from generous
 worker startup/shutdown deadlines for this large synthetic backlog.
 Targeted race timing: cold 2,500-event decode 847 ms; five cached sorts 20.5 ms after caching control classification.
 Live transport validation remains unverified; orchestrator owns that window.
+
+## Post-review control and notice corrections (2026-11-01)
+
+Owner stop no longer depends on queued callers' identity lookups. Control checks
+receive priority in the existing process-wide pacer without exceeding its rate.
+Owner notice retry caps no longer retain callers forever, and map-full drops log.
+Recipient dedupe remains per owner; the three-attempt cycle remains per caller.
+Shutdown cancellation reaches Slack owner resolution. MCP sign-in, callback
+redaction and MCP notice behavior were left untouched.
+
+Regressions: `control_latency_test.go`, `notice_shutdown_test.go` and extended
+`TestFinalOwnerBackgroundRetryBounded`. Completion-drain coverage includes an
+explicit dispatcher source-invariant test, guarding its pre-scan call site,
+alongside the existing behavioral drain unit test.
+
+Verification: `go vet ./...`, `go test -race -count=1 ./...` with empty GOFLAGS
+and default parallelism, and `CGO_ENABLED=0 go build` all passed. Nine reversible
+mutations were caught (eight assertion failures; detached worker context hit the
+10-second test timeout); all sources restored. No generated artifacts committed.
+Fakes only; live transport behavior remains unverified.

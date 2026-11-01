@@ -104,4 +104,12 @@ func TestFinalOwnerBackgroundRetryBounded(t *testing.T) {
 	if calls.Load() != 3 {
 		t.Fatal("owner retries unbounded")
 	}
+	r.newCaller(in)
+	deadline = time.Now().Add(time.Second)
+	for calls.Load() < 4 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() < 4 {
+		t.Fatal("capped caller never retried on later input")
+	}
 }

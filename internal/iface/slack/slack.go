@@ -44,22 +44,23 @@ type Options struct {
 	HTTPClient *http.Client
 }
 type Slack struct {
-	opt          Options
-	bot, app     *apiClient
-	socket       socketTransport
-	ready        chan struct{}
-	botID, name  string
-	mu           sync.Mutex
-	ingressMu    sync.Mutex
-	ingressLocks map[core.ConvKey]*ingressLock
-	retryMu      sync.Mutex
-	retries      map[int64]eventRetry
-	operatorLog  time.Time
-	outboundWake func()
-	diskMu       sync.Mutex
-	reserved     int64
-	copyReserved map[uint64]int64
-	progress     map[int64]*statusUpdate
+	opt           Options
+	bot, app      *apiClient
+	socket        socketTransport
+	ready         chan struct{}
+	botID, name   string
+	mu            sync.Mutex
+	rejectedUsers map[string]bool
+	ingressMu     sync.Mutex
+	ingressLocks  map[core.ConvKey]*ingressLock
+	retryMu       sync.Mutex
+	retries       map[int64]eventRetry
+	operatorLog   time.Time
+	outboundWake  func()
+	diskMu        sync.Mutex
+	reserved      int64
+	copyReserved  map[uint64]int64
+	progress      map[int64]*statusUpdate
 	// Injected by package tests only.
 	fileHost               func(string) bool
 	freeBytes              func(string) (int64, error)
@@ -374,7 +375,11 @@ func decodeEvent(raw []byte) eventMessage {
 }
 
 func (s *Slack) OwnerChat(email string) (core.ConvKey, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	return s.OwnerChatContext(context.Background(), email)
+}
+
+func (s *Slack) OwnerChatContext(parent context.Context, email string) (core.ConvKey, bool) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	if s.await(ctx) != nil {
 		return core.ConvKey{}, false
@@ -422,18 +427,39 @@ func (s *Slack) liveUser(ctx context.Context, id string) (*User, error) {
 	if err := s.identityLookup(ctx, id, &result); err != nil {
 		var ae *apiError
 		if errors.As(err, &ae) && slices.Contains([]string{"user_not_found", "user_not_visible"}, ae.Code) {
+			s.recordRejection(id, true)
 			return nil, nil
 		}
 		return nil, err
 	}
 	if result.User.ID != id {
 		s.opt.Log.Print("slack: ignored invalid user record")
+		s.recordRejection(id, true)
 		return nil, nil
 	}
 	if result.User.Profile.Email == "" {
 		s.opt.Log.Print("slack: live users.info has no email; verify users:read.email scope")
 	}
+	_, verified := Verify(&result.User, s.opt.TeamID)
+	s.recordRejection(id, !verified)
 	return &result.User, nil
+}
+
+// Rejection evidence is display/count metadata only, never admission authority.
+func (s *Slack) recordRejection(id string, rejected bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rejectedUsers == nil {
+		s.rejectedUsers = map[string]bool{}
+	}
+	if rejected {
+		if len(s.rejectedUsers) >= 1024 {
+			clear(s.rejectedUsers)
+		}
+		s.rejectedUsers[id] = true
+	} else {
+		delete(s.rejectedUsers, id)
+	}
 }
 
 func (s *Slack) controlEvent(raw []byte) bool {

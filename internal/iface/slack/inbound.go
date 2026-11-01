@@ -103,6 +103,9 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		s.opt.Log.Print("slack: ignored message with unknown surface")
 		return finish()
 	}
+	if s.controlMessage(m) {
+		ctx = context.WithValue(ctx, controlIdentityKey{}, true)
+	}
 	user, err := s.liveUser(ctx, m.User)
 	if err != nil {
 		return err
@@ -172,16 +175,13 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 					continue
 				}
 				victims = append(victims, prior.ID)
-				if pm.User == m.User {
+				// Counting is not admission. Unknown callers count conservatively;
+				// only an already definitive rejection can suppress the count.
+				s.mu.Lock()
+				rejected := s.rejectedUsers[pm.User]
+				s.mu.Unlock()
+				if pm.User == m.User || !rejected {
 					input.ControlIngress++
-				} else {
-					u, err := s.liveUser(ctx, pm.User)
-					if err != nil {
-						return err
-					}
-					if _, ok := Verify(u, s.opt.TeamID); ok {
-						input.ControlIngress++
-					}
 				}
 			}
 			payload.ControlIngress = input.ControlIngress

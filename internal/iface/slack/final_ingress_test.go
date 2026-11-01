@@ -265,6 +265,8 @@ func TestFinalOwnerFenceVerifiedCountAndLockPrune(t *testing.T) {
 	s.botID = "Ubot"
 	s.opt.Owners = []string{"slack:uowner@example.test"}
 	s.opt.UnmentionedCommands = []string{"stop"}
+	s.liveUser(context.Background(), "Uguest")
+	s.liveUser(context.Background(), "Umissing")
 	stageReview(t, s, f.event("C1", "channel", "Uguest", "<@Ubot> foreign", "root"))
 	m := f.event("C1", "channel", "Umissing", "<@Ubot> missing", "root")
 	stageReview(t, s, m)
