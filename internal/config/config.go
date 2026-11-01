@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 var DefaultOrder = []string{"omp", "codex", "claude", "pi"}
 
 type Config struct {
+	warnings     []string
 	Harness      harness.WarmConfig       `json:"harness,omitempty"`
 	OwnerSlack   *harness.OwnerSlack      `json:"owner_slack,omitempty"`
 	Commands     *Commands                `json:"commands,omitempty"`
@@ -58,7 +60,10 @@ func (c *Config) GuardLogMax() int64 {
 type Telegram struct {
 	// BotUsername is the bot the token must belong to: getMe is checked
 	// against it before polling, so a wrong token is never used.
-	BotUsername string `json:"bot_username"`
+	BotUsername  string `json:"bot_username"`
+	APIBase      string `json:"api_base,omitempty"`  // origin, without /bot
+	FileBase     string `json:"file_base,omitempty"` // prefix, including /file/bot
+	MaxFileBytes int64  `json:"max_file_bytes,omitempty"`
 }
 
 // Commands controls addressing on every shared interface.
@@ -95,7 +100,23 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse validates a config document and fills defaults.
-func Parse(raw []byte) (*Config, error) {
+func Parse(raw []byte) (*Config, error) { return parse(raw, false) }
+
+// CheckFile validates without opening stores, launching harnesses or connecting.
+// Only a missing employee account is downgraded for a staged installation.
+func CheckFile(path string) ([]string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	c, err := parse(raw, true)
+	if err != nil {
+		return nil, err
+	}
+	return c.warnings, nil
+}
+
+func parse(raw []byte, staged bool) (*Config, error) {
 	var c Config
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -105,13 +126,13 @@ func Parse(raw []byte) (*Config, error) {
 	if dec.Decode(new(any)) != io.EOF {
 		return nil, errors.New("config: trailing data after the JSON object")
 	}
-	if err := c.fill(); err != nil {
+	if err := c.fill(staged); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	return &c, nil
 }
 
-func (c *Config) fill() error {
+func (c *Config) fill(staged bool) error {
 	if c.OwnerSlack != nil {
 		if err := c.OwnerSlack.Validate(); err != nil {
 			return err
@@ -189,6 +210,17 @@ func (c *Config) fill() error {
 		}
 	}
 	if c.Telegram != nil {
+		if c.Telegram.MaxFileBytes < 0 || c.Telegram.MaxFileBytes == 1<<63-1 {
+			return errors.New("telegram.max_file_bytes must be positive")
+		}
+		for _, base := range []string{c.Telegram.APIBase, c.Telegram.FileBase} {
+			if base != "" {
+				u, err := url.Parse(base)
+				if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+					return errors.New("telegram bases must be HTTP(S) URLs without credentials, query or fragment")
+				}
+			}
+		}
 		c.Telegram.BotUsername = strings.TrimPrefix(strings.TrimSpace(c.Telegram.BotUsername), "@")
 		if !botUsername(c.Telegram.BotUsername) {
 			return errors.New("telegram.bot_username must be the bot's Telegram username (5-32 letters, digits or _)")
@@ -226,6 +258,18 @@ func (c *Config) fill() error {
 	// Every verified caller who is not an owner runs as the employee account.
 	if _, ok := c.RunAs[core.RoleEmployee]; !ok {
 		return errors.New("run_as.employee is required: every caller who is not an owner runs as it")
+	}
+	// Offline staging may lack the employee account; all runtime paths stay strict.
+	if staged {
+		_, lookupErr := lookupUser(c.RunAs[core.RoleEmployee].User)
+		var missing user.UnknownUserError
+		if errors.As(lookupErr, &missing) {
+			if _, err := lookupUser(c.RunAs[core.RoleOwner].User); err != nil {
+				return err
+			}
+			c.warnings = append(c.warnings, "employee OS account missing; create it before first start")
+			return nil
+		}
 	}
 	// The employee's account must be neither root nor the owner's, by uid.
 	if err := (harness.Accounts{RunAs: c.RunAs, Lookup: lookupUser}).Check(); err != nil {

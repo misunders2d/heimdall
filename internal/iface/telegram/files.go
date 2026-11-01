@@ -67,8 +67,8 @@ func (t *Interface) download(ctx context.Context, a *attachment) (string, int64,
 	if t.opt.UploadDir == "" {
 		return "", 0, errors.New("downloads are not configured")
 	}
-	if a.Size > maxFile {
-		return "", 0, fmt.Errorf("telegram reported file too large: %d bytes > %d", a.Size, maxFile)
+	if a.Size > t.opt.MaxFileBytes {
+		return "", 0, fmt.Errorf("telegram reported file too large: %d bytes > %d", a.Size, t.opt.MaxFileBytes)
 	}
 	var f struct {
 		FileSize int64  `json:"file_size"`
@@ -77,8 +77,8 @@ func (t *Interface) download(ctx context.Context, a *attachment) (string, int64,
 	if err := t.call(ctx, "getFile", map[string]any{"file_id": a.FileID}, &f, 20*time.Second); err != nil {
 		return "", 0, err
 	}
-	if f.FileSize > maxFile {
-		return "", 0, fmt.Errorf("file too large: %d bytes > %d", f.FileSize, maxFile)
+	if f.FileSize > t.opt.MaxFileBytes {
+		return "", 0, fmt.Errorf("file too large: %d bytes > %d", f.FileSize, t.opt.MaxFileBytes)
 	}
 	if f.FilePath == "" {
 		return "", 0, errors.New("telegram getFile returned no file_path")
@@ -91,7 +91,7 @@ func (t *Interface) download(ctx context.Context, a *attachment) (string, int64,
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.opt.API+"/file/bot"+t.opt.Token+"/"+f.FilePath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.opt.FileBase+t.opt.Token+"/"+f.FilePath, nil)
 	if err != nil {
 		return "", 0, t.scrubbed("file download", err)
 	}
@@ -109,15 +109,15 @@ func (t *Interface) download(ctx context.Context, a *attachment) (string, int64,
 	if err != nil {
 		return "", 0, err
 	}
-	n, err := io.Copy(out, io.LimitReader(res.Body, maxFile+1))
+	n, err := io.Copy(out, io.LimitReader(res.Body, t.opt.MaxFileBytes+1))
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}
 	switch {
 	case err != nil:
 		err = t.scrubbed("file download", err)
-	case n > maxFile:
-		err = fmt.Errorf("file too large: more than %d bytes", maxFile)
+	case n > t.opt.MaxFileBytes:
+		err = fmt.Errorf("file too large: more than %d bytes", t.opt.MaxFileBytes)
 	}
 	if err != nil {
 		os.Remove(dst)
@@ -163,7 +163,7 @@ func describe(a *attachment, err error) string {
 	if err != nil {
 		lines = append(lines, "error: "+err.Error())
 	}
-	lines = append(lines, "note: the Telegram Bot API downloads files of at most 20 MB; ask for a smaller or compressed file, or a link.")
+	lines = append(lines, "note: download failed under the configured API and size limit; ask for a smaller or compressed file, or a link.")
 	return strings.Join(lines, "\n")
 }
 

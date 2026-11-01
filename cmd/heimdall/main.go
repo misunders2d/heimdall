@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -38,6 +39,8 @@ const usage = `usage:
       The local interface trusts its operator: for testing only.
   heimdall harnesses -config FILE
       show where each harness is found for each role's OS user
+  heimdall check-config -config FILE
+      offline validation; missing employee account is a warning
   heimdall version`
 
 func main() {
@@ -59,6 +62,8 @@ func main() {
 		err = runLocal(os.Args[2:])
 	case "harnesses":
 		err = listHarnesses(os.Args[2:])
+	case "check-config":
+		err = checkConfig(os.Args[2:])
 	case "version":
 		fmt.Println("heimdall", version)
 	default:
@@ -107,7 +112,21 @@ func run(args []string) error {
 	defer st.Close()
 	var interfaces []router.Interface
 	if cfg.Telegram != nil {
-		tg, err := telegram.New(telegram.Options{UnmentionedCommands: cfg.UnmentionedCommands(), Token: os.Getenv(telegram.TokenEnv), BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
+		apiBase, fileBase, maxBytes := cfg.Telegram.APIBase, cfg.Telegram.FileBase, cfg.Telegram.MaxFileBytes
+		if v := os.Getenv("HEIMDALL_TELEGRAM_API_BASE"); v != "" {
+			apiBase = v
+		}
+		if v := os.Getenv("HEIMDALL_TELEGRAM_FILE_BASE"); v != "" {
+			fileBase = v
+		}
+		if v := os.Getenv("HEIMDALL_TELEGRAM_MAX_FILE_BYTES"); v != "" {
+			var err error
+			maxBytes, err = strconv.ParseInt(v, 10, 64)
+			if err != nil || maxBytes <= 0 {
+				return errors.New("invalid HEIMDALL_TELEGRAM_MAX_FILE_BYTES")
+			}
+		}
+		tg, err := telegram.New(telegram.Options{UnmentionedCommands: cfg.UnmentionedCommands(), Token: os.Getenv(telegram.TokenEnv), API: apiBase, FileBase: fileBase, MaxFileBytes: maxBytes, BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
 		if err != nil {
 			return err
 		}
@@ -198,4 +217,24 @@ func slackTeam(cfg *config.Config) string {
 		return cfg.Slack.TeamID
 	}
 	return ""
+}
+
+func checkConfig(args []string) error {
+	fs := flag.NewFlagSet("check-config", flag.ContinueOnError)
+	path := fs.String("config", "", "config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *path == "" || fs.NArg() != 0 {
+		return errors.New("-config FILE is required, with no positional arguments")
+	}
+	warnings, err := config.CheckFile(*path)
+	if err != nil {
+		return err
+	}
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, "warning:", warning)
+	}
+	fmt.Println("configuration valid (offline; credentials and interfaces not checked)")
+	return nil
 }

@@ -1,0 +1,25 @@
+[Unit]
+Description=Heimdall chat router (staged; do not start before cutover approval)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+UMask=0077
+# Config uses API origin (without /bot), and file prefix (with /file/bot).
+Environment=HEIMDALL_TELEGRAM_API_BASE=http://127.0.0.1:8081
+Environment=HEIMDALL_TELEGRAM_FILE_BASE=http://127.0.0.1:8081/file/bot
+Environment=HEIMDALL_TELEGRAM_MAX_FILE_BYTES=2000000000
+ExecStart=/usr/local/sbin/infisical-machine-run /usr/local/sbin/heimdall-run.sh
+Restart=on-failure
+RestartSec=5s
+# Native exit grace 60s + TERM grace 5s + pipe wait 5s; allow delivery drain.
+TimeoutStopSec=180s
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=heimdall
+
+# Deliberately no [Install] section: shipped disabled, manual activation only.

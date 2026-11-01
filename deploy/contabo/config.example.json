@@ -1,0 +1,27 @@
+{
+  "data_dir": "/var/lib/heimdall",
+  "mode": "corporate",
+  "owners": ["telegram:330959414", "slack:sergey@mellanni.com"],
+  "run_as": {
+    "owner": {"user": "root", "dir": "/root", "path": "/usr/bin:/usr/local/sbin:/usr/local/bin:/bin:/sbin:/usr/sbin"},
+    "employee": {"user": "heimdall-employee"}
+  },
+  "harness_order": ["omp", "codex", "claude", "pi"],
+  "max_parallel": 3,
+  "owner_slack": {"enabled": false},
+  "commands": {"unmentioned": ["stop", "cancel"]},
+  "slack": {"team_id": "T7LDPGQLC", "max_file_bytes": 200000000},
+  "telegram": {
+    "bot_username": "REPLACE_WITH_VERIFIED_BOT",
+    "api_base": "http://127.0.0.1:8081",
+    "file_base": "http://127.0.0.1:8081/file/bot",
+    "max_file_bytes": 2000000000
+  },
+  "prompt_guard": {"log_max_bytes": 1048576},
+  "harness": {
+    "idle_timeout_seconds": 900,
+    "max_lifetime_seconds": 14400,
+    "max_warm": 8,
+    "run_timeout_seconds": 1200
+  }
+}
