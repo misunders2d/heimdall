@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -95,8 +96,50 @@ func (f *slackFake) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		return
 	}
-	var args map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&args)
+	args := map[string]any{}
+	contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if contentType == "application/x-www-form-urlencoded" {
+		if err := r.ParseForm(); err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_arguments"})
+			return
+		}
+		for key, values := range r.PostForm {
+			args[key] = values[0]
+			// Slack expects JSON strings for structured form arguments.
+			switch key {
+			case "blocks", "attachments", "files", "metadata":
+				var value any
+				if json.Unmarshal([]byte(values[0]), &value) != nil {
+					_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_arguments"})
+					return
+				}
+				args[key] = value
+			}
+		}
+	} else {
+		// Read methods ignore JSON bodies; required arguments are then absent.
+		code := ""
+		switch method {
+		case "users.info":
+			code = "user_not_found"
+		case "users.lookupByEmail":
+			code = "users_not_found"
+		case "conversations.info", "conversations.history", "conversations.replies":
+			code = "channel_not_found"
+		case "files.info":
+			code = "file_not_found"
+		case "bots.info":
+			code = "bot_not_found"
+		case "auth.test":
+			code = "invalid_arguments"
+		default:
+			_ = json.NewDecoder(r.Body).Decode(&args)
+		}
+		if code != "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": code})
+			return
+		}
+	}
 	if args == nil {
 		args = map[string]any{}
 	}
@@ -123,7 +166,11 @@ func (f *slackFake) serve(w http.ResponseWriter, r *http.Request) {
 		response["user_id"] = "Ubot"
 		response["user"] = "Heimdall"
 	case "users.info":
-		response["user"] = f.users[str(args["user"])]
+		if user, ok := f.users[str(args["user"])]; ok {
+			response["user"] = user
+		} else {
+			response = map[string]any{"ok": false, "error": "user_not_found"}
+		}
 	case "users.lookupByEmail":
 		for _, u := range f.users {
 			if u.Profile.Email == args["email"] {

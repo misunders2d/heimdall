@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -100,7 +101,32 @@ func (a *apiClient) call(ctx context.Context, method string, args any, out any) 
 	}
 	return errors.New("slack: retry limit reached")
 }
+
+// formArguments preserves strings verbatim and JSON-encodes all other values,
+// including structured fields such as metadata and files. Use forms for every
+// Web API method: read methods may ignore JSON request bodies.
+// https://docs.slack.dev/apis/web-api/#url-encoded-bodies
+func formArguments(data []byte) ([]byte, error) {
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(data, &args); err != nil {
+		return nil, errors.New("slack: invalid API arguments")
+	}
+	form := url.Values{}
+	for key, raw := range args {
+		var value string
+		if json.Unmarshal(raw, &value) != nil || string(raw) == "null" {
+			value = string(raw)
+		}
+		form.Set(key, value)
+	}
+	return []byte(form.Encode()), nil
+}
+
 func (a *apiClient) once(parent context.Context, method string, data []byte, out any) (error, bool, time.Duration) {
+	data, err := formArguments(data)
+	if err != nil {
+		return err, false, 0
+	}
 	if a.pacer != nil {
 		if err := a.pacer.wait(parent, method); err != nil {
 			return err, false, 0
@@ -113,7 +139,7 @@ func (a *apiClient) once(parent context.Context, method string, data []byte, out
 		return errors.New("slack: invalid API endpoint"), false, 0
 	}
 	req.Header.Set("Authorization", "Bearer "+a.token)
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res, err := a.http.Do(req)
 	if err != nil {
 		if parent.Err() != nil {
