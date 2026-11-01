@@ -168,6 +168,9 @@ const (
 
 // Inbound is one message from an interface.
 type Inbound struct {
+	OAuthActor        string // interface-verified native OAuth actor; never role authority
+	OAuthInstallation string // bot installation, from auth.test
+
 	Conv   ConvKey
 	MsgID  string // interface message ID, unique within Conv.Interface+Conv.Chat
 	From   Principal

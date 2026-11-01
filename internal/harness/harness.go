@@ -5,7 +5,7 @@
 // The adapters are ported from AgentNet (github.com/misunders2d/agentnet,
 // internal/client, revision b26fc68b91f6dd896a9c6c46350ad08b9b25d729,
 // Apache-2.0). Native settings, skills, MCP servers and permissions stay the
-// run-as user's own; Heimdall adds no tool exclusions or overrides.
+// run-as user's own, except the opt-in private-owner Slack read gate.
 package harness
 
 import (
@@ -24,6 +24,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/misunders2d/heimdall/internal/core"
 )
 
 // SteerOutcome is a harness's answer to mid-turn input. Only Accepted means
@@ -118,7 +120,9 @@ type Session struct {
 
 // Spec is one turn.
 type Spec struct {
-	Progress func(Progress)
+	MCPNotify  func(string)
+	OwnerSlack *OwnerSlack
+	Progress   func(Progress)
 
 	Harness string
 	Prompt  string
@@ -168,6 +172,7 @@ type Result struct {
 
 // Run is one started native turn.
 type Run struct {
+	caller    Caller
 	harness   string
 	cmd       *exec.Cmd
 	bridge    bridge
@@ -250,16 +255,55 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	if spec.Harness == "claude" && spec.Progress != nil {
 		extra = append(extra, "--include-partial-messages")
 	}
+	slackArgs, err := ownerSlackArgs(spec.Harness, spec.Caller, spec.OwnerSlack, spec.Launch.Env)
+	if err != nil {
+		return nil, err
+	}
+	extra = append(extra, slackArgs...)
 	env, err := WithIdentity(spec.Launch.Env, spec.Caller)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", spec.Harness, err)
+	}
+	if spec.OwnerSlack != nil {
+		for _, ref := range []string{spec.OwnerSlack.ClientIDEnv, spec.OwnerSlack.ClientSecretEnv} {
+			filtered := env[:0]
+			for _, kv := range env {
+				if !strings.HasPrefix(kv, ref+"=") {
+					filtered = append(filtered, kv)
+				}
+			}
+			env = filtered
+		}
+	}
+	if spec.Harness == "pi" {
+		if spec.Caller.SlackRead {
+			if err := validatePiSlackConfig(spec.Launch, spec.OwnerSlack); err != nil {
+				return nil, err
+			}
+		}
+		env, err = piMCPEnv(spec.Launch, spec.Caller, env)
+		if err == nil && spec.Caller.SlackRead {
+			if spec.OwnerSlack == nil {
+				return nil, errors.New("missing owner Slack config")
+			}
+			for name, ref := range map[string]string{"SLACK_CLIENT_ID": spec.OwnerSlack.ClientIDEnv, "SLACK_CLIENT_SECRET": spec.OwnerSlack.ClientSecretEnv} {
+				v := envValue(spec.Launch.Env, ref)
+				if v == "" {
+					return nil, errors.New("owner Slack client environment reference is unset")
+				}
+				env = append(env, name+"="+v)
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("pi MCP scope: %w", err)
+		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(runCtx, spec.Launch.Path, append(slices.Clone(d.args), extra...)...)
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
-	r := &Run{harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
+	r := &Run{caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
 	r.stderr.max = 4 << 10
 	cmd.Stderr = &r.stderr
 	expected := ""
@@ -283,6 +327,9 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	switch b := r.bridge.(type) {
 	case *piRPCBridge:
 		b.progress = spec.Progress
+		if spec.Harness == "pi" && spec.Caller.Role == "owner" && spec.Caller.Private {
+			b.mcpNotify = spec.MCPNotify
+		}
 	case *claudeStreamBridge:
 		b.progress = spec.Progress
 	case *codexBridge:
@@ -327,7 +374,7 @@ func (r *Run) wait() {
 		if res.Failure != "" {
 			why = res.Failure + " (" + why + ")"
 		}
-		if tail := clip([]byte(r.stderr.String())); tail != "" {
+		if tail := clip([]byte(core.RedactMCPCallbacks(r.stderr.String()))); tail != "" {
 			why += "; stderr: " + tail
 		}
 		res.Answer, res.Answers, res.Failure = "", nil, why
@@ -537,4 +584,16 @@ func newUUID() string {
 	b[8] = b[8]&0x3f | 0x80
 	h := hex.EncodeToString(b)
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+}
+
+// RespondMCP accepts only this process's caller in the same private chat.
+func (r *Run) RespondMCP(ctx context.Context, p core.Principal, conv core.ConvKey, value string) bool {
+	if r.harness != "pi" || r.caller.Role != core.RoleOwner || !r.caller.Private || p.Key() != r.caller.Principal.Key() || conv.Interface != r.caller.Conv.Interface || conv.Chat != r.caller.Conv.Chat || !core.MCPCallback(value) {
+		return false
+	}
+	b, ok := r.bridge.(*piRPCBridge)
+	if !ok {
+		return false
+	}
+	return b.respondMCP(ctx, value)
 }

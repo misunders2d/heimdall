@@ -152,20 +152,20 @@ func TestFinalBacklogConcurrencyAndScan(t *testing.T) {
 		events = append(events, stageReview(t, s, m))
 	}
 	cache := map[int64]eventMessage{}
-	start := time.Now()
 	s.cacheEvents(events, cache)
-	cold := time.Since(start)
-	if cold > 5*time.Second {
-		t.Fatalf("cold decode exceeds budget: %s", cold)
+	// Immutable durable IDs must decode once, independent of CPU contention.
+	// Poison payloads after the cold scan: any repeated decode loses timestamps.
+	for i := range events {
+		events[i].Payload = []byte("invalid")
 	}
-	start = time.Now()
 	for range 5 {
 		s.cacheEvents(events, cache)
 	}
-	if time.Since(start) > 500*time.Millisecond {
-		t.Fatalf("cached scans exceed budget: %s", time.Since(start))
+	for _, e := range events {
+		if cache[e.ID].TS == "" {
+			t.Fatal("cached event decoded again")
+		}
 	}
-	t.Logf("cold decode %s; five cached scans %s", cold, time.Since(start))
 	if len(cache) != 2500 {
 		t.Fatal("cache incomplete")
 	}

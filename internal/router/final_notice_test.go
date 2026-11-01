@@ -78,38 +78,57 @@ func TestFinalOwnerPartialResolutionAsync(t *testing.T) {
 
 func TestFinalOwnerBackgroundRetryBounded(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
-	var calls atomic.Int32
+	calls := make(chan struct{}, 10)
+	scheduled := make(chan struct{}, 10)
+	var schedulePending atomic.Bool
 	e.f.mu.Lock()
-	e.f.ownerHook = func(id string) (core.ConvKey, bool) { calls.Add(1); return core.ConvKey{}, false }
+	e.f.ownerHook = func(id string) (core.ConvKey, bool) {
+		schedulePending.Store(true)
+		calls <- struct{}{}
+		return core.ConvKey{}, false
+	}
 	e.f.mu.Unlock()
 	r := New(e.r.opt, e.st, e.f)
-	r.noticeRetry = 10 * time.Millisecond
+	r.noticeQueue = make(chan core.Inbound)
+	var clock atomic.Int64
+	now := func() time.Time {
+		v := time.Unix(clock.Load(), 0)
+		if schedulePending.Swap(false) {
+			scheduled <- struct{}{}
+		}
+		return v
+	}
+	ticks := make(chan time.Time)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); r.callerNotices(ctx) }()
+	go func() { defer close(done); r.runCallerNotices(ctx, now, ticks) }()
 	defer func() { cancel(); <-done }()
 	in := core.Inbound{From: core.Principal{Platform: "fake", ID: "retry"}}
-	r.newCaller(in)
-	deadline := time.Now().Add(time.Second)
-	for calls.Load() < 3 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	r.noticeQueue <- in
+	<-calls
+	<-scheduled
+	for range 2 {
+		clock.Add(60)
+		ticks <- time.Unix(clock.Load(), 0)
+		<-calls
+		<-scheduled
 	}
-	if calls.Load() != 3 {
-		t.Fatal("failed owner not retried")
+	// Clock stays fixed: duplicates cannot race the cooldown deadline.
+	for range 6 {
+		r.noticeQueue <- in
 	}
-	for range 5 {
-		r.newCaller(in)
-	}
-	time.Sleep(40 * time.Millisecond)
-	if calls.Load() != 3 {
+	select {
+	case <-calls:
 		t.Fatal("owner retries unbounded")
+	default:
 	}
-	r.newCaller(in)
-	deadline = time.Now().Add(time.Second)
-	for calls.Load() < 4 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if calls.Load() < 4 {
+	// Advance through final cooldown; later input begins a new bounded cycle.
+	clock.Add(60)
+	ticks <- time.Unix(clock.Load(), 0)
+	r.noticeQueue <- in
+	select {
+	case <-calls:
+	case <-time.After(5 * time.Second):
 		t.Fatal("capped caller never retried on later input")
 	}
 }

@@ -81,13 +81,30 @@ owner may overrule.
 Separate module, never a Heimdall interface. Inert fail-closed identity
 compatibility remains; no AgentNet transport is planned.
 
+### Pi caller-scoped OAuth (2026-11-01)
+
+Ported from hub af9ffff: `MCP_OAUTH_DIR`, `PI_MCP_OAUTH_ACTOR`,
+`PI_MCP_OAUTH_INSTALLATION`, `PI_MCP_OAUTH_SERVERS` are set on every Pi turn.
+Inherited copies and `SLACK_CLIENT_*` are stripped for every harness. Telegram
+uses its canonical numeric actor; Slack carries live user ID and auth.test bot
+ID separately from email authority. Scope SHA-256 preserves the hub legacy
+label and existing root stores. Linear approval follows native admin/capability
+files, Mellanni is approved for identified callers, Slack only through the
+private-owner gate. Invalid scope gets the hub deny path. Directories must
+be owned by the turn uid with mode 0700; symlinks fail closed.
+
+Owner Pi MCP login/logout/reconnect and pasted callbacks now relay privately.
+Claude/Codex use separate native logins and per-turn controls. See
+[owner Slack runbook](owner-slack-read.md) for mechanisms, mock spike, setup,
+limitations and scope defaults. No production token validity has been tested.
+
 ### Variables Heimdall does not set
 
 | Variable | Hub sets it for | Effect of its absence in a Heimdall turn |
 |---|---|---|
 
 | `PI_EXTERNAL_TENANT_ID` | website tenants (hashed scope) | website-professional-knowledge refuses; Heimdall has no website interface. |
-| `MCP_OAUTH_DIR`, `PI_MCP_OAUTH_ACTOR`, `PI_MCP_OAUTH_INSTALLATION`, `PI_MCP_OAUTH_SERVERS` | per-caller MCP OAuth scope (`buildMcpOAuthChildEnv`) | MCP OAuth tokens are the run-as OS user's native ones; no per-caller scope inside one OS user. |
+
 | `OMP_RESTRICTED_NATIVE_IMAGE` | OMP: `1` for non-admins | `omp-extensions/genai-image.ts:173` registers the native image tool only when `1`. |
 | `PI_GOOGLE_WORKSPACE_MODE` | Slack shared-draft mode | google_workspace_sa: no shared-draft-only mode. |
 | `PI_PLANE_BROKER_ENABLED` | hub Plane broker | no Plane broker. |
@@ -157,7 +174,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 | Access whitelist and admin commands (`isAllowed`, whitelist/blacklist commands) | Heimdall has no allowlist (AGENTS.md roles): owners come from the config, every other verified caller is a non-root employee. Nothing to administer by chat. |
 | Google Workspace guard (`enforceGoogleWorkspaceOutputBoundary`) | Tool and output restrictions belong to each harness's native configuration; hub guard extensions still run inside a harness that loads them, reading the identity variables Heimdall sets. |
 | Admin-action guard | Same: a harness-side guard. Owner turns are never restricted by Heimdall. |
-| MCP OAuth UI | Harness-native. Heimdall sets `PI_EXTERNAL_MCP_PRIVATE=1` in private chats, so `native-mcp-auth` works as under the hub. |
+| MCP OAuth UI | Owner private Pi native UI relayed; pasted callbacks remain ephemeral. Other callers receive a redacted notice. See owner Slack runbook. |
 | Caption artifacts (`mellanni_drive_transcript` captions sent as `captions.txt`) | Tool-specific. A harness can leave the file in its outbox, which works for every tool and harness. |
 | Scheduled-delivery context (`PI_EXTERNAL_DEFAULT_DELIVERY`) | Set in hub transport format; Heimdall scheduler remains phase 3. |
 | Unauthorized-user notices (`notifyAdminsOnce`, `notifyUnauthorizedTelegramUser`) | Every identified caller is allowed, so there is nobody to refuse; unidentified callers are ignored and logged (fail closed). Replaced by a one-time new-caller notice to the owners, without the hub's message snippet. |

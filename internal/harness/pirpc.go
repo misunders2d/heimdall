@@ -1,3 +1,5 @@
+// Native MCP UI relay ported from misunderstood-pi-pack af9ffff,
+// extensions/.shared/external-pi-runner.ts respondToPiMcpUi.
 // Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
 package harness
 
@@ -13,11 +15,15 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/url"
 	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/misunders2d/heimdall/internal/core"
 )
 
 const initialID = "heimdall-initial"
@@ -25,8 +31,12 @@ const initialID = "heimdall-initial"
 // piRPCBridge owns one fresh native process and one initial request. Native
 // settings/extensions remain the run-as user's; no interactive session is attached.
 type piRPCBridge struct {
-	progress  func(Progress)
-	telemetry progressTracker
+	mcpNotify  func(string)
+	mcpState   string
+	mcpInput   string
+	mcpExpires time.Time
+	progress   func(Progress)
+	telemetry  progressTracker
 
 	writes               sync.WaitGroup
 	ctx                  context.Context
@@ -233,6 +243,7 @@ func (b *piRPCBridge) event(raw []byte) {
 		ID      string          `json:"id"`
 		Success bool            `json:"success"`
 		Method  string          `json:"method"`
+		Title   string          `json:"title"`
 		Message json.RawMessage `json:"message"`
 		Data    struct {
 			Disposition string `json:"disposition"`
@@ -281,10 +292,18 @@ func (b *piRPCBridge) event(raw []byte) {
 	case "response":
 		if e.ID == initialID && !e.Success {
 			why := b.nativeName() + " refused the request"
-			if msg := clip([]byte(e.Error)); msg != "" {
+			if msg := clip([]byte(core.RedactMCPCallbacks(e.Error))); msg != "" {
 				why += ": " + msg
 			}
 			b.failLocked(why)
+			return
+		}
+		if e.ID == initialID && e.Success && e.Data.Disposition == "handled" && b.mcpNotify != nil {
+			b.answer = "Native MCP command completed."
+			b.ended = true
+			b.active = false
+			b.readyOnce.Do(func() { close(b.ready) })
+			b.publishLocked()
 			return
 		}
 		if p, ok := b.pending[e.ID]; ok {
@@ -347,9 +366,60 @@ func (b *piRPCBridge) event(raw []byte) {
 			if len(text) > maxAnswer+1 {
 				text = text[:maxAnswer+1]
 			}
-			b.answer = text
+			b.answer = core.RedactMCPCallbacks(text)
 		}
 	case "extension_ui_request":
+		if b.mcpNotify != nil {
+			var message string
+			_ = json.Unmarshal(e.Message, &message)
+			if e.Method == "notify" && strings.HasPrefix(message, "Sign in to MCP server ") && strings.Contains(message, "in your browser:") {
+				b.readyOnce.Do(func() { close(b.ready) })
+				for _, field := range strings.Fields(message) {
+					if u, e := url.Parse(field); e == nil && u.Scheme == "https" {
+						b.mcpState = u.Query().Get("state")
+					}
+				}
+
+				b.mcpNotify(message + "\nPaste the callback URL in this private chat.")
+				return
+			}
+			if e.Method == "input" && e.ID != "" && strings.HasPrefix(e.Title, "Waiting for sign-in to ") {
+				b.readyOnce.Do(func() { close(b.ready) })
+				b.mcpInput = e.ID
+				b.mcpExpires = time.Now().Add(300 * time.Second)
+				id := e.ID
+				go func() {
+					timer := time.NewTimer(300 * time.Second)
+					defer timer.Stop()
+					select {
+					case <-b.ctx.Done():
+						return
+					case <-b.closed:
+						return
+					case <-timer.C:
+					}
+					b.mu.Lock()
+					pending := b.mcpInput == id
+					if pending {
+						b.mcpInput = ""
+					}
+					b.mu.Unlock()
+					if pending {
+						_ = b.send(b.ctx, "", nil, map[string]any{"type": "extension_ui_response", "id": id, "cancelled": true})
+					}
+				}()
+				return
+			}
+			if e.Method == "notify" && strings.HasPrefix(message, "Sign-in failed:") {
+				b.mcpNotify("MCP sign-in failed. Retry mcp login in this private chat.")
+				return
+			}
+			if e.Method == "notify" && (strings.HasPrefix(message, "Signed in to MCP server ") || message == "Sign-in cancelled.") {
+				b.mcpNotify(message)
+
+				return
+			}
+		}
 		switch e.Method {
 		case "notify", "setStatus", "setWidget", "setTitle", "set_editor_text", "setWorkingMessage", "setFooter", "setHeader":
 		default:
@@ -446,4 +516,22 @@ func (b *piRPCBridge) nativeName() string {
 		return "OMP"
 	}
 	return "Pi"
+}
+
+func (b *piRPCBridge) respondMCP(ctx context.Context, value string) bool {
+	b.mu.Lock()
+	id := b.mcpInput
+	callback, _ := url.Parse(strings.TrimSpace(value))
+	if b.mcpState != "" && (callback == nil || callback.Query().Get("state") != b.mcpState) {
+		b.mu.Unlock()
+		return false
+	}
+	if id == "" || b.done || time.Now().After(b.mcpExpires) {
+		b.mu.Unlock()
+		return false
+	}
+	b.mcpInput = ""
+	b.mu.Unlock()
+	_ = b.send(ctx, "", nil, map[string]any{"type": "extension_ui_response", "id": id, "value": value})
+	return true // Never replay a callback whose write outcome is uncertain.
 }

@@ -14,10 +14,13 @@ import (
 // Caller is who a turn runs for: the interface-verified principal, the role
 // it was given and the conversation the turn belongs to.
 type Caller struct {
-	Principal core.Principal
-	Role      core.Role
-	Conv      core.ConvKey
-	Private   bool // the conversation is the caller's one-to-one chat with the bot
+	SlackRead         bool
+	OAuthActor        string
+	OAuthInstallation string
+	Principal         core.Principal
+	Role              core.Role
+	Conv              core.ConvKey
+	Private           bool // the conversation is the caller's one-to-one chat with the bot
 }
 
 // identityPrefixes name variables that claim who the caller is, or what
@@ -26,7 +29,7 @@ type Caller struct {
 // environment nor anything a sender wrote can supply them.
 // BIGQUERY_CALLER_PRINCIPAL is an older caller claim that a hub tool still
 // reads.
-var identityPrefixes = []string{"PI_EXTERNAL_", "A2A_CALLER_", "PI_RESTRICTED_", "BIGQUERY_CALLER_PRINCIPAL=", "PI_TRANSPORT_CHILD="}
+var identityPrefixes = []string{"PI_EXTERNAL_", "A2A_CALLER_", "PI_RESTRICTED_", "BIGQUERY_CALLER_PRINCIPAL=", "PI_TRANSPORT_CHILD=", "MCP_OAUTH_DIR=", "PI_MCP_OAUTH_", "SLACK_CLIENT_"}
 
 // identityVars maps a caller to the Pi hub's identity variables, in the
 // hub's names and formats (misunderstood-pi-pack ec72c7d,

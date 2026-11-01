@@ -193,3 +193,14 @@ func TestSlackDispatchConcurrency(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnerSlackLoadValidation(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"personal","owners":["telegram:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
+	c, err := Parse([]byte(`{` + base + `,"owner_slack":{}}`))
+	if err != nil || c.OwnerSlack == nil || c.OwnerSlack.Enabled || len(c.OwnerSlack.Scopes) != 13 {
+		t.Fatal(c, err)
+	}
+	if _, err := Parse([]byte(`{` + base + `,"owner_slack":{"scopes":["chat:write"]}}`)); err == nil {
+		t.Fatal("write scope accepted at load")
+	}
+}

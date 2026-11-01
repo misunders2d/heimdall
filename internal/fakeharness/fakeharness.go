@@ -73,6 +73,10 @@ func Main() {
 	if name == "" {
 		return
 	}
+	if capture := os.Getenv("FAKE_CAPTURE_LAUNCH"); capture != "" {
+		data, _ := json.Marshal(map[string]any{"args": os.Args[1:], "oauth": os.Getenv("MCP_OAUTH_DIR"), "servers": os.Getenv("PI_MCP_OAUTH_SERVERS"), "client": os.Getenv("SLACK_CLIENT_ID"), "secret": os.Getenv("SLACK_CLIENT_SECRET")})
+		_ = os.WriteFile(capture, data, 0600)
+	}
 	f := &fake{name: name, state: os.Getenv(envState), in: bufio.NewScanner(os.Stdin), out: json.NewEncoder(os.Stdout)}
 	f.in.Buffer(make([]byte, 1<<20), 8<<20)
 	if _, err := os.Stat(filepath.Join(f.state, "lingering")); err == nil {

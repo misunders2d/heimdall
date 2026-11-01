@@ -33,12 +33,12 @@ type eventMessage struct {
 	Attachments    []any       `json:"attachments"`
 }
 
-const mcpNotice = "MCP sign-in is not supported through Heimdall. Use your native harness directly; do not paste OAuth codes here."
+const mcpNotice = "MCP sign-in through Heimdall is available only to owners in private chats using Pi. Do not paste OAuth codes elsewhere."
 
 var oauthURL = regexp.MustCompile(`(?i)https?://[^\s<>|]+`)
 var oauthAuthorize = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*\n\s*<?https?://[^\s<>|]+>?`)
 var oauthLine = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*$`)
-var mcpCommand = regexp.MustCompile(`(?i)^/?mcp(?:\s+(?:login|logout|reconnect)\s+[^\s]+)?$`)
+var mcpCommand = regexp.MustCompile(`(?i)^/?mcp(?:\s+(?:login|logout|reconnect)(?:\s+[^\s]+)?)?$`)
 var historicalImage = regexp.MustCompile(`(?i)\b(?:image|images|img|photo|photos|picture|pictures|screenshot|screenshots|attachment|attachments|attached|upload|uploaded)\b`)
 
 const omittedMCP = "[Private native MCP sign-in UI omitted]"
@@ -132,9 +132,17 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	}
 	thread := first(m.ThreadTS, m.TS)
 	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: thread}, MsgID: m.TS, From: principal, Origin: core.OriginLive, Text: commandText, Private: m.ChannelType == "im", At: time.Now()}
+	in.OAuthActor, in.OAuthInstallation = "sl_user_"+user.ID, "sl_user_"+s.botID
+	if in.Private && slices.Contains(s.opt.Owners, principal.Key()) {
+		in.Private = s.privateOwner(ctx, m, principal)
+	}
 	in.Text = hideOAuth(commandText)
 	embedded = hideOAuth(embedded)
-	if mcpCommand.MatchString(commandText) || (!meaningfulMCP(in.Text) && !meaningfulMCP(embedded) && len(m.Files) == 0) {
+	ownerMCP := mcpCommand.MatchString(commandText) && slices.Contains(s.opt.Owners, principal.Key()) && s.privateOwner(ctx, m, principal)
+	if ownerMCP {
+		in.Text = commandText
+	}
+	if !ownerMCP && (mcpCommand.MatchString(commandText) || (!meaningfulMCP(in.Text) && !meaningfulMCP(embedded) && len(m.Files) == 0)) {
 		in.InterfaceReply = mcpNotice
 		in.Text = omittedMCP
 		embedded = ""

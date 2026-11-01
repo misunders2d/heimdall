@@ -133,16 +133,18 @@ CREATE INDEX interface_events_expiry ON interface_events(iface,completed_at) WHE
 // inExtra is the inbound extra column: what the interface added beyond the
 // text.
 type inExtra struct {
-	Context        string            `json:"context,omitempty"`
-	ControlIngress int               `json:"control_ingress,omitempty"`
-	InterfaceReply string            `json:"interface_reply,omitempty"`
-	Attachments    []core.Attachment `json:"attachments,omitempty"`
-	Group          string            `json:"group,omitempty"`
+	OAuthActor        string            `json:"oauth_actor,omitempty"`
+	OAuthInstallation string            `json:"oauth_installation,omitempty"`
+	Context           string            `json:"context,omitempty"`
+	ControlIngress    int               `json:"control_ingress,omitempty"`
+	InterfaceReply    string            `json:"interface_reply,omitempty"`
+	Attachments       []core.Attachment `json:"attachments,omitempty"`
+	Group             string            `json:"group,omitempty"`
 }
 
 func inExtraOf(in core.Inbound) (string, error) {
-	x := inExtra{ControlIngress: in.ControlIngress, InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group}
-	if x.ControlIngress == 0 && x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" {
+	x := inExtra{OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInstallation, ControlIngress: in.ControlIngress, InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group}
+	if x.OAuthActor == "" && x.OAuthInstallation == "" && x.ControlIngress == 0 && x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -150,6 +152,7 @@ func inExtraOf(in core.Inbound) (string, error) {
 }
 
 func (x inExtra) apply(in *core.Inbound) {
+	in.OAuthActor, in.OAuthInstallation = x.OAuthActor, x.OAuthInstallation
 	in.ControlIngress = x.ControlIngress
 	in.Context, in.Attachments, in.Group, in.InterfaceReply = x.Context, x.Attachments, x.Group, x.InterfaceReply
 }

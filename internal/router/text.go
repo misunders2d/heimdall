@@ -4,6 +4,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/misunders2d/heimdall/internal/core"
 )
 
 // secretPatterns are the hub's outbound token patterns (misunderstood-pi-pack
@@ -12,7 +14,7 @@ var secretPatterns = regexp.MustCompile(`(?:github_pat_[A-Za-z0-9_]{20,})|(?:gh[
 
 // secretEnv are the hub's SECRET_ENV_KEYS; every HEIMDALL_* variable counts
 // too.
-var secretEnv = []string{"TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "SP_API_CLIENT_SECRET", "SP_API_REFRESH_TOKEN", "ADS_API_CLIENT_SECRET", "ADS_API_REFRESH_TOKEN", "KEEPA_API_KEY", "PLANE_API_KEY", "NEO4J_PASSWORD", "PI_WEBSITE_CHANNEL_SECRET"}
+var secretEnv = []string{"SLACK_CLIENT_SECRET", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "SP_API_CLIENT_SECRET", "SP_API_REFRESH_TOKEN", "ADS_API_CLIENT_SECRET", "ADS_API_REFRESH_TOKEN", "KEEPA_API_KEY", "PLANE_API_KEY", "NEO4J_PASSWORD", "PI_WEBSITE_CHANNEL_SECRET"}
 
 func secretValues() []string {
 	var out []string
@@ -38,6 +40,7 @@ func contains(list []string, s string) bool {
 // for every outbound message: the values of Heimdall's own secret variables
 // and anything shaped like a known token.
 func scrub(s string) string {
+	s = core.RedactMCPCallbacks(s)
 	for _, v := range secretValues() {
 		s = strings.ReplaceAll(s, v, "[REDACTED]")
 	}

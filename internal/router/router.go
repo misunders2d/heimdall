@@ -58,6 +58,8 @@ type Accounts interface {
 }
 
 type Options struct {
+	OwnerSlack  *harness.OwnerSlack
+	SlackTeam   string
 	Access      core.Access
 	Order       []string // default harness order
 	MaxParallel int
@@ -268,7 +270,7 @@ func waitExited(runs []*harness.Run, d time.Duration) int {
 
 // accept persists one verified message and hands it to its conversation.
 // Senders who cannot be identified are ignored without storing their text.
-func (r *Router) accept(_ context.Context, in core.Inbound) error {
+func (r *Router) accept(ctx context.Context, in core.Inbound) error {
 	if in.Origin == "" {
 		in.Origin = core.OriginLive
 	}
@@ -282,6 +284,12 @@ func (r *Router) accept(_ context.Context, in core.Inbound) error {
 		r.release(in)
 		return nil
 	}
+	if r.mcpControl(ctx, &in, role) {
+		r.release(in)
+		return nil
+	}
+	in.Text = core.RedactMCPCallbacks(in.Text)
+	in.Context = core.RedactMCPCallbacks(in.Context)
 	if in.Announce {
 		if in.Group != "" && !in.Ambient {
 			r.dispatch(store.InboundRow{Inbound: in})
@@ -762,7 +770,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 	if choice != nil && cmd.Harness == "" && !cmd.Next {
 		cmd.Harness, cmd.Next = choice.Harness, choice.Next
 	}
-	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next, text: cmd.Text}
+	it := item{row: row, role: role, harness: cmd.Harness, next: cmd.Next || strings.HasPrefix(cmd.Text, "/mcp "), text: cmd.Text}
 	// Steer only the sender's own turn: sessions are per verified caller, so
 	// nobody steers another person's turn.
 	if t := c.turn; t != nil && t.done == nil && !it.next && it.harness == "" && row.From.Key() == t.who {
@@ -970,7 +978,7 @@ func (c *conv) start(ctx context.Context) {
 	}
 	first := c.queue[0]
 	n := 1
-	for n < len(c.queue) && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
+	for n < len(c.queue) && !strings.HasPrefix(first.text, "/mcp ") && !strings.HasPrefix(c.queue[n].text, "/mcp ") && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
 		n++
 	}
 	batch := append([]item(nil), c.queue[:n]...)
@@ -1011,6 +1019,9 @@ func (c *conv) start(ctx context.Context) {
 // framed with its caller, context and attachments. It runs once the turn's
 // OS account is known, which the attachments are copied for.
 func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
+	if len(batch) == 1 && strings.HasPrefix(batch[0].text, "/mcp ") {
+		return batch[0].text, nil
+	}
 	var parts []string
 	var images []harness.Image
 	if p, ok := c.r.ifaces[c.key.Interface].(Prompter); ok {
@@ -1131,13 +1142,18 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			notes = append(notes, "turn not recordable, so it did not run: "+err.Error())
 			break
 		}
-		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}
+		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private, OAuthActor: batch[0].row.OAuthActor, OAuthInstallation: batch[0].row.OAuthInstallation}
+		caller.SlackRead = harness.SlackReadAllowed(c.r.opt.OwnerSlack, batch[0].row.Inbound, t.role, h, c.r.opt.SlackTeam)
 		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
 		var progress func(harness.Progress)
 		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok {
 			progress = func(p harness.Progress) { c.observe(ctx, t, "progress", p) }
 		}
-		run, err := c.r.startRun(harness.Spec{Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress})
+		run, err := c.r.startRun(harness.Spec{MCPNotify: func(text string) {
+			if iface := c.r.ifaces[c.key.Interface]; iface != nil {
+				_ = iface.Send(ctx, core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text})
+			}
+		}, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress})
 		if err != nil {
 			c.unbind(t, h, prev, clean)
 			notes = append(notes, err.Error())

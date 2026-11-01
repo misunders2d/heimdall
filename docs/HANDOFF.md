@@ -4,6 +4,57 @@ Read [AGENTS.md](../AGENTS.md) first: it holds the product rules. This file
 records where the work stands, what was decided, and what comes next. It
 supersedes the earlier handoffs of the same day.
 
+## Owner Slack read implementation (2026-11-01)
+
+Opt-in `owner_slack` is disabled by default. Read/search is restricted to
+owners in private Telegram chats or live-verified same-team Slack 1:1 DMs,
+on Pi, Claude and Codex. Ambient/scheduled/shared/employee turns never qualify.
+[Setup and test evidence](owner-slack-read.md) records per-harness login steps.
+This section supersedes historical MCP-scope/UI deferrals below.
+
+- Part 0 ports caller-scope hashing and approved-server rules from hub af9ffff.
+  Live Slack user ID and bot installation travel separately from verified email
+  authority and survive SQLite round trips. Root digest paths match existing hub
+  stores; actual production token validity remains untested.
+- Pi includes Slack only when gated; owner private login/logout/reconnect uses
+  native RPC UI and ephemeral callback handling. Slack callback controls bypass
+  raw-event staging; ordinary events retain persist-before-ack. Native config
+  must match configured URL/scopes/port; current hub seam limits Pi to 13 scopes.
+- Claude spike with 2.1.314 and a synthetic local OAuth/MCP/model server proved
+  matching per-turn config reuses the locally registered token from another cwd.
+  Four authenticated MCP requests, one synthetic token exchange, no real OAuth.
+  Gated launches use per-turn JSON, read/search allows and a fail-closed hook;
+  all other launches deny Slack tools.
+- Codex starts one app-server per turn; gated args pin URL, scopes, read/search
+  tools, callback port and automatic tool approval. Every other turn explicitly
+  disables Slack. Native approval/input still ends as needs-human.
+- Cold backlog test now proves one decode per durable ID by poisoning cached
+  payloads, replacing wall-clock thresholds vulnerable to test CPU contention.
+- Regression map: harness `owner_slack_test.go`, router `mcp_ui_test.go`, Slack
+  `owner_slack_test.go`, store `TestInboundOAuthActorInstallationRoundTrip`.
+  Final verification and mutation outcomes are recorded below.
+
+Final checks: `go vet ./...` twice and `go test -race -count=1 ./...` twice
+with empty GOFLAGS/default package parallelism passed. Final router durations:
+217.723 s and 176.225 s. `CGO_ENABLED=0 go build` passed into temporary storage.
+Nine reversible mutations were caught: legacy digest, OAuth env stripping,
+scheduled gate, native launch wiring, write guard, Pi input relay, callback
+queue bypass, live DM verification and cached event decode. Sources restored.
+Native Codex 0.166.0 additionally rejected an enabled-only disabled entry without
+a transport; supplying the disabled HTTP URL loaded successfully in a disposable
+home, without OAuth/network access. Resumed gated/ungated native fake processes
+are covered by `TestOwnerSlackLaunchIsolationAcrossResumedTurns`.
+
+The full run exposed a pre-existing wall-clock assumption in
+`TestFinalOwnerBackgroundRetryBounded`. It now uses manual clock/ticks and an
+explicit scheduling acknowledgement; 30 race-enabled repetitions passed before
+the final full runs. Production retry timing/caps remain unchanged.
+
+No live Slack, real OAuth, production testing, or heimdall-live changes.
+Sergey must provision native configs/secrets and perform the separate consents,
+then re-test earlier harnesses after the last consent. Existing memory policy
+is unchanged; owner read results may enter native transcripts/Memento.
+
 ## Phase 2 implementation (2026-11-01)
 
 Slack is complete, developed on `wip/slack-parity` and merged to `main`,

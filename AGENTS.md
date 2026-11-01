@@ -46,6 +46,10 @@ the `heimdall-live` unit.
   `--permission-mode auto`, Codex automatic review), adds no tool
   exclusions, sandbox changes or other restrictions, and runs no extra
   services.
+  Exception: opt-in `owner_slack` exposes Slack MCP read/search only to owners
+  in private Telegram chats or live-verified same-workspace Slack 1:1 DMs,
+  on Pi/Claude/Codex; never ambient or scheduled turns. Other turns have
+  Slack disabled. See [setup runbook](docs/owner-slack-read.md).
 - **Identity comes from the interface, never from text.** Callers never log
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack
@@ -64,8 +68,8 @@ the `heimdall-live` unit.
 - **Roles.**
   - *Owner (root)*: only the principals listed in the config's `owners`
     (Telegram user IDs, Slack verified emails). Owner turns run as the owner
-    OS user (root in production) with everything enabled; Heimdall never
-    restricts owner turns.
+    OS user (root in production) with everything enabled, except the
+    private-owner Slack read gate described above.
   - *Employee (non-root)*: every other caller the interface identified, with
     no allowlist: any Telegram user who is not an owner, any verified member
     of the owner's Slack workspace who is not an owner. Employee turns always run
@@ -206,8 +210,11 @@ header. Left out on purpose: AgentNet's room tool, approval relay UI,
 thinking stream and live-session reply registration.
 
 - Anything the native automatic mode still escalates (an approval or input
-  request) ends the turn as *needs human*; Heimdall answers no such request
-  itself.
+  request) ends the turn as *needs human*. Exception: Pi native MCP sign-in
+  UI is relayed only for owners in private chats; the owner supplies the
+  callback, never Heimdall. Callback URLs/codes are ephemeral and never
+  persisted, logged, echoed, or included in model context. Slack callback
+  controls bypass raw-event staging; ordinary events retain persist-before-ack.
 - Sessions: Pi and OMP use a per-session `--session-dir` with `--continue`
   (verified: an empty directory starts fresh, the same directory resumes);
   Claude `--session-id` / `--resume`; Codex app-server `thread/start` /

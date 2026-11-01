@@ -365,3 +365,17 @@ func TestFirstMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestInboundOAuthActorInstallationRoundTrip(t *testing.T) {
+	s := open(t)
+	in := msg("oauth")
+	in.OAuthActor = "sl_user_U1"
+	in.OAuthInstallation = "sl_user_B1"
+	if _, _, err := s.AddInbound(in); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.Pending()
+	if err != nil || len(rows) != 1 || rows[0].OAuthActor != in.OAuthActor || rows[0].OAuthInstallation != in.OAuthInstallation {
+		t.Fatal(rows, err)
+	}
+}

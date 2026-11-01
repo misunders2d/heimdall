@@ -255,6 +255,10 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 	sockDone := make(chan error, 1)
 	go func() {
 		sockDone <- s.socket.run(ctx, func(ctx context.Context, raw json.RawMessage) error {
+			if handled, err := s.mcpCallback(ctx, raw, accept); handled {
+				return err
+			}
+			raw = redactMCPEvent(raw)
 			key := eventKey(raw)
 			if key == "" {
 				return nil

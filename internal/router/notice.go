@@ -37,14 +37,17 @@ func (r *Router) newCaller(in core.Inbound) {
 // One worker, bounded pending callers and three attempts spaced one minute.
 // Resolution never owns the accept/conversation lock.
 func (r *Router) callerNotices(ctx context.Context) {
+	tick := time.NewTicker(min(time.Second, r.noticeRetry))
+	defer tick.Stop()
+	r.runCallerNotices(ctx, time.Now, tick.C)
+}
+func (r *Router) runCallerNotices(ctx context.Context, now func() time.Time, ticks <-chan time.Time) {
 	type pending struct {
 		in       core.Inbound
 		attempts int
 		next     time.Time
 	}
 	jobs := map[string]pending{}
-	tick := time.NewTicker(min(time.Second, r.noticeRetry))
-	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -57,10 +60,10 @@ func (r *Router) callerNotices(ctx context.Context) {
 					r.log.Print("new-caller pending map full; retry on next input")
 				}
 			}
-		case <-tick.C:
+		case <-ticks:
 		}
 		for key, j := range jobs {
-			if time.Now().Before(j.next) {
+			if now().Before(j.next) {
 				continue
 			}
 			if j.attempts >= 3 {
@@ -72,7 +75,7 @@ func (r *Router) callerNotices(ctx context.Context) {
 			}
 			complete := r.notifyCallerContext(ctx, j.in)
 			j.attempts++
-			j.next = time.Now().Add(r.noticeRetry)
+			j.next = now().Add(r.noticeRetry)
 			if complete {
 				delete(jobs, key)
 			} else {

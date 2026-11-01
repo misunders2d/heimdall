@@ -22,6 +22,7 @@ import (
 var DefaultOrder = []string{"omp", "codex", "claude", "pi"}
 
 type Config struct {
+	OwnerSlack   *harness.OwnerSlack      `json:"owner_slack,omitempty"`
 	Commands     *Commands                `json:"commands,omitempty"`
 	DataDir      string                   `json:"data_dir"`
 	Mode         core.Mode                `json:"mode"`
@@ -110,6 +111,11 @@ func Parse(raw []byte) (*Config, error) {
 }
 
 func (c *Config) fill() error {
+	if c.OwnerSlack != nil {
+		if err := c.OwnerSlack.Validate(); err != nil {
+			return err
+		}
+	}
 	if c.DataDir == "" {
 		return errors.New("data_dir is required")
 	}
