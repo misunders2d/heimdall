@@ -14,7 +14,32 @@ type apiPacer struct {
 	mu       sync.Mutex
 	interval time.Duration
 	next     map[string]time.Time
-	priority map[string]int
+	queues   map[string]*pacerQueue
+}
+
+type pacerWaiter struct{ priority bool }
+
+type pacerQueue struct {
+	ordinary, priority []*pacerWaiter
+	lastPriority       bool
+	changed            chan struct{}
+}
+
+func (q *pacerQueue) notify() {
+	close(q.changed)
+	q.changed = make(chan struct{})
+}
+
+func (q *pacerQueue) head() *pacerWaiter {
+	// A priority grant always yields the next slot to the oldest ordinary
+	// waiter, if one exists. Each class retains arrival order.
+	if len(q.priority) > 0 && (!q.lastPriority || len(q.ordinary) == 0) {
+		return q.priority[0]
+	}
+	if len(q.ordinary) > 0 {
+		return q.ordinary[0]
+	}
+	return nil
 }
 
 func (p *apiPacer) wait(ctx context.Context, method string) error {
@@ -22,17 +47,32 @@ func (p *apiPacer) wait(ctx context.Context, method string) error {
 		return nil
 	}
 	priority, _ := ctx.Value(controlIdentityKey{}).(bool)
+	w := &pacerWaiter{priority: priority}
 	p.mu.Lock()
-	if p.priority == nil {
-		p.priority = map[string]int{}
+	defer p.mu.Unlock()
+	if p.queues == nil {
+		p.queues = map[string]*pacerQueue{}
 	}
+	q := p.queues[method]
+	if q == nil {
+		q = &pacerQueue{changed: make(chan struct{})}
+		p.queues[method] = q
+	}
+	queue := &q.ordinary
 	if priority {
-		p.priority[method]++
+		queue = &q.priority
 	}
-	p.mu.Unlock()
-	if priority {
-		defer func() { p.mu.Lock(); p.priority[method]--; p.mu.Unlock() }()
-	}
+	*queue = append(*queue, w)
+	q.notify()
+	defer func() {
+		for i, item := range *queue {
+			if item == w {
+				*queue = append((*queue)[:i], (*queue)[i+1:]...)
+				break
+			}
+		}
+		q.notify() // Cancellation and grants both release the next waiter.
+	}()
 	interval := p.interval
 	if method == "users.lookupByEmail" {
 		interval *= 2
@@ -41,20 +81,33 @@ func (p *apiPacer) wait(ctx context.Context, method string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		p.mu.Lock()
 		delay := time.Until(p.next[method])
-		if delay <= 0 && (priority || p.priority[method] == 0) {
+		head := q.head() == w
+		if head && delay <= 0 {
+			if p.next == nil {
+				p.next = map[string]time.Time{}
+			}
 			p.next[method] = time.Now().Add(interval)
-			p.mu.Unlock()
+			q.lastPriority = priority
 			return nil
 		}
+		changed := q.changed
+		var timer *time.Timer
+		var tick <-chan time.Time
+		if head {
+			timer = time.NewTimer(delay)
+			tick = timer.C
+		}
 		p.mu.Unlock()
-		if delay <= 0 {
-			delay = p.interval
+		select {
+		case <-ctx.Done():
+		case <-changed:
+		case <-tick:
 		}
-		if err := pause(ctx, delay); err != nil {
-			return err
+		if timer != nil {
+			timer.Stop()
 		}
+		p.mu.Lock()
 	}
 }
 

@@ -74,7 +74,8 @@ func TestControlIdentityPacerPriority(t *testing.T) {
 	deadline := time.Now().Add(750 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if p.mu.TryLock() {
-			registered = p.priority["users.info"] > 0
+			q := p.queues["users.info"]
+			registered = q != nil && len(q.priority) > 0
 			p.mu.Unlock()
 			if registered {
 				break

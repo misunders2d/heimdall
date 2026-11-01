@@ -103,7 +103,15 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		s.opt.Log.Print("slack: ignored message with unknown surface")
 		return finish()
 	}
-	if s.controlMessage(m) {
+	text := strings.TrimSpace(unescape(m.Text))
+	mention := s.mention()
+	addressed := m.ChannelType == "im" || mention.MatchString(m.Text)
+	commandText := stripBoundaryMention(text, mention)
+	commandText = router.NormalizeSlash(commandText, s.botID)
+	if router.UnmentionedCommand(text, commandText, s.botID, s.opt.UnmentionedCommands) {
+		addressed = true
+	}
+	if addressed && s.controlMessage(m) {
 		ctx = context.WithValue(ctx, controlIdentityKey{}, true)
 	}
 	user, err := s.liveUser(ctx, m.User)
@@ -118,17 +126,9 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		s.opt.Log.Print("slack: ignored unidentified caller")
 		return finish()
 	}
-	text := strings.TrimSpace(unescape(m.Text))
 	embedded := embeddedContent(m)
 	if text == "" && embedded == "" && len(m.Files) == 0 {
 		return finish()
-	}
-	mention := s.mention()
-	addressed := m.ChannelType == "im" || mention.MatchString(m.Text)
-	commandText := stripBoundaryMention(text, mention)
-	commandText = router.NormalizeSlash(commandText, s.botID)
-	if router.UnmentionedCommand(text, commandText, s.botID, s.opt.UnmentionedCommands) {
-		addressed = true
 	}
 	thread := first(m.ThreadTS, m.TS)
 	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: thread}, MsgID: m.TS, From: principal, Origin: core.OriginLive, Text: commandText, Private: m.ChannelType == "im", At: time.Now()}
