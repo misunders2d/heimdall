@@ -1,8 +1,11 @@
 package harness
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/misunders2d/heimdall/internal/core"
@@ -51,6 +54,21 @@ func identityVars(c Caller) ([]string, error) {
 		private = "1"
 	}
 	vars = append(vars, "PI_EXTERNAL_MCP_PRIVATE="+private, "PI_TRANSPORT_CHILD=1")
+	var delivery any
+	switch c.Principal.Platform {
+	case core.PlatformSlack:
+		delivery = map[string]any{"platform": "slack", "channel": c.Conv.Chat, "thread_ts": c.Conv.Thread, "sessionKey": "sl_channel_" + c.Conv.Chat + "_thread_" + regexp.MustCompile(`[^A-Za-z0-9_.-]`).ReplaceAllString(firstThread(c.Conv.Thread), "_")}
+	case core.PlatformTelegram:
+		chat, err := strconv.ParseInt(c.Conv.Chat, 10, 64)
+		if err != nil {
+			return nil, errors.New("invalid Telegram chat ID")
+		}
+		delivery = map[string]any{"platform": "telegram", "chatId": chat, "sessionKey": "tg_chat_" + c.Conv.Chat}
+	}
+	if delivery != nil {
+		data, _ := json.Marshal(delivery)
+		vars = append(vars, "PI_EXTERNAL_DEFAULT_DELIVERY="+string(data))
+	}
 	for _, kv := range vars {
 		if strings.ContainsFunc(kv, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 			return nil, fmt.Errorf("caller identity %s contains a control character", strings.SplitN(kv, "=", 2)[0])
@@ -140,4 +158,11 @@ func hasIdentityPrefix(kv string) bool {
 		}
 	}
 	return false
+}
+
+func firstThread(s string) string {
+	if s == "" {
+		return "root"
+	}
+	return s
 }

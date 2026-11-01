@@ -44,7 +44,7 @@ var controlWords = map[string]string{
 // parseCommand reads a message. A control word alone is its command; other
 // text that does not start with "!" followed by a letter is a plain message.
 func parseCommand(text string) command {
-	t := strings.TrimSpace(text)
+	t := NormalizeSlash(strings.TrimSpace(text), "")
 	if kind, ok := controlWords[strings.ToLower(t)]; ok {
 		return command{Kind: kind}
 	}

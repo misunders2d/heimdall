@@ -35,7 +35,7 @@ func TestAPIAuthRetryAndPermanentErrors(t *testing.T) {
 			defer server.Close()
 			a := newAPI(server.URL, "test-credential", nil)
 			a.pause = func(_ context.Context, d time.Duration) error {
-				if d != 60*time.Second {
+				if d != 300*time.Second {
 					t.Errorf("delay %v", d)
 				}
 				return nil

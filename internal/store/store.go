@@ -122,6 +122,10 @@ INSERT INTO callers SELECT platform || ':' || user_id, MIN(received_at) FROM inb
  UNIQUE(iface,event_key));
  CREATE INDEX interface_events_pending ON interface_events(iface,complete,id);`,
 	`CREATE TABLE interface_progress(turn_id INTEGER PRIMARY KEY,iface TEXT NOT NULL,chat TEXT NOT NULL,thread TEXT NOT NULL,ts TEXT NOT NULL,phase TEXT NOT NULL);`,
+	// Dedupe age starts at completion, so delayed pending work gets a full window.
+	`ALTER TABLE interface_events ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0;
+UPDATE interface_events SET completed_at=received_at WHERE complete=1;
+CREATE INDEX interface_events_expiry ON interface_events(iface,completed_at) WHERE complete=1;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the

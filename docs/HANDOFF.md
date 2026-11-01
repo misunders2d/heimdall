@@ -12,13 +12,15 @@ with fake Web API/Socket Mode and native-protocol end-to-end tests. No live Slac
 business-policy rows and all 16 independent amendments with code evidence.
 
 - Startup/config/workspace validation and per-data-directory lock; raw events
-  commit to SQLite before ack. Four bounded post-ack workers preserve channel
-  order, verify live same-workspace email, and fetch history/download files.
+  commit to SQLite before ack. Four bounded post-ack workers preserve normal
+  channel order; a separate verified stop/cancel lane bypasses heavy work.
+  Workers verify live same-workspace email and fetch history/download files.
 - Live history plus stored ambient plus recent delivered assistant outputs
   share one 16000-character untrusted context budget. Embedded content cannot
   supply identity/commands; OAuth callbacks are hidden from context.
 - Inbound files default to 200000000 bytes each, configurable, with 1 GiB
-  reserved free disk and concurrent reservations. File tokens only reach the
+  reserved free disk and remaining-byte concurrent reservations; turn copies
+  check destination allocation. File tokens only reach the
   allowed Slack file hosts; checked per-user turn staging remains generic.
 - Optional generic lifecycle hook; Pi/OMP RPC, Claude stream-json and Codex
   public-summary/tool progress. Thinking stays, using hub NFKC/privacy/display
@@ -30,7 +32,8 @@ business-policy rows and all 16 independent amendments with code evidence.
   when the complete answer fits Slack's update limit. At-least-once remains.
   Progress timestamps/phase persist and restart recovery tidies them.
 - Native outbox uploads, reactions, verified owner DM notices and generic
-  commands. Schema 10 stages interface events; 11 persists progress. No
+  commands. Schema 10 stages interface events; 11 persists progress; 12 adds
+  completion timestamps and indexed event expiry. No
   migration rewrites existing shipped steps.
 - Lifecycle leftovers fixed in main: early answers get the post-answer exit
   deadline; active stop sends group SIGTERM then SIGKILL after five seconds.
@@ -589,3 +592,30 @@ are in `docs/hub-parity.md`.
     session (`/tmp/heimdall-src`); not Heimdall test artifacts, left alone.
   - The first session's leftover live-test sessions (one Claude project dir,
     two Codex rollouts, synthetic prompts only) were deleted on 2026-10-30.
+
+## Review corrections (2026-11-01)
+
+A1–A12 and B1–B8 addressed inline against pinned hub `ec72c7d`:
+transient identity lookup retries retain durable events; final failure status
+survives recovery without leaking memory; idle download deadline and scaled
+absolute cap replace 60-second total; controls bypass blocked heavy workers;
+chunking preserves inline fences and atomic angle tokens; disk accounting uses
+remaining bytes and checks turn copies; unusable config entries rejected;
+upload completion ambiguity gets explicit uncertainty, with sanitized reasons;
+completed event dedupe retention defaults to 72 hours (configurable 1–720);
+thinking filtering moved off stdout callback; Retry-After capped at five minutes.
+
+Slash abort/nevermind normalize through shared Slack/Telegram router. No ready
+status flicker. Slack header includes verified from identity. Both transports
+set hub-format default delivery; thread ambient excludes channel ambient.
+MCP commands/callbacks omitted from harness inputs and context. Shared notice
+requires addressing; 1:1 DM notice also supported, with no sign-in implementation:
+“MCP sign-in is not supported through Heimdall. Use your native harness directly;
+do not paste OAuth codes here.” Unverified/foreign callers remain silent.
+
+Deferred identity scope: website-only PI_EXTERNAL_TENANT_ID; MCP OAuth variables
+PI_MCP_OAUTH_ACTOR and PI_MCP_OAUTH_INSTALLATION (not PI_EXTERNAL_* names).
+Native authentication/scoping remains owner decision. No credentials copied.
+Regression tests added per correction. Fakes only; no live Slack/Telegram or
+heimdall-live operations. Required vet/race/static verification recorded with
+implementation commit; live transport parity remains unverified.

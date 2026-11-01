@@ -38,6 +38,7 @@ on a line number.
 | `PI_EXTERNAL_PLATFORM` | `telegram`, `slack`, `a2a` (AgentNet); any other interface its own name (e.g. `local`) | yes, every turn | privileged-tool-guard, admin-lifecycle-guard, native-mcp-auth, neo4j-memory-tools/-security, a2a-external-identity, helium10-hub, keepa-h10, plane-broker, slack-canvas-core, website-* |
 | `PI_EXTERNAL_USER_ID` | Telegram `tg_user_<numeric id>`; Slack the verified email; others `<platform>_user_<id>`, never a bare `local`/`system`. Not set for AgentNet yet (see below) | yes | privileged-tool-guard, admin-lifecycle-guard, scheduler (job owner), neo4j-memory-tools/-security, mellanni-bigquery, google_workspace_sa, clickup-mcp, native-mcp-auth, direct-ping-auth, a2a-external-identity |
 | `PI_EXTERNAL_CHAT_ID` | Telegram `tg_chat_<chat id>`; Slack `sl_channel_<channel>`; others `<platform>_chat_<chat>`. Not set for AgentNet yet | yes | scheduler (job scope), privileged-tool-guard, website-professional-knowledge |
+| `PI_EXTERNAL_DEFAULT_DELIVERY` | Slack `{platform,channel,thread_ts,sessionKey}`; Telegram `{platform,chatId,sessionKey}` (numeric chatId), hub session-key format | yes | scheduler default delivery |
 | `PI_EXTERNAL_USER_EMAIL` | Slack only: the verified email | **no** (Heimdall adds it) | mellanni-bigquery (`index.ts:24`), after `A2A_CALLER_PRINCIPAL` and `BIGQUERY_CALLER_PRINCIPAL` |
 | `PI_RESTRICTED_EXTERNAL_USER` | `0` for owner turns; `1` for every non-root turn and every AgentNet turn | yes: `0` for admins, `1` otherwise | scheduler, a2a-external-identity (an A2A caller needs `1`) |
 | `PI_EXTERNAL_MCP_PRIVATE` | `1` in the caller's one-to-one chat with the bot (Telegram `chat.type == "private"`, Slack DM), else `0` | yes (`nativeMcpUi.privateChat`) | native-mcp-auth (`:18-19`): with any `PI_EXTERNAL_*` set, MCP sign-in is refused unless this is `1` |
@@ -84,7 +85,7 @@ compatibility remains; no AgentNet transport is planned.
 
 | Variable | Hub sets it for | Effect of its absence in a Heimdall turn |
 |---|---|---|
-| `PI_EXTERNAL_DEFAULT_DELIVERY` | JSON of the chat a turn came from | scheduler (`parseDefaultDelivery`, L357): a job created without an explicit target has no default delivery chat. Heimdall's scheduler (phase 3) owns delivery. |
+
 | `PI_EXTERNAL_TENANT_ID` | website tenants (hashed scope) | website-professional-knowledge refuses; Heimdall has no website interface. |
 | `MCP_OAUTH_DIR`, `PI_MCP_OAUTH_ACTOR`, `PI_MCP_OAUTH_INSTALLATION`, `PI_MCP_OAUTH_SERVERS` | per-caller MCP OAuth scope (`buildMcpOAuthChildEnv`) | MCP OAuth tokens are the run-as OS user's native ones; no per-caller scope inside one OS user. |
 | `OMP_RESTRICTED_NATIVE_IMAGE` | OMP: `1` for non-admins | `omp-extensions/genai-image.ts:173` registers the native image tool only when `1`. |
@@ -158,7 +159,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 | Admin-action guard | Same: a harness-side guard. Owner turns are never restricted by Heimdall. |
 | MCP OAuth UI | Harness-native. Heimdall sets `PI_EXTERNAL_MCP_PRIVATE=1` in private chats, so `native-mcp-auth` works as under the hub. |
 | Caption artifacts (`mellanni_drive_transcript` captions sent as `captions.txt`) | Tool-specific. A harness can leave the file in its outbox, which works for every tool and harness. |
-| Scheduled-delivery context (`PI_EXTERNAL_DEFAULT_DELIVERY`) | Phase 3 scheduler owns delivery. |
+| Scheduled-delivery context (`PI_EXTERNAL_DEFAULT_DELIVERY`) | Set in hub transport format; Heimdall scheduler remains phase 3. |
 | Unauthorized-user notices (`notifyAdminsOnce`, `notifyUnauthorizedTelegramUser`) | Every identified caller is allowed, so there is nobody to refuse; unidentified callers are ignored and logged (fail closed). Replaced by a one-time new-caller notice to the owners, without the hub's message snippet. |
 | PID lock and heartbeat | One Heimdall per systemd unit; a second poller on the same token gets Telegram's 409, which is logged and retried. A data-directory lock is a cheap later addition if two instances ever share one. |
 | `deleteWebhook` | AGENTS.md: Heimdall never calls `deleteWebhook` or `setWebhook`; a webhook shows as a logged 409. |

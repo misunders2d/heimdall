@@ -96,18 +96,21 @@ func (s *Slack) download(ctx context.Context, f slackFile) core.Attachment {
 	if reservation == 0 {
 		reservation = s.opt.MaxFileBytes
 	}
-	s.mu.Lock()
+	s.diskMu.Lock()
 	free, err := s.freeBytes(s.UploadDir())
 	if err != nil || free-s.reserved-reservation < diskReserve {
-		s.mu.Unlock()
+		s.diskMu.Unlock()
 		return fail("insufficient disk space with reserved free space")
 	}
 	s.reserved += reservation
-	s.mu.Unlock()
-	defer func() { s.mu.Lock(); s.reserved -= reservation; s.mu.Unlock() }()
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	s.diskMu.Unlock()
+	defer func() { s.diskMu.Lock(); s.reserved -= reservation; s.diskMu.Unlock() }()
+	ctx, cancel := context.WithTimeout(ctx, downloadCap(s.opt.MaxFileBytes))
 	defer cancel()
+	idle := time.AfterFunc(s.downloadIdle(), cancel)
+	defer idle.Stop()
 	client := *s.bot.http
+	client.Timeout = 0
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || !s.fileHost(req.URL.String()) {
 			return errors.New("untrusted file redirect")
@@ -140,7 +143,7 @@ func (s *Slack) download(ctx context.Context, f slackFile) core.Attachment {
 	// Limit every read; reserve cap for unknown sizes, and reject a body that
 	// exceeds its declared reservation instead of consuming other downloads' space.
 	limit := min(s.opt.MaxFileBytes, reservation)
-	n, err := io.Copy(file, io.LimitReader(response.Body, limit+1))
+	n, err := io.Copy(&downloadWriter{file: file, s: s, remaining: &reservation, idle: idle}, io.LimitReader(response.Body, limit+1))
 	if err == nil {
 		err = file.Sync()
 	}
@@ -207,4 +210,80 @@ func (s *Slack) upload(ctx context.Context, out core.Outbound) error {
 		return errors.New("slack: file upload rejected")
 	}
 	return api.call(ctx, "files.completeUploadExternal", map[string]any{"files": []map[string]string{{"id": grant.ID, "title": out.File.Name}}, "channel_id": out.Conv.Chat, "thread_ts": out.Conv.Thread}, nil)
+}
+
+func uploadReason(err error) string {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		if ae.Ambiguous {
+			return "completion uncertain; check thread before retrying"
+		}
+		return ae.Error()
+	}
+	switch err.Error() {
+	case "slack: outbound file unavailable":
+		return "outbound file unavailable"
+	case "slack: untrusted file upload endpoint", "slack: invalid file upload endpoint":
+		return "untrusted upload endpoint"
+	case "slack: file upload rejected":
+		return "upload endpoint rejected transfer"
+	}
+	return "transfer could not be confirmed"
+}
+
+// At least 10 minutes, plus one second per 16 KiB of configured capacity.
+func downloadCap(size int64) time.Duration {
+	return 10*time.Minute + time.Duration(size/16384)*time.Second
+}
+func (s *Slack) downloadIdle() time.Duration {
+	if s.fileIdle > 0 {
+		return s.fileIdle
+	}
+	return 60 * time.Second
+}
+
+type downloadWriter struct {
+	file      io.Writer
+	s         *Slack
+	remaining *int64
+	idle      *time.Timer
+}
+
+func (w *downloadWriter) Write(p []byte) (int, error) {
+	w.s.diskMu.Lock()
+	defer w.s.diskMu.Unlock()
+	n, err := w.file.Write(p)
+	used := min(int64(n), *w.remaining)
+	*w.remaining -= used
+	w.s.reserved -= used
+	if n > 0 {
+		w.idle.Reset(w.s.downloadIdle())
+	}
+	return n, err
+}
+
+// Serialize local copy allocation with download writes/reservations. The free
+// space reading includes completed uploads; only remaining downloads are added.
+func (s *Slack) WithUploadCopy(dir string, size int64, copyFile func() error) error {
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	free, err := s.freeBytes(dir)
+	if err != nil {
+		return err
+	}
+	reserved := s.reserved
+	var uploadStat, destStat syscall.Stat_t
+	if err := syscall.Stat(s.UploadDir(), &uploadStat); err != nil {
+		return err
+	}
+	if err := syscall.Stat(dir, &destStat); err != nil {
+		return err
+	}
+	if uploadStat.Dev != destStat.Dev {
+		reserved = 0
+	}
+	if free-reserved-size < diskReserve {
+		return errors.New("insufficient disk space for turn copy")
+	}
+	return copyFile()
 }

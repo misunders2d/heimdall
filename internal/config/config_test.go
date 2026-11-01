@@ -122,3 +122,28 @@ func TestSlackAndSharedCommandConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewUnmentionedAndDedupeConfig(t *testing.T) {
+	for _, name := range []string{"use", "next"} {
+		_, err := Parse([]byte(`{"data_dir":"/tmp/h","mode":"personal","owners":["slack:owner@example.test"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}},"commands":{"unmentioned":["` + name + `"]}}`))
+		if err == nil {
+			t.Fatalf("accepted unusable %s", name)
+		}
+	}
+	for _, hours := range []int{0, 1, 720, -1, 721} {
+		raw := `{"data_dir":"/tmp/h","mode":"personal","owners":["slack:owner@example.test"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}},"slack":{"team_id":"Ttest","event_dedupe_hours":` + strconv.Itoa(hours) + `}}`
+		got, err := Parse([]byte(raw))
+		if hours < 0 || hours > 720 {
+			if err == nil {
+				t.Fatal("invalid retention accepted")
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hours == 0 && got.Slack.EventDedupeHours != 72 {
+				t.Fatal("default retention")
+			}
+		}
+	}
+}

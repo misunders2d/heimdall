@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,7 +77,11 @@ func (s *Slack) Send(ctx context.Context, out core.Outbound) error {
 		if err != nil {
 			warning := out
 			warning.File = nil
-			warning.Text = "File upload failed: " + safeFilename(out.File.Name)
+			warning.Text = "File upload failed: " + safeFilename(out.File.Name) + ": " + uploadReason(err)
+			var ae *apiError
+			if errors.As(err, &ae) && ae.Ambiguous {
+				warning.Text = "File upload completion uncertain: " + safeFilename(out.File.Name) + ": " + uploadReason(err)
+			}
 			warning.Formatted = false
 			warning.TurnID = 0
 			if sent := s.sendText(ctx, warning); sent == nil {
@@ -97,6 +102,9 @@ func (s *Slack) Send(ctx context.Context, out core.Outbound) error {
 	}
 	if out.Text != "" {
 		if err := s.sendText(ctx, out); err != nil {
+			s.mu.Lock()
+			delete(s.progress, out.TurnID)
+			s.mu.Unlock()
 			return err
 		}
 	}
@@ -222,6 +230,8 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 }
 func (s *Slack) setDeliveryStatus(ctx context.Context, out core.Outbound, message string) {
 	if p, ok, _ := s.opt.Store.Progress(out.TurnID); ok && p.TS != "" {
+		p.Phase = "delivery_failed"
+		_ = s.opt.Store.SaveProgress(p)
 		_ = s.bot.call(ctx, "chat.update", map[string]any{"channel": p.Conv.Chat, "ts": p.TS, "text": escapeText(s.name + " " + message)}, nil)
 	}
 }
@@ -246,7 +256,7 @@ func (s *Slack) cleanupStatus(ctx context.Context, out core.Outbound, reacted bo
 		}
 		p.TS = ts
 	}
-	if p.Phase == "done" && p.TS != "" && (out.Text != "" || reacted) {
+	if (p.Phase == "done" || p.Phase == "delivery_failed") && p.TS != "" && (out.Text != "" || reacted) {
 		err = s.bot.call(ctx, "chat.delete", map[string]string{"channel": p.Conv.Chat, "ts": p.TS}, nil)
 		var ae *apiError
 		if err != nil && (!errors.As(err, &ae) || ae.Code != "message_not_found") {
@@ -265,6 +275,13 @@ func (s *Slack) cleanupStatus(ctx context.Context, out core.Outbound, reacted bo
 	return s.opt.Store.DeleteProgress(out.TurnID)
 }
 func splitReply(text string) []string {
+	// Oversize Slack tokens degrade to escaped text before boundary selection.
+	text = regexp.MustCompile(`<[^>]*>`).ReplaceAllStringFunc(text, func(token string) string {
+		if len([]rune(token)) > 3000 {
+			return escapeText(token)
+		}
+		return token
+	})
 	var parts []string
 	fence := ""
 	prefix := ""
@@ -286,7 +303,7 @@ func splitReply(text string) []string {
 				n = len([]rune(body[:at]))
 				body = string(runes[:n])
 			}
-			if at := strings.LastIndex(body, "<"); at >= len(body)/2 && !strings.Contains(body[at:], ">") {
+			if at := strings.LastIndex(body, "<"); at >= 0 && !strings.Contains(body[at:], ">") {
 				n = len([]rune(body[:at]))
 				body = string(runes[:n])
 			}
@@ -297,7 +314,7 @@ func splitReply(text string) []string {
 		}
 		for _, line := range strings.Split(body, "\n") {
 			trim := strings.TrimSpace(line)
-			if strings.HasPrefix(trim, "```") {
+			if strings.HasPrefix(trim, "```") && strings.Count(trim, "```")%2 == 1 {
 				if fence == "" {
 					fence = clip(trim, 80)
 				} else {

@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"time"
 )
 
 // InterfaceEvent is a raw platform event waiting for post-ack processing.
@@ -39,7 +40,7 @@ func (s *Store) NextEvent(iface string) (InterfaceEvent, bool, error) {
 // has committed. A crash between acceptance and this update retries local
 // processing; the router's independent message key dedupes commands/turns.
 func (s *Store) CompleteEvent(id int64) error {
-	_, err := s.db.Exec(`UPDATE interface_events SET complete=1,payload=NULL WHERE id=?`, id)
+	_, err := s.db.Exec(`UPDATE interface_events SET complete=1,payload=NULL,completed_at=? WHERE id=? AND complete=0`, now(), id)
 	return err
 }
 
@@ -78,4 +79,10 @@ func (s *Store) EventPending(id int64) (bool, error) {
 		return false, nil
 	}
 	return complete == 0, err
+}
+
+// PruneEvents retains pending work irrespective of age.
+func (s *Store) PruneEvents(iface string, before time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM interface_events WHERE iface=? AND complete=1 AND completed_at<?`, iface, before.UnixMilli())
+	return err
 }

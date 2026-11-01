@@ -82,7 +82,7 @@ func (a *apiClient) call(ctx context.Context, method string, args any, out any) 
 		if !retry || attempt == 4 {
 			return err
 		}
-		if method == "chat.postMessage" {
+		if method == "chat.postMessage" || method == "files.completeUploadExternal" {
 			var ae *apiError
 			if !errors.As(err, &ae) || ae.Status != 429 {
 				return err
@@ -124,7 +124,7 @@ func (a *apiClient) once(parent context.Context, method string, data []byte, out
 			return router.PermanentError{Err: e}, false, 0
 		}
 		after, _ := strconv.Atoi(res.Header.Get("Retry-After"))
-		after = min(max(after, 0), 60)
+		after = min(max(after, 0), 300)
 		return e, true, time.Duration(after) * time.Second
 	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, (8<<20)+1))

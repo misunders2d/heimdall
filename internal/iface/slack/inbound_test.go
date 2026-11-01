@@ -47,11 +47,11 @@ func TestSlackSharedCommandPolicies(t *testing.T) {
 			s, _ := testSlack(t, f)
 			s.botID = "Ubot"
 			s.opt.UnmentionedCommands = policy.words
-			for _, text := range []string{"stop", "cancel", "/stop", "/stop@Ubot", "abort", "nevermind", "reset", "chatid", "/start", "!help", "!status", "!use omp", "!next hello", "!omp hello", "stop now", "hello", "<@Ubot> reset", "<@Ubot|bot> !status"} {
+			for _, text := range []string{"stop", "cancel", "/stop", "/stop@Ubot", "abort", "nevermind", "/abort", "/nevermind", "reset", "chatid", "/start", "!help", "!status", "!use omp", "!next hello", "!omp hello", "stop now", "hello", "<@Ubot> reset", "<@Ubot|bot> !status"} {
 				m := f.event("C1", "channel", "Uowner", text, "")
 				var got core.Inbound
 				directEvent(t, s, m, func(_ context.Context, in core.Inbound) error { got = in; return nil })
-				control := text == "stop" || text == "cancel" || text == "/stop" || text == "/stop@Ubot" || text == "abort" || text == "nevermind"
+				control := text == "stop" || text == "cancel" || text == "/stop" || text == "/stop@Ubot" || text == "abort" || text == "nevermind" || text == "/abort" || text == "/nevermind"
 				command := text != "hello" && text != "stop now"
 				want := strings.Contains(text, "<@Ubot") || policy.name == "all" && command || policy.name == "default" && control
 				if got.MsgID == "" || got.Ambient == want {
@@ -101,7 +101,7 @@ func TestSlackAdmissionAndEmbeddedBoundary(t *testing.T) {
 	m = f.event("C1", "channel", "Uowner", "http://localhost/?code=private-code&state=state", "")
 	directEvent(t, s, m, accept)
 	in = admitted[2]
-	if in.InterfaceReply == "" || strings.Contains(in.Text, "private-code") {
+	if !in.Ambient || strings.Contains(in.Text, "private-code") {
 		t.Fatal("OAuth safety warning missing")
 	}
 	rows, err := s.opt.Store.RecentAmbient(core.ConvKey{Interface: "slack", Chat: "C1"}, nil, 40)
@@ -157,10 +157,13 @@ func TestSlackContextCombinesSourcesAndImageOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	text, images := s.context(context.Background(), eventMessage{Channel: "C1", TS: "1000.000020", ThreadTS: k.Thread}, k)
-	for _, want := range []string{"live history", "stored channel ambient", "prior delivered answer"} {
+	for _, want := range []string{"live history", "prior delivered answer"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %s", want)
 		}
+	}
+	if strings.Contains(text, "stored channel ambient") {
+		t.Fatal("thread leaked channel ambient")
 	}
 	if len(images) != 5 || images[0].ID != "3" || images[4].ID != "7" {
 		t.Fatalf("image selection/order %+v", images)

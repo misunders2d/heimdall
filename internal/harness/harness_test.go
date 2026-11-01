@@ -509,6 +509,21 @@ func TestIdentityMapsToHubVariables(t *testing.T) {
 			[]string{"PI_EXTERNAL_PLATFORM=local", "PI_EXTERNAL_USER_ID=local_user_local", "PI_EXTERNAL_CHAT_ID=local_chat_system", "PI_RESTRICTED_EXTERNAL_USER=0", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.c.Principal.Platform == "telegram" {
+				if tc.c.Conv.Chat == "C9" {
+					tc.c.Conv.Chat = "-100"
+					for i := range tc.want {
+						tc.want[i] = strings.ReplaceAll(tc.want[i], "tg_chat_C9", "tg_chat_-100")
+					}
+				}
+				if tc.c.Conv.Chat == "43" {
+					tc.want = append(tc.want, `PI_EXTERNAL_DEFAULT_DELIVERY={"chatId":43,"platform":"telegram","sessionKey":"tg_chat_43"}`)
+				} else {
+					tc.want = append(tc.want, `PI_EXTERNAL_DEFAULT_DELIVERY={"chatId":-100,"platform":"telegram","sessionKey":"tg_chat_-100"}`)
+				}
+			} else if tc.c.Principal.Platform == "slack" {
+				tc.want = append(tc.want, `PI_EXTERNAL_DEFAULT_DELIVERY={"channel":"C9","platform":"slack","sessionKey":"sl_channel_C9_thread_t","thread_ts":"t"}`)
+			}
 			got, err := harness.WithIdentity(nil, tc.c)
 			if err != nil {
 				t.Fatal(err)
@@ -526,7 +541,7 @@ func TestIdentityReplacesInheritedClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"PATH=/bin", "PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_-100", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1"}
+	want := []string{"PATH=/bin", "PI_EXTERNAL_PLATFORM=telegram", "PI_EXTERNAL_USER_ID=tg_user_42", "PI_EXTERNAL_CHAT_ID=tg_chat_-100", "PI_RESTRICTED_EXTERNAL_USER=1", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_TRANSPORT_CHILD=1", `PI_EXTERNAL_DEFAULT_DELIVERY={"chatId":-100,"platform":"telegram","sessionKey":"tg_chat_-100"}`}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
@@ -557,7 +572,7 @@ func TestHarnessProcessSeesCallerIdentity(t *testing.T) {
 	for _, name := range all {
 		t.Run(name, func(t *testing.T) {
 			res := turn(t, launch(t, bin, name, true), name, "x", harness.Session{ID: harness.NewSessionID(name)})
-			want := `ext="PI_EXTERNAL_CHAT_ID=tg_chat_-100 PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=1 PI_TRANSPORT_CHILD=1"`
+			want := `ext="PI_EXTERNAL_CHAT_ID=tg_chat_-100 PI_EXTERNAL_DEFAULT_DELIVERY={\"chatId\":-100,\"platform\":\"telegram\",\"sessionKey\":\"tg_chat_-100\"} PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=1 PI_TRANSPORT_CHILD=1"`
 			if !strings.Contains(res.Answer, want) {
 				t.Fatalf("answer %q lacks %s", res.Answer, want)
 			}

@@ -108,7 +108,7 @@ func run(args []string) error {
 		interfaces = append(interfaces, tg)
 	}
 	if c := cfg.Slack; c != nil {
-		sl, err := slack.New(slack.Options{BotToken: os.Getenv(slack.BotTokenEnv), AppToken: os.Getenv(slack.AppTokenEnv), TeamID: c.TeamID, DataDir: cfg.DataDir, Store: st, UnmentionedCommands: cfg.UnmentionedCommands(), MaxFileBytes: c.MaxFileBytes, StatusName: c.StatusName, StatusUpdates: c.StatusUpdates, Log: logger})
+		sl, err := slack.New(slack.Options{BotToken: os.Getenv(slack.BotTokenEnv), AppToken: os.Getenv(slack.AppTokenEnv), TeamID: c.TeamID, DataDir: cfg.DataDir, Store: st, UnmentionedCommands: cfg.UnmentionedCommands(), MaxFileBytes: c.MaxFileBytes, EventDedupeHours: c.EventDedupeHours, StatusName: c.StatusName, StatusUpdates: c.StatusUpdates, Log: logger})
 		if err != nil {
 			return err
 		}

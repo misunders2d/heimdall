@@ -23,6 +23,7 @@ type statusUpdate struct {
 	mu                          sync.Mutex
 	p                           store.Progress
 	phase, activity, tool, last string
+	thinking                    string
 	disabled, terminal          bool
 	signal                      chan struct{}
 	done                        chan struct{}
@@ -112,12 +113,11 @@ func (s *Slack) ObserveTurn(ctx context.Context, e router.TurnEvent) {
 	case "progress":
 		p := e.Progress
 		if p.Phase == "thinking" {
-			if activity := safeActivity(p.Text); activity != "" {
-				u.activity = activity
-				u.phase = "running"
-			} else if p.Reset {
+			u.thinking = strings.Clone(p.Text[max(0, len(p.Text)-8000):])
+			if p.Reset {
 				u.activity = ""
 			}
+			u.phase = "running"
 		} else {
 			u.phase = p.Phase
 			if p.Tool != "" {
@@ -175,6 +175,9 @@ func (s *Slack) runStatus(ctx context.Context, u *statusUpdate) {
 	u.mu.Lock()
 	u.disabled = s.opt.StatusUpdates != nil && !*s.opt.StatusUpdates
 	text := s.statusText(u)
+	if u.phase == "done" {
+		text = escapeText(s.name) + " is working…"
+	}
 	p := u.p
 	u.mu.Unlock()
 	if err := s.opt.Store.SaveProgress(p); err != nil {
@@ -244,7 +247,18 @@ func (s *Slack) runStatus(ctx context.Context, u *statusUpdate) {
 }
 func (s *Slack) flushStatus(ctx context.Context, u *statusUpdate, final bool) {
 	u.mu.Lock()
+	thinking := u.thinking
+	u.thinking = ""
+	u.mu.Unlock()
+	activity := safeActivity(thinking)
+	u.mu.Lock()
+	if activity != "" {
+		u.activity = activity
+	}
 	text := s.statusText(u)
+	if u.phase == "done" {
+		text = escapeText(s.name) + " is working…"
+	}
 	p := u.p
 	disabled := u.disabled
 	same := text == u.last
@@ -254,7 +268,7 @@ func (s *Slack) flushStatus(ctx context.Context, u *statusUpdate, final bool) {
 			s.opt.Log.Print("slack: terminal status not persisted")
 		}
 	}
-	if disabled || p.TS == "" || same {
+	if p.Phase == "done" || disabled || p.TS == "" || same {
 		return
 	}
 	err := s.bot.call(ctx, "chat.update", map[string]any{"channel": p.Conv.Chat, "ts": p.TS, "text": text, "unfurl_links": false, "unfurl_media": false}, nil)
@@ -288,6 +302,9 @@ func (s *Slack) recoverProgress(ctx context.Context) error {
 		if p.TS == "" {
 			ts, _ := s.findDelivery(ctx, p.Conv, fmt.Sprintf("progress-%d", p.Turn), "heimdall_progress")
 			p.TS = ts
+		}
+		if p.Phase == "delivery_failed" || (p.TurnState == "done" && p.Pending) {
+			continue
 		}
 		if p.TurnState == "done" && !p.Pending && p.TS != "" {
 			p.Phase = "done"

@@ -44,6 +44,7 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
 | `commands.unmentioned` | shared addressing policy; default `["stop","cancel"]`, `["all"]` allows every command, `[]` requires addressing for every command |
 | `slack.team_id` | workspace the bot token must belong to; checked with `auth.test` before Socket Mode |
+| `slack.event_dedupe_hours` | completed-event dedupe retention, default `72` hours, range `1`–`720`; pending events never pruned |
 | `slack.max_file_bytes` | inbound cap per file, default `200000000` (200 MB); downloads also reserve 1 GiB free disk space across concurrent downloads |
 | `slack.status_name`, `slack.status_updates` | optional progress display name; set `status_updates: false` to disable progress messages |
 | `telegram.bot_username` | the bot the token must belong to; checked with `getMe` before polling |
@@ -228,3 +229,5 @@ whoever types, so list `local:...` owners only in test configs.
 ## License
 
 Apache-2.0. The harness adapters are ported from AgentNet; see [NOTICE](NOTICE).
+
+Accepted `commands.unmentioned` entries: `stop`, `cancel`, `reset`, `chatid`, `help`, `status`, `all`. Exact standalone controls accept bare/slash forms (including `/abort`, `/nevermind`); `help`/`status` use `/help`, `/status`, `!help`, `!status`. `use` and `next` require addressing unless `all` is selected.

@@ -73,7 +73,8 @@ func (c *Config) UnmentionedCommands() []string {
 
 // Slack configures Socket Mode; both tokens come only from HEIMDALL_SLACK_*.
 type Slack struct {
-	TeamID string `json:"team_id"`
+	EventDedupeHours int    `json:"event_dedupe_hours,omitempty"`
+	TeamID           string `json:"team_id"`
 
 	MaxFileBytes  int64  `json:"max_file_bytes,omitempty"`
 	StatusName    string `json:"status_name,omitempty"`
@@ -144,7 +145,7 @@ func (c *Config) fill() error {
 	}
 	if c.Commands != nil {
 		for _, name := range c.Commands.Unmentioned {
-			if !slices.Contains([]string{"stop", "cancel", "reset", "chatid", "help", "status", "use", "next", "all"}, name) {
+			if !slices.Contains([]string{"stop", "cancel", "reset", "chatid", "help", "status", "all"}, name) {
 				return errors.New("commands.unmentioned contains an unknown command")
 			}
 		}
@@ -152,6 +153,12 @@ func (c *Config) fill() error {
 	if c.Slack != nil {
 		if c.Slack.TeamID == "" || strings.ContainsAny(c.Slack.TeamID, " \t\r\n") {
 			return errors.New("slack.team_id is required")
+		}
+		if c.Slack.EventDedupeHours == 0 {
+			c.Slack.EventDedupeHours = 72
+		}
+		if c.Slack.EventDedupeHours < 1 || c.Slack.EventDedupeHours > 720 {
+			return errors.New("slack.event_dedupe_hours must be 1-720")
 		}
 		if c.Slack.MaxFileBytes == 0 {
 			c.Slack.MaxFileBytes = 200_000_000

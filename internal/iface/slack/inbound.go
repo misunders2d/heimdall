@@ -29,12 +29,14 @@ type eventMessage struct {
 	Attachments []any       `json:"attachments"`
 }
 
+const mcpNotice = "MCP sign-in is not supported through Heimdall. Use your native harness directly; do not paste OAuth codes here."
+
 var oauthUI = regexp.MustCompile(`(?i)https?://[^\s<>]*[?&](?:code|state|error)=|Sign in to MCP server .* in your browser:`)
 var mcpCommand = regexp.MustCompile(`(?i)^/?mcp(?:\s+(?:login|logout|reconnect)\s+[a-z0-9_-]+)?$`)
 var historicalImage = regexp.MustCompile(`(?i)\b(?:image|images|img|photo|photos|picture|pictures|screenshot|screenshots|attachment|attachments|attached|upload|uploaded)\b`)
 
 func hideOAuth(text string) string {
-	if oauthUI.MatchString(text) {
+	if oauthUI.MatchString(text) || mcpCommand.MatchString(strings.TrimSpace(text)) {
 		return "[Private native MCP sign-in UI omitted]"
 	}
 	return text
@@ -74,7 +76,11 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		s.opt.Log.Print("slack: ignored message with unknown surface")
 		return finish()
 	}
-	principal, ok := Verify(s.liveUser(ctx, m.User), s.opt.TeamID)
+	user, err := s.liveUser(ctx, m.User)
+	if err != nil {
+		return err
+	}
+	principal, ok := Verify(user, s.opt.TeamID)
 	if !ok {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -96,10 +102,10 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	}
 	thread := first(m.ThreadTS, m.TS)
 	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: thread}, MsgID: m.TS, From: principal, Origin: core.OriginLive, Text: commandText, Private: m.ChannelType == "im", At: time.Now()}
-	if !in.Private && (mcpCommand.MatchString(commandText) || oauthUI.MatchString(text)) {
-		addressed = true
-		in.InterfaceReply = "Use your private one-to-one DM for MCP sign-in."
-		in.Text = hideOAuth(commandText)
+	if mcpCommand.MatchString(commandText) || oauthUI.MatchString(text+"\n"+embedded) {
+		in.InterfaceReply = mcpNotice
+		in.Text = "[MCP sign-in input omitted]"
+		embedded = ""
 	}
 	for _, f := range m.Files {
 		in.Attachments = append(in.Attachments, core.Attachment{Name: first(f.Name, f.Title, f.ID), MIME: f.MIME, Kind: "document", Source: "message"})
@@ -128,6 +134,13 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		}
 		return finish()
 	}
+	if s.controlEvent(e.Payload) || in.InterfaceReply != "" {
+		in.Attachments = nil
+		if err := accept(ctx, in); err != nil {
+			return err
+		}
+		return finish()
+	}
 	contextText, prior := s.context(ctx, m, in.Conv)
 	surface := "channel"
 	if in.Private {
@@ -135,7 +148,7 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	} else if m.ChannelType == "mpim" {
 		surface = "multi-user DM"
 	}
-	in.Context = fmt.Sprintf("[Slack %s | ts %s | channel sl_channel_%s | thread %s]\n%s", surface, m.TS, m.Channel, thread, contextText)
+	in.Context = fmt.Sprintf("[Slack %s | ts %s | from %s | channel sl_channel_%s | thread %s]\n%s", surface, m.TS, principal.ID, m.Channel, thread, contextText)
 	if embedded != "" {
 		in.Context += "\n" + router.Untrusted("Slack embedded/forwarded message content", embedded)
 	}
@@ -215,9 +228,9 @@ func (s *Slack) context(ctx context.Context, m eventMessage, k core.ConvKey) (st
 			slices.Reverse(images)
 		}
 	}
-	keys := []core.ConvKey{{Interface: "slack", Chat: k.Chat}, k}
+	keys := []core.ConvKey{k}
 	if m.ThreadTS == "" {
-		keys = keys[:1]
+		keys[0].Thread = ""
 	}
 	for _, key := range keys {
 		if rows, err := s.opt.Store.RecentAmbient(key, []string{m.TS}, 40); err == nil {

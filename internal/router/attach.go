@@ -86,7 +86,24 @@ func (c *conv) file(t *turn, it item, i int, a core.Attachment, imageRoom bool) 
 		c.r.log.Printf("turn %d: turn directory not created: %v", t.id, err)
 		return unavailable("Heimdall could not prepare the turn's directory"), nil
 	}
-	path, err := dir.Add(stored, fmt.Sprintf("%d-%d-%s", it.row.ID, i+1, name))
+	var path string
+	copyFile := func() error {
+		var e error
+		path, e = dir.Add(stored, fmt.Sprintf("%d-%d-%s", it.row.ID, i+1, name))
+		return e
+	}
+	if allocator, ok := c.r.ifaces[c.key.Interface].(interface {
+		WithUploadCopy(string, int64, func() error) error
+	}); ok {
+		info, e := os.Stat(stored)
+		if e != nil {
+			err = e
+		} else {
+			err = allocator.WithUploadCopy(dir.Path(), info.Size(), copyFile)
+		}
+	} else {
+		err = copyFile()
+	}
 	if err != nil {
 		c.r.log.Printf("turn %d: attachment %d of message %d not copied: %v", t.id, i+1, it.row.ID, err)
 		return unavailable("Heimdall could not copy the file for this turn"), nil

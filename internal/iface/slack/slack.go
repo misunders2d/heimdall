@@ -31,6 +31,7 @@ type Options struct {
 	Store                                           *store.Store
 	UnmentionedCommands                             []string
 	MaxFileBytes                                    int64
+	EventDedupeHours                                int
 	StatusUpdates                                   *bool
 	Log                                             *log.Logger
 	// Test-only injection; never accepted from config.
@@ -44,12 +45,14 @@ type Slack struct {
 	ready       chan struct{}
 	botID, name string
 	mu          sync.Mutex
+	diskMu      sync.Mutex
 	reserved    int64
 	progress    map[int64]*statusUpdate
 	// Injected by package tests only.
 	fileHost               func(string) bool
 	freeBytes              func(string) (int64, error)
 	statusEvery, partEvery time.Duration
+	fileIdle               time.Duration
 }
 
 func New(opt Options) (*Slack, error) {
@@ -201,6 +204,9 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 		return err
 	}
 	s.pruneUploads()
+	if err := s.pruneEvents(); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	if err = s.initialize(ctx); err != nil {
@@ -215,11 +221,29 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 		return err
 	}
 	jobs := make(chan store.InterfaceEvent, max(64, len(recovered)))
+	controls := make(chan store.InterfaceEvent, 64)
+	controlDone := make(chan struct{})
+	go func() {
+		defer close(controlDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case e := <-controls:
+				_ = s.retryEvent(ctx, e, accept)
+			}
+		}
+	}()
+	defer func() { cancel(); <-controlDone }()
 	done := make(chan error, 1)
 	go func() { done <- s.processEvents(ctx, jobs, accept) }()
 	enqueue := func(e store.InterfaceEvent) error {
+		queue := jobs
+		if s.controlEvent(e.Payload) {
+			queue = controls
+		}
 		select {
-		case jobs <- e:
+		case queue <- e:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -252,6 +276,9 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 			key := eventKey(raw)
 			if key == "" {
 				return nil
+			}
+			if err := s.pruneEvents(); err != nil {
+				return err
 			}
 			return s.opt.Store.StageEvent("slack", key, raw)
 		})
@@ -324,7 +351,7 @@ func (s *Slack) processEvents(ctx context.Context, jobs <-chan store.InterfaceEv
 			pending = append(pending[:i], pending[i+1:]...)
 			active[key] = true
 			running++
-			go func() { err := s.process(ctx, e, accept); done <- completed{key, err} }()
+			go func() { err := s.retryEvent(ctx, e, accept); done <- completed{key, err} }()
 		}
 		var input <-chan store.InterfaceEvent
 		if len(pending) < 64 {
@@ -356,7 +383,7 @@ func (s *Slack) OwnerChat(email string) (core.ConvKey, bool) {
 	if s.bot.call(ctx, "users.lookupByEmail", map[string]string{"email": email}, &result) != nil {
 		return core.ConvKey{}, false
 	}
-	live := s.liveUser(ctx, result.User.ID)
+	live, _ := s.liveUser(ctx, result.User.ID)
 	p, ok := Verify(live, s.opt.TeamID)
 	if !ok || p.Email != core.NormalizeEmail(email) {
 		return core.ConvKey{}, false
@@ -371,15 +398,50 @@ func (s *Slack) OwnerChat(email string) (core.ConvKey, bool) {
 	}
 	return core.ConvKey{Interface: "slack", Chat: opened.Channel.ID}, true
 }
-func (s *Slack) liveUser(ctx context.Context, id string) *User {
+func (s *Slack) liveUser(ctx context.Context, id string) (*User, error) {
 	var result struct {
 		User User `json:"user"`
 	}
-	if id == "" || s.bot.call(ctx, "users.info", map[string]string{"user": id}, &result) != nil || result.User.ID != id {
-		return nil
+	if err := s.bot.call(ctx, "users.info", map[string]string{"user": id}, &result); err != nil {
+		var ae *apiError
+		if errors.As(err, &ae) && ae.Code == "user_not_found" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if result.User.ID != id {
+		return nil, errors.New("slack: invalid user record")
 	}
 	if result.User.Profile.Email == "" {
 		s.opt.Log.Print("slack: live users.info has no email; verify users:read.email scope")
 	}
-	return &result.User
+	return &result.User, nil
+}
+
+func (s *Slack) controlEvent(raw []byte) bool {
+	var p struct{ Event eventMessage }
+	if json.Unmarshal(raw, &p) != nil {
+		return false
+	}
+	mention := regexp.MustCompile(`<@` + regexp.QuoteMeta(s.botID) + `(?:\|[^>]+)?>`)
+	text := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(p.Event.Text)), mention), s.botID)
+	return text == "!stop" || text == "!cancel" || text == "stop" || text == "cancel" || text == "abort" || text == "nevermind"
+}
+func (s *Slack) retryEvent(ctx context.Context, e store.InterfaceEvent, accept func(context.Context, core.Inbound) error) error {
+	for attempt := 0; ; attempt++ {
+		if err := s.process(ctx, e, accept); err == nil {
+			return nil
+		}
+		if err := pause(ctx, time.Second*time.Duration(1<<min(attempt, 6))); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *Slack) pruneEvents() error {
+	hours := s.opt.EventDedupeHours
+	if hours == 0 {
+		hours = 72
+	}
+	return s.opt.Store.PruneEvents("slack", time.Now().Add(-time.Duration(hours)*time.Hour))
 }
