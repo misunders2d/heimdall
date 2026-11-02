@@ -671,8 +671,15 @@ func newUUID() string {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
-// RespondMCP accepts only this process's caller in the same private chat.
+// RespondMCP accepts only the current turn's caller in the same private chat.
+// Process tracking retains the first Run, but each warm turn owns a new bridge.
 func (r *Run) RespondMCP(ctx context.Context, p core.Principal, conv core.ConvKey, value string) bool {
+	if r.worker != nil {
+		r.worker.mu.Lock()
+		current := r.worker.current
+		r.worker.mu.Unlock()
+		r = current
+	}
 	if r.harness != "pi" || r.caller.Role != core.RoleOwner || !r.caller.Private || p.Key() != r.caller.Principal.Key() || conv.Interface != r.caller.Conv.Interface || conv.Chat != r.caller.Conv.Chat || !core.MCPCallback(value) {
 		return false
 	}

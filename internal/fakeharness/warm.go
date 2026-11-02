@@ -87,6 +87,20 @@ func (f *fake) warm() {
 		if strings.Contains(text, "HANG") {
 			continue
 		}
+		if f.name == "pi" && strings.Contains(text, "MCP_LOGIN") {
+			f.emit(map[string]any{"type": "extension_ui_request", "method": "notify", "message": "Sign in to MCP server t3 in your browser: https://example.invalid/authorize?state=" + id})
+			f.emit(map[string]any{"type": "extension_ui_request", "method": "input", "id": id, "title": "Waiting for sign-in to t3."})
+			if !strings.Contains(text, "EXPIRE") {
+				response, ok := f.read()
+				if !ok || response["type"] != "extension_ui_response" || response["id"] != id || response["value"] != "http://localhost:18765/callback?state="+id+"&code=synthetic" {
+					return
+				}
+			}
+			// Native command completion, including Pi's own input timeout,
+			// leaves the transport available for another login.
+			f.emit(map[string]any{"type": "response", "id": m["id"], "success": true, "data": map[string]any{"disposition": "handled"}})
+			continue
+		}
 		answer := fmt.Sprintf("pid=%d turn=%d %s", os.Getpid(), turn, text)
 		if strings.Contains(text, "DUPLICATE_TAG") {
 			answer += "\n\n— " + f.name

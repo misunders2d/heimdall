@@ -8,9 +8,67 @@ import (
 	"testing"
 	"time"
 
+	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/fakeharness"
 	"github.com/misunders2d/heimdall/internal/harness"
 )
+
+func TestWarmMCPCallbackUsesCurrentRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, state := warmSpec(t, "pi")
+	s.Caller.Role = core.RoleOwner
+	s.Caller.Private = true
+	s.MCPNotify = func(string) {}
+	s.Prompt = "MCP_LOGIN_EXPIRE"
+	p := harness.NewPool(harness.WarmConfig{})
+	first := pooledTurn(t, p, ctx, s)
+	firstResult := first.Result()
+	s.Session = harness.Session{ID: firstResult.SessionID, Resume: true}
+	s.Prompt = "MCP_LOGIN"
+	second, err := p.Start(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); <-second.Exited() }()
+	if second == first || second.Process() != first.Process() {
+		t.Fatal("login did not reuse the first process with a new Run")
+	}
+	root := first.Process() // Router keeps only this root in r.runs.
+	wrong := "http://localhost:18765/callback?state=turn-1&code=synthetic"
+	callback := "http://localhost:18765/callback?state=turn-2&code=synthetic"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if root.RespondMCP(ctx, s.Caller.Principal, s.Caller.Conv, wrong) {
+			t.Fatal("stale state accepted")
+		}
+		if root.RespondMCP(ctx, s.Caller.Principal, s.Caller.Conv, callback) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("matching callback refused on reused process")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-second.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("second login never received its native UI response")
+	}
+	if res := second.Result(); res.Failure != "" || res.Answer == "" {
+		t.Fatalf("second login failed: %+v", res)
+	}
+	if root.RespondMCP(ctx, s.Caller.Principal, s.Caller.Conv, callback) {
+		t.Fatal("callback replayed")
+	}
+	if first.Result().Answer != firstResult.Answer {
+		t.Fatal("stale first turn changed")
+	}
+	data, err := os.ReadFile(filepath.Join(state, "pids"))
+	if err != nil || len(strings.Fields(string(data))) != 1 {
+		t.Fatalf("expected one warm process: %s, %v", data, err)
+	}
+}
 
 func warmSpec(t *testing.T, name string) (harness.Spec, string) {
 	bin, state := fakeharness.Install(t, name)
