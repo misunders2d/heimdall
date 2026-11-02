@@ -59,11 +59,11 @@ func TestFakeEmployeePolicyAndOwnerSeparation(t *testing.T) {
 					t.Fatal(got)
 				}
 			case "claude":
-				if !strings.Contains(args, "--strict-mcp-config") || !strings.Contains(args, "Skill,Read,WebSearch") {
+				if strings.Count(args, "--permission-mode") != 1 || !strings.Contains(args, "--restricted") || !strings.Contains(args, "--strict-mcp-config") || !strings.Contains(args, "Skill,Read,WebSearch") {
 					t.Fatal(got)
 				}
 			case "codex":
-				if !strings.Contains(args, `mcp_servers."unexpected-owner-server".enabled=false`) || !strings.Contains(args, `approval_policy="never"`) {
+				if !strings.Contains(args, `"unexpected-owner-server"={enabled=false}`) || !strings.Contains(args, `approval_policy="never"`) {
 					t.Fatal(got)
 				}
 			}

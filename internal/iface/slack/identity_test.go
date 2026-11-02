@@ -16,7 +16,7 @@ func member(email string) *User {
 
 func TestVerifyMemberOfOwnWorkspace(t *testing.T) {
 	p, ok := Verify(member(" Worker@Example.com"), workspace)
-	if !ok || p.Key() != "slack:worker@example.com" || p.Team != workspace || p.Email != "worker@example.com" {
+	if !ok || p.Key() != "slack:worker@example.com" || p.SlackUserID != "U1" || p.Team != workspace || p.Email != "worker@example.com" {
 		t.Fatalf("Verify = %+v, %v", p, ok)
 	}
 	if role, ok := (core.Access{Owners: map[string]bool{}}).Role(p); !ok || role != core.RoleEmployee {

@@ -51,7 +51,7 @@ func TestTelegramThroughRouter(t *testing.T) {
 	api := newFakeAPI(t)
 	var logs syncBuffer
 	tg := newIface(t, api.srv.URL, botName, &logs)
-	r := router.New(router.Options{
+	r := router.New(router.Options{EmployeeHarnesses: []string{"omp", "pi", "claude", "codex"},
 		Access:      core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{"telegram:42": true}},
 		Order:       []string{"omp"},
 		MaxParallel: 2,
@@ -138,7 +138,7 @@ func TestSlowAlbumPartStaysInTheAlbum(t *testing.T) {
 	var logs syncBuffer
 	tg := newIface(t, api.srv.URL, botName, &logs)
 	tg.opt.UploadDir = filepath.Join(t.TempDir(), "uploads")
-	r := router.New(router.Options{
+	r := router.New(router.Options{EmployeeHarnesses: []string{"omp", "pi", "claude", "codex"},
 		Access:      core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{"telegram:42": true}},
 		Order:       []string{"omp"},
 		MaxParallel: 2,

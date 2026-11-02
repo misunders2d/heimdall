@@ -26,31 +26,44 @@ func employeeArgs(name string, l Launch) ([]string, error) {
 	case "agy":
 		return nil, errors.New("employee " + name + " turns are unavailable: native isolation has not been validated")
 	case "pi", "omp":
-		return []string{"--tools", "read", "--exclude-tools", "bash,powershell,edit,write,grep,find,ls,mcp__*", "--no-approve", "--mcp-config", SharedRoot + "/heimdall/empty-mcp.json", "--extension", SharedRoot + "/heimdall/employee-guard.ts"}, nil
+		return []string{"--no-extensions", "--no-mcp", "--extension", SharedRoot + "/pi/extensions/privileged-tool-guard.ts", "--extension", SharedRoot + "/pi/extensions/admin-lifecycle-guard.ts", "--tools", "read", "--exclude-tools", "bash,powershell,edit,write,grep,find,ls,mcp__*", "--no-approve", "--extension", SharedRoot + "/heimdall/employee-guard.ts"}, nil
 	case "claude":
 		executable, err := os.Executable()
 		if err != nil {
 			return nil, err
 		}
 		command := "'" + strings.ReplaceAll(executable, "'", "'\\''") + "' hook employee-guard"
-		deny := []string{"Read(/root/**)"}
+		deny := []string{"Read(//root/**)"}
 		for _, d := range []string{".pi", ".codex", ".claude", ".gemini", ".local/state/heimdall/sessions"} {
-			deny = append(deny, "Read("+filepath.Join(l.Home, d)+"/**)")
+			deny = append(deny, "Read(/"+filepath.Join(l.Home, d)+"/**)")
 		}
 		settings, _ := json.Marshal(map[string]any{"disableSkillShellExecution": true, "autoMemoryEnabled": false, "permissions": map[string]any{"deny": deny}, "hooks": map[string]any{"PreToolUse": []any{map[string]any{"matcher": ".*", "hooks": []any{map[string]any{"type": "command", "command": command, "onFailure": "block"}}}}}})
-		return []string{"--permission-mode", "dontAsk", "--tools", "Skill,Read,WebSearch", "--add-dir", SharedRoot, "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--disallowedTools", "Bash,PowerShell,Edit,Write,Glob,Grep,NotebookEdit,Agent,Task,mcp__*", "--settings", string(settings)}, nil
+		return []string{"--restricted", "--setting-sources", "", "--permission-mode", "dontAsk", "--tools", "Skill,Read,WebSearch", "--add-dir", SharedRoot, "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--disallowedTools", "Bash,PowerShell,Edit,Write,Glob,Grep,NotebookEdit,Agent,Task,mcp__*", "--settings", string(settings)}, nil
 	case "codex":
-		args := []string{"-c", `features.shell_tool=true`, "-c", `approval_policy="never"`, "-c", `default_permissions="employee"`, "-c", `permissions.employee.network.enabled=false`}
-		// Exact subtrees, not unbounded globs: Linux deny-read glob expansion is bounded.
+		args := []string{"--strict-config", "-c", `features.shell_tool=true`, "-c", `approval_policy="never"`, "-c", `default_permissions="employee"`}
+		// One TOML table: quoted dotted CLI path keys are treated literally by
+		// Codex 0.166.0 and rejected as non-absolute paths.
+		fs := map[string]string{}
 		for _, p := range []string{l.Home, "/root", "/proc", "/sys"} {
-			args = append(args, "-c", "permissions.employee.filesystem."+strconv.Quote(p)+`="deny"`)
+			fs[p] = "deny"
 		}
 		for _, p := range []string{SharedRoot, l.Dir, "/usr", "/bin", "/lib", "/lib64", "/etc/ld.so.cache", "/dev/null"} {
-			args = append(args, "-c", "permissions.employee.filesystem."+strconv.Quote(p)+`="read"`)
+			fs[p] = "read"
 		}
 		for _, d := range []string{".codex", ".claude", ".pi", ".gemini"} {
-			args = append(args, "-c", "permissions.employee.filesystem."+strconv.Quote(filepath.Join(l.Home, d))+`="deny"`)
+			fs[filepath.Join(l.Home, d)] = "deny"
 		}
+		keys := make([]string, 0, len(fs))
+		for p := range fs {
+			keys = append(keys, p)
+		}
+		slices.Sort(keys)
+		entries := make([]string, 0, len(keys))
+		for _, p := range keys {
+			entries = append(entries, strconv.Quote(p)+"="+strconv.Quote(fs[p]))
+		}
+		args = append(args, "-c", "permissions.employee={network={enabled=false},filesystem={"+strings.Join(entries, ",")+"}}")
+
 		for _, feature := range []string{"multi_agent", "apps", "plugins", "hooks", "memories", "computer_use", "browser_use", "skill_mcp_dependency_install"} {
 			args = append(args, "--disable", feature)
 		}
@@ -143,7 +156,7 @@ func employeeCodexMCPArgs(ctx context.Context, l Launch) ([]string, error) {
 	}
 	slices.Sort(names)
 	names = slices.Compact(names)
-	var args []string
+	var entries []string
 	for _, name := range names {
 		// Missing servers need a valid dummy transport; disabled entries never connect.
 		if !slices.ContainsFunc(servers, func(s struct {
@@ -151,10 +164,10 @@ func employeeCodexMCPArgs(ctx context.Context, l Launch) ([]string, error) {
 		}) bool {
 			return s.Name == name
 		}) {
-			args = append(args, "-c", "mcp_servers."+strconv.Quote(name)+`={enabled=false,url="https://disabled.invalid/mcp"}`)
+			entries = append(entries, strconv.Quote(name)+`={enabled=false,url="https://disabled.invalid/mcp"}`)
 		} else {
-			args = append(args, "-c", "mcp_servers."+strconv.Quote(name)+".enabled=false")
+			entries = append(entries, strconv.Quote(name)+"={enabled=false}")
 		}
 	}
-	return args, nil
+	return []string{"-c", "mcp_servers={" + strings.Join(entries, ",") + "}"}, nil
 }

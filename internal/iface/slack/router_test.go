@@ -29,7 +29,7 @@ func routerFor(t *testing.T, s *Slack, st *store.Store, bin string) *router.Rout
 	if err != nil {
 		t.Fatal(err)
 	}
-	return router.New(router.Options{Access: core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{"slack:uowner@example.test": true}}, Order: []string{"omp", "codex"}, MaxParallel: 3, Accounts: sameUser{harness.Accounts{RunAs: map[core.Role]core.RunAs{core.RoleOwner: {User: u.Username, Path: bin}}}}, Log: log.New(io.Discard, "", 0), OutboxDir: s.opt.DataDir + "/outbox"}, st, s)
+	return router.New(router.Options{EmployeeHarnesses: []string{"omp", "pi", "claude", "codex"}, Access: core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{"slack:uowner@example.test": true}}, Order: []string{"omp", "codex"}, MaxParallel: 3, Accounts: sameUser{harness.Accounts{RunAs: map[core.Role]core.RunAs{core.RoleOwner: {User: u.Username, Path: bin}}}}, Log: log.New(io.Discard, "", 0), OutboxDir: s.opt.DataDir + "/outbox"}, st, s)
 }
 func startRouter(t *testing.T, r *router.Router) (context.CancelFunc, <-chan error) {
 	ctx, cancel := context.WithCancel(context.Background())

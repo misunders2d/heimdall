@@ -1075,17 +1075,16 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if ctx.Err() != nil || t.stopped.Load() {
 			break
 		}
-		if c.r.opt.Access.Dir != "" {
-			current, _, admitted := c.r.opt.Access.Decide(t.from, c.key)
-			if !admitted || current != t.role {
-				notes = append(notes, "caller admission or role changed; turn refused")
-				break
-			}
-			if t.role == core.RoleEmployee && !slices.Contains(c.r.opt.EmployeeHarnesses, h) {
-				notes = append(notes, h+": employee turns unavailable until native isolation and skill reading are validated")
-				continue
-			}
+		current, caps, admitted := c.r.opt.Access.Decide(t.from, c.key)
+		if !admitted || current != t.role {
+			notes = append(notes, "caller admission or role changed; turn refused")
+			break
 		}
+		if t.role == core.RoleEmployee && !slices.Contains(c.r.opt.EmployeeHarnesses, h) {
+			notes = append(notes, h+": employee turns unavailable until native isolation and skill reading are validated")
+			continue
+		}
+
 		launch, err := c.r.opt.Accounts.Prepare(t.role, memory, harness.Binary(h))
 		var account *harness.AccountError
 		if errors.As(err, &account) {
@@ -1132,7 +1131,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			notes = append(notes, "turn not recordable, so it did not run: "+err.Error())
 			break
 		}
-		caller := harness.Caller{Capabilities: c.r.opt.Access.Capabilities(t.from, c.key), Principal: t.from, Role: t.role, Conv: c.key, Private: t.private, OAuthActor: batch[0].row.OAuthActor, OAuthInstallation: batch[0].row.OAuthInstallation}
+		caller := harness.Caller{Capabilities: caps, Principal: t.from, Role: t.role, Conv: c.key, Private: t.private, OAuthActor: batch[0].row.OAuthActor, OAuthInstallation: batch[0].row.OAuthInstallation}
 		caller.SlackRead = harness.SlackReadAllowed(c.r.opt.OwnerSlack, batch[0].row.Inbound, t.role, h, c.r.opt.SlackTeam)
 		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
 		var progress func(harness.Progress)

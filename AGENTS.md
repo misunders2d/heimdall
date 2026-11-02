@@ -63,7 +63,7 @@ the `heimdall-live` unit.
   (later phase), which store their creator and run under that creator's
   role and mode evaluated at fire time.
 - **Roles.**
-  - *Owner (root)*: Pi-file admin authority (`ADMIN_USER_IDS` and admins.json).
+  - *Owner (root)*: `ADMIN_USER_IDS` authority only. File admins are admitted employees.
     Config owners are only an explicit non-hub fallback.
   - *Employee (non-root)*: admitted by Pi's existing user OR chat whitelist
     after blacklist denial. Unknown callers are ignored, metadata logged only.

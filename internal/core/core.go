@@ -44,12 +44,13 @@ const (
 // SlackPrincipal); any other Slack caller cannot be identified. Email and
 // KeyID also travel with the caller to the harness.
 type Principal struct {
-	Platform string `json:"platform"`         // telegram, slack, agentnet, local
-	ID       string `json:"id"`               // verified identity; Slack: the email
-	Name     string `json:"name,omitempty"`   // display only, never authority
-	Email    string `json:"email,omitempty"`  // interface-verified email (Slack), or ""
-	Team     string `json:"team,omitempty"`   // Slack workspace (team ID) that verified the caller, or ""
-	KeyID    string `json:"key_id,omitempty"` // verified signing key ID (AgentNet), or ""
+	SlackUserID string `json:"slack_user_id,omitempty"` // live verified Slack user, admission/authority aliases only
+	Platform    string `json:"platform"`                // telegram, slack, agentnet, local
+	ID          string `json:"id"`                      // verified identity; Slack: the email
+	Name        string `json:"name,omitempty"`          // display only, never authority
+	Email       string `json:"email,omitempty"`         // interface-verified email (Slack), or ""
+	Team        string `json:"team,omitempty"`          // Slack workspace (team ID) that verified the caller, or ""
+	KeyID       string `json:"key_id,omitempty"`        // verified signing key ID (AgentNet), or ""
 }
 
 // Key is the principal's identity, platform:id: what the owner list holds

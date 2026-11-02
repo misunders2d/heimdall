@@ -47,5 +47,7 @@ func Verify(u *User, workspace string) (core.Principal, bool) {
 	if name == "" {
 		name = u.Name
 	}
-	return core.SlackPrincipal(email, u.TeamID, name), true
+	p := core.SlackPrincipal(email, u.TeamID, name)
+	p.SlackUserID = u.ID
+	return p, true
 }

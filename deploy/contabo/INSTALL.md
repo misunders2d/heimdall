@@ -106,7 +106,11 @@ in approved cutover smoke test. Prompt guard only logs metadata; never blocks.
    equality on every policy update and after reboot. Install mounts only
    during an approved deployment, never from development tests.
    Install `deploy/employee/{employee-guard.ts,empty-mcp.json}` root-owned,
-   employee-readable into `/opt/assistant/heimdall/`. Retain Pi's existing
+   employee-readable into `/opt/assistant/heimdall/`. Expose the administrator-owned Pi pack extensions subtree read-only at
+   `/opt/assistant/pi/extensions`, including `.shared` access/identity helpers
+   and its required read-only policy references. Employee Pi explicitly loads
+   `privileged-tool-guard.ts` and `admin-lifecycle-guard.ts` from there;
+   ambient extension discovery and native MCP are disabled. Retain the
    privileged-tool guard; employee extensions must contain no memory or
    owner business connectors. Employee native config and hook setup must
    be administrator-controlled. The Claude hook invokes the installed

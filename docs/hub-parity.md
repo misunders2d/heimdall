@@ -302,3 +302,29 @@ final; native status still transitions to cancelled. Cancel queue semantics
 are unchanged. Claude Stop and other per-turn native hooks still run per turn;
 session-end hooks now run when the retained process exits. Heimdall does not
 invoke or emulate memory hooks. Live hook execution remains unverified.
+
+## Review corrections (2026-11-02)
+
+Intentional Pi divergences: only `ADMIN_USER_IDS` confers Heimdall ownership.
+`admins.json` confers admission (including Pi's blacklist bypass), but the caller
+is an employee: no root, Memento or owner MCP. Non-empty file admins warn at
+startup. For ordinary employees, a blacklist match on **any** verified alias
+wins over every whitelist alias/chat, unlike Pi's per-alias union. Slack uses
+the live verified email **and** user ID (`sl_user_`, legacy `sl_`, raw ID).
+Session keys remain email-based. Sorted expansion of chained identity entries
+is retained; keep principals disjoint rather than depending on insertion order.
+
+`Load` (startup) and `check-config` require a usable `ADMIN_USER_IDS` in Pi
+access mode. Only explicit `standalone_access` with `owners` bypasses this;
+otherwise config owners warn and are ignored. Missing/malformed access files
+log the failing filename without contents. Admission/role and capabilities used
+for a candidate launch come from the same `Decide` result. Separate transport,
+ingress and launch checks remain deliberate live-revocation boundaries; the
+five-file snapshot is not an atomic filesystem transaction.
+
+Codex employee shell permissions are read-only, including the turn's `out/`:
+employees cannot create outbound files through this profile. This is deliberate
+until output writes get independent confinement validation. Employee enablement
+remains an explicit deployment gate; no real-account confinement claim follows
+from fake-harness tests or parser acceptance. See
+[native validation evidence](employee-native-validation.md).

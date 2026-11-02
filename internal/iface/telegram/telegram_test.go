@@ -1272,3 +1272,25 @@ func TestPiAccessDeniesBeforeAlbumAndFileIntake(t *testing.T) {
 		t.Fatal("unknown album remembered")
 	}
 }
+
+func TestPiAccessChatWhitelistAndRevocation(t *testing.T) {
+	i := newIface(t, "http://127.0.0.1", botName, &syncBuffer{})
+	dir := t.TempDir()
+	i.opt.Access = &core.Access{Dir: dir}
+	t.Setenv("ADMIN_USER_IDS", "1")
+	for name, data := range map[string]string{"whitelist.json": `{"chats":["tg_chat_-10"]}`, "blacklist.json": `{}`, "admins.json": `{}`, "identities.json": `{}`, "capabilities.json": `{}`} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := &message{MessageID: 1, From: &user{ID: 7}, Chat: chat{ID: -10, Type: "group"}, Text: "@" + botName + " synthetic"}
+	if _, _, ok := i.inbound(update{UpdateID: 1, Message: m}); !ok {
+		t.Fatal("chat whitelist denied")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "blacklist.json"), []byte(`{"users":["tg_user_7"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := i.inbound(update{UpdateID: 2, Message: m}); ok {
+		t.Fatal("blacklisted user admitted")
+	}
+}

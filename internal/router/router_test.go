@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -176,13 +177,14 @@ func setup(t *testing.T, mode core.Mode, order []string, installed ...string) *e
 	t.Setenv("MEMENTO_PROCESSING", "")
 	t.Setenv("HOME", home) // native session directories stay inside the test
 	e.opt = Options{
-		Access:      core.Access{Mode: mode, Owners: map[string]bool{owner: true, "slack:boss@example.com": true}},
-		Order:       order,
-		MaxParallel: 4,
-		Accounts:    accounts,
-		Log:         log.New(e.logs, "", 0),
-		OutboxDir:   filepath.Join(t.TempDir(), "outbox"),
-		GuardLog:    e.guard,
+		EmployeeHarnesses: []string{"omp", "pi", "claude", "codex"},
+		Access:            core.Access{Mode: mode, Owners: map[string]bool{owner: true, "slack:boss@example.com": true}},
+		Order:             order,
+		MaxParallel:       4,
+		Accounts:          accounts,
+		Log:               log.New(e.logs, "", 0),
+		OutboxDir:         filepath.Join(t.TempDir(), "outbox"),
+		GuardLog:          e.guard,
 	}
 	e.start()
 	return e
@@ -1868,6 +1870,7 @@ func TestHubEmployeeValidationGateAndUnknownAdmission(t *testing.T) {
 		}
 	}
 	e.opt.Access = core.Access{Dir: dir, Mode: core.ModeCorporate}
+	e.opt.EmployeeHarnesses = nil
 	e.start()
 	e.sendAs(core.Principal{Platform: "telegram", ID: "7"}, "c1", "synthetic")
 	want(t, e.reply(), "employee turns unavailable until native isolation")
@@ -1881,5 +1884,83 @@ func TestHubEmployeeValidationGateAndUnknownAdmission(t *testing.T) {
 	case out := <-e.f.out:
 		t.Fatalf("unknown caller answered: %+v", out)
 	default:
+	}
+}
+
+func TestStandaloneEmployeeValidationGate(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.stop()
+	e.opt.EmployeeHarnesses = nil
+	e.start()
+	e.send(employee, "c1", "synthetic")
+	want(t, e.reply(), "employee turns unavailable until native isolation")
+}
+
+func TestTurnRechecksRoleAndAdmissionBeforeLaunch(t *testing.T) {
+	for _, role := range []core.Role{core.RoleOwner, core.RoleEmployee} {
+		t.Run(string(role), func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range []string{"whitelist.json", "blacklist.json", "admins.json", "identities.json", "capabilities.json"} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("ADMIN_USER_IDS", "1")
+			r := New(Options{Access: core.Access{Dir: dir}, EmployeeHarnesses: []string{"pi"}}, nil)
+			c := &conv{r: r, key: core.ConvKey{Interface: "fake", Chat: "c1"}, events: make(chan any, 1)}
+			tr := &turn{from: core.Principal{Platform: "telegram", ID: "7"}, role: role, candidates: []string{"pi"}}
+			// Admission was revoked after the turn was queued.
+			c.runTurn(context.Background(), tr, nil)
+			ev := (<-c.events).(doneEvent)
+			if !strings.Contains(strings.Join(ev.notes, " "), "caller admission or role changed") {
+				t.Fatal(ev.notes)
+			}
+			// Now admitted as employee: an earlier owner turn must still be refused.
+			if role == core.RoleOwner {
+				if err := os.WriteFile(filepath.Join(dir, "whitelist.json"), []byte(`{"users":["7"]}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				c.runTurn(context.Background(), tr, nil)
+				ev = (<-c.events).(doneEvent)
+				if !strings.Contains(strings.Join(ev.notes, " "), "caller admission or role changed") {
+					t.Fatal(ev.notes)
+				}
+			}
+		})
+	}
+}
+
+func TestEnabledEmployeeHarnessTurnDirAndCapabilities(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"pi"}, "pi")
+	e.stop()
+	dir := t.TempDir()
+	for name, data := range map[string]string{"whitelist.json": `{"users":["7"]}`, "blacklist.json": `{}`, "admins.json": `{}`, "identities.json": `{}`, "capabilities.json": `{"7":["mcp.linear"]}`} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capture := filepath.Join(t.TempDir(), "launch.json")
+	t.Setenv("FAKE_CAPTURE_LAUNCH", capture)
+	e.opt.Access = core.Access{Dir: dir, Mode: core.ModeCorporate}
+	e.opt.EmployeeHarnesses = []string{"pi"}
+	e.start()
+	e.sendAs(core.Principal{Platform: "telegram", ID: "7"}, "-101", "synthetic")
+	want(t, e.reply(), "role employee", "mem=1")
+	raw, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		TurnDir string `json:"turn_dir"`
+		Caps    string `json:"capabilities"`
+	}
+	if err = json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.TurnDir == "" || !strings.Contains(got.TurnDir, harness.TurnsDir) || got.Caps != `["mcp.linear"]` {
+		t.Fatalf("%+v", got)
+	}
+	if info, err := os.Stat(filepath.Join(got.TurnDir, "in")); err != nil || !info.IsDir() {
+		t.Fatalf("turn dir: %v", err)
 	}
 }

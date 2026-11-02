@@ -12,9 +12,9 @@ import (
 func TestEmployeeLaunchPolicy(t *testing.T) {
 	l := Launch{Home: "/home/employee", Dir: "/home/employee/turn"}
 	for name, wants := range map[string][]string{
-		"pi":     {"--tools|read", "--extension|/opt/assistant/heimdall/employee-guard.ts", "mcp__*"},
-		"claude": {"Skill,Read,WebSearch", "--strict-mcp-config", `"disableSkillShellExecution":true`, `"autoMemoryEnabled":false`, "--permission-mode|dontAsk"},
-		"codex":  {`default_permissions="employee"`, `approval_policy="never"`, `permissions.employee.filesystem."/home/employee/.codex"="deny"`, "--disable|hooks", "--disable|memories", "mcp_servers={}"},
+		"pi":     {"--no-extensions", "--no-mcp", "privileged-tool-guard.ts", "admin-lifecycle-guard.ts", "--tools|read", "--extension|/opt/assistant/heimdall/employee-guard.ts", "mcp__*"},
+		"claude": {"--restricted", "Read(//root/**)", `"onFailure":"block"`, "Skill,Read,WebSearch", "--strict-mcp-config", `"disableSkillShellExecution":true`, `"autoMemoryEnabled":false`, "--permission-mode|dontAsk"},
+		"codex":  {`default_permissions="employee"`, `approval_policy="never"`, `"/home/employee/.codex"="deny"`, "--disable|hooks", "--disable|memories", "mcp_servers={}"},
 	} {
 		args, e := employeeArgs(name, l)
 		if e != nil {

@@ -336,7 +336,11 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(runCtx, spec.Launch.Path, append(slices.Clone(d.args), extra...)...)
+	base := slices.Clone(d.args)
+	if spec.Caller.Role == core.RoleEmployee && spec.Harness == "claude" {
+		base = base[:len(base)-2]
+	}
+	cmd := exec.CommandContext(runCtx, spec.Launch.Path, append(base, extra...)...)
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second

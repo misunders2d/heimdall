@@ -3,6 +3,8 @@ package core
 // Pi access-control.ts semantics. Files are read by Heimdall, never the child UID.
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -83,7 +85,11 @@ func (a Access) files() (accessFiles, bool) {
 	var f accessFiles
 	for name, dst := range map[string]any{"whitelist.json": &f.White, "blacklist.json": &f.Black, "admins.json": &f.Admins, "identities.json": &f.Identities, "capabilities.json": &f.Caps} {
 		raw, e := os.ReadFile(filepath.Join(a.Dir, name))
-		if e != nil || json.Unmarshal(raw, dst) != nil {
+		if e == nil {
+			e = json.Unmarshal(raw, dst)
+		}
+		if e != nil {
+			log.Printf("access: cannot load %s; admission denied", name)
 			return f, false
 		}
 	}
@@ -117,6 +123,9 @@ func (a Access) Decide(p Principal, conv ConvKey) (Role, []string, bool) {
 		return "", nil, false
 	}
 	ids := f.ids(platform, p.ID)
+	if p.Platform == PlatformSlack && p.SlackUserID != "" {
+		ids = append(ids, f.ids(platform, p.SlackUserID)...)
+	}
 	chats := f.ids(platform, conv.Chat)
 	has := func(list []string, ids []string) bool {
 		for _, v := range list {
@@ -126,16 +135,17 @@ func (a Access) Decide(p Principal, conv ConvKey) (Role, []string, bool) {
 		}
 		return false
 	}
-	admins := append(strings.Split(os.Getenv("ADMIN_USER_IDS"), ","), f.Admins.Users...)
+	admins := strings.Split(os.Getenv("ADMIN_USER_IDS"), ",")
 	for _, admin := range admins {
 		if overlap(ids, variants(platform, admin)) {
 			return RoleOwner, nil, true
 		}
 	}
-	if has(f.Black.Users, ids) || has(f.Black.Chats, chats) {
+	fileAdmin := has(f.Admins.Users, ids)
+	if !fileAdmin && (has(f.Black.Users, ids) || has(f.Black.Chats, chats)) {
 		return "", nil, false
 	}
-	if !has(f.White.Users, ids) && !has(f.White.Chats, chats) {
+	if !fileAdmin && !has(f.White.Users, ids) && !has(f.White.Chats, chats) {
 		return "", nil, false
 	}
 	var caps []string
@@ -170,7 +180,7 @@ func (a Access) OwnerKeys() []string {
 	if !ok {
 		return nil
 	}
-	candidates := append(strings.Split(os.Getenv("ADMIN_USER_IDS"), ","), f.Admins.Users...)
+	candidates := strings.Split(os.Getenv("ADMIN_USER_IDS"), ",")
 	for p, e := range f.Identities.Principals {
 		candidates = append(candidates, p)
 		candidates = append(candidates, e.Aliases...)
@@ -195,4 +205,31 @@ func (a Access) OwnerKeys() []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+// ValidateAuthority checks startup authority without reading credentials or requiring
+// the staged Pi access files to exist. The files themselves fail closed per turn.
+func (a Access) ValidateAuthority() ([]string, error) {
+	if a.Dir == "" {
+		return nil, nil
+	}
+	valid := false
+	for _, id := range strings.Split(os.Getenv("ADMIN_USER_IDS"), ",") {
+		id = normID(id)
+		for _, prefix := range []string{"tg_user_", "tg_", "sl_user_", "sl_"} {
+			id = strings.TrimPrefix(id, prefix)
+		}
+		if numeric(id) || strings.Contains(id, "@") || (strings.HasPrefix(id, "U") || strings.HasPrefix(id, "W")) && len(id) > 1 {
+			valid = true
+		}
+	}
+	if !valid {
+		return nil, fmt.Errorf("Pi access requires non-empty ADMIN_USER_IDS with a verified owner identity; non-hub installs may explicitly set standalone_access and owners")
+	}
+	var admins accessList
+	raw, err := os.ReadFile(filepath.Join(a.Dir, "admins.json"))
+	if err == nil && json.Unmarshal(raw, &admins) == nil && (len(admins.Users) > 0 || len(admins.Chats) > 0) {
+		return []string{"admins.json is non-empty: entries grant admission only, never owner authority"}, nil
+	}
+	return nil, nil
 }

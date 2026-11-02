@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"os"
 	"os/user"
@@ -99,10 +100,21 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Parse(raw)
+	c, err := Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err = c.validateAuthority(); err != nil {
+		return nil, err
+	}
+	for _, w := range c.warnings {
+		log.Print("config: " + w)
+	}
+	return c, nil
 }
 
-// Parse validates a config document and fills defaults.
+// Parse validates a config document and fills defaults without runtime authority
+// checks. Load and CheckFile additionally validate the startup environment.
 func Parse(raw []byte) (*Config, error) { return parse(raw, false) }
 
 // CheckFile validates without opening stores, launching harnesses or connecting.
@@ -114,6 +126,9 @@ func CheckFile(path string) ([]string, error) {
 	}
 	c, err := parse(raw, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := c.validateAuthority(); err != nil {
 		return nil, err
 	}
 	return c.warnings, nil
@@ -326,4 +341,16 @@ func expandHome(p string) (string, error) {
 		p = filepath.Join(home, p[1:])
 	}
 	return filepath.Abs(p)
+}
+
+func (c *Config) validateAuthority() error {
+	warnings, err := c.Access().ValidateAuthority()
+	if err != nil {
+		return err
+	}
+	c.warnings = append(c.warnings, warnings...)
+	if !c.StandaloneAccess && len(c.Owners) > 0 {
+		c.warnings = append(c.warnings, "owners ignored in Pi access mode; authority comes only from ADMIN_USER_IDS")
+	}
+	return nil
 }

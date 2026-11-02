@@ -367,3 +367,28 @@ func TestPiAccessDeniesBeforeAmbientIntake(t *testing.T) {
 		t.Fatal("config owners bypassed Pi authority")
 	}
 }
+
+func TestPiSlackIDAdmission(t *testing.T) {
+	f := newSlackFake(t)
+	s, _ := testSlack(t, f)
+	s.botID = "Ubot"
+	dir := t.TempDir()
+	s.opt.Access = &core.Access{Dir: dir}
+	t.Setenv("ADMIN_USER_IDS", "1")
+	for name, data := range map[string]string{"whitelist.json": `{"users":["sl_user_Uowner"]}`, "blacklist.json": `{}`, "admins.json": `{}`, "identities.json": `{}`, "capabilities.json": `{}`} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	accepted := 0
+	directEvent(t, s, f.event("D1", "im", "Uowner", "synthetic", ""), func(_ context.Context, in core.Inbound) error {
+		accepted++
+		if in.From.SlackUserID != "Uowner" {
+			t.Fatal(in.From)
+		}
+		return nil
+	})
+	if accepted != 1 {
+		t.Fatal("Slack ID whitelist denied")
+	}
+}
