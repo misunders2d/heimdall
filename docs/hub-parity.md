@@ -1,5 +1,12 @@
 # Current ONE-assistant parity delta (2026-11-02)
 
+Employee turns run on Sergey's existing harness installs and logins. Employees
+never log in anywhere; there is no second login. Restriction and isolation are
+implementation work, not a user setup task. Employee identity reaches tools via
+Heimdall's verified platform identity and the Mellanni signed per-turn caller
+token (MEL-724, not built yet). Keep `employee_harnesses: []` until native
+isolation, skill reading, credential denial and caller-bound tools are validated.
+
 Pi-file admission is evaluated by the root router before persistence/ambient
 context intake and again before launch. Transports also gate before file
 handling/ambient storage. Slack raw events remain temporarily staged before
@@ -123,7 +130,7 @@ uid, with no group/other writes on ancestors and mode 0700 on scope dirs;
 symlinks fail closed.
 
 Owner Pi MCP login/logout/reconnect and pasted callbacks now relay privately.
-Claude/Codex use separate native logins and per-turn controls. See
+Owner Claude/Codex use their existing native logins and per-turn controls. See
 [owner Slack runbook](owner-slack-read.md) for mechanisms, mock spike, setup,
 limitations and scope defaults. No production token validity has been tested.
 

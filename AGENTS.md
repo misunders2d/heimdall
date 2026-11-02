@@ -75,10 +75,10 @@ the `heimdall-live` unit.
   - When Heimdall cannot switch to a turn's OS user (it is not root and the
     user differs from its own), the turn is refused. An employee turn never
     runs as the owner.
-  - Harness logins are done manually by the owner, per OS user and machine.
-    Heimdall never copies credentials and never reuses one user's home or
-    environment for another (the employee environment is rebuilt from that
-    user's account).
+  - Employee turns use Sergey's existing harness installs/logins. Employees
+    never log in; no second login. Isolation is implementation work. Never
+    copy credentials or expose owner homes. Keep employee turns disabled until
+    native restrictions and MEL-724 signed caller-token delivery are validated.
 - **Modes.** Both corporate and personal modes keep Memento owner-only.
   Employee turns force `MEMENTO_PROCESSING=1`, remove memory MCP and disable
   native memory hooks. ACL-safe company knowledge belongs to Mellanni.

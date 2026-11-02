@@ -1,5 +1,12 @@
 # ONE-assistant implementation handoff (2026-11-02)
 
+Employee turns run on Sergey's existing harness installs and logins. Employees
+never log in anywhere; there is no second login. Restriction and isolation are
+implementation work, not a user setup task. Employee identity reaches tools via
+Heimdall's verified platform identity and the Mellanni signed per-turn caller
+token (MEL-724, not built yet). Keep `employee_harnesses: []` until native
+isolation, skill reading, credential denial and caller-bound tools are validated.
+
 Patched in the work clone only; no live config, binary, services or transports
 changed. Transport and router admission now read Pi's five access files under root, including
 admin authority, aliases, blacklist/whitelist and narrow capabilities. Unknown

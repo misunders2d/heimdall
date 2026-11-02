@@ -1,5 +1,12 @@
 # Contabo staged install — root, no start
 
+Employee turns run on Sergey's existing harness installs and logins. Employees
+never log in anywhere; there is no second login. Restriction and isolation are
+implementation work, not a user setup task. Employee identity reaches tools via
+Heimdall's verified platform identity and the Mellanni signed per-turn caller
+token (MEL-724, not built yet). Keep `employee_harnesses: []` until native
+isolation, skill reading, credential denial and caller-bound tools are validated.
+
 Run these steps yourself on the production hub. This release has not been
 run there. Existing Pi hub remains responsible for Slack, Telegram and scheduling.
 Never touch `heimdall-live` or `heimdall-slack-test`.
@@ -24,7 +31,8 @@ Never touch `heimdall-live` or `heimdall-slack-test`.
    Template identity/workspace values are deliberately this deployment's values.
    Both modes keep employee Memento off. No tokens in config.
 6. Install wrapper and unit:
-   `install -m 0755 heimdall-run.sh /usr/local/sbin/heimdall-run.sh` and
+   `install -m 0755 heimdall-run.sh /usr/local/sbin/heimdall-run.sh`,
+   `install -m 0755 heimdall-infisical-run.sh /usr/local/sbin/heimdall-infisical-run.sh` and
    `install -m 0644 heimdall.service /etc/systemd/system/heimdall.service`.
 7. Run `systemctl daemon-reload`. **Do not enable or start Heimdall.** Unit has
    no install target; it is intentionally static/disabled. Logs use journal.
@@ -53,17 +61,12 @@ original bot-token variables are unset, HEIMDALL token variables stripped from
 harness launches. Caller identity/private native MCP scope remains supplied by
 Heimdall's Part 0 launch code; do not replace it with ambient owner scope.
 Employee environment never inherits root secrets. The current hub Pi wrapper
-forces root's agent directory/key, so employee needs its own user-native Pi
-installation/launcher first on that account's PATH, with its own home, login,
-native MCP seam and authorized identity. Never grant access to root credentials
+forces root's agent directory/key; implementing a restricted Pi launcher on
+the existing installation/login is required before employee enablement. Never grant access to root credentials
 or reuse the root-forcing wrapper for employees. Root instruction-file sharing
 below does not authorize sharing secrets.
 
-Default order remains `omp → codex → claude → pi`. Missing OMP is detected in
-account PATH preparation before any process/turn starts, then Codex is tried.
-The missing OMP reason appears in reply notes on every such default turn.
-Recommendation for this hub: after owner agrees, remove `omp` from
-`harness_order` to avoid noise. Explicit `!omp` never falls back.
+Default order is `codex → claude → pi`; preserve this in deployed config.
 
 Telegram `api_base` is the origin **without `/bot`**; adapter appends `/botTOKEN`.
 `file_base` includes `/file/bot`, adapter appends `TOKEN/path`. Unit HEIMDALL
@@ -79,14 +82,13 @@ in approved cutover smoke test. Prompt guard only logs metadata; never blocks.
    Stopping all `pi-hub.service` also stops scheduling; use only an explicitly
    approved outage with a scheduler continuity plan. Never run competing pollers
    or Slack Socket Mode clients. Do not touch the two reserved test/live units.
-2. Obtain approval to create `heimdall-employee`; create a separate non-root OS
-   account/home. Heimdall runtime refuses startup until account exists and UID
-   differs from root/owner. Do not create it as part of staging.
-3. Sergey performs native harness logins manually as root and separately as employee,
-   using his own subscriptions for both.
-   OMP absent; Codex, Claude, Pi required. Confirm per-user executables, homes,
-   native automatic modes, MCP setup and restricted caller scope. No login copy.
-4. Expose the ONE hub policy and skills outside `/root`, without copying:
+2. Keep `employee_harnesses: []` for this owner-only cutover. A separate non-root
+   execution context and restricted native launches remain implementation work.
+   Employee validation is not a blocker for the owner-only switch.
+3. Verify the owner's existing Codex, Claude and Pi installations and logins.
+   Employees never sign in; no employee login or credentials are required.
+4. Before future employee enablement (not needed for this owner-only switch),
+   expose the ONE hub policy and skills outside `/root`, without copying:
    use administrator-owned `/opt/assistant` (0755) with read-only bind mounts
    of the canonical policy file at `/opt/assistant/AGENTS.md` (0644) and the
    ONE consolidated hub skills directory at `/opt/assistant/skills` (0755
@@ -119,7 +121,7 @@ in approved cutover smoke test. Prompt guard only logs metadata; never blocks.
    `owner_slack`; it stays false in staged config. Separate approval and native
    auth required; never connect live Slack during development.
 6. Re-run offline check and harness discovery; confirm bot username, local API,
-   scoped Pi launch, account separation, missing-token stripping and logins.
+   scoped Pi launch, disabled employees and missing-token stripping.
    Only after gates pass, approved operator may manually start `heimdall.service`.
    Run synthetic smoke tests without memory (`MEMENTO_PROCESSING=1`), then remove
    test state under controlled shutdown. Enable-on-boot is a separate unit change.
@@ -187,3 +189,36 @@ without exposing another caller's token. Mellanni additionally requires the
 signed per-turn caller credential from MEL-724; model-controlled identity env
 is insufficient. Both stay excluded until those connectors are implemented
 and validated. Never substitute owner OAuth or company/service identity.
+
+## Dedicated Heimdall Infisical project (install before start)
+
+The hub machine identity is reused; Heimdall must load ONLY the Heimdall project,
+not Pi's project. In Infisical grant that identity read access to Heimdall's
+`prod` environment, path `/`. Required keys: `TELEGRAM_BOT_TOKEN`,
+`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ADMIN_USER_IDS`. Optional Pi-tool secrets
+belong in this project only when required by the owner's Pi harness/tools.
+Pi retains its own project and bot tokens for scheduler Web API delivery.
+
+Create the project selector without displaying credentials (project ID is not
+secret; replace the placeholder with the Heimdall project's ID):
+
+```bash
+install -d -o root -g root -m 0700 /etc/heimdall
+(umask 077; printf '%s\n' 'INFISICAL_PROJECT_ID=REPLACE_WITH_HEIMDALL_PROJECT_ID' > /etc/heimdall/infisical.env)
+chown root:root /etc/heimdall/infisical.env
+chmod 0600 /etc/heimdall/infisical.env
+install -o root -g root -m 0755 deploy/contabo/heimdall-infisical-run.sh /usr/local/sbin/heimdall-infisical-run.sh
+install -o root -g root -m 0755 deploy/contabo/heimdall-run.sh /usr/local/sbin/heimdall-run.sh
+install -o root -g root -m 0644 deploy/contabo/heimdall.service /etc/systemd/system/heimdall.service
+stat -c '%U %a %n' /etc/heimdall/infisical.env
+bash -n /usr/local/sbin/heimdall-infisical-run.sh
+systemctl daemon-reload
+```
+
+The selector contains exactly one unquoted `INFISICAL_PROJECT_ID=...` line,
+root-owned mode 0600, never tokens. The wrapper sources `/etc/pi-infisical.env`
+then `/etc/pi-infisical-machine.env` without printing either, replaces the project
+ID from this selector, and execs `/usr/local/lib/pi-infisical-exec.js`.
+No authentication files are copied. Do not run the wrapper during preparation.
+Employee business tools cannot use this machine identity as caller authority;
+MEL-724 signed caller tokens remain unimplemented, so employees stay disabled.

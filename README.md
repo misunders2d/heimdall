@@ -1,5 +1,12 @@
 # Heimdall
 
+Employee turns run on Sergey's existing harness installs and logins. Employees
+never log in anywhere; there is no second login. Restriction and isolation are
+implementation work, not a user setup task. Employee identity reaches tools via
+Heimdall's verified platform identity and the Mellanni signed per-turn caller
+token (MEL-724, not built yet). Keep `employee_harnesses: []` until native
+isolation, skill reading, credential denial and caller-bound tools are validated.
+
 A thin, reliable message router between chat interfaces and agent
 harnesses. Heimdall receives a message, attaches the caller identity its
 interface verified, picks a harness (OMP, Codex, Claude, Pi or AGY), runs
@@ -75,8 +82,9 @@ the native harness setup allows. Employee turns always run as a separate
 non-privileged OS user with an environment rebuilt from that account;
 Heimdall must run as root to switch to it and refuses employee turns
 otherwise. An employee account whose uid is root's or the owner's is
-refused at startup and on every turn. Log each harness in for each OS user
-as Sergey, on Sergey’s subscriptions; Heimdall never copies credentials.
+refused at startup and on every turn. No employee login or credential copy is
+required or permitted; implementing restricted execution on existing installs
+and logins remains the integrator's responsibility.
 Employee native readers are confined to shared instructions/skills and their
 own turn files. All employee Memento hooks/tools are disabled; owner MCPs are
 absent. AGY employee turns are refused. Business MCP remains excluded pending
