@@ -7,7 +7,6 @@
     "local:owner"
   ],
   "harness_order": [
-    "omp",
     "codex",
     "claude",
     "pi"
@@ -37,5 +36,6 @@
   "slack": {
     "team_id": "T_PLACEHOLDER",
     "max_file_bytes": 200000000
-  }
+  },
+  "standalone_access": true
 }

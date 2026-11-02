@@ -1,3 +1,37 @@
+# ONE-assistant implementation handoff (2026-11-02)
+
+Patched in the work clone only; no live config, binary, services or transports
+changed. Transport and router admission now read Pi's five access files under root, including
+admin authority, aliases, blacklist/whitelist and narrow capabilities. Unknown
+callers are denied; missing/malformed snapshots fail closed. Owners config is
+ignored unless non-hub `standalone_access` is explicitly selected.
+Employee Memento is disabled in both modes. Native launch controls preserve
+skill readers, restrict file roots and remove owner MCPs; AGY employees are
+refused. AGY owner headless launch includes `-p --mode auto`. Default harness
+order is Codex → Claude → Pi; staged live configuration needs a later approved
+migration.
+
+Employee execution defaults disabled (`employee_harnesses: []`) pending native
+isolation/skill-read validation per installed version. Business MCP is excluded:
+Linear requires a safe per-caller OAuth connector plus `mcp.linear`; Mellanni
+requires MEL-724 signed caller credentials. Existing Pi scopeRoot is fixed
+under `/root`; a shared employee UID native OAuth cache is not caller isolation.
+These are implementation/cutover blockers, owned by the hub integrator; nobody
+is changing the live runtime in this task. Next check is release native
+validation and connector implementation before enabling employees.
+
+Validation in the authorized work clone: official Go 1.26.0 archive SHA-256
+matched go.dev metadata. `go vet ./...` and `go test -p 2 ./...` passed.
+`go test -race -p 2` passed for cmd/heimdall, core, config, harness, router,
+Slack and Telegram packages. Tests use synthetic access fixtures, fake native
+protocol processes and local fake HTTP APIs; no real provider or chat sessions.
+Native employee skill-read/auth-denial checks remain a deployment gate.
+
+[INSTALL.md](../deploy/contabo/INSTALL.md) records the same-inode read-only bind
+mount layout for policy/skills, deployment files and remaining gates. No copies,
+no laptop skills, no owner credentials exposed. Historical handoff entries below
+are superseded wherever they conflict with this section.
+
 ## Warm workers — 2026-11-01
 
 Implementation: `internal/harness/warm.go` owns bounded retained transports;

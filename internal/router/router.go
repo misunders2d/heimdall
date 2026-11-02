@@ -58,20 +58,21 @@ type Accounts interface {
 }
 
 type Options struct {
-	Harness     harness.WarmConfig
-	OwnerSlack  *harness.OwnerSlack
-	SlackTeam   string
-	Access      core.Access
-	Order       []string // default harness order
-	MaxParallel int
-	Accounts    Accounts
-	Log         *log.Logger
-	TypingEvery time.Duration // how often Typing repeats while a turn runs; default 4s
-	AlbumWait   time.Duration // how long a grouped message's parts are held after the last; default 1.5s
-	OutboxDir   string        // Heimdall's copies of files to send; "" sends none
-	MaxAttempts int           // delivery attempts of one reply before it is failed; default 50 (about 3.6 h)
-	GuardLog    string        // the prompt-injection log (metadata only); "" logs nothing
-	GuardLogMax int64         // its size before rotation to GuardLog+".1"; default DefaultGuardLogMax
+	EmployeeHarnesses []string
+	Harness           harness.WarmConfig
+	OwnerSlack        *harness.OwnerSlack
+	SlackTeam         string
+	Access            core.Access
+	Order             []string // default harness order
+	MaxParallel       int
+	Accounts          Accounts
+	Log               *log.Logger
+	TypingEvery       time.Duration // how often Typing repeats while a turn runs; default 4s
+	AlbumWait         time.Duration // how long a grouped message's parts are held after the last; default 1.5s
+	OutboxDir         string        // Heimdall's copies of files to send; "" sends none
+	MaxAttempts       int           // delivery attempts of one reply before it is failed; default 50 (about 3.6 h)
+	GuardLog          string        // the prompt-injection log (metadata only); "" logs nothing
+	GuardLogMax       int64         // its size before rotation to GuardLog+".1"; default DefaultGuardLogMax
 }
 
 type Router struct {
@@ -289,7 +290,7 @@ func (r *Router) accept(ctx context.Context, in core.Inbound) error {
 		r.release(in)
 		return err
 	}
-	role, ok := r.opt.Access.Role(in.From)
+	role, _, ok := r.opt.Access.Decide(in.From, in.Conv)
 	if !ok {
 		r.log.Printf("ignored message from an unidentified %s caller in %s", in.From.Platform, in.Conv)
 		r.release(in)
@@ -709,7 +710,7 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 // now, so a revoked principal (or, later, a scheduled job's creator) fails
 // closed.
 func (c *conv) route(row store.InboundRow, choice *command) bool {
-	role, ok := c.r.opt.Access.Role(row.From)
+	role, _, ok := c.r.opt.Access.Decide(row.From, c.key)
 	if !ok {
 		c.r.log.Printf("message %d from %s in %s rejected: caller no longer authorized", row.ID, row.From.Key(), c.key)
 		_ = c.r.store.SetInbound(row.ID, store.InRejected, "caller not authorized")
@@ -1074,6 +1075,17 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if ctx.Err() != nil || t.stopped.Load() {
 			break
 		}
+		if c.r.opt.Access.Dir != "" {
+			current, _, admitted := c.r.opt.Access.Decide(t.from, c.key)
+			if !admitted || current != t.role {
+				notes = append(notes, "caller admission or role changed; turn refused")
+				break
+			}
+			if t.role == core.RoleEmployee && !slices.Contains(c.r.opt.EmployeeHarnesses, h) {
+				notes = append(notes, h+": employee turns unavailable until native isolation and skill reading are validated")
+				continue
+			}
+		}
 		launch, err := c.r.opt.Accounts.Prepare(t.role, memory, harness.Binary(h))
 		var account *harness.AccountError
 		if errors.As(err, &account) {
@@ -1091,6 +1103,14 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			t.launch = launch
 			t.mu.Unlock()
 			prompt, images = c.prompt(t, batch)
+		}
+		if t.role == core.RoleEmployee {
+			dir, e := c.turnDir(t)
+			if e != nil {
+				notes = append(notes, "employee turn directory unavailable")
+				break
+			}
+			launch.Dir = dir.Path()
 		}
 		sess := harness.Session{}
 		prev, clean, err := c.r.store.Session(c.key, t.who, h)
@@ -1112,7 +1132,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			notes = append(notes, "turn not recordable, so it did not run: "+err.Error())
 			break
 		}
-		caller := harness.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private, OAuthActor: batch[0].row.OAuthActor, OAuthInstallation: batch[0].row.OAuthInstallation}
+		caller := harness.Caller{Capabilities: c.r.opt.Access.Capabilities(t.from, c.key), Principal: t.from, Role: t.role, Conv: c.key, Private: t.private, OAuthActor: batch[0].row.OAuthActor, OAuthInstallation: batch[0].row.OAuthInstallation}
 		caller.SlackRead = harness.SlackReadAllowed(c.r.opt.OwnerSlack, batch[0].row.Inbound, t.role, h, c.r.opt.SlackTeam)
 		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
 		var progress func(harness.Progress)

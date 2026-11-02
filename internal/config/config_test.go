@@ -29,9 +29,10 @@ func TestParseDefaultsAndAccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(c.HarnessOrder, ",") != "omp,codex,claude,pi" || c.MaxParallel != 4 {
+	if strings.Join(c.HarnessOrder, ",") != "codex,claude,pi" || c.MaxParallel != 4 {
 		t.Fatalf("defaults: %+v", c)
 	}
+	c.StandaloneAccess = true
 	a := c.Access()
 	if r, ok := a.Role(core.Principal{Platform: "telegram", ID: "1", Name: "anything"}); !ok || r != core.RoleOwner {
 		t.Fatal("owner not recognised by Telegram user ID")
@@ -47,7 +48,7 @@ func TestParseDefaultsAndAccess(t *testing.T) {
 func TestParseRejects(t *testing.T) {
 	base := `"data_dir":"/tmp/h","mode":"corporate","run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
 	for name, doc := range map[string]string{
-		"no owners":           `{` + base + `}`,
+		"no owners":           `{` + base + `,"standalone_access":true}`,
 		"bad principal":       `{` + base + `,"owners":["nocolon"]}`,
 		"telegram name":       `{` + base + `,"owners":["telegram:@boss"]}`,
 		"slack user ID":       `{` + base + `,"owners":["slack:T1/U2"]}`,

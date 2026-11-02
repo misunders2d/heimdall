@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -24,8 +23,7 @@ type OwnerNotifier interface {
 
 // newCaller tells every owner it can reach, once, that a non-root caller
 // wrote for the first time: who (verified key and display name) and
-// where, never what. Every identified caller is non-root without an
-// allowlist, so this is how the owner learns who uses the bot.
+// where, never what. Admission has already checked the shared Pi access files.
 func (r *Router) newCaller(in core.Inbound) {
 	select {
 	case r.noticeQueue <- in:
@@ -99,11 +97,7 @@ func (r *Router) notifyCallerContext(ctx context.Context, in core.Inbound) bool 
 		name = "no name"
 	}
 	text := fmt.Sprintf("ℹ New caller: %q (%s) wrote for the first time, in %s. Their turns run as the non-root employee account.\n— heimdall", name, in.From.Key(), where)
-	owners := make([]string, 0, len(r.opt.Access.Owners))
-	for key := range r.opt.Access.Owners {
-		owners = append(owners, key)
-	}
-	slices.Sort(owners)
+	owners := r.opt.Access.OwnerKeys()
 	complete := true
 	for _, key := range owners {
 		if ctx.Err() != nil {

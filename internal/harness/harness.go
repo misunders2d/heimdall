@@ -76,13 +76,13 @@ type def struct {
 }
 
 // The native launch flags follow AgentNet's Harnesses table: native
-// automatic approval or review where the harness has one, nothing else.
+// automatic approval/review for owners. Employee controls are appended separately.
 var defs = map[string]def{
 	"omp":    {bin: "omp", args: []string{"--mode", "rpc", "--auto-approve"}, style: sessionDir, steer: true},
 	"pi":     {bin: "pi", args: []string{"--mode", "rpc"}, style: sessionDir, steer: true},
 	"claude": {bin: "claude", args: []string{"-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--replay-user-messages", "--permission-mode", "auto"}, style: sessionID, steer: true},
 	"codex":  {bin: "codex", args: []string{"app-server"}, style: sessionThread, steer: true},
-	"agy":    {bin: "agy", args: []string{"--input-format", "stream-json", "--output-format", "stream-json"}, style: sessionConversation},
+	"agy":    {bin: "agy", args: []string{"-p", "--mode", "auto", "--input-format", "stream-json", "--output-format", "stream-json"}, style: sessionConversation},
 }
 
 // Known reports whether name is a supported harness.
@@ -266,7 +266,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	if spec.Harness == "codex" && !spec.Caller.SlackRead {
+	if spec.Harness == "codex" && !spec.Caller.SlackRead && spec.Caller.Role != core.RoleEmployee {
 		slackArgs, err = codexDisabledSlackArgs(ctx, spec.Launch)
 		if err != nil {
 			return nil, err
@@ -288,7 +288,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 			env = filtered
 		}
 	}
-	if spec.Harness == "pi" {
+	if spec.Harness == "pi" && spec.Caller.Role != core.RoleEmployee {
 		if spec.Caller.SlackRead {
 			if err := validatePiSlackConfig(spec.Launch, spec.OwnerSlack); err != nil {
 				return nil, err
@@ -312,6 +312,27 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("pi MCP scope: %w", err)
+		}
+	}
+	if spec.Caller.Role == core.RoleEmployee {
+		policy, e := employeeArgs(spec.Harness, spec.Launch)
+		if e != nil {
+			return nil, e
+		}
+		extra = append(extra, policy...)
+		if spec.Harness == "codex" {
+			disabled, e := employeeCodexMCPArgs(ctx, spec.Launch)
+			if e != nil {
+				return nil, e
+			}
+			extra = append(extra, disabled...)
+		}
+		env = employeeEnv(env, spec.Caller)
+		env = setEnv(env, "HEIMDALL_TURN_DIR", spec.Launch.Dir)
+		if spec.Harness == "pi" {
+			env = setEnv(env, "MCP_OAUTH_DIR", mcpDenyPath)
+			env = setEnv(env, "PI_MCP_OAUTH_SERVERS", "[]")
+			env = setEnv(env, "PI_CODING_AGENT_DIR", filepath.Join(spec.Launch.Home, ".pi", "agent"))
 		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)

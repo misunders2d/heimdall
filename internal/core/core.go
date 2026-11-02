@@ -14,24 +14,21 @@ import (
 type Role string
 
 const (
-	RoleOwner    Role = "owner"    // root: listed in the config's owners
-	RoleEmployee Role = "employee" // every other verified caller: non-root
+	RoleOwner    Role = "owner"    // hub admin authority; owners fallback for non-hub
+	RoleEmployee Role = "employee" // admitted non-admin: non-root
 )
 
 // Mode decides who gets memory.
 type Mode string
 
 const (
-	ModeCorporate Mode = "corporate" // owner and Slack callers get memory
+	ModeCorporate Mode = "corporate" // Memento remains owner-only
 	ModePersonal  Mode = "personal"  // only the owner gets memory
 )
 
-// Memory reports whether a turn for p in role gets Memento in mode: always
-// for the owner; in corporate mode also for Slack callers, verified in the
-// owner's own workspace. Other non-root callers, Telegram users included,
-// never get memory, in either mode.
+// Memory is owner-only in every mode. Employee business knowledge is not Memento.
 func Memory(mode Mode, role Role, p Principal) bool {
-	return role == RoleOwner || mode == ModeCorporate && p.Platform == PlatformSlack && p.Email != ""
+	return role == RoleOwner
 }
 
 // Platforms with identity rules of their own.
@@ -113,9 +110,9 @@ func validToken(s string) bool {
 	return true
 }
 
-// Access maps verified principals to roles: listed owners are root, every
-// other caller its interface identified is non-root.
+// Access uses Pi files on the hub; Owners is the explicit non-hub fallback.
 type Access struct {
+	Dir    string // nonempty: Pi files are the sole admission and admin authority
 	Mode   Mode
 	Owners map[string]bool // principal keys
 }
@@ -137,6 +134,10 @@ func (a Access) Role(p Principal) (Role, bool) {
 		if p.Email == "" || p.ID != NormalizeEmail(p.Email) || p.Team == "" {
 			return "", false
 		}
+	}
+	if a.Dir != "" {
+		r, _, ok := a.Decide(p, ConvKey{})
+		return r, ok
 	}
 	if a.Owners[p.Key()] {
 		return RoleOwner, true

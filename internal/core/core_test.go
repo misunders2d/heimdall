@@ -45,7 +45,7 @@ func TestMemory(t *testing.T) {
 		{ModePersonal, RoleOwner, tg, true},
 		{ModeCorporate, RoleOwner, tg, true},
 		{ModePersonal, RoleEmployee, sl, false},
-		{ModeCorporate, RoleEmployee, sl, true},
+		{ModeCorporate, RoleEmployee, sl, false},
 		{ModeCorporate, RoleEmployee, tg, false},
 		{ModePersonal, RoleEmployee, tg, false},
 		{ModeCorporate, RoleEmployee, Principal{Platform: "local", ID: "x"}, false},

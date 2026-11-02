@@ -1,3 +1,28 @@
+# Current ONE-assistant parity delta (2026-11-02)
+
+Pi-file admission is evaluated by the root router before persistence/ambient
+context intake and again before launch. Transports also gate before file
+handling/ambient storage. Slack raw events remain temporarily staged before
+live identity lookup for reliable acknowledgement; denied payloads are cleared
+by CompleteEvent and never become ambient or runnable input. All five files must parse; missing or
+malformed snapshots deny admission. Config owners are only a non-hub fallback
+behind `standalone_access`. Capabilities reach `Caller.Capabilities` and launch
+environment for planning; they are not credentials or tool authorization.
+Memento is owner-only in both modes. Every employee launch forcibly sets
+`MEMENTO_PROCESSING=1` and `PI_RESTRICTED_EXTERNAL_USER=1`.
+
+Default order: Codex, Claude, Pi. Employee launch policies retain skill readers,
+deny auth/transcript access and remove owner MCPs. Employee AGY is refused.
+`employee_harnesses` defaults empty until native validation. All employee MCP,
+including capability-granted Linear, remains excluded pending per-caller
+credential isolation; Mellanni also lacks the signed caller credential.
+See [installation and exact remaining gates](../deploy/contabo/INSTALL.md).
+
+ONE policy and ONE consolidated hub skills directory are exposed via read-only
+bind mounts under `/opt/assistant`, with both accounts' harness links resolving
+to those same files. No instruction projection. Earlier parity observations
+below are historical where superseded by this section.
+
 # Hub parity
 
 Harness environment and Telegram behavior are recorded below. The complete
@@ -175,7 +200,7 @@ interfaces (`Typer`, `Prompter`, `Reactor`, `GroupContext`, `FileSender`,
 
 | Hub feature | Why not |
 |---|---|
-| Access whitelist and admin commands (`isAllowed`, whitelist/blacklist commands) | Heimdall has no allowlist (AGENTS.md roles): owners come from the config, every other verified caller is a non-root employee. Nothing to administer by chat. |
+| Access whitelist and admin commands (`isAllowed`, whitelist/blacklist commands) | Pi access files are the sole hub authority: admin → blacklist → user OR chat whitelist, including aliases/capabilities. Unknown callers are denied. No access-file mutation commands are added. |
 | Google Workspace guard (`enforceGoogleWorkspaceOutputBoundary`) | Tool and output restrictions belong to each harness's native configuration; hub guard extensions still run inside a harness that loads them, reading the identity variables Heimdall sets. |
 | Admin-action guard | Same: a harness-side guard. Owner turns are never restricted by Heimdall. |
 | MCP OAuth UI | Owner private Pi native UI relayed; pasted callbacks remain ephemeral. Other callers receive a redacted notice. See owner Slack runbook. |

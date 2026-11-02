@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -43,7 +44,14 @@ func launch(t *testing.T, bin, name string, memory bool) harness.Launch {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l.Home = t.TempDir() // session directories stay inside the test
+	l.Home = t.TempDir() // session directories and native configuration stay inside the test
+	var env []string
+	for _, kv := range l.Env {
+		if !strings.HasPrefix(kv, "HOME=") && !strings.HasPrefix(kv, "PI_CODING_AGENT_DIR=") {
+			env = append(env, kv)
+		}
+	}
+	l.Env = append(env, "HOME="+l.Home, "PI_CODING_AGENT_DIR="+filepath.Join(l.Home, ".pi", "agent"))
 	return l
 }
 
@@ -51,12 +59,14 @@ func turn(t *testing.T, l harness.Launch, name, prompt string, s harness.Session
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: prompt, Session: s, Launch: l, Caller: caller})
+	r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: prompt, Session: s, Launch: l, Caller: protocolCaller})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r.Result()
 }
+
+var protocolCaller = harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "telegram", Chat: "-100"}}
 
 var all = []string{"pi", "omp", "claude", "codex", "agy"}
 
@@ -86,7 +96,7 @@ func TestSteerAcceptedOnNativeAcknowledgement(t *testing.T) {
 			l := launch(t, bin, name, true)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "work WAIT_STEER", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: caller})
+			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "work WAIT_STEER", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: protocolCaller})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -118,7 +128,7 @@ func TestAnswerKeepsTheReplyToEachInput(t *testing.T) {
 			l := launch(t, bin, name, true)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "work WAIT_STEER STEERREPLY", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: caller})
+			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "work WAIT_STEER STEERREPLY", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: protocolCaller})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,7 +155,7 @@ func TestCodexSteerAfterFinalAnswerKeepsBoth(t *testing.T) {
 	l := launch(t, bin, "codex", true)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	r, err := harness.Start(ctx, harness.Spec{Harness: "codex", Prompt: "work WAIT_STEER FINALFIRST", Session: harness.Session{}, Launch: l, Caller: caller})
+	r, err := harness.Start(ctx, harness.Spec{Harness: "codex", Prompt: "work WAIT_STEER FINALFIRST", Session: harness.Session{}, Launch: l, Caller: protocolCaller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +177,7 @@ func TestClaudeLateSteerIsAnsweredNotDropped(t *testing.T) {
 	l := launch(t, bin, "claude", true)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	r, err := harness.Start(ctx, harness.Spec{Harness: "claude", Prompt: "work STEERLATE", Session: harness.Session{ID: harness.NewSessionID("claude")}, Launch: l, Caller: caller})
+	r, err := harness.Start(ctx, harness.Spec{Harness: "claude", Prompt: "work STEERLATE", Session: harness.Session{ID: harness.NewSessionID("claude")}, Launch: l, Caller: protocolCaller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +200,7 @@ func lateSteer(t *testing.T, prompt string) *harness.Run {
 	l := launch(t, bin, "claude", true)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
-	r, err := harness.Start(ctx, harness.Spec{Harness: "claude", Prompt: "work STEERLATE " + prompt, Session: harness.Session{ID: harness.NewSessionID("claude")}, Launch: l, Caller: caller})
+	r, err := harness.Start(ctx, harness.Spec{Harness: "claude", Prompt: "work STEERLATE " + prompt, Session: harness.Session{ID: harness.NewSessionID("claude")}, Launch: l, Caller: protocolCaller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +266,7 @@ func TestAnswerIsFinalBeforeTheProcessExits(t *testing.T) {
 			l := launch(t, bin, name, true)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "hello LINGER=4", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: caller})
+			r, err := harness.Start(ctx, harness.Spec{Harness: name, Prompt: "hello LINGER=4", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: protocolCaller})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -288,7 +298,7 @@ func lingers(t *testing.T, words string) (*harness.Run, string, *logLines) {
 	bin, state := fakeharness.Install(t, "omp")
 	l := launch(t, bin, "omp", true)
 	logs := &logLines{}
-	r, err := harness.Start(context.Background(), harness.Spec{Harness: "omp", Prompt: "hello LINGER=30 " + words, Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: l, Caller: caller, Log: logs.add})
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "omp", Prompt: "hello LINGER=30 " + words, Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: l, Caller: protocolCaller, Log: logs.add})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +391,7 @@ func TestStopEndsTheExitGraceNow(t *testing.T) {
 func TestAgyHasNoSteering(t *testing.T) {
 	bin, _ := fakeharness.Install(t, "agy")
 	l := launch(t, bin, "agy", true)
-	r, err := harness.Start(context.Background(), harness.Spec{Harness: "agy", Prompt: "hi", Launch: l, Caller: caller})
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "agy", Prompt: "hi", Launch: l, Caller: protocolCaller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +440,7 @@ func TestNativeApprovalRequestNeedsHuman(t *testing.T) {
 func TestCancelStopsTheTurn(t *testing.T) {
 	bin, _ := fakeharness.Install(t, "pi")
 	l := launch(t, bin, "pi", true)
-	r, err := harness.Start(context.Background(), harness.Spec{Harness: "pi", Prompt: "SLEEP", Session: harness.Session{ID: harness.NewSessionID("pi")}, Launch: l, Caller: caller})
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "pi", Prompt: "SLEEP", Session: harness.Session{ID: harness.NewSessionID("pi")}, Launch: l, Caller: protocolCaller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +582,7 @@ func TestHarnessProcessSeesCallerIdentity(t *testing.T) {
 	for _, name := range all {
 		t.Run(name, func(t *testing.T) {
 			res := turn(t, launch(t, bin, name, true), name, "x", harness.Session{ID: harness.NewSessionID(name)})
-			want := `ext="PI_EXTERNAL_CHAT_ID=tg_chat_-100 PI_EXTERNAL_DEFAULT_DELIVERY={\"chatId\":-100,\"platform\":\"telegram\",\"sessionKey\":\"tg_chat_-100\"} PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=1 PI_TRANSPORT_CHILD=1"`
+			want := `ext="PI_EXTERNAL_CHAT_ID=tg_chat_-100 PI_EXTERNAL_DEFAULT_DELIVERY={\"chatId\":-100,\"platform\":\"telegram\",\"sessionKey\":\"tg_chat_-100\"} PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=0 PI_TRANSPORT_CHILD=1"`
 			if !strings.Contains(res.Answer, want) {
 				t.Fatalf("answer %q lacks %s", res.Answer, want)
 			}
@@ -716,7 +726,7 @@ func TestCancelKillsAfterTermGrace(t *testing.T) {
 func TestActiveCancelSendsSIGTERMAndMarksCancelled(t *testing.T) {
 	setGrace(t, time.Hour, 300*time.Millisecond)
 	bin, state := fakeharness.Install(t, "omp")
-	r, err := harness.Start(context.Background(), harness.Spec{Harness: "omp", Prompt: "HANGTERM", Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: launch(t, bin, "omp", true), Caller: caller})
+	r, err := harness.Start(context.Background(), harness.Spec{Harness: "omp", Prompt: "HANGTERM", Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: launch(t, bin, "omp", true), Caller: protocolCaller})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -29,6 +29,7 @@ const DefaultMaxFileBytes int64 = 200_000_000
 const diskReserve int64 = 1 << 30
 
 type Options struct {
+	Access                                          *core.Access // root-side Pi admission; nil only in standalone adapter tests
 	BotToken, AppToken, TeamID, DataDir, StatusName string
 	Store                                           *store.Store
 	OwnerSlackEnabled                               bool

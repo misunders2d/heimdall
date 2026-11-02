@@ -1260,3 +1260,15 @@ func TestOwnerChatIsThePrivateChat(t *testing.T) {
 		t.Fatal("a non-numeric owner has a Telegram chat")
 	}
 }
+
+func TestPiAccessDeniesBeforeAlbumAndFileIntake(t *testing.T) {
+	i := newIface(t, "http://127.0.0.1", botName, &syncBuffer{})
+	i.opt.Access = &core.Access{Dir: t.TempDir()}
+	m := &message{MessageID: 1, From: &user{ID: 7}, Chat: chat{ID: -10, Type: "group"}, Text: "@" + botName + " private unknown", MediaGroupID: "album"}
+	if _, _, ok := i.inbound(update{UpdateID: 1, Message: m}); ok {
+		t.Fatal("unknown caller admitted")
+	}
+	if len(i.albums) != 0 {
+		t.Fatal("unknown album remembered")
+	}
+}

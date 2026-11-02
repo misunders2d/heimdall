@@ -156,7 +156,7 @@ func TestMCPTurnRoleAndSurfaceGate(t *testing.T) {
 			t.Fatal(err)
 		}
 		enabled := tc.email == "boss@example.com" && tc.private
-		if strings.Contains(strings.Join(got.Args, " "), "--mcp-config") != enabled {
+		if strings.Contains(strings.Join(got.Args, " "), "https://mcp.slack.com/mcp") != enabled {
 			t.Fatal("role/surface gate bypassed", got.Args)
 		}
 	}

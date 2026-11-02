@@ -60,3 +60,14 @@ func TestCodexSteerAckBeforeCompletionIsAccepted(t *testing.T) {
 		t.Fatalf("outcome %+v", o)
 	}
 }
+
+func TestCodexEmployeeThreadNeverRequestsApproval(t *testing.T) {
+	var out strings.Builder
+	b := codexTestBridge()
+	b.employee = true
+	b.input = discard{&out}
+	b.event([]byte(`{"id":1,"result":{}}`))
+	if !strings.Contains(out.String(), `"approvalPolicy":"never"`) || strings.Contains(out.String(), "auto_review") {
+		t.Fatal(out.String())
+	}
+}

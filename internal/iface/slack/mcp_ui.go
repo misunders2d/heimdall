@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Slack) privateOwner(ctx context.Context, m eventMessage, p core.Principal) bool {
-	if !s.opt.OwnerSlackEnabled || m.ChannelType != "im" || !slices.Contains(s.opt.Owners, p.Key()) {
+	if !s.opt.OwnerSlackEnabled || m.ChannelType != "im" || !s.owner(p) {
 		return false
 	}
 	var result struct {
@@ -96,4 +96,13 @@ func redactMCPEvent(raw json.RawMessage) json.RawMessage {
 		return nil
 	}
 	return out
+}
+
+// All owner-only transport controls share the router's admin authority.
+func (s *Slack) owner(p core.Principal) bool {
+	if s.opt.Access != nil {
+		r, ok := s.opt.Access.Role(p)
+		return ok && r == core.RoleOwner
+	}
+	return slices.Contains(s.opt.Owners, p.Key())
 }

@@ -54,7 +54,8 @@ const (
 
 // Options configure the interface.
 type Options struct {
-	UnmentionedCommands []string // nil: stop/cancel, empty: every command needs addressing
+	Access              *core.Access // root-side Pi admission; nil only in standalone adapter tests
+	UnmentionedCommands []string     // nil: stop/cancel, empty: every command needs addressing
 
 	Token        string        // bot token; never logged
 	BotUsername  string        // the bot getMe must report, without "@"
@@ -356,6 +357,14 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		// Not a person writing as themselves: channel posts, anonymous
 		// admins, linked-channel forwards and bots.
 		return core.Inbound{}, nil, false
+	}
+	if t.opt.Access != nil {
+		principal := core.Principal{Platform: core.PlatformTelegram, ID: strconv.FormatInt(m.From.ID, 10)}
+		conv := core.ConvKey{Interface: core.PlatformTelegram, Chat: strconv.FormatInt(m.Chat.ID, 10)}
+		if _, _, admitted := t.opt.Access.Decide(principal, conv); !admitted {
+			t.logf("update %d in chat %d ignored: caller not admitted", u.UpdateID, m.Chat.ID)
+			return core.Inbound{}, nil, false
+		}
 	}
 	private := m.Chat.Type == "private"
 	text := m.Text

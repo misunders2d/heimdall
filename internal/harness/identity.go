@@ -14,6 +14,7 @@ import (
 // Caller is who a turn runs for: the interface-verified principal, the role
 // it was given and the conversation the turn belongs to.
 type Caller struct {
+	Capabilities      []string
 	SlackRead         bool
 	OAuthActor        string
 	OAuthInstallation string
@@ -38,7 +39,7 @@ var identityPrefixes = []string{"PI_EXTERNAL_", "A2A_CALLER_", "PI_RESTRICTED_",
 // identity read the same values. This is the only place the mapping lives;
 // docs/hub-parity.md lists every hub variable and its readers.
 //
-// The variables tell tools who is calling. Heimdall adds no tool flags:
+// The variables identify the caller; employee launch policy also confines tools.
 // PI_RESTRICTED_EXTERNAL_USER is 1 for employees and every AgentNet caller,
 // as the hub sets it for callers who are not admins, and 0 for the owner.
 // Every turn also gets, as the hub sets them on every child it spawns:

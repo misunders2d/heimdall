@@ -187,7 +187,7 @@ func (a Accounts) Prepare(role core.Role, memory bool, bin string) (Launch, erro
 		return Launch{}, accountErr("cannot run as OS user %q: Heimdall runs as uid %d, not root; the turn was refused rather than run as another user", r.User, self)
 	}
 	// With memory the native setup decides; Heimdall never force-enables it.
-	if !memory {
+	if !memory || role == core.RoleEmployee {
 		l.Env = setEnv(l.Env, "MEMENTO_PROCESSING", "1")
 	}
 	l.Dir = r.Dir

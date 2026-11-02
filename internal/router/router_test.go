@@ -507,7 +507,7 @@ func TestModesControlMemory(t *testing.T) {
 
 	corporate := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	corporate.sendAs(slack, "c2", "e")
-	want(t, corporate.reply(), "mem= ")
+	want(t, corporate.reply(), "mem=1 ")
 	// Telegram callers who are not owners get no memory in either mode.
 	corporate.sendAs(tg, "-103", "t")
 	want(t, corporate.reply(), "mem=1 ")
@@ -672,7 +672,11 @@ func TestEmployeeAccountNeverRunsAsOwner(t *testing.T) {
 	e.opt.Accounts, _ = stubbed(t, e.bin, map[string]int{"boss": os.Getuid(), "emp": os.Getuid()})
 	e.start()
 	e.send(employee, "c1", "hi")
-	want(t, e.reply(), "No harness could take this turn", "the owner's uid")
+	reason := "the owner's uid"
+	if os.Getuid() == 0 {
+		reason = "uid 0"
+	}
+	want(t, e.reply(), "No harness could take this turn", reason)
 	e.send(owner, "c2", "hi")
 	want(t, e.reply(), "omp#1")
 }
@@ -1845,5 +1849,37 @@ func TestOwnerNoticeResolutionFailureRetriedOnLaterAttempt(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("notice lost after transient resolution failure")
+	}
+}
+
+func TestHubEmployeeValidationGateAndUnknownAdmission(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"pi"}, "pi")
+	e.stop()
+	dir := t.TempDir()
+	for name, data := range map[string]string{
+		"whitelist.json":    `{"users":["tg_user_7"],"chats":[]}`,
+		"blacklist.json":    `{"users":[],"chats":[]}`,
+		"admins.json":       `{"users":[]}`,
+		"identities.json":   `{"principals":{}}`,
+		"capabilities.json": `{"tg_user_7":["mcp.linear"]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.opt.Access = core.Access{Dir: dir, Mode: core.ModeCorporate}
+	e.start()
+	e.sendAs(core.Principal{Platform: "telegram", ID: "7"}, "c1", "synthetic")
+	want(t, e.reply(), "employee turns unavailable until native isolation")
+	// Unknown message never enters durable inbound/context state.
+	e.sendAs(core.Principal{Platform: "telegram", ID: "999"}, "c1", "UNKNOWN_SECRET_TEXT")
+	time.Sleep(50 * time.Millisecond)
+	if strings.Contains(e.logs.String(), "UNKNOWN_SECRET_TEXT") {
+		t.Fatal("unknown text logged")
+	}
+	select {
+	case out := <-e.f.out:
+		t.Fatalf("unknown caller answered: %+v", out)
+	default:
 	}
 }

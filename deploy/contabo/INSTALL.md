@@ -22,8 +22,7 @@ Never touch `heimdall-live` or `heimdall-slack-test`.
    `install -m 0600 config.example.json /etc/heimdall/config.json`.
    Replace `telegram.bot_username` with the hub bot's already verified username.
    Template identity/workspace values are deliberately this deployment's values.
-   Corporate mode matches shared workspace memory; obtain owner decision before
-   changing to personal. No tokens in config.
+   Both modes keep employee Memento off. No tokens in config.
 6. Install wrapper and unit:
    `install -m 0755 heimdall-run.sh /usr/local/sbin/heimdall-run.sh` and
    `install -m 0644 heimdall.service /etc/systemd/system/heimdall.service`.
@@ -83,26 +82,35 @@ in approved cutover smoke test. Prompt guard only logs metadata; never blocks.
 2. Obtain approval to create `heimdall-employee`; create a separate non-root OS
    account/home. Heimdall runtime refuses startup until account exists and UID
    differs from root/owner. Do not create it as part of staging.
-3. Perform native harness logins manually as root and separately as employee.
+3. Sergey performs native harness logins manually as root and separately as employee,
+   using his own subscriptions for both.
    OMP absent; Codex, Claude, Pi required. Confirm per-user executables, homes,
    native automatic modes, MCP setup and restricted caller scope. No login copy.
-4. With Sergey's go, make Pi AGENTS the sole instruction source for both users:
-   root: `/root/.claude/CLAUDE.md`, `/root/.codex/AGENTS.md`, and
-   `/root/.gemini/AGENTS.md` (AGY) symlink to
-   `/root/.pi/agent/AGENTS.md`; employee: `~/.pi/agent/AGENTS.md` points to an
-   approved readable instruction-only projection of that same canonical file,
-   and `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/AGENTS.md`
-   point to that employee Pi path.
-   Preserve existing instruction files before replacement. Do not make `/root`
-   traversable just to share instructions. AGY is outside launch order. Its
-   [official global rule path](https://antigravity.google/docs/rules/) was
-   checked 2026-11-01; verify installed version before enabling. Example commands
-   (after backing up existing files), run as each target user:
-   `mkdir -p ~/.claude ~/.codex ~/.gemini`;
-   Use absolute symlink targets:
-   `ln -s "$HOME/.pi/agent/AGENTS.md" "$HOME/.claude/CLAUDE.md"`,
-   `ln -s "$HOME/.pi/agent/AGENTS.md" "$HOME/.codex/AGENTS.md"`,
-   `ln -s "$HOME/.pi/agent/AGENTS.md" "$HOME/.gemini/AGENTS.md"`.
+4. Expose the ONE hub policy and skills outside `/root`, without copying:
+   use administrator-owned `/opt/assistant` (0755) with read-only bind mounts
+   of the canonical policy file at `/opt/assistant/AGENTS.md` (0644) and the
+   ONE consolidated hub skills directory at `/opt/assistant/skills` (0755
+   directories, 0644 text). This preserves the original inodes and pack hub
+   ownership without making `/root` traversable. Resolve skill symlinks: any
+   target still under `/root` is a failed gate. Do not mount credentials or
+   all of the pack. Consolidating shared hub and Pi-specific skills must be
+   completed first; no laptop skills or second discovery directory.
+   Make both accounts' `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md`,
+   `~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md` link to
+   `/opt/assistant/AGENTS.md`; `~/.agents/skills`, `~/.claude/skills`, and
+   `~/.gemini/config/skills` link to `/opt/assistant/skills`.
+   Preserve existing files before replacing entries. Verify device/inode
+   equality (`stat -L`) from source and every entry and read access as the
+   employee. A symlink directly into `/root` fails. Bind mounts must be
+   re-established after atomic source-file replacements; re-check inode
+   equality on every policy update and after reboot. Install mounts only
+   during an approved deployment, never from development tests.
+   Install `deploy/employee/{employee-guard.ts,empty-mcp.json}` root-owned,
+   employee-readable into `/opt/assistant/heimdall/`. Retain Pi's existing
+   privileged-tool guard; employee extensions must contain no memory or
+   owner business connectors. Employee native config and hook setup must
+   be administrator-controlled. The Claude hook invokes the installed
+   employee-readable Heimdall binary; a binary under `/root` cannot work.
 5. Complete [owner Slack setup](../../docs/owner-slack-read.md) before enabling
    `owner_slack`; it stays false in staged config. Separate approval and native
    auth required; never connect live Slack during development.
@@ -116,3 +124,62 @@ in approved cutover smoke test. Prompt guard only logs metadata; never blocks.
    remains hub-owned. Preserve Heimdall state for diagnosis; do not replay turns
    interrupted by restart. Outbound delivery is at-least-once and may duplicate
    one ambiguous send. Never run both sets of chat adapters simultaneously.
+
+## ONE-assistant launch gates (2026-11-02)
+
+Default order is now `codex → claude → pi`. The example uses Pi-file admission
+and `employee_harnesses: []`. Existing `/etc/heimdall/config.json` is NOT edited
+by this change: migrate it deliberately at approved deployment, remove the old
+OMP-first override, and retain Pi's access files as the only admission source.
+`standalone_access: true` is a non-hub compatibility option, never for Contabo.
+
+Before adding a harness to `employee_harnesses`, validate its installed version
+in an isolated native test: skill discovery, SKILL.md body and reference reads;
+denial of `/root`, employee provider auth, MCP auth, transcripts, other callers'
+turns, shell mutation/network, owner MCP and credential/login flows. Verify
+Memento recall/capture/hooks are absent. Keep validation evidence with release
+notes. Fake tests alone do not pass these gates. The router refuses unvalidated
+employee harnesses; AGY is always refused for employees, even when selected
+explicitly. The AGY owner adapter now uses `-p --mode auto` for headless JSON.
+
+Pi keeps `read` and a symlink-aware guard, excludes all other built-ins/MCP,
+and uses a dedicated empty MCP config. Claude keeps `Skill,Read,WebSearch`,
+uses strict empty MCP, denies mutation/delegation tools, disables inline skill
+shell execution and auto-memory, and runs the fail-closed reader guard.
+Employee Claude native memory hooks must be removed before validation (the
+Memento suppression environment is defense in depth). Codex retains shell for
+skill reads, requests a named filesystem profile limited to shared root, turn
+cwd and system runtime files, denies home/auth/proc/sys, disables network,
+auto-approval, hooks, memory, plugins/apps, browser/computer use and subagents,
+and replaces the MCP map. Its app-server thread policy is also `never`.
+Codex read-only execution cannot generate attachments; employee output files
+are unsupported until a separately validated confinement design permits them.
+The named profile implements read-only confinement; do not also pass the legacy
+`sandbox_mode` override (official Codex config rejects that combination).
+Version-dependent profile support must be verified; never fall back to an
+unrestricted launch when unsupported. Employee warm processes are discarded
+when turn directory or capability scope changes.
+
+### Employee business MCP: intentionally excluded
+
+`mcp.linear` and `scheduler` grants are evaluated by root and carried in launch
+planning, never re-read using the employee UID. No business MCP is currently
+exposed to employees, even with a grant. This is a remaining integration gate,
+not a claim of employee tool parity.
+
+Investigated pack `extensions/.shared/mcp-oauth-scope.ts`: per-caller stores
+have `sha256-<scope>` directories, but the reviewed native Pi seam validates
+against fixed `/root/.pi/agent/mcp-oauth-users`. Merely setting agentDir to the
+employee home does not change that root. Native Claude/Codex OAuth caches are
+account-level, not per-chat-caller. Sharing one employee UID cache would mix
+employees' authority. Candidate storage is a root-owned broker tree outside
+`/root`, e.g. `/var/lib/heimdall/employee-oauth/<principal-digest>` (0700), with
+only a caller-bound connector's own subtree readable to its worker. Do NOT
+make the entire tree readable to the shared employee UID. No credentials have
+been moved or read by this implementation.
+
+Linear requires `mcp.linear` AND a connector that selects the caller's OAuth
+without exposing another caller's token. Mellanni additionally requires the
+signed per-turn caller credential from MEL-724; model-controlled identity env
+is insufficient. Both stay excluded until those connectors are implemented
+and validated. Never substitute owner OAuth or company/service identity.

@@ -351,3 +351,19 @@ func TestAlreadyQueuedRedeliveryDoesNotProcessCompletedEvent(t *testing.T) {
 		t.Fatalf("completed event processed %d times", accepted)
 	}
 }
+
+func TestPiAccessDeniesBeforeAmbientIntake(t *testing.T) {
+	f := newSlackFake(t)
+	s, _ := testSlack(t, f)
+	s.botID = "Ubot"
+	// Missing synthetic access files fail closed, despite a valid workspace identity.
+	s.opt.Access = &core.Access{Dir: t.TempDir()}
+	directEvent(t, s, f.event("C1", "channel", "Uowner", "PRIVATE_UNKNOWN_TEXT", ""), func(context.Context, core.Inbound) error { t.Fatal("unknown caller admitted"); return nil })
+	rows, err := s.opt.Store.RecentAmbient(core.ConvKey{Interface: "slack", Chat: "C1"}, nil, 10)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("unknown ambient persisted: %v %v", rows, err)
+	}
+	if s.owner(core.SlackPrincipal("uowner@example.test", "T1", "")) {
+		t.Fatal("config owners bypassed Pi authority")
+	}
+}

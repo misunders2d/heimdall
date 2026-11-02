@@ -51,8 +51,10 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "hook":
-		if len(os.Args) != 3 || os.Args[2] != "slack-guard" {
+		if len(os.Args) != 3 || os.Args[2] != "slack-guard" && os.Args[2] != "employee-guard" {
 			err = errors.New("unknown hook")
+		} else if os.Args[2] == "employee-guard" {
+			err = harness.EmployeeGuard(os.Stdin, os.Stdout)
 		} else {
 			err = harness.SlackGuard(os.Stdin, os.Stdout)
 		}
@@ -110,6 +112,7 @@ func run(args []string) error {
 		return err
 	}
 	defer st.Close()
+	access := cfg.Access()
 	var interfaces []router.Interface
 	if cfg.Telegram != nil {
 		apiBase, fileBase, maxBytes := cfg.Telegram.APIBase, cfg.Telegram.FileBase, cfg.Telegram.MaxFileBytes
@@ -126,14 +129,14 @@ func run(args []string) error {
 				return errors.New("invalid HEIMDALL_TELEGRAM_MAX_FILE_BYTES")
 			}
 		}
-		tg, err := telegram.New(telegram.Options{UnmentionedCommands: cfg.UnmentionedCommands(), Token: os.Getenv(telegram.TokenEnv), API: apiBase, FileBase: fileBase, MaxFileBytes: maxBytes, BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
+		tg, err := telegram.New(telegram.Options{Access: &access, UnmentionedCommands: cfg.UnmentionedCommands(), Token: os.Getenv(telegram.TokenEnv), API: apiBase, FileBase: fileBase, MaxFileBytes: maxBytes, BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
 		if err != nil {
 			return err
 		}
 		interfaces = append(interfaces, tg)
 	}
 	if c := cfg.Slack; c != nil {
-		sl, err := slack.New(slack.Options{OwnerSlackEnabled: cfg.OwnerSlack != nil && cfg.OwnerSlack.Enabled, Owners: cfg.Owners, BotToken: os.Getenv(slack.BotTokenEnv), AppToken: os.Getenv(slack.AppTokenEnv), TeamID: c.TeamID, DataDir: cfg.DataDir, Store: st, UnmentionedCommands: cfg.UnmentionedCommands(), MaxFileBytes: c.MaxFileBytes, EventDedupeHours: c.EventDedupeHours, DispatchConcurrency: c.DispatchConcurrency, IngressRetryWindow: time.Duration(c.IngressRetrySeconds) * time.Second, StatusName: c.StatusName, StatusUpdates: c.StatusUpdates, Log: logger})
+		sl, err := slack.New(slack.Options{Access: &access, OwnerSlackEnabled: cfg.OwnerSlack != nil && cfg.OwnerSlack.Enabled, Owners: cfg.Owners, BotToken: os.Getenv(slack.BotTokenEnv), AppToken: os.Getenv(slack.AppTokenEnv), TeamID: c.TeamID, DataDir: cfg.DataDir, Store: st, UnmentionedCommands: cfg.UnmentionedCommands(), MaxFileBytes: c.MaxFileBytes, EventDedupeHours: c.EventDedupeHours, DispatchConcurrency: c.DispatchConcurrency, IngressRetryWindow: time.Duration(c.IngressRetrySeconds) * time.Second, StatusName: c.StatusName, StatusUpdates: c.StatusUpdates, Log: logger})
 		if err != nil {
 			return err
 		}
@@ -141,7 +144,7 @@ func run(args []string) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	r := router.New(router.Options{Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
+	r := router.New(router.Options{EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")
@@ -169,7 +172,7 @@ func runLocal(args []string) error {
 	defer cancel()
 	l := local.New(os.Stdin, os.Stdout, *as, *chat)
 	logger := log.New(os.Stderr, "heimdall: ", log.LstdFlags)
-	r := router.New(router.Options{Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, l)
+	r := router.New(router.Options{EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, l)
 	go func() {
 		select {
 		case <-l.EOF():

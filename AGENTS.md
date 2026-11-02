@@ -40,12 +40,9 @@ the `heimdall-live` unit.
 - **Keep it thin.** No invented subsystems: no activity boards, registries,
   job trackers or delegation layers. Memory is Memento's job; agent-to-agent
   work and job tracking are AgentNet's job; business connectors and tool
-  restrictions belong to each harness's native configuration. Heimdall
-  launches each harness in its own native automatic approval/review mode
-  (AgentNet's launch table: OMP `--auto-approve`, Claude
-  `--permission-mode auto`, Codex automatic review), adds no tool
-  exclusions, sandbox changes or other restrictions, and runs no extra
-  services.
+  restrictions are selected by caller role. Owners retain native automatic
+  modes. Employees use confined readers and explicit tool/MCP restrictions;
+  unsupported or unvalidated launches are refused. No extra services.
   Exception: opt-in `owner_slack` exposes Slack MCP read/search only to owners
   in private Telegram chats or live-verified same-workspace Slack 1:1 DMs,
   on Pi/Claude/Codex; never ambient or scheduled turns. Other turns have
@@ -66,18 +63,13 @@ the `heimdall-live` unit.
   (later phase), which store their creator and run under that creator's
   role and mode evaluated at fire time.
 - **Roles.**
-  - *Owner (root)*: only the principals listed in the config's `owners`
-    (Telegram user IDs, Slack verified emails). Owner turns run as the owner
-    OS user (root in production) with everything enabled, except the
-    private-owner Slack read gate described above.
-  - *Employee (non-root)*: every other caller the interface identified, with
-    no allowlist: any Telegram user who is not an owner, any verified member
-    of the owner's Slack workspace who is not an owner. Employee turns always run
-    as a separate non-privileged OS user, with all of that user's tools, and
-    tell tools they are restricted (`PI_RESTRICTED_EXTERNAL_USER=1`).
-    The first time one writes, each owner the interface can reach
-    privately is told once: name, verified key and conversation, never the
-    message.
+  - *Owner (root)*: Pi-file admin authority (`ADMIN_USER_IDS` and admins.json).
+    Config owners are only an explicit non-hub fallback.
+  - *Employee (non-root)*: admitted by Pi's existing user OR chat whitelist
+    after blacklist denial. Unknown callers are ignored, metadata logged only.
+    Employees run under a separate UID with confined skill readers, no owner
+    MCP, no Memento and no server administration. Native harness validation
+    is required before listing a harness in `employee_harnesses`.
   - The employee OS account is checked by uid: never root's or the
     owner's, at startup and on every turn.
   - When Heimdall cannot switch to a turn's OS user (it is not root and the
@@ -87,13 +79,9 @@ the `heimdall-live` unit.
     Heimdall never copies credentials and never reuses one user's home or
     environment for another (the employee environment is rebuilt from that
     user's account).
-- **Modes.** `corporate`: the owner and verified Slack callers get memory.
-  `personal`: only the owner gets memory. Telegram callers who are not
-  owners never get memory, in either mode. Memory means Memento's native integration for that
-  harness run; for a no-memory turn Heimdall sets `MEMENTO_PROCESSING=1`,
-  which suppresses Memento's own hooks/extensions. Heimdall never enables
-  memory the native setup lacks. Memento MCP tools configured natively for
-  the employee user and native transcript storage are outside this switch.
+- **Modes.** Both corporate and personal modes keep Memento owner-only.
+  Employee turns force `MEMENTO_PROCESSING=1`, remove memory MCP and disable
+  native memory hooks. ACL-safe company knowledge belongs to Mellanni.
 - **Prompt-injection scoring is log only** (owner, 2026-10-30;
   `internal/router/guard.go`). The hub's scoring of every admitted message
   (ambient ones included), on every interface, never blocks or alters a
@@ -158,7 +146,7 @@ the `heimdall-live` unit.
   Status is deleted after confirmed text/reaction delivery, compacted if
   deletion fails, and recovered after restart. Files out use checked outboxes
   and the supported external-upload flow; reactions use Slack names.
-- **Harness choice.** Default order `omp → codex → claude → pi`
+- **Harness choice.** Default order `codex → claude → pi`
   (configurable). Fall back to the next harness only when the previous one
   failed before its turn started (before any side effect is possible).
   Explicit choices (`!use <harness>`, `!<harness> <msg>`) never fall back.
@@ -260,7 +248,8 @@ thinking stream and live-session reply registration.
 
 ## Working rules
 
-- Test only on the development machine. Never test on the production server.
+- Development/testing normally runs on a laptop. Explicit owner authorization
+  permits isolated work-clone coding/fake tests on the hub, never live runtime.
 - Secrets come from the environment (Infisical in production) or owner-only
   files; never commit, log or print them. Harness environments never inherit
   `HEIMDALL_*` variables.

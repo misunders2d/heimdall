@@ -16,7 +16,7 @@ func warmSpec(t *testing.T, name string) (harness.Spec, string) {
 	bin, state := fakeharness.Install(t, name)
 	l := launch(t, bin, name, true)
 	l.Env = append(l.Env, "FAKE_WARM=1")
-	return harness.Spec{Harness: name, Prompt: "hello", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: caller}, state
+	return harness.Spec{Harness: name, Prompt: "hello", Session: harness.Session{ID: harness.NewSessionID(name)}, Launch: l, Caller: protocolCaller}, state
 }
 func pooledTurn(t *testing.T, p *harness.Pool, ctx context.Context, s harness.Spec) *harness.Run {
 	t.Helper()
@@ -81,7 +81,7 @@ func TestWarmFingerprintAndIsolation(t *testing.T) {
 			case "env":
 				s.Launch.Env = append(s.Launch.Env, "MODEL=changed")
 			case "role":
-				s.Caller.Role = "owner"
+				s.Caller.Role = "employee"
 			case "private":
 				s.Caller.Private = true
 			case "caller":
@@ -235,7 +235,7 @@ func TestWarmAgyRemainsPerTurn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	bin, _ := fakeharness.Install(t, "agy")
-	s := harness.Spec{Harness: "agy", Prompt: "hello", Launch: launch(t, bin, "agy", true), Caller: caller}
+	s := harness.Spec{Harness: "agy", Prompt: "hello", Launch: launch(t, bin, "agy", true), Caller: protocolCaller}
 	p := harness.NewPool(harness.WarmConfig{})
 	first, err := p.Start(ctx, s)
 	if err != nil {

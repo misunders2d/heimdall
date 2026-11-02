@@ -20,22 +20,25 @@ import (
 )
 
 // DefaultOrder is the harness order used when a chat has no `!use` choice.
-var DefaultOrder = []string{"omp", "codex", "claude", "pi"}
+var DefaultOrder = []string{"codex", "claude", "pi"}
 
 type Config struct {
-	warnings     []string
-	Harness      harness.WarmConfig       `json:"harness,omitempty"`
-	OwnerSlack   *harness.OwnerSlack      `json:"owner_slack,omitempty"`
-	Commands     *Commands                `json:"commands,omitempty"`
-	DataDir      string                   `json:"data_dir"`
-	Mode         core.Mode                `json:"mode"`
-	Owners       []string                 `json:"owners"` // principal keys, platform:id; everyone else is non-root
-	HarnessOrder []string                 `json:"harness_order,omitempty"`
-	MaxParallel  int                      `json:"max_parallel,omitempty"`
-	RunAs        map[core.Role]core.RunAs `json:"run_as"`
-	Slack        *Slack                   `json:"slack,omitempty"`
-	Telegram     *Telegram                `json:"telegram,omitempty"`
-	PromptGuard  *PromptGuard             `json:"prompt_guard,omitempty"`
+	EmployeeHarnesses []string `json:"employee_harnesses,omitempty"` // enable only after native isolation validation
+	AccessDir         string   `json:"access_dir,omitempty"`
+	StandaloneAccess  bool     `json:"standalone_access,omitempty"` // non-hub installs only: legacy owners fallback
+	warnings          []string
+	Harness           harness.WarmConfig       `json:"harness,omitempty"`
+	OwnerSlack        *harness.OwnerSlack      `json:"owner_slack,omitempty"`
+	Commands          *Commands                `json:"commands,omitempty"`
+	DataDir           string                   `json:"data_dir"`
+	Mode              core.Mode                `json:"mode"`
+	Owners            []string                 `json:"owners"` // principal keys, platform:id; everyone else is non-root
+	HarnessOrder      []string                 `json:"harness_order,omitempty"`
+	MaxParallel       int                      `json:"max_parallel,omitempty"`
+	RunAs             map[core.Role]core.RunAs `json:"run_as"`
+	Slack             *Slack                   `json:"slack,omitempty"`
+	Telegram          *Telegram                `json:"telegram,omitempty"`
+	PromptGuard       *PromptGuard             `json:"prompt_guard,omitempty"`
 }
 
 // PromptGuard sizes the prompt-injection log, <data_dir>/prompt-guard.log:
@@ -133,6 +136,11 @@ func parse(raw []byte, staged bool) (*Config, error) {
 }
 
 func (c *Config) fill(staged bool) error {
+	for _, h := range c.EmployeeHarnesses {
+		if h != "codex" && h != "claude" && h != "pi" {
+			return errors.New("employee_harnesses supports only codex, claude, pi after native validation")
+		}
+	}
 	if c.OwnerSlack != nil {
 		if err := c.OwnerSlack.Validate(); err != nil {
 			return err
@@ -149,7 +157,7 @@ func (c *Config) fill(staged bool) error {
 	if c.Mode != core.ModeCorporate && c.Mode != core.ModePersonal {
 		return fmt.Errorf("mode must be %q or %q", core.ModeCorporate, core.ModePersonal)
 	}
-	if len(c.Owners) == 0 {
+	if c.StandaloneAccess && len(c.Owners) == 0 {
 		return errors.New("owners must list at least one verified principal (platform:id)")
 	}
 	for i, k := range c.Owners {
@@ -293,9 +301,16 @@ func botUsername(s string) bool {
 // lookupUser resolves OS accounts; tests replace it.
 var lookupUser = user.Lookup
 
-// Access is the config's owner list.
+// Access selects the hub Pi authority, or explicit non-hub owners fallback.
 func (c *Config) Access() core.Access {
 	a := core.Access{Mode: c.Mode, Owners: map[string]bool{}}
+	if !c.StandaloneAccess {
+		a.Dir = c.AccessDir
+		if a.Dir == "" {
+			a.Dir = "/root/.pi/agent/access"
+		}
+		return a
+	}
 	for _, k := range c.Owners {
 		a.Owners[k] = true
 	}

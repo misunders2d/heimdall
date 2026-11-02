@@ -37,9 +37,11 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | Key | Meaning |
 |---|---|
 | `data_dir` | SQLite queues and state |
-| `mode` | `corporate` (the owner and Slack callers get memory) or `personal` (only the owner does); Telegram callers who are not owners never do |
-| `owners` | root callers as `platform:id`: `telegram:<numeric user ID>`, `slack:<verified email>` |
-| `harness_order` | default order, `omp, codex, claude, pi` |
+| `mode` | `corporate` or `personal`; Memento is owner-only in both |
+| `access_dir` | Pi access files; default `/root/.pi/agent/access`, read by Heimdall before UID drop |
+| `owners` | legacy fallback only when `standalone_access: true` on non-hub installs |
+| `employee_harnesses` | default `[]`; list only Codex/Claude/Pi after native isolation validation |
+| `harness_order` | default order, `codex, claude, pi` |
 | `max_parallel` | conversations running a turn at once |
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
 | `commands.unmentioned` | shared addressing policy; default `["stop","cancel"]`, `["all"]` allows every command, `[]` requires addressing for every command |
@@ -57,13 +59,16 @@ A message the hub would have blocked (score 4 or more) runs unchanged; only
 its metadata (score, pattern names, interface, chat, thread, caller and
 message ID, never the text) is logged to `<data_dir>/prompt-guard.log`.
 
-Every other caller the interface verified is non-root: any Telegram user who
-is not an owner, any member of the bot's own Slack workspace whose email
-Slack verifies live (not deleted, not a bot). Other Slack callers, guests
-from other workspaces included, are ignored. There is no allowlist beyond
-`owners`. The first time a non-root caller writes, each owner is told so
-once in their private Telegram chat with the bot: the caller's name,
-verified ID and conversation, never the message.
+Verified identity is required before admission. Hub admission uses Pi's existing
+`whitelist.json`, `blacklist.json`, `admins.json`, `identities.json` and
+`capabilities.json`: admins (`ADMIN_USER_IDS` plus file admins) first, blacklist
+deny next, user OR chat whitelist last. Aliases and canonical/legacy IDs match
+Pi. Unknown callers are ignored by the router without storing message text;
+logs contain metadata only. Invalid/missing access snapshots fail closed.
+Hub owners come from that same admin authority; config `owners` is ignored.
+Narrow capabilities reach launch planning but never grant owner authority.
+New-caller private notices derive their owner destinations from that same
+authority; config owners cannot add hub recipients.
 
 Owner turns run as the owner OS user (root in production) with everything
 the native harness setup allows. Employee turns always run as a separate
@@ -71,7 +76,11 @@ non-privileged OS user with an environment rebuilt from that account;
 Heimdall must run as root to switch to it and refuses employee turns
 otherwise. An employee account whose uid is root's or the owner's is
 refused at startup and on every turn. Log each harness in for each OS user
-yourself; Heimdall never copies credentials.
+as Sergey, on Sergey’s subscriptions; Heimdall never copies credentials.
+Employee native readers are confined to shared instructions/skills and their
+own turn files. All employee Memento hooks/tools are disabled; owner MCPs are
+absent. AGY employee turns are refused. Business MCP remains excluded pending
+a safe per-caller credential connector; see [deployment gates](deploy/contabo/INSTALL.md).
 
 `heimdall harnesses -config FILE` shows which harnesses each role's OS user
 can launch.
@@ -149,8 +158,8 @@ or interactivity is required. Bot scopes:
 Set `HEIMDALL_SLACK_BOT_TOKEN` and `HEIMDALL_SLACK_APP_TOKEN` in the launch
 environment, then use `heimdall run -config FILE`. Either interface block
 may be omitted. Slack refuses a workspace mismatch and locks its data directory.
-Owners use `slack:<verified email>` in `owners`; other live same-workspace
-members run as the employee OS user. Slack Connect externals are silent.
+Hub owners match Pi admin authority by verified Slack email/identity aliases;
+whitelisted same-workspace members run as the employee OS user. Slack Connect externals are silent.
 
 Every message, including DMs, replies in its root thread. Shared messages
 need a bot mention (`<@bot-user-id>` on the wire), except permitted commands;
@@ -219,7 +228,8 @@ heimdall local -config my.json -as owner
 
 Type one message per line. Prefix `@user` and `#chat/thread` to switch the
 sender and conversation for that line (e.g. `@employee #team/7 hello`); any
-sender not listed in `owners` is non-root. The local interface trusts
+sender not listed in `owners` is non-root only with explicit
+`standalone_access: true` in a non-hub test config. The local interface trusts
 whoever types, so list `local:...` owners only in test configs.
 
 ## Reliability

@@ -24,6 +24,7 @@ import (
 const clientVersion = "0.1.0"
 
 type codexBridge struct {
+	employee  bool
 	warm      bool
 	progress  func(Progress)
 	telemetry progressTracker
@@ -56,7 +57,7 @@ func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []
 	if err != nil {
 		return nil, err
 	}
-	b := &codexBridge{warm: isWarmInput(out), prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), answered: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
+	b := &codexBridge{employee: envValue(cmd.Env, "PI_RESTRICTED_EXTERNAL_USER") == "1", warm: isWarmInput(out), prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), answered: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
 	if s.Resume {
 		b.resume = s.ID
 	}
@@ -237,6 +238,10 @@ func (b *codexBridge) event(raw []byte) {
 			// Select native automatic review without changing the native sandbox.
 			params["approvalPolicy"] = "on-request"
 			params["approvalsReviewer"] = "auto_review"
+			if b.employee {
+				params["approvalPolicy"] = "never"
+				delete(params, "approvalsReviewer")
+			}
 			b.send(map[string]any{"id": 2, "method": method, "params": params})
 		case "2":
 			var r struct {
