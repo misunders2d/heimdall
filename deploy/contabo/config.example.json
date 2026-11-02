@@ -5,7 +5,7 @@
     "owner": {
       "user": "root",
       "dir": "/root",
-      "path": "/usr/bin:/usr/local/sbin:/usr/local/bin:/bin:/sbin:/usr/sbin"
+      "path": "/usr/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin:/root/.nvm/versions/node/v22.23.4/bin:/root/.bun/bin"
     },
     "employee": {
       "user": "heimdall-employee"
