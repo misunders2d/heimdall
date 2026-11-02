@@ -199,19 +199,26 @@ and validated. Never substitute owner OAuth or company/service identity.
 
 ## Dedicated Heimdall Infisical project (install before start)
 
-The hub machine identity is reused; Heimdall must load ONLY the Heimdall project,
-not Pi's project. In Infisical grant that identity read access to Heimdall's
-`prod` environment, path `/`. Required keys: `TELEGRAM_BOT_TOKEN`,
+Heimdall uses its own machine identity, created inside the Heimdall project
+with the Viewer role (`prod`, path `/`), and loads ONLY that project, never Pi's.
+(Infisical cannot assign the hub's project-scoped identity to another project.) Required keys: `TELEGRAM_BOT_TOKEN`,
 `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ADMIN_USER_IDS`. Optional Pi-tool secrets
 belong in this project only when required by the owner's Pi harness/tools.
 Pi retains its own project and bot tokens for scheduler Web API delivery.
 
-Create the project selector without displaying credentials (project ID is not
-secret; replace the placeholder with the Heimdall project's ID):
+Heimdall has its OWN Infisical machine identity (Universal Auth, Viewer on the
+Heimdall project only). It never reads the Pi hub's `/etc/pi-infisical*.env`.
+Write `/etc/heimdall/infisical.env` without displaying the client secret: the
+project ID and client ID are not secret; read the client secret from a private
+file (e.g. a secret-request file), never from chat or shell history:
 
 ```bash
 install -d -o root -g root -m 0700 /etc/heimdall
-(umask 077; printf '%s\n' 'INFISICAL_PROJECT_ID=REPLACE_WITH_HEIMDALL_PROJECT_ID' > /etc/heimdall/infisical.env)
+(umask 077; {
+  printf 'INFISICAL_PROJECT_ID=%s\n' 'REPLACE_WITH_HEIMDALL_PROJECT_ID'
+  printf 'INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=%s\n' 'REPLACE_WITH_CLIENT_ID'
+  printf 'INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=%s\n' "$(cat /path/to/private-secret-file)"
+} > /etc/heimdall/infisical.env)
 chown root:root /etc/heimdall/infisical.env
 chmod 0600 /etc/heimdall/infisical.env
 install -o root -g root -m 0755 deploy/contabo/heimdall-infisical-run.sh /usr/local/sbin/heimdall-infisical-run.sh
@@ -222,10 +229,10 @@ bash -n /usr/local/sbin/heimdall-infisical-run.sh
 systemctl daemon-reload
 ```
 
-The selector contains exactly one unquoted `INFISICAL_PROJECT_ID=...` line,
-root-owned mode 0600, never tokens. The wrapper sources `/etc/pi-infisical.env`
-then `/etc/pi-infisical-machine.env` without printing either, replaces the project
-ID from this selector, and execs `/usr/local/lib/pi-infisical-exec.js`.
+The file holds exactly `INFISICAL_PROJECT_ID`, `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID`
+and `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET` (unquoted, each once), root-owned
+mode 0600. The wrapper parses it (never sources it), clears inherited Infisical
+variables, and execs `/usr/local/lib/pi-infisical-exec.js` without printing values.
 No authentication files are copied. Do not run the wrapper during preparation.
 Employee business tools cannot use this machine identity as caller authority;
 MEL-724 signed caller tokens remain unimplemented, so employees stay disabled.
