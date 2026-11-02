@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Slack) privateOwner(ctx context.Context, m eventMessage, p core.Principal) bool {
-	if !s.opt.OwnerSlackEnabled || m.ChannelType != "im" || !s.owner(p) {
+	if m.ChannelType != "im" || !s.owner(p) {
 		return false
 	}
 	var result struct {
@@ -46,7 +46,8 @@ func (s *Slack) mcpCallback(ctx context.Context, raw json.RawMessage, accept fun
 	if !ok {
 		return true, nil
 	}
-	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: first(m.ThreadTS, m.TS)}, From: p, MsgID: m.TS, Origin: core.OriginLive, At: time.Now(), Text: value, Private: true, SlackReadVerified: s.privateOwner(ctx, m, p), OAuthActor: "sl_user_" + u.ID, OAuthInstallation: "sl_user_" + s.botID}
+	privateOwner := s.privateOwner(ctx, m, p)
+	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: first(m.ThreadTS, m.TS)}, From: p, MsgID: m.TS, Origin: core.OriginLive, At: time.Now(), Text: value, Private: true, SlackPrivateOwnerVerified: privateOwner, SlackReadVerified: privateOwner && s.opt.OwnerSlackEnabled, OAuthActor: "sl_user_" + u.ID, OAuthInstallation: "sl_user_" + s.botID}
 	if m.Type != "message" || m.BotID != "" || m.Subtype != "" {
 		return true, nil
 	}

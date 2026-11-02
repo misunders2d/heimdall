@@ -53,15 +53,20 @@ func TestT3SignInPrivateOwner(t *testing.T) {
 		for _, role := range []core.Role{core.RoleOwner, core.RoleEmployee} {
 			for _, private := range []bool{false, true} {
 				for _, verified := range []bool{false, true} {
-					r := New(Options{}, nil)
-					in := core.Inbound{Conv: core.ConvKey{Interface: platform}, Text: "mcp login t3", Origin: core.OriginLive, Private: private, SlackReadVerified: verified}
-					r.mcpControl(context.Background(), &in, role)
-					eligible := role == core.RoleOwner && private && (platform != "slack" || verified)
-					if in.MCPControl != eligible {
-						t.Fatal(platform, role, private, verified, in)
-					}
-					if eligible && in.Text != "!pi /mcp login t3" {
-						t.Fatal("t3 login not routed natively", in.Text)
+					for _, read := range []bool{false, true} {
+						r := New(Options{OwnerSlack: &harness.OwnerSlack{Enabled: read}}, nil)
+						in := core.Inbound{Conv: core.ConvKey{Interface: platform}, Text: "mcp login t3", Origin: core.OriginLive, Private: private, SlackPrivateOwnerVerified: verified, SlackReadVerified: read}
+						r.mcpControl(context.Background(), &in, role)
+						eligible := role == core.RoleOwner && private && (platform != "slack" || verified)
+						if in.MCPControl != eligible {
+							t.Fatal(platform, role, private, verified, read, in)
+						}
+						if eligible && in.Text != "!pi /mcp login t3" {
+							t.Fatal("t3 login not routed natively", in.Text)
+						}
+						if !eligible && in.InterfaceReply != mcpNotice {
+							t.Fatal("missing refusal notice", in)
+						}
 					}
 				}
 			}

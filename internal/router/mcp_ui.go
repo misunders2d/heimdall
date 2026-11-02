@@ -23,7 +23,7 @@ func (r *Router) mcpControl(ctx context.Context, in *core.Inbound, role core.Rol
 	}
 	eligible := role == core.RoleOwner && in.Private && !in.Ambient && in.Origin == core.OriginLive && (in.Conv.Interface == "telegram" || in.Conv.Interface == "slack")
 	if in.Conv.Interface == "slack" {
-		eligible = eligible && in.SlackReadVerified
+		eligible = eligible && in.SlackPrivateOwnerVerified
 	}
 	if callback {
 		if in.Ambient {
