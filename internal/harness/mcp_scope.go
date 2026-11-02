@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+
+	"github.com/misunders2d/heimdall/internal/core"
 )
 
 const mcpDenyPath = "/dev/null/pi-mcp-oauth-denied"
@@ -26,7 +28,7 @@ func mcpOAuthScopePath(root, platform, actor, installation string, servers []str
 	valid := len(servers) > 0
 	for _, server := range servers {
 		server = strings.TrimSpace(server)
-		if seen[server] || !slices.Contains([]string{"linear", "mellanni", "slack"}, server) {
+		if seen[server] || !slices.Contains([]string{"linear", "mellanni", "slack", "t3"}, server) {
 			valid = false
 		}
 		seen[server] = true
@@ -127,6 +129,28 @@ func hubLinear(env []string, home, platform, actor string) bool {
 	return false
 }
 
+// piMCPServers uses the verified role; file admins never grant owner MCPs.
+func piMCPServers(home string, c Caller, env []string, platform, actor, installation string) []string {
+	servers := []string{}
+	if c.Role != core.RoleOwner {
+		return servers
+	}
+	if platform == "telegram" && telegramActor.MatchString(actor) || platform == "slack" && slackActor.MatchString(actor) && slackActor.MatchString(installation) {
+		accessPlatform := "tg"
+		if platform == "slack" {
+			accessPlatform = "sl"
+		}
+		if hubLinear(env, home, accessPlatform, actor) {
+			servers = append(servers, "linear")
+		}
+		servers = append(servers, "mellanni", "t3")
+		if c.SlackRead {
+			servers = append(servers, "slack")
+		}
+	}
+	return servers
+}
+
 func piMCPEnv(l Launch, c Caller, env []string) ([]string, error) {
 	actor, installation := c.OAuthActor, c.OAuthInstallation
 	platform := c.Principal.Platform
@@ -134,20 +158,7 @@ func piMCPEnv(l Launch, c Caller, env []string) ([]string, error) {
 		actor = "tg_user_" + c.Principal.ID
 		installation = ""
 	}
-	servers := []string{}
-	if platform == "telegram" && telegramActor.MatchString(actor) || platform == "slack" && slackActor.MatchString(actor) && slackActor.MatchString(installation) {
-		accessPlatform := "tg"
-		if platform == "slack" {
-			accessPlatform = "sl"
-		}
-		if hubLinear(env, l.Home, accessPlatform, actor) {
-			servers = append(servers, "linear")
-		}
-		servers = append(servers, "mellanni")
-		if c.SlackRead {
-			servers = append(servers, "slack")
-		}
-	}
+	servers := piMCPServers(l.Home, c, env, platform, actor, installation)
 	root := filepath.Join(l.Home, ".pi", "agent", "mcp-oauth-users")
 	// Hub's fixed root is deliberately preserved for root; other OS users must
 	// never receive root's home, policy, or credentials.

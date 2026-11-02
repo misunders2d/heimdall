@@ -48,6 +48,27 @@ func TestMCPOwnerCommandAndCallbackPrivacy(t *testing.T) {
 		t.Fatal("callback queued", rows, err)
 	}
 }
+func TestT3SignInPrivateOwner(t *testing.T) {
+	for _, platform := range []string{"telegram", "slack"} {
+		for _, role := range []core.Role{core.RoleOwner, core.RoleEmployee} {
+			for _, private := range []bool{false, true} {
+				for _, verified := range []bool{false, true} {
+					r := New(Options{}, nil)
+					in := core.Inbound{Conv: core.ConvKey{Interface: platform}, Text: "mcp login t3", Origin: core.OriginLive, Private: private, SlackReadVerified: verified}
+					r.mcpControl(context.Background(), &in, role)
+					eligible := role == core.RoleOwner && private && (platform != "slack" || verified)
+					if in.MCPControl != eligible {
+						t.Fatal(platform, role, private, verified, in)
+					}
+					if eligible && in.Text != "!pi /mcp login t3" {
+						t.Fatal("t3 login not routed natively", in.Text)
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestMCPNativeCommandPromptUnframed(t *testing.T) {
 	e := setup(t, core.ModePersonal, []string{"pi"}, "pi")
 	defer e.stop()

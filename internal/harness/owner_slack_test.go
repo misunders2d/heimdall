@@ -30,12 +30,16 @@ func TestMCPOAuthScopeHubGoldenVectors(t *testing.T) {
 		if got != "/root/.pi/agent/mcp-oauth-users/sha256-"+v.digest {
 			t.Errorf("%s %s: %s", v.platform, v.actor, got)
 		}
+		withT3 := mcpOAuthScopePath("/root/.pi/agent/mcp-oauth-users", v.platform, v.actor, v.installation, append(v.servers, "t3"))
+		if withT3 != got {
+			t.Errorf("t3 moved existing %s store: %s", v.platform, withT3)
+		}
 	}
 }
 func TestMCPOAuthScopeDenyAndStableServerSet(t *testing.T) {
 	root := t.TempDir()
 	path := mcpOAuthScopePath(root, "slack", "sl_user_U1", "sl_user_B1", []string{"mellanni"})
-	if got := mcpOAuthScopePath(root, "slack", "sl_user_U1", "sl_user_B1", []string{"linear", "mellanni", "slack"}); got != path {
+	if got := mcpOAuthScopePath(root, "slack", "sl_user_U1", "sl_user_B1", []string{"linear", "mellanni", "slack", "t3"}); got != path {
 		t.Fatal("server changes moved existing token store")
 	}
 	for _, servers := range [][]string{nil, {}, {"helium10"}, {"mellanni", "mellanni"}} {
@@ -419,6 +423,45 @@ func TestCodexDisabledSlackNativeStdio(t *testing.T) {
 		for _, server := range servers {
 			if server.Name == "slack" && server.Enabled {
 				t.Fatal("Slack enabled")
+			}
+		}
+	}
+}
+
+func TestPiT3OwnerOnly(t *testing.T) {
+	home := t.TempDir()
+	access := filepath.Join(home, ".pi", "agent", "access")
+	if err := os.MkdirAll(access, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(access, "admins.json"), []byte(`{"users":["tg_user_42","sl_user_U1"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, platform := range []string{"telegram", "slack"} {
+		actor, installation := "tg_user_42", ""
+		if platform == "slack" {
+			actor, installation = "sl_user_U1", "sl_user_B1"
+		}
+		for _, role := range []core.Role{core.RoleOwner, core.RoleEmployee} {
+			for _, slackRead := range []bool{false, true} {
+				c := Caller{Role: role, SlackRead: slackRead, Principal: core.Principal{Platform: platform, ID: "42"}}
+				servers := piMCPServers(home, c, nil, platform, actor, installation)
+				if role == core.RoleOwner {
+					if !strings.Contains(strings.Join(servers, ","), "t3") {
+						t.Fatal("owner missing t3", platform)
+					}
+					if strings.Contains(strings.Join(servers, ","), "slack") != slackRead {
+						t.Fatal("Slack gate changed")
+					}
+				} else {
+					if len(servers) != 0 {
+						t.Fatal("file admin employee got MCP", servers)
+					}
+					env, err := piMCPEnv(Launch{Home: home}, c, nil)
+					if err != nil || envValue(env, "MCP_OAUTH_DIR") != mcpDenyPath || envValue(env, "PI_MCP_OAUTH_SERVERS") != `[]` {
+						t.Fatal("employee MCP not denied", err)
+					}
+				}
 			}
 		}
 	}

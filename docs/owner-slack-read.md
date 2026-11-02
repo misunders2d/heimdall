@@ -111,6 +111,31 @@ The native input expires after 300 seconds. A restart loses the pending login;
 start it again. Telegram and Slack use separate stores and require separate
 consents. Existing hub Telegram consent is reused when actor/home/config match.
 
+## Pi: owner T3 sign-in
+
+Owner Pi turns also approve `t3`, using its existing entry in the owner's native
+`mcp.json`. The pack binds credentials to that entry's HTTPS URL; no deployment
+hostname is hardcoded here. Employees, including file admins, receive no T3.
+Slack retains its separate owner/private gating. Caller store digests stay unchanged.
+
+After both code changes are installed by the operator, send `mcp login t3` in
+Heimdall's private Telegram chat. Open the browser link Pi sends, approve access
+to the intended T3 server/account, then paste the complete loopback callback URL
+from the browser address bar into that same private chat within 300 seconds.
+The browser may show a connection error because its loopback is not the hub;
+use the URL, without forwarding the callback listener.
+
+Repeat `mcp login t3` in the owner's freshly verified Slack 1:1 DM with Heimdall;
+paste its callback in the same reply thread where login was started. This uses
+the existing Slack private-DM verification (`owner_slack.enabled` and the
+`im:read`/`conversations.info` checks above). Telegram and Slack authorize separate
+stores; never copy tokens. The command routes directly to Pi regardless of the
+conversation's selected harness. After native sign-in succeeds, send
+`!pi List available T3 Code tools.` in each chat to verify discovery.
+
+Implementation tests use synthetic stores/native Pi and fake protocols only;
+live T3 OAuth registration, consent and refresh remain operator verification.
+
 ## Claude: one-time root login
 
 Connect with `ssh -t root@<host>`. Work in a dedicated login directory that
