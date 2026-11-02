@@ -51,8 +51,10 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "hook":
-		if len(os.Args) != 3 || os.Args[2] != "slack-guard" && os.Args[2] != "employee-guard" {
+		if len(os.Args) != 3 || os.Args[2] != "slack-guard" && os.Args[2] != "employee-guard" && os.Args[2] != "input-context" {
 			err = errors.New("unknown hook")
+		} else if os.Args[2] == "input-context" {
+			err = harness.ContextHook(os.Stdin, os.Stdout)
 		} else if os.Args[2] == "employee-guard" {
 			err = harness.EmployeeGuard(os.Stdin, os.Stdout)
 		} else {
@@ -74,6 +76,9 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "heimdall:", err)
+		if len(os.Args) == 3 && os.Args[1] == "hook" && os.Args[2] == "input-context" {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -131,8 +132,27 @@ func (w *worker) next(spec Spec) (*Run, error) {
 	ctx, cancel := context.WithCancel(old.ctx)
 	gate := make(chan struct{})
 	input := w.input.(*warmInput)
-	cmd := &exec.Cmd{Dir: spec.Launch.Dir, Stdin: &warmInput{WriteCloser: input.WriteCloser, thread: spec.Session.ID, gate: gate}}
-	r := &Run{worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log}
+	if w.root.contextDir != "" {
+		entries, err := os.ReadDir(w.root.contextDir)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".json") {
+				if err := os.Remove(filepath.Join(w.root.contextDir, entry.Name())); err != nil {
+					cancel()
+					return nil, err
+				}
+			}
+		}
+	}
+	if _, err := stageContext(w.root.contextDir, spec.Prompt, spec.Context); err != nil {
+		cancel()
+		return nil, err
+	}
+	cmd := &exec.Cmd{Env: []string{"HD_CONTEXT_DIR=" + w.root.contextDir}, Dir: spec.Launch.Dir, Stdin: &warmInput{WriteCloser: input.WriteCloser, thread: spec.Session.ID, gate: gate}}
+	r := &Run{contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log}
 	var err error
 	switch spec.Harness {
 	case "pi", "omp":
@@ -140,7 +160,7 @@ func (w *worker) next(spec Spec) (*Run, error) {
 	case "claude":
 		r.bridge, err = newClaudeStreamBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
 	case "codex":
-		r.bridge, err = newCodexBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session)
+		r.bridge, err = newCodexBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session, spec.Instructions, spec.Context)
 	}
 	if err != nil {
 		cancel()
@@ -205,13 +225,15 @@ func launchFingerprint(s Spec) [32]byte {
 	// Prompt, images, callbacks and Resume change per turn, not at launch.
 	b, _ := json.Marshal(struct {
 		Harness        string
+		Instructions   string
+		ContextEnabled bool
 		Launch         Launch
 		Caller         Caller
 		Slack          *OwnerSlack
 		Session        string
 		Telemetry      bool
 		NativeSettings string
-	}{s.Harness, s.Launch, s.Caller, s.OwnerSlack, "", s.Progress != nil, nativeSettings(s)})
+	}{s.Harness, s.Instructions, s.Context != "" || s.Instructions != "", s.Launch, s.Caller, s.OwnerSlack, "", s.Progress != nil, nativeSettings(s)})
 	return sha256.Sum256(b)
 }
 func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {

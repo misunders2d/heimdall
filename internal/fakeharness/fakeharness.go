@@ -130,13 +130,15 @@ func Install(t testing.TB, names ...string) (bin, state string) {
 }
 
 type fake struct {
-	name, state string
-	in          *bufio.Scanner
-	out         *json.Encoder
-	prompt      string
-	turn        int
-	resumed     bool
-	steers      []string
+	name, state  string
+	in           *bufio.Scanner
+	out          *json.Encoder
+	prompt       string
+	metadata     string
+	inputContext string
+	turn         int
+	resumed      bool
+	steers       []string
 }
 
 func (f *fake) emit(v any) { _ = f.out.Encode(v) }
@@ -144,6 +146,32 @@ func (f *fake) emit(v any) { _ = f.out.Encode(v) }
 // record appends one input the harness received (kind "prompt" or "steer")
 // to STATE/inputs.jsonl, for tests that check the whole text.
 func (f *fake) record(kind, text string, images int) {
+	if f.name == "pi" || f.name == "claude" {
+		f.inputContext = ""
+		dir := os.Getenv("HD_CONTEXT_DIR")
+		if dir != "" {
+			entries, _ := os.ReadDir(dir)
+			for _, entry := range entries {
+				if !strings.HasSuffix(entry.Name(), ".json") {
+					continue
+				}
+				path := filepath.Join(dir, entry.Name())
+				raw, _ := os.ReadFile(path)
+				var data struct{ Prompt, Context string }
+				if json.Unmarshal(raw, &data) == nil && data.Prompt == text {
+					f.inputContext = data.Context
+					os.Remove(path)
+					break
+				}
+			}
+		}
+		if kind == "prompt" {
+			f.metadata = f.inputContext
+		} else {
+			f.metadata += "\n" + f.inputContext
+		}
+	}
+
 	if kind == "prompt" && strings.Contains(text, "LINGER=") {
 		// Before any answer: the process is lingering until it exits.
 		_ = os.WriteFile(filepath.Join(f.state, "lingering"), nil, 0o600)
@@ -153,7 +181,7 @@ func (f *fake) record(kind, text string, images int) {
 		return
 	}
 	defer file.Close()
-	_ = json.NewEncoder(file).Encode(Input{Harness: f.name, Kind: kind, Text: text, Images: images})
+	_ = json.NewEncoder(file).Encode(Input{Harness: f.name, Kind: kind, Text: text, Images: images, Context: f.inputContext})
 }
 
 // Input is one recorded harness input.
@@ -162,6 +190,7 @@ type Input struct {
 	Kind    string `json:"kind"`
 	Text    string `json:"text"`
 	Images  int    `json:"images"`
+	Context string `json:"context,omitempty"`
 }
 
 // Inputs reads the inputs recorded in state, oldest first.
@@ -181,6 +210,22 @@ func (f *fake) read() (map[string]any, bool) {
 	for f.in.Scan() {
 		var m map[string]any
 		if json.Unmarshal(f.in.Bytes(), &m) == nil {
+			if m["method"] == "thread/inject_items" {
+				params, _ := m["params"].(map[string]any)
+				items, _ := params["items"].([]any)
+				for _, item := range items {
+					obj, _ := item.(map[string]any)
+					content, _ := obj["content"].([]any)
+					for _, part := range content {
+						block, _ := part.(map[string]any)
+						text, _ := block["text"].(string)
+						f.metadata += "\n" + text
+						f.inputContext = text
+					}
+				}
+				f.emit(map[string]any{"id": m["id"], "result": map[string]any{}})
+				continue
+			}
 			return m, true
 		}
 	}
@@ -253,7 +298,7 @@ func lastLine(s string) string {
 }
 
 func (f *fake) answer() string {
-	lines := strings.Split(strings.TrimSpace(f.prompt), "\n")
+	lines := strings.Split(strings.TrimSpace(f.metadata+"\n"+f.prompt), "\n")
 	var ext []string
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "PI_EXTERNAL_") || strings.HasPrefix(kv, "A2A_CALLER_") || strings.HasPrefix(kv, "PI_RESTRICTED_") || strings.HasPrefix(kv, "PI_TRANSPORT_CHILD=") {
@@ -277,7 +322,7 @@ var outbox = regexp.MustCompile(`save them in (\S+) before`)
 // writeOut saves WRITE=<name>:<content> files (no spaces) into the outbox
 // the prompt names, as a harness's own tools would.
 func (f *fake) writeOut() {
-	m := outbox.FindStringSubmatch(f.prompt)
+	m := outbox.FindStringSubmatch(f.metadata + "\n" + f.prompt)
 	if m == nil {
 		return
 	}
@@ -295,7 +340,7 @@ var reactRef = regexp.MustCompile(`\[react: ([a-f0-9-]{36}) (?:<emoji>|emoji_nam
 // harness was given (REACT=<emoji>), or answers with the directives only
 // (REACTONLY).
 func (f *fake) react(answer string) string {
-	all := f.prompt + "\n" + strings.Join(f.steers, "\n")
+	all := f.metadata + "\n" + f.prompt + "\n" + strings.Join(f.steers, "\n")
 	_, rest, ok := strings.Cut(all, "REACT=")
 	if !ok {
 		return answer
@@ -507,8 +552,12 @@ func (f *fake) claude() {
 			}
 			sm, _ := s["message"].(map[string]any)
 			text, images := claudeContent(sm["content"])
+			priorContext := f.metadata
 			f.record("steer", text, images)
+			nextContext := f.metadata
+			f.metadata = priorContext
 			result(f.answer())
+			f.metadata = nextContext
 			replay("u1", sm["content"])
 			f.steers = append(f.steers, text)
 			switch {

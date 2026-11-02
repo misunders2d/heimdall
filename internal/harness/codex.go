@@ -29,42 +29,53 @@ type codexBridge struct {
 	progress  func(Progress)
 	telemetry progressTracker
 
-	ctx                  context.Context
-	input                io.WriteCloser
-	writeMu              sync.Mutex
-	stateMu              sync.Mutex
-	readMu               sync.Mutex
-	ready                chan struct{}
-	readyOnce            sync.Once
-	answered             chan struct{} // closed once an answer is published
-	steerID              int
-	steering             map[string]chan SteerOutcome
-	closeOnce            sync.Once
-	prompt, cwd          string
-	images               []Image
-	resume               string
-	buf                  []byte
-	thread, turn, answer string
-	answerPhase          string
-	answers              []string // final texts for inputs before the last accepted steer
-	done, published      bool
-	failure, human       string
+	ctx                       context.Context
+	input                     io.WriteCloser
+	writeMu                   sync.Mutex
+	stateMu                   sync.Mutex
+	readMu                    sync.Mutex
+	ready                     chan struct{}
+	readyOnce                 sync.Once
+	answered                  chan struct{} // closed once an answer is published
+	steerID                   int
+	steering                  map[string]chan SteerOutcome
+	closeOnce                 sync.Once
+	prompt, cwd               string
+	instructions, contextText string
+	contextRequests           map[string]map[string]any
+	images                    []Image
+	resume                    string
+	buf                       []byte
+	thread, turn, answer      string
+	answerPhase               string
+	answers                   []string // final texts for inputs before the last accepted steer
+	done, published           bool
+	failure, human            string
 }
 
-func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, s Session) (*codexBridge, error) {
+func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, s Session, notes ...string) (*codexBridge, error) {
 	// A real OS stdin pipe lets Cmd.Wait finish on process EOF.
 	out, err := turnInput(cmd)
 	if err != nil {
 		return nil, err
 	}
 	b := &codexBridge{employee: envValue(cmd.Env, "PI_RESTRICTED_EXTERNAL_USER") == "1", warm: isWarmInput(out), prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), answered: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
+	b.contextRequests = map[string]map[string]any{}
+	if len(notes) > 0 {
+		b.instructions = notes[0]
+	}
+	if len(notes) > 1 {
+		b.contextText = notes[1]
+	}
 	if s.Resume {
 		b.resume = s.ID
 	}
 	go func() {
 		if reuse, ok := out.(*warmInput); ok && reuse.thread != "" {
+			b.stateMu.Lock()
 			b.thread = reuse.thread
-			b.send(map[string]any{"id": 3, "method": "turn/start", "params": map[string]any{"threadId": b.thread, "cwd": b.cwd, "input": codexInput(prompt, images)}})
+			b.startTurn()
+			b.stateMu.Unlock()
 			return
 		}
 		b.send(map[string]any{"id": 1, "method": "initialize", "params": map[string]any{"clientInfo": map[string]any{"name": "heimdall", "version": clientVersion}, "capabilities": map[string]any{"experimentalApi": true}}})
@@ -223,6 +234,15 @@ func (b *codexBridge) event(raw []byte) {
 	if b.done || m.Method == "" && strings.HasPrefix(string(m.ID), `"heimdall-steer-`) {
 		return
 	}
+	if request, ok := b.contextRequests[string(m.ID)]; ok && m.Method == "" {
+		delete(b.contextRequests, string(m.ID))
+		if len(m.Error) > 0 && string(m.Error) != "null" {
+			b.failLocked("Codex refused native input context")
+			return
+		}
+		b.send(request)
+		return
+	}
 	if len(m.Error) > 0 && string(m.Error) != "null" {
 		b.failLocked(codexRPCError(m.ID, m.Error))
 		return
@@ -236,6 +256,9 @@ func (b *codexBridge) event(raw []byte) {
 				method, params = "thread/resume", map[string]any{"cwd": b.cwd, "threadId": b.resume}
 			}
 			// Select native automatic review without changing the native sandbox.
+			if b.instructions != "" {
+				params["developerInstructions"] = b.instructions
+			}
 			params["approvalPolicy"] = "on-request"
 			params["approvalsReviewer"] = "auto_review"
 			if b.employee {
@@ -254,7 +277,7 @@ func (b *codexBridge) event(raw []byte) {
 				return
 			}
 			b.thread = r.Thread.ID
-			b.send(map[string]any{"id": 3, "method": "turn/start", "params": map[string]any{"threadId": b.thread, "cwd": b.cwd, "input": codexInput(b.prompt, b.images)}})
+			b.startTurn()
 		case "3":
 			var r struct {
 				Turn struct {
@@ -376,7 +399,25 @@ func codexInput(text string, images []Image) []any {
 	return input
 }
 
+// Native protocol verified with codex-cli 0.166.0 generated JSON schemas.
+// thread/inject_items takes Responses API messages; never a UserInput text item.
+func (b *codexBridge) withContext(id, text string, request map[string]any) {
+	if text == "" {
+		b.send(request)
+		return
+	}
+	key, _ := json.Marshal(id)
+	b.contextRequests[string(key)] = request
+	b.send(map[string]any{"id": id, "method": "thread/inject_items", "params": map[string]any{"threadId": b.thread, "items": []any{map[string]any{"type": "message", "role": "developer", "content": []any{map[string]any{"type": "input_text", "text": text}}}}}})
+}
+func (b *codexBridge) startTurn() {
+	b.withContext("heimdall-context-start", b.contextText, map[string]any{"id": 3, "method": "turn/start", "params": map[string]any{"threadId": b.thread, "cwd": b.cwd, "input": codexInput(b.prompt, b.images)}})
+}
 func (b *codexBridge) steer(ctx context.Context, id, text string, images []Image) SteerOutcome {
+	return b.steerContext(ctx, id, text, images, "")
+}
+
+func (b *codexBridge) steerContext(ctx context.Context, id, text string, images []Image, contextText string) SteerOutcome {
 	b.stateMu.Lock()
 	if b.done || b.thread == "" || b.turn == "" || b.ctx.Err() != nil {
 		b.stateMu.Unlock()
@@ -389,9 +430,15 @@ func (b *codexBridge) steer(ctx context.Context, id, text string, images []Image
 	ch := make(chan SteerOutcome, 1)
 	b.steering[key] = ch
 	request := map[string]any{"id": rpcID, "method": "turn/steer", "params": map[string]any{"threadId": b.thread, "expectedTurnId": b.turn, "clientUserMessageId": id, "input": codexInput(text, images)}}
+	if contextText != "" {
+		b.withContext("context-"+rpcID, contextText, request)
+		request = nil
+	}
 	b.stateMu.Unlock()
 	// A write failure can follow a partial handover: it proves no rejection.
-	go b.send(request)
+	if request != nil {
+		go b.send(request)
+	}
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 	select {

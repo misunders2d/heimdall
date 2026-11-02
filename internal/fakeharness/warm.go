@@ -71,6 +71,7 @@ func (f *fake) warm() {
 			params, _ := m["params"].(map[string]any)
 			text, _ = codexInput(params["input"])
 		}
+		f.record("prompt", text, 0)
 		if strings.Contains(text, "EXIT_ON_NEXT") {
 			exitOnNext = true
 		}

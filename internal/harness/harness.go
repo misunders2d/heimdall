@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -127,12 +128,14 @@ type Spec struct {
 	OwnerSlack *OwnerSlack
 	Progress   func(Progress)
 
-	Harness string
-	Prompt  string
-	Images  []Image // pictures passed natively, besides their paths in Prompt
-	Session Session
-	Launch  Launch
-	Caller  Caller // required: the process carries the caller's identity
+	Harness      string
+	Prompt       string
+	Instructions string  // native session instructions
+	Context      string  // native per-input context, never user text
+	Images       []Image // pictures passed natively, besides their paths in Prompt
+	Session      Session
+	Launch       Launch
+	Caller       Caller // required: the process carries the caller's identity
 	// Log, if set, gets one metadata line (never native output) when the
 	// process is stopped after its answer.
 	Log func(string)
@@ -178,6 +181,7 @@ type Run struct {
 	pooled       chan struct{}
 	retained     atomic.Bool
 	worker       *worker
+	contextDir   string
 	bridgeCancel context.CancelFunc
 	caller       Caller
 	harness      string
@@ -335,6 +339,18 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 			env = setEnv(env, "PI_CODING_AGENT_DIR", filepath.Join(spec.Launch.Home, ".pi", "agent"))
 		}
 	}
+	contextDir, contextArgs, err := prepareContext(spec, extra)
+	if err != nil {
+		return nil, err
+	}
+	contextStarted := false
+	defer func() {
+		if !contextStarted {
+			os.RemoveAll(contextDir)
+		}
+	}()
+	extra = contextArgs
+	env = setEnv(env, "HD_CONTEXT_DIR", contextDir)
 	runCtx, cancel := context.WithCancel(ctx)
 	base := slices.Clone(d.args)
 	if spec.Caller.Role == core.RoleEmployee && spec.Harness == "claude" {
@@ -344,7 +360,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
-	r := &Run{caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
+	r := &Run{contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
 	r.stderr.max = 4 << 10
 	cmd.Stderr = &r.stderr
 	expected := ""
@@ -371,7 +387,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	case sessionID:
 		r.bridge, err = newClaudeStreamBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
 	case sessionThread:
-		r.bridge, err = newCodexBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session)
+		r.bridge, err = newCodexBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session, spec.Instructions, spec.Context)
 	case sessionConversation:
 		r.bridge = newAgyBridge(runCtx, cmd, spec.Prompt, expected)
 	}
@@ -402,6 +418,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		cancel()
 		return nil, fmt.Errorf("%s did not start: %w", spec.Harness, err)
 	}
+	contextStarted = true
 	if r.worker != nil {
 		go r.worker.wait()
 		go r.early()
@@ -419,6 +436,7 @@ func (r *Run) wait() {
 }
 
 func (r *Run) finishExit(runErr error) {
+	defer os.RemoveAll(r.contextDir)
 	// Only an observed native outcome supersedes a process error; finish's
 	// missing-terminal fallback must not hide an actual exit failure.
 	settled := r.bridge.settled()
@@ -598,6 +616,22 @@ func (r *Run) Cancel() {
 	} else {
 		r.Stop("on cancellation")
 	}
+}
+
+// SteerContext stages metadata separately before the bridge hands over input.
+func (r *Run) SteerContext(ctx context.Context, id, text string, images []Image, contextText string) SteerOutcome {
+	if b, ok := r.bridge.(*codexBridge); ok {
+		return b.steerContext(ctx, id, text, images, contextText)
+	}
+	path, err := stageContext(r.contextDir, text, contextText)
+	if err != nil {
+		return SteerUnsupported
+	}
+	result := r.Steer(ctx, id, text, images)
+	if result == SteerQueued || result == SteerUnsupported {
+		os.Remove(path)
+	}
+	return result
 }
 
 // Steer passes text, and images where the harness takes them, into the

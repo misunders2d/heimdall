@@ -501,7 +501,10 @@ type turn struct {
 	started    time.Time
 
 	// loop-owned
-	harness  string
+	harness string
+
+	nativeText, nativeContext, instructions string
+
 	ready    bool
 	steerQ   []item
 	steering bool
@@ -993,28 +996,34 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 	if len(batch) == 1 && batch[0].row.MCPControl {
 		return batch[0].text, nil
 	}
-	var parts []string
+	var parts, human, contextParts []string
 	var images []harness.Image
 	if p, ok := c.r.ifaces[c.key.Interface].(Prompter); ok {
 		if note := strings.TrimSpace(p.PromptNote()); note != "" {
 			parts = append(parts, note)
+			t.instructions = note
 		}
 	}
 	if note := c.outboxNote(t); note != "" {
 		parts = append(parts, note)
+		contextParts = append(contextParts, note)
 	}
 	if recent := c.ambient(t, batch); recent != "" {
 		parts = append(parts, recent)
+		contextParts = append(contextParts, recent)
 	}
 	c.react(t, batch)
 	for _, it := range batch {
 		blocks, ims := c.files(t, it)
 		parts = append(parts, frame(it, blocks))
+		human = append(human, humanText(it, blocks))
+		contextParts = append(contextParts, frameContext(it))
 		images = append(images, ims...)
 	}
 	if len(images) > maxImages {
 		images = images[:maxImages]
 	}
+	t.nativeText, t.nativeContext = strings.Join(human, "\n\n"), strings.Join(contextParts, "\n\n")
 	return strings.Join(parts, "\n\n"), images
 }
 
@@ -1138,11 +1147,18 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok {
 			progress = func(p harness.Progress) { c.observe(ctx, t, "progress", p) }
 		}
+		nativePrompt, instructions, turnContext := prompt, "", ""
+		if h == "codex" || h == "claude" || h == "pi" {
+			nativePrompt, instructions, turnContext = t.nativeText, t.instructions, t.nativeContext
+			if batch[0].row.MCPControl {
+				nativePrompt = prompt
+			}
+		}
 		run, err := c.startCandidate(ctx, t, harness.Spec{MCPNotify: func(text string) {
 			if iface := c.r.ifaces[c.key.Interface]; iface != nil {
 				_ = iface.Send(ctx, core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text})
 			}
-		}, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: prompt, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress})
+		}, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress})
 		if err != nil {
 			c.unbind(t, h, prev, clean)
 			notes = append(notes, err.Error())
@@ -1251,18 +1267,23 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 	run := t.run
 	t.mu.Unlock()
 	go func() {
-		var parts []string
+		var parts, contextParts []string
 		var images []harness.Image
 		refs := c.react(t, items)
 		for _, it := range items {
 			blocks, ims := c.files(t, it)
-			parts = append(parts, frame(it, blocks))
+			if t.harness == "codex" || t.harness == "claude" || t.harness == "pi" {
+				parts = append(parts, humanText(it, blocks))
+				contextParts = append(contextParts, frameContext(it))
+			} else {
+				parts = append(parts, frame(it, blocks))
+			}
 			images = append(images, ims...)
 		}
 		if len(images) > maxImages {
 			images = images[:maxImages]
 		}
-		outcome := run.Steer(ctx, fmt.Sprintf("heimdall-%d", items[0].row.ID), strings.Join(parts, "\n\n"), images)
+		outcome := run.SteerContext(ctx, fmt.Sprintf("heimdall-%d", items[0].row.ID), strings.Join(parts, "\n\n"), images, strings.Join(contextParts, "\n\n"))
 		c.send(ctx, steerEvent{t: t, items: items, refs: refs, outcome: outcome})
 	}()
 }
@@ -1485,6 +1506,20 @@ func frame(it item, files []string) string {
 		react = it.react + "\n"
 	}
 	return fmt.Sprintf("[Heimdall | from %q | role %s | verified %s | %s%s]\n%s%s%s%s", name, it.role, it.row.From.Key(), it.row.Conv, origin, react, context, it.text, attached)
+}
+
+// humanText is deliberately independent of framing: human-supplied markers are
+// never parsed or stripped. Attachment references remain native user input.
+func humanText(it item, files []string) string {
+	text := it.text
+	if len(files) != 0 {
+		text += "\n" + strings.Join(files, "\n")
+	}
+	return text
+}
+func frameContext(it item) string {
+	it.text = ""
+	return frame(it, nil)
 }
 
 func sanitizeName(s string) string {

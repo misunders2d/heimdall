@@ -447,7 +447,7 @@ func TestPhotoThenForwardSteerTheRunningTurn(t *testing.T) {
 			}
 			in := fakeharness.Inputs(e.state)
 			if len(in) != 4 || in[1].Kind != "steer" || in[1].Images != 1 || !strings.Contains(in[1].Text, "what's on this image?") ||
-				!strings.Contains(in[3].Text, "[Telegram forward context | source trader") {
+				!strings.Contains(in[3].Text+in[3].Context, "[Telegram forward context | source trader") {
 				t.Fatalf("inputs %+v", in)
 			}
 			e.noReply(300 * time.Millisecond)
@@ -1723,11 +1723,11 @@ func TestWaitingSteersGoTogether(t *testing.T) {
 			out := e.reply()
 			want(t, out, h+"#1", "steers=2")
 			in := fakeharness.Inputs(e.state)
-			if len(in) != 3 || in[1].Kind != "steer" || !strings.HasSuffix(in[1].Text, "\nalpha") || in[2].Kind != "steer" || in[2].Images != 2 {
+			if len(in) != 3 || in[1].Kind != "steer" || !strings.HasSuffix(in[1].Text, "alpha") || in[2].Kind != "steer" || in[2].Images != 2 {
 				t.Fatalf("inputs %+v", in)
 			}
-			b, c := strings.Index(in[2].Text, "\nbravo"), strings.Index(in[2].Text, "\ncharlie FINISH")
-			if b < 0 || c < b || strings.Count(in[2].Text, "[Heimdall |") != 2 {
+			b, c := strings.Index(in[2].Text, "bravo"), strings.Index(in[2].Text, "charlie FINISH")
+			if b < 0 || c < b || strings.Count(in[2].Text+in[2].Context, "[Heimdall |") != 2 {
 				t.Fatalf("combined steer %q", in[2].Text)
 			}
 			e.send(owner, "c1", "!status")
