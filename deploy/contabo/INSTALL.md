@@ -84,7 +84,14 @@ in approved cutover smoke test. Prompt guard only logs metadata; never blocks.
    or Slack Socket Mode clients. Do not touch the two reserved test/live units.
 2. Keep `employee_harnesses: []` for this owner-only cutover. A separate non-root
    execution context and restricted native launches remain implementation work.
-   Employee validation is not a blocker for the owner-only switch.
+   Employee native validation is not a blocker for the owner-only switch, but
+   current runtime still requires `run_as.employee` to exist before startup.
+   In the approved live window, use `getent passwd <configured-user>`; if absent,
+   create a system account with a private home and nologin shell, e.g.
+   `useradd --system --create-home --home-dir /var/lib/heimdall-employee --shell /usr/sbin/nologin heimdall-employee`
+   when that is the configured name. Verify `id -u <configured-user>` is neither
+   root nor the owner's UID. No employee login, harness install or credentials.
+   Do not create the account during work-clone preparation.
 3. Verify the owner's existing Codex, Claude and Pi installations and logins.
    Employees never sign in; no employee login or credentials are required.
 4. Before future employee enablement (not needed for this owner-only switch),
