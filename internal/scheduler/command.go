@@ -180,10 +180,10 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 		what = "change to job " + j.EditOf
 	}
 	fmt.Fprintf(&b, "📝 Job draft %s (%s): %q\n", j.ID, what, d.Name)
-	s.describe(&b, c, j, d, sched)
+	s.describe(&b, c, j, d, sched, true)
 	if j.EditOf != "" {
 		if orig, ok, _ := s.st.Job(j.EditOf); ok {
-			b.WriteString("Changes:\n" + diff(orig.Def, j.Def))
+			b.WriteString("Changes:\n" + diff(orig.Def, j.Def, false))
 		}
 	}
 	if d.Paused {
@@ -193,8 +193,10 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 	return b.String()
 }
 
-// describe writes a job's schedule, next fires, target and content.
-func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, sched *schedule.Schedule) {
+// describe writes a job's schedule, next fires, target and content. The
+// prompt or text is shown in full in private chats; in shared ones only a
+// draft's card previews it (§5.3), every other reply omits it (§4).
+func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, sched *schedule.Schedule, card bool) {
 	fmt.Fprintf(b, "Kind: %s, harness %s\n", d.Kind, or(d.Harness, "default order"))
 	spec, _ := json.Marshal(d.Schedule)
 	fmt.Fprintf(b, "Schedule: %s in %s\n", spec, d.TZ)
@@ -213,14 +215,19 @@ func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, s
 	if d.Kind == KindNotify {
 		body, label = d.Text, "Text"
 	}
-	if !c.Private && len([]rune(body)) > 200 {
+	switch {
+	case c.Private:
+	case !card:
+		body = "(shown only in private chats)"
+	case len([]rune(body)) > 200:
 		body = string([]rune(body)[:200]) + "…"
 	}
 	fmt.Fprintf(b, "%s: %s\n", label, body)
 }
 
-// diff lists the fields an edit changes.
-func diff(before, after string) string {
+// diff lists the fields an edit changes; hide leaves out the prompt's and
+// text's values (a shared chat).
+func diff(before, after string, hide bool) string {
 	var a, z map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(before), &a)
 	_ = json.Unmarshal([]byte(after), &z)
@@ -236,7 +243,11 @@ func diff(before, after string) string {
 	slices.Sort(keys)
 	var b strings.Builder
 	for _, k := range keys {
-		if string(a[k]) != string(z[k]) {
+		switch {
+		case string(a[k]) == string(z[k]):
+		case hide && (k == "prompt" || k == "text"):
+			fmt.Fprintf(&b, "  %s: changed (shown only in private chats)\n", k)
+		default:
 			fmt.Fprintf(&b, "  %s: %s → %s\n", k, clip(string(a[k]), 80), clip(string(z[k]), 80))
 		}
 	}
@@ -334,7 +345,7 @@ func (s *Scheduler) add(c Caller, raw string) (string, *store.JobChange) {
 	j.Def = mustJSON(d)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Job %s %s: %q\n", j.ID, what, d.Name)
-	s.describe(&b, c, j, d, sched)
+	s.describe(&b, c, j, d, sched, false)
 	return strings.TrimSpace(b.String()), &store.JobChange{Add: &j}
 }
 
@@ -372,7 +383,7 @@ func (s *Scheduler) edit(c Caller, id, raw string) (string, *store.JobChange) {
 	if err != nil {
 		return "Job not changed: " + err.Error(), nil
 	}
-	return fmt.Sprintf("Job %s changed (from its next run):\n%s", j.ID, diff(j.Def, mustJSON(d))), &store.JobChange{Update: j.ID, Set: s.applied(d, sched, j.Version+1)}
+	return fmt.Sprintf("Job %s changed (from its next run):\n%s", j.ID, diff(j.Def, mustJSON(d), !c.Private)), &store.JobChange{Update: j.ID, Set: s.applied(d, sched, j.Version+1)}
 }
 
 // applied are the columns a job gets from definition d: its next slot from
@@ -538,7 +549,7 @@ func (s *Scheduler) show(c Caller, id string) string {
 		fmt.Fprintf(&b, " (%s)", j.Reason)
 	}
 	fmt.Fprintf(&b, ", by %s, version %d\n", j.Creator.Key(), j.Version)
-	s.describe(&b, c, j, d, sched)
+	s.describe(&b, c, j, d, sched, false)
 	opts, _ := json.Marshal(struct {
 		Quiet      bool     `json:"quiet,omitempty"`
 		Grace      string   `json:"grace,omitempty"`

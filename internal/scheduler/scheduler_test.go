@@ -691,3 +691,23 @@ func TestCreatePaused(t *testing.T) {
 		t.Fatalf("paused in an edit: %q", out)
 	}
 }
+
+// In a shared chat no job reply carries a prompt or text (§4); only a
+// draft's card previews it there (§5.3).
+func TestSharedRepliesHidePrompt(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"private plan","schedule":{"every":"1h"},"prompt":"the secret prompt"}`)
+	if out := r.cmd(inGroup, "job show "+id); strings.Contains(out, "secret") || !strings.Contains(out, "private plan") {
+		t.Fatalf("shared show: %q", out)
+	}
+	if out := r.cmd(inGroup, "job edit "+id+` {"prompt":"another secret"}`); strings.Contains(out, "secret") || !strings.Contains(out, "prompt") {
+		t.Fatalf("shared edit: %q", out)
+	}
+	if out := r.cmd(asBoss, "job show "+id); !strings.Contains(out, "another secret") {
+		t.Fatalf("private show: %q", out)
+	}
+	long := strings.Repeat("a", 300)
+	if _, d, card := r.s.Draft(inGroup, []string{"```heimdall-job\n{\"name\":\"x\",\"schedule\":{\"every\":\"1h\"},\"prompt\":\"" + long + "\"}\n```"}); d == nil || !strings.Contains(card, long[:200]+"…") || strings.Contains(card, long) {
+		t.Fatalf("shared card: %q", card)
+	}
+}
