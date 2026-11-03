@@ -58,7 +58,11 @@ on a line number.
   `PI_RESTRICTED_*`, `BIGQUERY_CALLER_PRINCIPAL` and `PI_TRANSPORT_CHILD` is
   removed from the harness environment, then the turn's own values are set.
   Neither Heimdall's own environment nor message text can supply them.
-- `HEIMDALL_*` variables (Heimdall's secrets) never reach a harness.
+- Heimdall's own `HEIMDALL_*` variables (its secrets) never reach a harness.
+  Heimdall sets only non-secret `HEIMDALL_*` values: `HEIMDALL_TURN_DIR` and
+  `HEIMDALL_CALLER_CAPABILITIES` on employee turns, and for employee Pi the
+  paths `HEIMDALL_GOOGLE_ACCESS_FILE` (the per-turn access-only token file)
+  and `HEIMDALL_MCP_SCOPE_ROOT`.
 - Values come from the caller its interface verified (`core.Principal`), the
   role Heimdall gave it, the conversation and the interface's one-to-one chat
   flag (`core.Inbound.Private`). Message text is never used.

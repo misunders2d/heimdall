@@ -55,7 +55,6 @@ One JSON object, used by `!job add`, `!job edit` and model drafts (§5). The sam
   "overlap": "skip",
   "session": "fresh",
   "idempotent": false,
-  "history_ctx": false,
   "requires": [],
   "timeout": "20m"
 }
@@ -74,9 +73,10 @@ One JSON object, used by `!job add`, `!job edit` and model drafts (§5). The sam
 | `overlap` | `skip` (default) or `queue_one` (§3.4). |
 | `session` | `fresh` (default): a new native session each run. `job`: resume the job's stored native transcript, only if its last run ended cleanly. No process stays resident either way. |
 | `idempotent` | Owner declares the job safe to repeat; an interrupted run may re-run once (§7.2). |
-| `history_ctx` | Give the run the job's last 3 delivered chat replies (≤8 KB) as untrusted context, for deduplication. |
+| `history_ctx` | Deferred (§17): the key is refused for now. Planned: the job's last 3 delivered chat replies (≤8 KB) as untrusted context, for deduplication. |
 | `requires` | Hint only, e.g. `["mellanni"]`, `["google"]`. Picks the sign-in notice text (§4). Heimdall never reads credential stores. |
 | `timeout` | Turn timeout. Default `harness.run_timeout_seconds`; owner maximum 2 h. |
+| `paused` | Creation only (`!job add` or a draft): the job is created paused, by its creator (§7.5). Never stored; edits refuse it. |
 
 ### 2.3 Delivery targets
 
@@ -177,7 +177,7 @@ The router handles the inbound row like any other message, with these difference
   - `PI_EXTERNAL_DEFAULT_DELIVERY` = the target, in hub format;
   - `MEMENTO_PROCESSING=1`;
   - `PI_SCHEDULER_TOOLS=0` on Pi and OMP turns while the scheduler is enabled (§11).
-- **Frame.** "scheduled job <name> created by this caller" (`router.go:1543`), the AgentNet instruction when the target is `agentnet:`, and the `history_ctx` block when enabled.
+- **Frame.** "scheduled job <name> created by this caller" (`router.go:1543`), and the AgentNet instruction when the target is `agentnet:`.
 
 ### 3.7 Memory
 
@@ -234,13 +234,13 @@ States: `pending`, `running`, `ok`, `quiet`, `failed`, `unverified`, `skipped`, 
   - `employee_harnesses` only;
   - Memento always off, no `owner_slack`.
 - **Missing or expired sign-in.**
-  - The turn runs and the service call fails, so the turn ends `failed` or `needs_human` before any side effect.
-  - The creator's notice: "send `mcp login` in your private chat, then `!job resume <id>` — heimdall". `requires` only picks this text.
+  - The turn runs and the service call fails, so the turn ends `failed` or `needs_human` before any side effect. A tool that reports the missing sign-in as a structured `auth_needed` result fails the run too, whatever the model then answers (§17).
+  - The creator's notice: "send `google login` (Google) or `mcp login` (other services) in your private chat, then `!job resume <id>` — heimdall". The structured result names the service; otherwise `requires` only picks this text.
   - At most `pause_after` turns are spent before the job pauses itself.
   - Heimdall never inspects credential stores and never falls back to another identity.
 - **Visibility.**
   - The owner sees all jobs (`!jobs all`); everyone else sees their own.
-  - In shared chats, lists show names only. Prompts are shown only in private chats.
+  - In shared chats, lists show names only. Prompts are shown only in private chats; there only a draft's card previews one (§5.3).
 - **`PI_RESTRICTED_EXTERNAL_USER`** stays `0` for owner turns and `1` for every other turn (`docs/hub-parity.md`). Its only scheduler effect was in Pi's scheduler tools, which §11 switches off for Heimdall turns.
 
 ## 5. Natural-language drafts
@@ -283,7 +283,7 @@ There is exactly one Slack Socket Mode consumer and one Telegram poller: Heimdal
 
 - **Checker.** `{"check": {"checker": "<name>", "params": {…}}}`. `<name>` must appear in config `scheduler.checkers`, as an owner-installed executable with its argv and timeout. It can never come from chat.
 - **Runtime.**
-  - Runs as the creator's OS user, with a cleaned environment plus the identity variables, never `HEIMDALL_*`.
+  - Runs as the creator's OS user, with a cleaned environment plus the identity variables, never Heimdall's own `HEIMDALL_*` variables (§17).
   - Timeout 60 s by default; stdout capped at 256 KiB.
   - Owner jobs only in v1.
 - **Contract.**
@@ -349,8 +349,8 @@ Illustration only. Existing Pi jobs are recreated by hand after the scheduler sh
 ### 7.3 Drain and health
 
 - **`heimdall drain [--timeout 30m]`**
-  - Sets `hold_until`, so no new scheduled run starts; live chat is unaffected.
-  - Waits until no turn is running and the outbox is empty (`Router.Idle` semantics, read from the database).
+  - Sets `hold_until`, so no new scheduled run starts; live chat is unaffected. The hold also applies where a run's turn starts: a run handed to the router earlier waits again (§17).
+  - Waits until no turn is running, no run handed to the router is waiting for its turn, and the outbox is empty (`Router.Idle` semantics, read from the database).
   - Exits 0 when idle, 75 on timeout.
   - The hold clears at startup; slots missed during the hold follow `grace`.
   - Production restarts run `drain` first. It replaces Pi's restart guard.
@@ -369,7 +369,7 @@ The Pi hub runs with its chat adapters off, so its own scheduler only sends: Sla
 ### 7.5 Per-job cutover from Pi (never both firing)
 
 1. Back up the Pi job's JSON. Pi has no pause, and deleting a job removes its file.
-2. Create the Heimdall job **paused**, from the identity whose tools it needs. Check its next 3 fires.
+2. Create the Heimdall job **paused** (`"paused": true` in its definition, one step), from the identity whose tools it needs. Check its next 3 fires.
 3. Optionally run it once by hand (`!job run`), only if the job is private and free of side effects.
 4. Between two Pi fires, delete the Pi job and confirm it is gone.
 5. Then `!job resume`.
@@ -378,7 +378,7 @@ The Pi hub runs with its chat adapters off, so its own scheduler only sends: Sla
 
 ## 8. Storage
 
-New tables in the existing database, as one append-only schema step (two for 3a, two more for 3b):
+New tables in the existing database, as append-only schema steps (3a: step 14, tables; step 15, `job_runs.replayed`; 3b: two more tables):
 
 - **`jobs`**
   - id, name, kind;
@@ -392,6 +392,7 @@ New tables in the existing database, as one append-only schema step (two for 3a,
   - `slot`, with **UNIQUE(job_id, slot)**;
   - `due_at`, trigger (`schedule`, `manual` or `watch`);
   - state, attempt, inbound_id, turn_id, cause category;
+  - `replayed`: the idempotent re-run after a restart was used (§7.2);
   - start and end times.
 - **`sched_meta`**: `tick_at`, `hold_until`.
 - **(3b) `watch_state`**: job_id, cursor (≤64 KiB), last check time, consecutive failures.
@@ -409,7 +410,7 @@ Logs carry metadata only: job, run, slot, state, lateness, harness, attempt, cau
 |---|---|
 | `!jobs [all]` | List your jobs (owner: `all`). |
 | `!job show <id>` | Spec, zone, next 3 fires (local and UTC), target, options, last 5 runs. |
-| `!job add` + JSON | Create a job (same validator as drafts); created active. |
+| `!job add` + JSON | Create a job (same validator as drafts); created active, or paused with `"paused": true`. |
 | `!job edit <id>` + JSON of changed fields | Edit; applies from the next run. |
 | `!job confirm <id>` / `!job discard <id>` | Accept or drop a draft. |
 | `!job pause <id>` / `!job resume <id>` | Pause or resume. |
@@ -576,7 +577,7 @@ All run with `go vet ./...` and `go test -race ./...`, using fake clocks and fak
 
 **Environment**
 - Scheduled turns get: `MEMENTO_PROCESSING=1`; `PI_EXTERNAL_DEFAULT_DELIVERY` = target; `Private=false`; no `owner_slack`.
-- No `HEIMDALL_*` in the harness environment.
+- None of Heimdall's own `HEIMDALL_*` variables in the harness environment (only the non-secret ones Heimdall sets, §17).
 - `PI_SCHEDULER_TOOLS=0` on Pi and OMP only while the scheduler is enabled.
 
 **Delivery**
@@ -660,9 +661,9 @@ Use a scratch config and data directory outside the repo, a separate test bot (n
 10. **AgentNet.** An owner job with an `agentnet:` target to a test address: the message arrives, nothing is posted to chat, and `!job history` shows `ok`. Without the marker, the run is unverified and a notice is sent.
 11. **Data safety.**
     - Logs contain no prompt or answer text (check with a planted synthetic marker).
-    - The harness environment contains no `HEIMDALL_*`.
+    - The harness environment contains none of Heimdall's own `HEIMDALL_*` variables (only the non-secret ones Heimdall sets, §17).
     - `export` contains no secrets.
-12. **Rollback.** `scheduler.enabled=false`, then restart: no runs, Pi tools back, jobs kept.
+12. **Rollback.** `scheduler.enabled=false`, then restart: no runs, Pi tools back, jobs kept. The previous binary only with the pre-deploy database backup (HANDOFF, rollback B).
 13. **Clean-up.** Scratch state removed; the repo is clean.
 
 For 3b, add:
@@ -709,7 +710,20 @@ Built on `main` 4f3f7e8, rebased onto `main` fe58149 (employee Google sign-in, `
 - A scheduled run's own notes (the quiet instruction, the AgentNet delivery instruction) follow its prompt in the native message on every harness. As turn context, live Pi ignored the quiet instruction.
 - A draft's card is Heimdall's own message after the answer; an answer that was only the block is replaced by the card.
 - `scheduler.checkers` is not accepted until 3b.
-- Size: about 2,800 non-comment Go lines (3,300 with comments) against the ~1,520 estimate; the operator CLI, the DST evaluation and the role checks of every command are the difference. No dependency beyond gronx.
+- Size (before the review fixes below): about 2,800 non-comment Go lines (3,300 with comments) against the ~1,520 estimate; the operator CLI, the DST evaluation and the role checks of every command are the difference. No dependency beyond gronx.
+
+**Review fixes (independent review, 2026-11-03)**
+- Job commands change nothing themselves: each returns its change (`store.JobChange`), and `AnswerCommand` stores it with the command's completion and its reply in one transaction. A crash in between replays the command once, never its change twice (two jobs from one `!job add`, two manual runs, a double renew).
+- The creator is checked where the turn starts (`Scheduler.Admit`, called by the router before any harness): live Slack re-verification, `Access.Decide` against the target, and the job's role rules, evaluated then. A run that waited for a router slot, or whose message is replayed after a restart, never runs on the due loop's earlier check; that check stays as an early filter. A temporary Slack error retries the run (before ready); a refusal pauses the job with the identity notice.
+- Fire-time rules hold at every fire: the future-run and future-`until` checks belong to creating and editing only (`validate`), so a due one-off is not refused.
+- Drain's hold applies where a turn starts (`Begin`): a run handed to the router before the hold goes back to `pending` with the same attempt, its never-started message dropped (the next start stores `run:<id>:<attempt>` again), and starts once the hold clears at startup. `drain` counts runs handed over but not ended as busy.
+- `"paused": true` creates a job paused in one step (§7.5); a draft may carry it. The job's reason is `paused by <creator> at creation`, so `sched health` does not count it.
+- A tool result with `details.status` `auth_needed` (the employee Google runtime returns one, as an ordinary result, `isError` false, so the model explains it in a normal answer) fails a scheduled run: cause `sign-in needed: <service>` (`details.service`, else `google` for `google_` tools). It is not retried and counts towards `pause_after`. Failure and pause notices name the sign-in: `google login` for Google, `mcp login` for anything else; `requires` picks it when the cause is a sign-in category or `needs_human`. Read from Pi's `tool_execution_end` (`result.details`, Pi 1.5.0 RPC; the hub's employee Pi version is unchecked). Live turns are unchanged.
+- The idempotent re-run is recorded in `job_runs.replayed` (schema step 15), not in the cause, so a crash before ready in between allows no second post-ready re-run.
+- In shared chats `!job show`, `!job add` and `!job edit` carry no prompt or text (an edit's diff says only that it changed); only a draft's card previews 200 characters.
+- `history_ctx` is deferred: the key is refused as unknown, the history block and its query are gone.
+- Environment rule, as built: Heimdall's own `HEIMDALL_*` variables (bot tokens, the Google client ID and secret) are stripped from every harness environment (`harness/launch.go`), and employee turns also drop `GOOGLE_*`, `PI_GOOGLE_*`, `HEIMDALL_GOOGLE_*` and `INFISICAL_*`. Heimdall then sets only non-secret `HEIMDALL_*` values: `HEIMDALL_TURN_DIR` (employee turns), `HEIMDALL_CALLER_CAPABILITIES` (employee turns), and for employee Pi the paths `HEIMDALL_GOOGLE_ACCESS_FILE` (the per-turn access-only token file) and `HEIMDALL_MCP_SCOPE_ROOT`. No Heimdall secret or Infisical credential is among them.
+- Rollback (HANDOFF): A, `scheduler.enabled=false` on this binary; B, the previous binary only with the database backup taken right before the deploy (the schema-13 binary refuses schema 15) and the previous config (it refuses the `scheduler` section).
 
 ## Appendix A. Pi hub scheduler: kept, changed, dropped
 
@@ -732,7 +746,7 @@ References are to `extensions/scheduler.ts` on `origin/hub` 956955e.
 | Keyword-regex tool validation | `:452-497` | Declared `expect` checks. |
 | Regex classes: blocked, partial, unsafe | `:531-557`, `:936-957` | Dropped. |
 | Prompt sentinel strings | `:37-39`, `:125-135` | Structured `quiet` and `expect.prefix`. |
-| Daily-intel-specific code and state | `:25-26`, `:185-287` | Dropped; generic `history_ctx`. |
+| Daily-intel-specific code and state | `:25-26`, `:185-287` | Dropped; a generic `history_ctx` is deferred (§17). |
 | Open failures injected into chat turns | `:721-743`, `:1114-1126` | Dropped; notices plus `!jobs`. |
 | Fixed failure envelope; failures reach the target | `:675-710` | Kept. |
 | Non-admins: current chat only, own scope only | `:1082-1100` | Kept for employees. |

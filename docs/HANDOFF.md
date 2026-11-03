@@ -73,8 +73,9 @@ Pi and Codex installs, scratch config/data outside the repo,
   clean, then (Heimdall stopped) exit 1 with "due loop last ran 3m3s ago" and
   an overdue job; on restart one missed notice counted 3 slots and the next
   slot ran.
-- 11: in a scheduled Pi turn `env` showed no `HEIMDALL_*` name (a planted
-  `HEIMDALL_` variable in Heimdall's environment was absent),
+- 11: in a scheduled owner Pi turn `env` showed no `HEIMDALL_*` name (a planted
+  `HEIMDALL_` variable in Heimdall's environment was absent; employee turns
+  get only the non-secret `HEIMDALL_*` values of scheduler.md §17),
   `PI_SCHEDULER_TOOLS=0`, `PI_EXTERNAL_MCP_PRIVATE=0`, `MEMENTO_PROCESSING=1`;
   the log held no message text; `sched export` held no secrets.
 - 12: `enabled:false`: `!jobs` and `!job add` say not enabled, all jobs kept,
@@ -90,9 +91,29 @@ follow the prompt in the native message (`TestScheduledNoteInNativeMessage`).
 Deploy (owner): add the `scheduler` block from
 `deploy/contabo/config.example.json`; build
 `CGO_ENABLED=0 go build -o heimdall ./cmd/heimdall`; deploy the pack branch
-so Pi/OMP hide their scheduler tools; `heimdall drain -config FILE` before the
-restart. Rollback: `scheduler.enabled=false` and restart (jobs kept), or the
-previous binary (schema step 14 only adds tables and a column).
+so Pi/OMP hide their scheduler tools; `heimdall drain -config FILE`, stop
+Heimdall, then back up the database and keep the previous binary and config:
+`sqlite3 DATA_DIR/heimdall.db ".backup DATA_DIR/heimdall.db.pre-scheduler"`.
+Then install and start the new binary (it migrates to schema 15).
+
+Rollback (validated 2026-11-03 on a synthetic database, laptop; the sqlite3
+CLI on the hub is not checked):
+- **A** (keeps everything): `scheduler.enabled=false` on the new binary, then
+  restart. No runs, Pi scheduler tools back, jobs kept. Checked: the new
+  binary with `enabled:false` starts on a schema-15 database.
+- **B** (previous binary): the previous binary refuses the migrated database
+  (`database schema 15 is newer than this Heimdall (13)`, exit 1) and the new
+  config (`unknown field "scheduler"`). With Heimdall stopped:
+  `sqlite3 DATA_DIR/heimdall.db ".restore DATA_DIR/heimdall.db.pre-scheduler"`,
+  reinstall the previous binary and config, start. Everything written since
+  the backup is lost: messages, turns, sessions, undelivered replies and all
+  jobs. Restore any Pi job already cut over (§7.5 rollback) first.
+- Test B, as run: `main` fe58149 built to `heimdall-old` created the database
+  (schema 13) and a synthetic row was added; `.backup`; the new binary
+  (`heimdall sched list`) migrated it to 15 and a second synthetic row was
+  added; `heimdall-old local` then refused it (above); `.restore`;
+  `heimdall-old local` started and exited 0 on schema 13 with the first row
+  kept, the second gone and no scheduler tables. Scratch state removed.
 
 Open: live checks 5, 8, 9 and 10 on the hub. Pi did not propose jobs while
 the first-message jobs note was turn context (Codex did); by orchestrator
@@ -105,6 +126,22 @@ ends at once as `failed`, cause `needs_human: …`, with a notice
 Google sign-in, `!which` model). Pi/OMP scheduler source drift in
 the pack (`test-omp-scheduler-parity` fails before and after the change);
 `scheduler.checkers` is rejected until 3b.
+
+### Review fixes — 2026-11-03
+
+An independent review of the branch found nine issues; each is fixed with a
+regression test that failed before its fix (scheduler.md §17, "Review
+fixes"): job commands stored with their answers
+(`TestJobCommandStoredWithItsAnswer`); the creator checked where the turn
+starts (`TestScheduledCreatorCheckedAtTurnStart`, `TestAdmitAtTurnStart`);
+due one-offs no longer refused (`TestDueOneOffStarts`); drain's hold at the
+turn start and dispatched runs counted (`TestHoldAtTurnStart`); a structured
+`auth_needed` tool result fails the run with the right sign-in notice
+(`TestScheduledSignInNeededFails`, `TestPiToolResultSignIn`); paused
+creation (`TestCreatePaused`); the idempotent re-run flag, schema step 15
+(`TestIdempotentReplayOnce`); no prompt in shared-chat replies
+(`TestSharedRepliesHidePrompt`); the rollback above. `history_ctx` is
+deferred. Fakes only; nothing re-run live.
 
 ## Warm workers — 2026-11-01
 

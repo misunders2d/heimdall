@@ -99,8 +99,8 @@ can launch.
 HEIMDALL_TELEGRAM_TOKEN=... heimdall run -config heimdall.json   # logs on stderr
 ```
 
-The token comes only from the environment (`HEIMDALL_*` variables never
-reach a harness) and never appears in logs or errors. If the token belongs
+The token comes only from the environment (Heimdall's own `HEIMDALL_*`
+variables never reach a harness) and never appears in logs or errors. If the token belongs
 to another bot than `telegram.bot_username`, Heimdall refuses to poll and
 exits. It never touches webhooks: a webhook or a second poller on the same
 token shows as a logged conflict. Use a separate bot for testing; two
@@ -238,7 +238,7 @@ with their current role (design: [docs/scheduler.md](docs/scheduler.md)).
 
 ```
 !jobs [all]                   your jobs (owner: everyone's)
-!job add <json>               create an active job
+!job add <json>               create a job (active, or "paused":true)
 !job edit <id> <json>         change fields from its next run
 !job show|history <id>        schedule, next 3 runs, options; last runs
 !job confirm|discard <id>     accept or drop a draft (or reply yes / no)
@@ -252,8 +252,8 @@ also `{"every":"15m"}`, `{"every":"2w","at":"09:00"}`, `{"at":"2026-12-01T09:00"
 or, for owners, `agentnet:<address>`. `"kind":"notify"` sends a fixed `text`.
 Options: `quiet` (answer `NO_UPDATE` sends nothing), `expect`
 (`tools`/`files`/`prefix` checks), `grace`, `until`, `overlap`, `session`,
-`history_ctx`, `requires`, `timeout`. Employees: at most every hour, here or
-their private chat, 10 jobs. Asked in plain language, a harness proposes a
+`requires`, `timeout`, and at creation `paused`. Employees: at most every
+hour, here or their private chat, 10 jobs. Asked in plain language, a harness proposes a
 job; Heimdall shows a card and only the person confirms.
 
 Runs deliver to their target with no typing or progress, never capture

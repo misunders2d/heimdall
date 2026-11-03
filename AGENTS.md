@@ -199,7 +199,8 @@ the `heimdall-live` unit.
 
 - **Scheduler** (phase 3a; design of record [docs/scheduler.md](docs/scheduler.md)).
   - Jobs run as their creator; role and admission are evaluated at every
-    fire. Slack creators are re-verified live. Never another identity.
+    fire, where the run's turn starts. Slack creators are re-verified live.
+    Never another identity.
   - One run per job and slot: `UNIQUE(job_id, slot)` in the same
     transaction that creates the run. Delivery is at-least-once.
   - Scheduled turns: their own conversation `sched:<job_id>`, delivering to
@@ -218,7 +219,9 @@ the `heimdall-live` unit.
   - Watches (3b): deterministic checkers from config only, running as the
     creator, with an expiry. One Slack consumer and one Telegram poller.
   - `PI_SCHEDULER_TOOLS=0` on Pi and OMP turns while the scheduler is
-    enabled. Production restarts run `heimdall drain` first.
+    enabled. Production restarts run `heimdall drain` first; its hold
+    applies where a run's turn starts.
+  - A job command's change is stored with its answer, in one transaction.
 
 ## Harness adapters
 
@@ -282,7 +285,10 @@ thinking stream and live-session reply registration.
   permits isolated work-clone coding/fake tests on the hub, never live runtime.
 - Secrets come from the environment (Infisical in production) or owner-only
   files; never commit, log or print them. Harness environments never inherit
-  `HEIMDALL_*` variables.
+  Heimdall's own `HEIMDALL_*` variables (tokens, Google client); Heimdall
+  sets only non-secret ones: the turn directory, caller capabilities and,
+  for employee Pi, the access-only Google token file path and MCP scope root
+  (docs/scheduler.md §17).
 - Never commit private deployment details (user IDs, emails, hostnames,
   server paths or specs). Example configs use placeholders. Private context
   documents stay outside the repository.
