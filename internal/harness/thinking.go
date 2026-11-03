@@ -3,6 +3,7 @@ package harness
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,45 @@ func Model(name string, l Launch) string {
 	}
 	if len(model) > 64 || strings.TrimLeft(model, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/[]") != "" {
 		return "" // shown in chat as is: one plain token only
+	}
+	return model
+}
+
+// ClaudeSessionModel is the model of the last assistant message in Claude
+// Code's transcript for session id under the launch's home, or "". Claude
+// writes ~/.claude/projects/<cwd>/<id>.jsonl; only the tail is read.
+func ClaudeSessionModel(l Launch, id string) string {
+	if id == "" || len(id) > 64 || strings.TrimLeft(id, "abcdefABCDEF0123456789-") != "" {
+		return ""
+	}
+	paths, _ := filepath.Glob(filepath.Join(l.Home, ".claude", "projects", "*", id+".jsonl"))
+	if len(paths) != 1 {
+		return ""
+	}
+	f, err := os.Open(paths[0])
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	const tail = 256 << 10
+	if st, err := f.Stat(); err == nil && st.Size() > tail {
+		_, _ = f.Seek(st.Size()-tail, 0)
+	}
+	data, _ := io.ReadAll(io.LimitReader(f, tail))
+	model := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				Model string `json:"model"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.Type == "assistant" && entry.Message.Model != "" && !strings.HasPrefix(entry.Message.Model, "<") {
+			model = entry.Message.Model
+		}
+	}
+	if len(model) > 64 || strings.TrimLeft(model, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/[]") != "" {
+		return ""
 	}
 	return model
 }

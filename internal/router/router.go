@@ -742,7 +742,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		c.answer(row, store.CommandEnd{Detail: "status"}, c.status())
 		return false
 	case cmdWhich:
-		c.answer(row, store.CommandEnd{Detail: "which"}, c.which(role))
+		c.answer(row, store.CommandEnd{Detail: "which"}, c.which(role, row.From.Key()))
 		return false
 	case cmdUse:
 		c.r.warm.Invalidate(c.key, "")
@@ -955,7 +955,7 @@ func (c *conv) status() string {
 // thinking level it is configured with for the asking caller's role. Answers carry no
 // signature, so it also names the running turn's harness and, when fallback
 // or a one-off !<harness> made it differ, the one the last reply came from.
-func (c *conv) which(role core.Role) string {
+func (c *conv) which(role core.Role, who string) string {
 	order := strings.Join(c.r.opt.Order, " → ")
 	var b strings.Builder
 	selected, _ := c.r.store.ChatHarness(c.key)
@@ -971,6 +971,15 @@ func (c *conv) which(role core.Role) string {
 		model, level := "", ""
 		if launch, err := c.r.opt.Accounts.Prepare(role, false, harness.Binary(selected)); err == nil {
 			model, level = harness.Model(selected, launch), harness.Thinking(selected, launch)
+			if model == "" && selected == "claude" {
+				// Claude Code picks its own default; show what this
+				// conversation's last Claude reply actually used.
+				if id, _, err := c.r.store.Session(c.key, who, "claude"); err == nil {
+					if m := harness.ClaudeSessionModel(launch, id); m != "" {
+						model = m + " (last reply)"
+					}
+				}
+			}
 		}
 		if model == "" {
 			model = "default"

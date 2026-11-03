@@ -89,3 +89,29 @@ func TestModel(t *testing.T) {
 		})
 	}
 }
+
+func TestClaudeSessionModel(t *testing.T) {
+	home := t.TempDir()
+	id := "0f1e2d3c-aaaa-bbbb-cccc-123456789abc"
+	dir := filepath.Join(home, ".claude", "projects", "-root")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lines := `{"type":"user","message":{"role":"user"}}
+{"type":"assistant","message":{"model":"claude-sonnet-5-5"}}
+{"type":"assistant","message":{"model":"claude-opus-5-5"}}
+{"type":"assistant","message":{"model":"<synthetic>"}}
+`
+	if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := Launch{Home: home}
+	if got := ClaudeSessionModel(l, id); got != "claude-opus-5-5" {
+		t.Fatalf("got %q", got)
+	}
+	for _, bad := range []string{"", "*", "../x", "0f1e2d3c-aaaa-bbbb-cccc-000000000000"} {
+		if got := ClaudeSessionModel(l, bad); got != "" {
+			t.Fatalf("id %q gave %q", bad, got)
+		}
+	}
+}
