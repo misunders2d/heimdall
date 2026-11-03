@@ -462,12 +462,12 @@ func (s *Scheduler) Recover() error {
 		switch h.InState {
 		case store.InPending:
 		case store.InInterrupted:
-			if !h.Ready || d.Idempotent && h.Cause != "re-run after restart" && now.Sub(h.Due) <= s.grace(d, sched) {
+			if !h.Ready || d.Idempotent && !h.Replayed && now.Sub(h.Due) <= s.grace(d, sched) {
 				why := "queued again: interrupted before the harness was ready"
 				if h.Ready {
 					why = "re-run after restart"
 				}
-				s.endRun(j, d, store.RunEnd{ID: h.ID, Job: h.Job, Retry: now, Cause: why})
+				s.endRun(j, d, store.RunEnd{ID: h.ID, Job: h.Job, Retry: now, Replay: h.Ready, Cause: why})
 				continue
 			}
 			s.endRun(j, d, store.RunEnd{ID: h.ID, Job: h.Job, State: store.RunInterrupted, Cause: "Heimdall restarted during the run"},

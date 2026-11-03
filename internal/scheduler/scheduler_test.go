@@ -592,3 +592,43 @@ func TestDrainHealthExport(t *testing.T) {
 		t.Fatalf("export %s", raw)
 	}
 }
+
+// An idempotent run is re-run once after a restart cut it off after its
+// harness was ready. That one re-run is recorded apart from the run's
+// cause: a crash before ready in between does not allow a second one.
+func TestIdempotentReplayOnce(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"idem","schedule":{"every":"1h"},"idempotent":true,"prompt":"p"}`)
+	crash := func(ready bool) store.Run {
+		t.Helper()
+		r.rows = nil
+		r.tick()
+		if len(r.rows) != 1 {
+			t.Fatalf("dispatched %d, runs %+v", len(r.rows), r.runs(id))
+		}
+		turn, err := r.st.StartTurn(r.rows[0].Conv, core.RoleOwner, r.rows[0].From.Key(), "", []int64{r.rows[0].ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			_ = r.st.TurnReady(turn)
+		}
+		if _, err := r.st.Recover(func(store.Interrupted) core.Outbound { return core.Outbound{} }, func(store.InboundRow) core.Outbound { return core.Outbound{} }); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.s.Recover(); err != nil {
+			t.Fatal(err)
+		}
+		return r.runs(id)[0]
+	}
+	r.now = r.now.Add(time.Hour)
+	if got := crash(true); got.State != store.RunPending {
+		t.Fatalf("first crash after ready: %+v", got)
+	}
+	if got := crash(false); got.State != store.RunPending {
+		t.Fatalf("crash before ready: %+v", got)
+	}
+	if got := crash(true); got.State != store.RunInterrupted {
+		t.Fatalf("a second crash after ready re-ran the run again: %+v", got)
+	}
+}

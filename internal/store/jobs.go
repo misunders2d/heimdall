@@ -248,14 +248,15 @@ type Run struct {
 	Cause     string
 	Started   time.Time
 	Ended     time.Time
+	Replayed  bool // re-run once after a restart (idempotent jobs)
 }
 
-const runCols = `id,job_id,version,slot,due_at,trigger,state,attempt,not_before,coalesce(inbound_id,0),cause,started_at,ended_at`
+const runCols = `id,job_id,version,slot,due_at,trigger,state,attempt,not_before,coalesce(inbound_id,0),cause,started_at,ended_at,replayed`
 
 func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 	var r Run
 	var due, nb, started, ended int64
-	err := row.Scan(&r.ID, &r.Job, &r.Version, &r.Slot, &due, &r.Trigger, &r.State, &r.Attempt, &nb, &r.Inbound, &r.Cause, &started, &ended)
+	err := row.Scan(&r.ID, &r.Job, &r.Version, &r.Slot, &due, &r.Trigger, &r.State, &r.Attempt, &nb, &r.Inbound, &r.Cause, &started, &ended, &r.Replayed)
 	r.Due, r.NotBefore, r.Started, r.Ended = ms(due), ms(nb), ms(started), ms(ended)
 	return r, err
 }
@@ -383,6 +384,7 @@ type RunEnd struct {
 	State     string
 	Cause     string
 	Retry     time.Time // set: back to pending, due then, as the next attempt
+	Replay    bool      // with Retry: the run's one re-run after a restart
 	Inbound   int64     // set: its message, still pending, is cancelled
 	JobState  string    // set: the job becomes paused or done
 	JobReason string
@@ -390,7 +392,7 @@ type RunEnd struct {
 
 func endRun(tx *sql.Tx, e RunEnd) error {
 	if !e.Retry.IsZero() {
-		_, err := tx.Exec(`UPDATE job_runs SET state=?,attempt=attempt+1,not_before=?,cause=?,inbound_id=NULL WHERE id=?`, RunPending, e.Retry.UnixMilli(), clip(e.Cause), e.ID)
+		_, err := tx.Exec(`UPDATE job_runs SET state=?,attempt=attempt+1,not_before=?,cause=?,inbound_id=NULL,replayed=replayed OR ? WHERE id=?`, RunPending, e.Retry.UnixMilli(), clip(e.Cause), e.Replay, e.ID)
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE job_runs SET state=?,cause=?,ended_at=? WHERE id=?`, e.State, clip(e.Cause), now(), e.ID); err != nil {
@@ -434,7 +436,7 @@ type HeldRun struct {
 
 // HeldRuns lists the runs handed to the router before a restart.
 func (s *Store) HeldRuns() ([]HeldRun, error) {
-	rows, err := s.db.Query(`SELECT r.id,r.job_id,r.version,r.slot,r.due_at,r.trigger,r.state,r.attempt,r.not_before,coalesce(r.inbound_id,0),r.cause,r.started_at,r.ended_at,coalesce(i.state,''),coalesce(t.ready,0)
+	rows, err := s.db.Query(`SELECT r.id,r.job_id,r.version,r.slot,r.due_at,r.trigger,r.state,r.attempt,r.not_before,coalesce(r.inbound_id,0),r.cause,r.started_at,r.ended_at,r.replayed,coalesce(i.state,''),coalesce(t.ready,0)
 FROM job_runs r LEFT JOIN inbound i ON i.id=r.inbound_id LEFT JOIN turns t ON t.id=i.turn_id WHERE r.state=? ORDER BY r.id`, RunRunning)
 	if err != nil {
 		return nil, err
@@ -444,7 +446,7 @@ FROM job_runs r LEFT JOIN inbound i ON i.id=r.inbound_id LEFT JOIN turns t ON t.
 	for rows.Next() {
 		var h HeldRun
 		var due, nb, started, ended int64
-		if err := rows.Scan(&h.ID, &h.Job, &h.Version, &h.Slot, &due, &h.Trigger, &h.State, &h.Attempt, &nb, &h.Inbound, &h.Cause, &started, &ended, &h.InState, &h.Ready); err != nil {
+		if err := rows.Scan(&h.ID, &h.Job, &h.Version, &h.Slot, &due, &h.Trigger, &h.State, &h.Attempt, &nb, &h.Inbound, &h.Cause, &started, &ended, &h.Replayed, &h.InState, &h.Ready); err != nil {
 			return nil, err
 		}
 		h.Due, h.NotBefore, h.Started, h.Ended = ms(due), ms(nb), ms(started), ms(ended)

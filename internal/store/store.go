@@ -149,6 +149,9 @@ CREATE TABLE job_runs(
 CREATE INDEX job_runs_state ON job_runs(state, due_at);
 CREATE TABLE sched_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 ALTER TABLE turns ADD COLUMN ready INTEGER NOT NULL DEFAULT 0;`,
+	// An idempotent run's one re-run after a restart, recorded apart from
+	// its cause (docs/scheduler.md §7.2).
+	`ALTER TABLE job_runs ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
