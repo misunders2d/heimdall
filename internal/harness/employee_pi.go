@@ -6,7 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
+
+	"github.com/misunders2d/heimdall/internal/googleoauth"
 )
 
 // Owner auth is read by the root broker only. Never hand off refresh.
@@ -80,7 +83,7 @@ func prepareEmployeePi(ctx context.Context, spec Spec, env []string) ([]string, 
 			cleanup()
 		}
 	}()
-	if err = os.Chown(dir, int(l.Cred.Uid), int(l.Cred.Gid)); err != nil {
+	if err = chownEmployeeAgent(dir, l); err != nil {
 		return nil, nil, err
 	}
 	servers := piMCPServers(l.Home, spec.Caller, env, spec.Caller.Principal.Platform, envValue(env, "PI_MCP_OAUTH_ACTOR"), spec.Caller.OAuthInstallation)
@@ -93,15 +96,20 @@ func prepareEmployeePi(ctx context.Context, spec Spec, env []string) ([]string, 
 		catalog[server] = map[string]any{"url": url, "exposure": "direct"}
 	}
 	for name, value := range map[string]any{"auth.json": map[string]any{"openai-codex": auth}, "settings.json": settings, "mcp.json": map[string]any{"mcpServers": catalog, "autoEnableCodemode": false}} {
-		raw, _ := json.Marshal(value)
-		path := filepath.Join(dir, name)
-		if err = os.WriteFile(path, raw, 0600); err != nil {
-			return nil, nil, err
-		}
-		if err = os.Chown(path, int(l.Cred.Uid), int(l.Cred.Gid)); err != nil {
+		if err = writeEmployeeJSON(dir, name, value, l); err != nil {
 			return nil, nil, err
 		}
 	}
+	access := googleoauth.Access{}
+	if spec.Google != nil {
+		c := spec.Caller
+		// Failure is auth-needed for Google only; other employee tools still run.
+		access, _ = spec.Google.Snapshot(ctx, googleoauth.Caller{Principal: c.Principal, Actor: c.OAuthActor, Installation: c.OAuthInstallation})
+	}
+	if err = writeEmployeeGoogleAccess(dir, access, l); err != nil {
+		return nil, nil, err
+	}
+	env = setEnv(env, "HEIMDALL_GOOGLE_ACCESS_FILE", filepath.Join(dir, "google-access.json"))
 	if err = os.Symlink(SharedRoot+"/AGENTS.md", filepath.Join(dir, "AGENTS.md")); err != nil {
 		return nil, nil, err
 	}
@@ -109,4 +117,44 @@ func prepareEmployeePi(ctx context.Context, spec Spec, env []string) ([]string, 
 	env = setEnv(env, "HEIMDALL_MCP_SCOPE_ROOT", filepath.Join(l.Home, ".pi", "agent", "mcp-oauth-users"))
 	ok = true
 	return env, cleanup, nil
+}
+
+// The handoff schema has no field capable of carrying renewal credentials.
+func writeEmployeeGoogleAccess(dir string, access googleoauth.Access, l Launch) error {
+	return writeEmployeeJSON(dir, "google-access.json", access, l)
+}
+
+// The shared uid can modify its own home. Never follow a planted handoff
+// symlink or chown through a pathname after publishing ownership.
+func chownEmployeeAgent(dir string, l Launch) error {
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return errors.New("employee agent directory is unsafe")
+	}
+	f := os.NewFile(uintptr(fd), dir)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	stat, ok := st.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != 0 || st.Mode().Perm() != 0700 {
+		return errors.New("employee agent directory is unsafe")
+	}
+	return f.Chown(int(l.Cred.Uid), int(l.Cred.Gid))
+}
+func writeEmployeeJSON(dir, name string, value any, l Launch) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err = f.Write(raw); err != nil {
+		return err
+	}
+	return f.Chown(int(l.Cred.Uid), int(l.Cred.Gid))
 }

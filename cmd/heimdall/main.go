@@ -17,6 +17,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/config"
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/googleoauth"
 	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/iface/local"
 	"github.com/misunders2d/heimdall/internal/iface/slack"
@@ -149,7 +150,11 @@ func run(args []string) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	r := router.New(router.Options{EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
+	google, err := googleoauth.New(cfg.EmployeeGoogle, cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	r := router.New(router.Options{Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")

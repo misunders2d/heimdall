@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/googleoauth"
 )
 
 // SteerOutcome is a harness's answer to mid-turn input. Only Accepted means
@@ -123,6 +124,7 @@ type Session struct {
 
 // Spec is one turn.
 type Spec struct {
+	Google     *googleoauth.Broker
 	warm       bool
 	MCPNotify  func(string)
 	OwnerSlack *OwnerSlack

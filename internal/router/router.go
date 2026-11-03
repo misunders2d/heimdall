@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/googleoauth"
 	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/store"
 )
@@ -58,6 +59,7 @@ type Accounts interface {
 }
 
 type Options struct {
+	Google            *googleoauth.Broker
 	EmployeeHarnesses []string
 	Harness           harness.WarmConfig
 	OwnerSlack        *harness.OwnerSlack
@@ -293,6 +295,10 @@ func (r *Router) accept(ctx context.Context, in core.Inbound) error {
 	role, _, ok := r.opt.Access.Decide(in.From, in.Conv)
 	if !ok {
 		r.log.Printf("ignored message from an unidentified %s caller in %s", in.From.Platform, in.Conv)
+		r.release(in)
+		return nil
+	}
+	if r.googleControl(ctx, in, role) {
 		r.release(in)
 		return nil
 	}
@@ -1203,7 +1209,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			if iface := c.r.ifaces[c.key.Interface]; iface != nil {
 				_ = iface.Send(ctx, core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text})
 			}
-		}, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress})
+		}, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress})
 		if err != nil {
 			c.unbind(t, h, prev, clean)
 			notes = append(notes, err.Error())

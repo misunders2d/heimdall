@@ -44,6 +44,7 @@ var historicalImage = regexp.MustCompile(`(?i)\b(?:image|images|img|photo|photos
 const omittedMCP = "[Private native MCP sign-in UI omitted]"
 
 func hideOAuth(text string) string {
+	text = core.RedactGoogleCallbacks(text)
 	if mcpCommand.MatchString(strings.TrimSpace(text)) {
 		return omittedMCP
 	}
@@ -142,6 +143,9 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if in.Private && !s.controlMessage(m) && s.owner(principal) {
 		in.SlackPrivateOwnerVerified = s.privateOwner(ctx, m, principal)
 		in.SlackReadVerified = in.SlackPrivateOwnerVerified && s.opt.OwnerSlackEnabled
+	}
+	if core.GoogleCommand(commandText) != "" && !s.owner(principal) {
+		in.Private = s.privateCaller(ctx, m)
 	}
 	in.Text = hideOAuth(commandText)
 	embedded = hideOAuth(embedded)

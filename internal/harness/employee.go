@@ -26,7 +26,7 @@ func employeeArgs(name string, l Launch) ([]string, error) {
 	case "agy":
 		return nil, errors.New("employee " + name + " turns are unavailable: native isolation has not been validated")
 	case "pi":
-		return []string{"--no-extensions", "--extension", "builtin:mcp", "--no-builtin-tools", "--tools", "read,employee_mcp_status,mcp__mellanni__*,mcp__linear__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource", "--no-prompt-templates", "--no-themes"}, nil
+		return []string{"--no-extensions", "--extension", "builtin:mcp", "--no-builtin-tools", "--tools", "read,google_*,employee_mcp_status,mcp__mellanni__*,mcp__linear__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource", "--no-prompt-templates", "--no-themes"}, nil
 	case "omp":
 		return []string{"--no-extensions", "--no-mcp", "--extension", SharedRoot + "/pi/extensions/privileged-tool-guard.ts", "--extension", SharedRoot + "/pi/extensions/admin-lifecycle-guard.ts", "--tools", "read", "--exclude-tools", "bash,powershell,edit,write,grep,find,ls,mcp__*", "--no-approve", "--extension", SharedRoot + "/heimdall/employee-guard.ts"}, nil
 	case "claude":
@@ -80,6 +80,16 @@ func employeeEnv(env []string, c Caller) []string {
 	if c.Role != core.RoleEmployee {
 		return env
 	}
+	// Even synthetic/custom Launch envs cannot leak a Google client or old store.
+	clean := env[:0:0]
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(k, "GOOGLE_") || strings.HasPrefix(k, "PI_GOOGLE_") || strings.HasPrefix(k, "HEIMDALL_GOOGLE_") || strings.HasPrefix(k, "INFISICAL_") {
+			continue
+		}
+		clean = append(clean, kv)
+	}
+	env = clean
 	for k, v := range map[string]string{"MEMENTO_PROCESSING": "1", "PI_RESTRICTED_EXTERNAL_USER": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_SKIP_MODEL_ACCESS_MEMORY": "1"} {
 		env = setEnv(env, k, v)
 	}

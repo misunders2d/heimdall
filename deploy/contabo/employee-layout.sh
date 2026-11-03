@@ -59,7 +59,7 @@ bind_ro "$node_root/bin/node" runtime/node
 bind_ro "$node_root/lib/node_modules/@earendil-works/pi-coding-agent" runtime/pi
 # One guard dependency is mode 0600 in the live pack. Expose only that reviewed
 # source file; do not chmod the live checkout or expose the .secrets subtree.
-install -m 0644 "$repo/deploy/employee/employee-guard.ts" "$repo/deploy/employee/pi-employee-cli.mjs" "$root/heimdall/"
+install -m 0644 "$repo/deploy/employee/employee-guard.ts" "$repo/deploy/employee/pi-employee-cli.mjs" "$repo/deploy/employee/google-runtime.mjs" "$repo/deploy/employee/google-tools.mjs" "$repo/deploy/employee/google-workspace.py" "$root/heimdall/"
 install -m 0755 "$repo/deploy/employee/pi" "$root/bin/pi"
 # Existing account was provisioned with nobody ownership; account stays uid 997.
 chown heimdall-employee:heimdall-employee "$emp_home"

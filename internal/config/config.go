@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/googleoauth"
 	"github.com/misunders2d/heimdall/internal/harness"
 )
 
@@ -24,9 +25,10 @@ import (
 var DefaultOrder = []string{"codex", "claude", "pi"}
 
 type Config struct {
-	EmployeeHarnesses []string `json:"employee_harnesses,omitempty"` // enable only after native isolation validation
-	AccessDir         string   `json:"access_dir,omitempty"`
-	StandaloneAccess  bool     `json:"standalone_access,omitempty"` // non-hub installs only: legacy owners fallback
+	EmployeeGoogle    *googleoauth.Config `json:"employee_google,omitempty"`
+	EmployeeHarnesses []string            `json:"employee_harnesses,omitempty"` // enable only after native isolation validation
+	AccessDir         string              `json:"access_dir,omitempty"`
+	StandaloneAccess  bool                `json:"standalone_access,omitempty"` // non-hub installs only: legacy owners fallback
 	warnings          []string
 	Harness           harness.WarmConfig       `json:"harness,omitempty"`
 	OwnerSlack        *harness.OwnerSlack      `json:"owner_slack,omitempty"`
@@ -151,6 +153,9 @@ func parse(raw []byte, staged bool) (*Config, error) {
 }
 
 func (c *Config) fill(staged bool) error {
+	if err := c.EmployeeGoogle.Validate(); err != nil {
+		return err
+	}
 	for _, h := range c.EmployeeHarnesses {
 		if h != "codex" && h != "claude" && h != "pi" {
 			return errors.New("employee_harnesses supports only codex, claude, pi after native validation")

@@ -2,6 +2,7 @@
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { installGoogleTools } from './google-runtime.mjs';
 const root = '/opt/assistant';
 const packageDir = root + '/runtime/pi';
 if (process.getuid() === 0 || process.env.PI_RESTRICTED_EXTERNAL_USER !== '1' || process.env.MEMENTO_PROCESSING !== '1') throw new Error('Restricted employee context required');
@@ -24,7 +25,9 @@ const guard = (await jiti.import(root + '/heimdall/employee-guard.ts')).default;
 factories.push({name:'employee-boundary',factory:async pi => {
   const approved = JSON.parse(process.env.PI_MCP_OAUTH_SERVERS || '[]');
   if (!approved.length || approved.some(s => !['mellanni','linear'].includes(s))) throw new Error('Employee server route denied');
+  const googleAuthorized = installGoogleTools(pi, Type, sanitizeUntrustedText);
   const authorized = event => {
+    if (googleAuthorized(event)) return true;
     if (event.toolName === 'employee_mcp_status') return true;
     const state = globalThis[Symbol.for('pi.hub.native-mcp.compat.v1')];
     const tool = pi.getAllTools().find(t => t.name === event.toolName);
@@ -42,7 +45,7 @@ factories.push({name:'employee-boundary',factory:async pi => {
   }});
   lifecycle(pi);
   guard(pi, authorized);
-  pi.on('before_agent_start', async () => ({systemPrompt: undefined, message:{role:'custom',customType:'employee-oauth-help',content:'Use your own Mellanni/Linear OAuth. If Mellanni needs sign-in, tell the caller: DM the bot `mcp login mellanni`. Never start sign-in from a model tool call.',display:false}}));
+  pi.on('before_agent_start', async () => ({systemPrompt: undefined, message:{role:'custom',customType:'employee-oauth-help',content:'Use your own Mellanni/Linear OAuth. If Mellanni needs sign-in, tell the caller: DM the bot `mcp login mellanni`. Never start sign-in from a model tool call. Google uses your own account: if disconnected, send `google login` in a DM. Google writes require the caller’s explicit request; confirm_write is an assertion of that request, never permission to invent one. Gmail and Calendar are DM-only; shared Slack allows draft creation with status-only results. No email send or event delete tool exists.',display:false}}));
 }});
 // Pi reports extension-load errors and can otherwise continue. Employee launches
 // must fail closed if any required native factory/guard cannot initialize.

@@ -28,3 +28,21 @@ func TestMCPCallbackRedactionInErrorsAndEmbeddedText(t *testing.T) {
 		t.Fatal("ordinary URL changed")
 	}
 }
+
+func TestGoogleCallbacksRecognizedAndRedacted(t *testing.T) {
+	for _, raw := range []string{
+		"https://example.test/oauth/google/callback?state=hmg_1&code=SYNTHETIC_CALLBACK",
+		"https://other.test/oauth/google/callback?error=access_denied&state=unknown",
+		"http://example.test/oauth/google/callback?state=unknown&code=SYNTHETIC_CALLBACK",
+	} {
+		if !GoogleCallback(raw) {
+			t.Fatal("Google callback unrecognized")
+		}
+		if strings.Contains(RedactMCPCallbacks("before "+raw+" after"), "SYNTHETIC_CALLBACK") {
+			t.Fatal("Google callback leaked")
+		}
+	}
+	if GoogleCallback("https://example.test/ordinary?code=public") {
+		t.Fatal("ordinary URL captured")
+	}
+}

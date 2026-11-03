@@ -74,7 +74,7 @@ func callbackValue(raw json.RawMessage) string {
 		value = strings.TrimSuffix(strings.TrimPrefix(value, "<"), ">")
 		value, _, _ = strings.Cut(value, "|")
 	}
-	if core.MCPCallback(value) {
+	if core.MCPCallback(value) || core.GoogleCallback(value) {
 		return value
 	}
 	return ""
