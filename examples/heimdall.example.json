@@ -37,5 +37,14 @@
     "team_id": "T_PLACEHOLDER",
     "max_file_bytes": 200000000
   },
-  "standalone_access": true
+  "standalone_access": true,
+  "scheduler": {
+    "enabled": true,
+    "default_tz": "Europe/Kyiv",
+    "max_concurrent": 2,
+    "per_creator": 1,
+    "grace_recurring_seconds": 7200,
+    "grace_oneoff_seconds": 86400,
+    "pause_after": 3
+  }
 }

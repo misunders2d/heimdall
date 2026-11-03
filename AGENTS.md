@@ -188,6 +188,7 @@ the `heimdall-live` unit.
 - **Commands** use the `!` prefix on every interface (Slack forbids `/` in
   threads): `!help`, `!status`, `!which`, `!stop`, `!cancel`, `!reset`, `!chatid`,
   `!use <harness>` (sticky per conversation: chat + thread), `!use default`,
+  `!jobs`, `!job …` (scheduler),
   `!<harness> <msg>` (that message only), `!next <msg>`. The hub's control
   words work alone in a message without the `!`: `stop`, `cancel`
   (`abort`, `nevermind`), `reset`, `chatid`. Stop is limited to the turn's
@@ -195,6 +196,29 @@ the `heimdall-live` unit.
   may clear everyone's). `reset` forgets only
   the caller's own sessions in that conversation.
   Unknown `!word` commands are answered with help, never sent to a harness.
+
+- **Scheduler** (phase 3a; design of record [docs/scheduler.md](docs/scheduler.md)).
+  - Jobs run as their creator; role and admission are evaluated at every
+    fire. Slack creators are re-verified live. Never another identity.
+  - One run per job and slot: `UNIQUE(job_id, slot)` in the same
+    transaction that creates the run. Delivery is at-least-once.
+  - Scheduled turns: their own conversation `sched:<job_id>`, delivering to
+    the captured target; `Private=false`; no `owner_slack`;
+    `MEMENTO_PROCESSING=1` (never memory, no opt-in); a fresh session by
+    default; no progress messages; never a warm worker.
+  - Retry only before the ready signal. Interrupted runs are never re-run,
+    except `idempotent` jobs (once).
+  - Models only propose jobs, through the answer block. A human confirms in
+    the same conversation within 24 h (`!job confirm`, or a bare yes/no that
+    Heimdall matches itself). Blocks from scheduled turns are ignored.
+  - Notices are fixed templates ending `— heimdall`; no model text in
+    shared channels.
+  - AgentNet: owner jobs may name an address; the agent delivers; Heimdall
+    never talks to AgentNet.
+  - Watches (3b): deterministic checkers from config only, running as the
+    creator, with an expiry. One Slack consumer and one Telegram poller.
+  - `PI_SCHEDULER_TOOLS=0` on Pi and OMP turns while the scheduler is
+    enabled. Production restarts run `heimdall drain` first.
 
 ## Harness adapters
 
@@ -239,10 +263,12 @@ thinking stream and live-session reply registration.
 
 | Path | What |
 |---|---|
-| `cmd/heimdall` | CLI: `run`, `local`, `harnesses`, `version` |
+| `cmd/heimdall` | CLI: `run`, `local`, `harnesses`, `check-config`, `sched`, `drain`, `version` |
 | `internal/core` | principals, roles, modes, conversation keys, messages |
 | `internal/config` | the one JSON config file |
-| `internal/store` | SQLite: inbound/outbound queues, turns, sessions, chat settings |
+| `internal/store` | SQLite: inbound/outbound queues, turns, sessions, chat settings, jobs and runs |
+| `internal/schedule` | cron, interval and one-off slots in a zone, the DST rule |
+| `internal/scheduler` | due loop, job rules, commands, drafts, outcomes, notices, `sched`/`drain` |
 | `internal/harness` | ported native adapters, launch as an OS user |
 | `internal/router` | conversations, `!` commands, steer/follow-up, fallback, delivery |
 | `internal/iface/local` | local stdin/stdout interface for end-to-end tests |
@@ -282,5 +308,6 @@ thinking stream and live-session reply registration.
    delivery, ported adapters, local CLI interface, and the Telegram
    interface (end to end on the development machine).
 2. Slack interface. AgentNet stays separate and is never a Heimdall interface.
-3. Scheduler (jobs carry and run as their creator).
+3. Scheduler (jobs carry and run as their creator): 3a built (jobs,
+   drafts, Pi tool switch); 3b watches next.
 4. Production cutover.

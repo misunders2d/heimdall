@@ -205,6 +205,7 @@ Commands work the same on every interface:
 !use default       back to the default order
 !<harness> <msg>   only this message goes to <harness>
 !next <msg>        queue as follow-up instead of steering
+!jobs, !job …      scheduled jobs (see below)
 ```
 
 `stop`, `cancel` (or `abort`, `nevermind`), `reset` and `chatid` alone in a
@@ -228,6 +229,37 @@ their own native session per conversation. A message sent
 while the sender's own turn runs steers it (messages that wait while
 another is handed over go together, as one steer); everything else queues
 as a follow-up. Replies end with `— <harness>`.
+
+## Scheduled jobs
+
+With `"scheduler": {"enabled": true, "default_tz": "Europe/Kyiv"}` in the
+config, Heimdall runs jobs as the person who created them, at every fire
+with their current role (design: [docs/scheduler.md](docs/scheduler.md)).
+
+```
+!jobs [all]                   your jobs (owner: everyone's)
+!job add <json>               create an active job
+!job edit <id> <json>         change fields from its next run
+!job show|history <id>        schedule, next 3 runs, options; last runs
+!job confirm|discard <id>     accept or drop a draft (or reply yes / no)
+!job pause|resume|run|stop|rm <id>
+!job renew <id> [30d]         extend its expiry
+```
+
+A job: `{"name":"standup","schedule":{"cron":["0 9 * * MON-FRI"]},"prompt":"…"}`;
+also `{"every":"15m"}`, `{"every":"2w","at":"09:00"}`, `{"at":"2026-12-01T09:00"}`.
+`"to"` is `here` (default), `tg:<chat>[/<topic>]`, `slack:<channel>[/<thread>]`
+or, for owners, `agentnet:<address>`. `"kind":"notify"` sends a fixed `text`.
+Options: `quiet` (answer `NO_UPDATE` sends nothing), `expect`
+(`tools`/`files`/`prefix` checks), `grace`, `until`, `overlap`, `session`,
+`history_ctx`, `requires`, `timeout`. Employees: at most every hour, here or
+their private chat, 10 jobs. Asked in plain language, a harness proposes a
+job; Heimdall shows a card and only the person confirms.
+
+Runs deliver to their target with no typing or progress, never capture
+memory, and send failures as fixed notices. Operators:
+`heimdall sched list|show <id>|health|export -config FILE`, and
+`heimdall drain -config FILE` before a restart (exit 0 idle, 75 timeout).
 
 ## Try it locally
 

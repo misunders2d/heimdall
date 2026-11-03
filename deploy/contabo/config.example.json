@@ -46,5 +46,14 @@
     "run_timeout_seconds": 1200
   },
   "access_dir": "/root/.pi/agent/access",
-  "employee_harnesses": []
+  "employee_harnesses": [],
+  "scheduler": {
+    "enabled": true,
+    "default_tz": "Europe/Kyiv",
+    "max_concurrent": 2,
+    "per_creator": 1,
+    "grace_recurring_seconds": 7200,
+    "grace_oneoff_seconds": 86400,
+    "pause_after": 3
+  }
 }
