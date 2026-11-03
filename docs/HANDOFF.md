@@ -49,8 +49,9 @@ are superseded wherever they conflict with this section.
 Branch `feat/scheduler-3a` from `main` 4f3f7e8; design of record and as-built
 deviations in [scheduler.md](scheduler.md) (§17). Pack change (D3,
 `PI_SCHEDULER_TOOLS=0` hides the hub scheduler tools) is on pack branch
-`feat/pi-scheduler-tools-flag` from `origin/hub`, with offline test
-`scripts/test-scheduler-tools-flag.mjs`. Nothing deployed.
+`feat/pi-scheduler-tools-flag` (0a7aa22, rebased 2026-11-03 onto `origin/hub`
+bbd9a6a, whose employee Google rules it keeps), with offline test
+`scripts/test-scheduler-tools-flag.mjs` (passes). Nothing deployed.
 
 Evidence: `go vet ./...`, `go test -race -count=1 ./...` and a
 `CGO_ENABLED=0` build pass. Laptop acceptance with `heimdall local`, the real
