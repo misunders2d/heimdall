@@ -558,13 +558,14 @@ type steerEvent struct {
 }
 
 type doneEvent struct {
-	t       *turn
-	harness string // "" when no harness became ready
-	res     harness.Result
-	notes   []string
-	files   []harness.OutFile // collected from the outbox after an answer
-	skipped []string          // outbox files not taken, "name: reason"
-	refused bool              // the caller's admission or role changed: refused before any harness
+	t        *turn
+	harness  string // "" when no harness became ready
+	res      harness.Result
+	notes    []string
+	files    []harness.OutFile // collected from the outbox after an answer
+	skipped  []string          // outbox files not taken, "name: reason"
+	refused  bool              // the caller's admission or role changed: refused before any harness
+	identity error             // a scheduled turn's creator check failed (scheduler.Admit): no harness ran
 }
 
 func (c *conv) push(row store.InboundRow) {
@@ -1235,14 +1236,23 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 	// A scheduled run is decided against, and runs for, its job's target;
 	// it never captures memory.
 	target, refused := c.key, false
+	from, actor, installation := t.from, batch[0].row.OAuthActor, batch[0].row.OAuthInstallation
+	var identity error
 	if t.job != nil {
 		target, memory = t.job.Target.Conv, false
+		// The creator is checked now, as the turn starts: never only when
+		// the run was handed over (it may have waited, or been replayed
+		// after a restart).
+		v, err := c.r.opt.Jobs.Admit(ctx, t.job)
+		if identity = err; err == nil {
+			from, actor, installation = v.Principal, v.OAuthActor, v.OAuthInstallation
+		}
 	}
 	for _, h := range t.candidates {
-		if ctx.Err() != nil || t.stopped.Load() {
+		if ctx.Err() != nil || t.stopped.Load() || identity != nil {
 			break
 		}
-		current, caps, admitted := c.r.opt.Access.Decide(t.from, target)
+		current, caps, admitted := c.r.opt.Access.Decide(from, target)
 		if !admitted || current != t.role {
 			notes = append(notes, "caller admission or role changed; turn refused")
 			refused = true
@@ -1305,7 +1315,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			notes = append(notes, "turn not recordable, so it did not run: "+err.Error())
 			break
 		}
-		caller := harness.Caller{Capabilities: caps, Principal: t.from, Role: t.role, Conv: target, Private: t.private, OAuthActor: batch[0].row.OAuthActor, OAuthInstallation: batch[0].row.OAuthInstallation}
+		caller := harness.Caller{Capabilities: caps, Principal: from, Role: t.role, Conv: target, Private: t.private, OAuthActor: actor, OAuthInstallation: installation}
 		caller.SlackRead = harness.SlackReadAllowed(c.r.opt.OwnerSlack, batch[0].row.Inbound, t.role, h, c.r.opt.SlackTeam)
 		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
 		var progress func(harness.Progress)
@@ -1402,7 +1412,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		notes = append(notes, h+" failed before starting: "+why)
 	}
 	notes = append(gated, notes...)
-	c.send(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes, refused: refused})
+	c.send(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes, refused: refused, identity: identity})
 }
 
 // commit ends the turn with harness h's outcome: h took the turn, so no
@@ -1738,7 +1748,7 @@ func (c *conv) jobEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEnd {
 		files[i] = core.File{Path: f.Path, Name: f.Name, MIME: mimeOf(f.Name)}
 	}
 	res.Answer = stripHarnessTag(res.Answer, d.harness)
-	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Notes: d.notes, Files: files, Tools: tools})
+	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Identity: d.identity, Notes: d.notes, Files: files, Tools: tools})
 	e.Harness, e.Session, e.Clean = d.harness, res.SessionID, e.State == store.TurnDone && !res.Unclean
 	if e.Reply != nil {
 		e.Reply.Text = c.r.scrub(e.Reply.Text)

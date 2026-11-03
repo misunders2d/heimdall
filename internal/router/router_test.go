@@ -150,6 +150,7 @@ type env struct {
 	logs     *syncBuffer       // the router's log
 	r        *Router           // the running router
 	sched    *scheduler.Config // the scheduler, when enabled
+	reverify func(context.Context, core.Principal) (scheduler.Verified, bool, error)
 }
 
 // syncBuffer is a log destination tests can read while the router writes.
@@ -240,6 +241,7 @@ func (e *env) start() {
 	}
 	if e.sched != nil {
 		e.opt.Jobs = scheduler.New(*e.sched, st, e.opt.Access, e.opt.Log)
+		e.opt.Jobs.Reverify = e.reverify
 	}
 	r := New(e.opt, st, iface)
 	e.r = r

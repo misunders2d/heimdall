@@ -9,6 +9,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -285,36 +286,62 @@ func (s *Scheduler) start(ctx context.Context, now time.Time) (wake time.Time) {
 	return wake
 }
 
-// launch evaluates the creator now (Slack live re-verification, admission,
-// role rules) and runs r: a notify job's text is enqueued, an agent job's
-// prompt is handed to the router. It reports a turn handed over.
-func (s *Scheduler) launch(ctx context.Context, j store.Job, d Def, sched *schedule.Schedule, r store.Run, now time.Time) bool {
-	p, v := j.Creator, Verified{}
-	if p.Platform == core.PlatformSlack {
+// ErrTemporary is a creator check that could not finish (a Slack error):
+// the run is retried before the ready signal. Any other check error
+// refuses the run.
+var ErrTemporary = errors.New("temporary Slack identity error")
+
+// verify is the creator now (§4): a Slack creator re-verified live, then
+// admission and the job's role rules.
+func (s *Scheduler) verify(ctx context.Context, j store.Job, d Def, now time.Time) (Verified, Target, error) {
+	v := Verified{Principal: j.Creator}
+	if j.Creator.Platform == core.PlatformSlack {
 		if s.Reverify == nil {
-			s.refuse(j, d, r, "Slack is not configured, so the creator cannot be re-verified")
-			return false
+			return v, Target{}, errors.New("Slack is not configured, so the creator cannot be re-verified")
 		}
 		vctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		var ok bool
-		var err error
-		v, ok, err = s.Reverify(vctx, p)
+		live, ok, err := s.Reverify(vctx, j.Creator)
 		cancel()
 		switch {
 		case err != nil:
-			s.endRun(j, d, s.retry(j, d, sched, r, now, "temporary Slack identity error"))
-			return false
+			return v, Target{}, ErrTemporary
 		case !ok:
-			s.refuse(j, d, r, "Slack identity no longer verified")
-			return false
+			return v, Target{}, errors.New("Slack identity no longer verified")
 		}
-		p = v.Principal
+		v = live
 	}
-	tgt, err := s.admit(j, d, p, now)
-	if err != nil {
+	tgt, err := s.admit(j, d, v.Principal, now)
+	return v, tgt, err
+}
+
+// Admit checks a scheduled turn's creator as the turn starts, before any
+// harness, so a run handed over earlier or replayed after a restart never
+// runs on an older check. The turn runs as v (with its Slack OAuth scope).
+// An error ends the turn first (Outcome.Identity): ErrTemporary retries,
+// any other refuses the run and pauses the job.
+func (s *Scheduler) Admit(ctx context.Context, t *Turn) (Verified, error) {
+	j, ok, err := s.st.Job(t.Job)
+	if err != nil || !ok {
+		return Verified{}, fmt.Errorf("job %s is unreadable", t.Job)
+	}
+	v, _, err := s.verify(ctx, j, t.Def, s.now())
+	return v, err
+}
+
+// launch checks the creator (verify) and runs r: a notify job's text is
+// enqueued, an agent job's prompt is handed to the router, which checks the
+// creator again as the turn starts (Admit). It reports a turn handed over.
+func (s *Scheduler) launch(ctx context.Context, j store.Job, d Def, sched *schedule.Schedule, r store.Run, now time.Time) bool {
+	v, tgt, err := s.verify(ctx, j, d, now)
+	switch {
+	case errors.Is(err, ErrTemporary):
+		s.endRun(j, d, s.retry(j, d, sched, r, now, err.Error()))
+		return false
+	case err != nil:
 		s.refuse(j, d, r, err.Error())
 		return false
 	}
+	p := v.Principal
 	if d.Kind == KindNotify {
 		end := store.RunEnd{ID: r.ID, Job: j.ID, State: store.RunOK}
 		if sched.OneOff() && r.Trigger != "manual" {
@@ -556,15 +583,16 @@ func (s *Scheduler) Begin(row store.InboundRow) (*Turn, bool) {
 
 // Outcome is how a scheduled turn ended, as the router saw it.
 type Outcome struct {
-	Turn    *Turn
-	TurnID  int64
-	Harness string // "" when no harness became ready
-	Result  harness.Result
-	Stopped bool     // !job stop or !job rm
-	Refused bool     // the creator's admission or role changed as the turn started
-	Notes   []string // why candidates failed before starting
-	Files   []core.File
-	Tools   []string // native tool names seen
+	Turn     *Turn
+	TurnID   int64
+	Harness  string // "" when no harness became ready
+	Result   harness.Result
+	Stopped  bool     // !job stop or !job rm
+	Refused  bool     // the creator's admission or role changed between candidates
+	Identity error    // Admit's error as the turn started: ErrTemporary, or a refusal
+	Notes    []string // why candidates failed before starting
+	Files    []core.File
+	Tools    []string // native tool names seen
 }
 
 var (
@@ -604,6 +632,12 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 	case o.Stopped:
 		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, "stopped by command"
 		run.State, run.Cause = store.RunCancelled, "stopped by command"
+	case errors.Is(o.Identity, ErrTemporary):
+		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "creator not verified"
+		run = s.retry(j, t.Def, sched, r, s.now(), o.Identity.Error())
+	case o.Identity != nil:
+		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "creator refused"
+		run, e.Notices = s.refusal(j, t.Def, r, o.Identity.Error())
 	case o.Refused:
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "creator refused"
 		run, e.Notices = s.refusal(j, t.Def, r, "admission or role changed")

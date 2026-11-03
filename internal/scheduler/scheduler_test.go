@@ -748,3 +748,32 @@ func TestHoldAtTurnStart(t *testing.T) {
 		t.Fatalf("held run did not start after the hold: %+v", r.runs(id))
 	}
 }
+
+// Admit, as a turn starts: a temporary Slack error retries the run before
+// the ready signal; an expiry that passed after the hand-over is no refusal.
+func TestAdmitAtTurnStart(t *testing.T) {
+	r := newRig(t)
+	r.s.cfg.Interfaces = append(r.s.cfg.Interfaces, core.PlatformSlack)
+	slackBoss := core.SlackPrincipal("boss@example.com", "T1", "boss")
+	r.s.access.Owners[slackBoss.Key()] = true
+	var verr error
+	r.s.Reverify = func(_ context.Context, p core.Principal) (Verified, bool, error) {
+		return Verified{Principal: p, OAuthActor: "sl_user_U1"}, true, verr
+	}
+	r.add(Caller{Principal: slackBoss, Role: core.RoleOwner, Conv: core.ConvKey{Interface: core.PlatformSlack, Chat: "D1"}, Private: true}, `{"name":"s","schedule":{"every":"1h"},"until":"61m","prompt":"p"}`)
+	r.now = r.now.Add(time.Hour)
+	r.tick()
+	turn, ok := r.s.Begin(r.rows[0])
+	if !ok {
+		t.Fatal("not begun")
+	}
+	r.now = r.now.Add(2 * time.Minute)
+	if v, err := r.s.Admit(context.Background(), turn); err != nil || v.OAuthActor != "sl_user_U1" {
+		t.Fatalf("admit after until: %+v %v", v, err)
+	}
+	verr = errors.New("timeout")
+	_, err := r.s.Admit(context.Background(), turn)
+	if e := r.s.End(Outcome{Turn: turn, Identity: err}); !errors.Is(err, ErrTemporary) || e.Run.Retry.IsZero() || e.Run.Cause != ErrTemporary.Error() {
+		t.Fatalf("temporary error: %v %+v", err, e.Run)
+	}
+}

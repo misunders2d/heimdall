@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -299,5 +301,54 @@ func TestJobCommandStoredWithItsAnswer(t *testing.T) {
 	jobs, err := e.st.Jobs(store.JobFilter{States: []string{store.JobActive, store.JobPaused}})
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("a replayed !job add left %d jobs (%v)", len(jobs), err)
+	}
+}
+
+// A run is checked as its turn starts, not only when it was handed over: a
+// Slack creator deactivated meanwhile (here across a restart, the run's
+// message replayed) is refused and the job paused; no harness runs.
+func TestScheduledCreatorCheckedAtTurnStart(t *testing.T) {
+	e := schedEnv(t, []string{"omp"}, "omp")
+	var live atomic.Bool
+	live.Store(true)
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.reverify = func(_ context.Context, p core.Principal) (scheduler.Verified, bool, error) {
+		return scheduler.Verified{Principal: p, OAuthActor: "sl_user_U1"}, live.Load(), nil
+	}
+	e.start()
+	boss := core.SlackPrincipal("boss@example.com", "T1", "boss")
+	e.f.in <- core.Inbound{Conv: group, MsgID: "add1", From: boss, Origin: core.OriginLive, Text: `!job add {"name":"slack job","schedule":{"every":"1h"},"to":"tg:-100","prompt":"check things"}`}
+	id := jobIDRE.FindString(e.reply().Text)
+	if id == "" {
+		t.Fatal("job not created")
+	}
+	// Handed over as the due loop does after its check, then a restart
+	// before the turn started, and the creator deactivated meanwhile.
+	e.stop()
+	stopOnce.Delete(e.st)
+	st, err := store.Open(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateRun(store.Run{Job: id, Version: 1, Slot: "manual:1", Due: time.Now(), Trigger: "manual", State: store.RunPending}, "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	runs, _ := st.Runs(store.RunFilter{Job: id})
+	if _, err := st.StartRun(runs[0], core.Inbound{Conv: core.ConvKey{Interface: "telegram", Chat: core.SchedChat(id)}, MsgID: fmt.Sprintf("run:%d:0", runs[0].ID), From: boss, Origin: core.OriginScheduled, Text: "check things", At: time.Now(),
+		Run: &core.ScheduledRun{Job: id, Run: runs[0].ID, Target: group}}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	live.Store(false)
+	e.start()
+	want(t, e.reply(), "refused", "Slack identity no longer verified", "— heimdall")
+	if j, _, _ := e.st.Job(id); j.State != store.JobPaused {
+		t.Fatalf("job %s (%s)", j.State, j.Reason)
+	}
+	for _, in := range fakeharness.Inputs(e.state) {
+		if strings.Contains(in.Text, "check things") {
+			t.Fatal("the refused creator's run reached a harness")
+		}
 	}
 }
