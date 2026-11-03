@@ -147,9 +147,12 @@ func (s *Scheduler) resolve(to string, c Caller) (Target, error) {
 	return t, nil
 }
 
+const untilUsage = "until: a future date (YYYY-MM-DD[THH:MM]) or a duration (72h, 30d)"
+
 // check validates d for c, the job's creator (its role now and where the
 // job was created), fills defaults and resolves the target and schedule.
-// anchor is the job's creation: fixed intervals count from it.
+// anchor is the job's creation: fixed intervals count from it. It holds at
+// every fire too, so nothing in it depends on the slot being ahead.
 func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *schedule.Schedule, error) {
 	owner := c.Role == core.RoleOwner
 	fail := func(format string, args ...any) (Target, *schedule.Schedule, error) {
@@ -179,9 +182,6 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	sched, err := schedule.Compile(d.Schedule, d.TZ, anchor)
 	if err != nil {
 		return fail("%v", err)
-	}
-	if _, ok := sched.Next(now); !ok {
-		return fail("schedule: no future run (a one-off in the past?)")
 	}
 	minGap := time.Minute
 	if !owner {
@@ -213,8 +213,8 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	}
 	if d.Until != "" {
 		until, err := s.until(d.Until, sched.Location(), now)
-		if err != nil || !until.After(now) {
-			return fail("until: a future date (YYYY-MM-DD[THH:MM]) or a duration (72h, 30d)")
+		if err != nil {
+			return fail(untilUsage)
 		}
 		d.Until = until.UTC().Format(time.RFC3339)
 	}

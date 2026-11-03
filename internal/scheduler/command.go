@@ -144,15 +144,21 @@ func (s *Scheduler) proposal(c Caller, raw []byte) (store.Job, error) {
 	return j, nil
 }
 
-// validate is check plus a future run.
+// validate is check plus what only creating or changing a job needs: a
+// future run, and an expiry still ahead. A due run is never refused for
+// those (its slot is past by then).
 func (s *Scheduler) validate(d *Def, c Caller, anchor, now time.Time) (*schedule.Schedule, error) {
 	_, sched, err := s.check(d, c, anchor, now)
-	if err == nil {
-		if _, ok := sched.Next(now); !ok {
-			err = errors.New("schedule: no future run (a one-off in the past?)")
-		}
+	if err != nil {
+		return nil, err
 	}
-	return sched, err
+	if _, ok := sched.Next(now); !ok {
+		return nil, errors.New("schedule: no future run (a one-off in the past?)")
+	}
+	if until, err := time.Parse(time.RFC3339, d.Until); err == nil && !until.After(now) {
+		return nil, errors.New(untilUsage)
+	}
+	return sched, nil
 }
 
 // creator is the caller whose role rules a job keeps: its creator, with

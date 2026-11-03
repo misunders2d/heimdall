@@ -632,3 +632,26 @@ func TestIdempotentReplayOnce(t *testing.T) {
 		t.Fatalf("a second crash after ready re-ran the run again: %+v", got)
 	}
 }
+
+// A due one-off starts: its slot being past is no reason to refuse it.
+// Only creating or changing a job needs a future run (or a future until).
+func TestDueOneOffStarts(t *testing.T) {
+	r := newRig(t) // 12:00 in Kyiv
+	agent := r.add(asBoss, `{"name":"once","schedule":{"at":"2026-11-03T12:30"},"prompt":"p"}`)
+	note := r.add(asWork, `{"name":"ping","kind":"notify","schedule":{"at":"2026-11-03T12:30"},"text":"stand up"}`)
+	if out := r.cmd(asBoss, `job add {"name":"past","schedule":{"at":"2026-11-03T11:00"},"prompt":"p"}`); !strings.Contains(out, "no future run") {
+		t.Fatalf("a past one-off was created: %s", out)
+	}
+	r.sent()
+	r.now = r.now.Add(31 * time.Minute)
+	r.tick()
+	if j := r.job(agent); len(r.rows) != 1 || j.State != store.JobActive {
+		t.Fatalf("one-off agent job: dispatched %d, job %s (%s)", len(r.rows), j.State, j.Reason)
+	}
+	if j, sent := r.job(note), texts(r.sent()); j.State != store.JobDone || !strings.Contains(sent, "stand up") {
+		t.Fatalf("one-off notify job: %s (%s), sent %q", j.State, j.Reason, sent)
+	}
+	if e := r.finish("done", Outcome{Harness: "pi"}); e.Run.State != store.RunOK || e.Run.JobState != store.JobDone {
+		t.Fatalf("one-off end: %+v", e.Run)
+	}
+}
