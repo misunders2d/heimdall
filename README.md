@@ -196,6 +196,7 @@ Commands work the same on every interface:
 ```
 !help              list commands
 !status            what is running and queued in this conversation
+!which             the harness this conversation uses now
 !stop              stop the current turn and clear your queued messages
 !cancel            clear your queued messages; the turn keeps running
 !reset             your next message here starts fresh native sessions
@@ -255,7 +256,7 @@ whoever types, so list `local:...` owners only in test configs.
 
 Apache-2.0. The harness adapters are ported from AgentNet; see [NOTICE](NOTICE).
 
-Accepted `commands.unmentioned` entries: `stop`, `cancel`, `reset`, `chatid`, `help`, `status`, `all`. Exact standalone controls accept bare/slash forms (including `/abort`, `/nevermind`); `help`/`status` use `/help`, `/status`, `!help`, `!status`. `use` and `next` require addressing unless `all` is selected.
+Accepted `commands.unmentioned` entries: `stop`, `cancel`, `reset`, `chatid`, `help`, `status`, `which`, `all`. Exact standalone controls accept bare/slash forms (including `/abort`, `/nevermind`); `help`/`status`/`which` use `/help`, `/status`, `/which`, `!help`, `!status`, `!which`. `use` and `next` require addressing unless `all` is selected.
 
 Owner Slack review fixes (2026-11-01): callbacks bypass durable staging and relay
 only after Socket Mode acknowledgement. Identity/API failures drop callback

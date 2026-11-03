@@ -198,7 +198,7 @@ func (c *Config) fill(staged bool) error {
 	}
 	if c.Commands != nil {
 		for _, name := range c.Commands.Unmentioned {
-			if !slices.Contains([]string{"stop", "cancel", "reset", "chatid", "help", "status", "all"}, name) {
+			if !slices.Contains([]string{"stop", "cancel", "reset", "chatid", "help", "status", "which", "all"}, name) {
 				return errors.New("commands.unmentioned contains an unknown command")
 			}
 		}

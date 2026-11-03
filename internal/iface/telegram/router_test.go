@@ -92,8 +92,8 @@ func TestTelegramThroughRouter(t *testing.T) {
 		reply float64
 		parts []string
 	}{
-		"private": {dm, 101, []string{"omp#1", "role owner", "verified telegram:42", `last="hello from the owner"`, "PI_EXTERNAL_CHAT_ID=tg_chat_42 PI_EXTERNAL_DEFAULT_DELIVERY={\\\"chatId\\\":42,\\\"platform\\\":\\\"telegram\\\",\\\"sessionKey\\\":\\\"tg_chat_42\\\"} PI_EXTERNAL_MCP_PRIVATE=1 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=0 PI_TRANSPORT_CHILD=1", "mem= ", "— omp"}},
-		"group":   {group, 102, []string{"omp#1", "role employee", "verified telegram:43", `last="hello from a colleague"`, "PI_EXTERNAL_CHAT_ID=tg_chat_-1002 PI_EXTERNAL_DEFAULT_DELIVERY={\\\"chatId\\\":-1002,\\\"platform\\\":\\\"telegram\\\",\\\"sessionKey\\\":\\\"tg_chat_-1002\\\"} PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_43 PI_RESTRICTED_EXTERNAL_USER=1 PI_TRANSPORT_CHILD=1", "mem=1 ", "— omp"}},
+		"private": {dm, 101, []string{"omp#1", "role owner", "verified telegram:42", `last="hello from the owner"`, "PI_EXTERNAL_CHAT_ID=tg_chat_42 PI_EXTERNAL_DEFAULT_DELIVERY={\\\"chatId\\\":42,\\\"platform\\\":\\\"telegram\\\",\\\"sessionKey\\\":\\\"tg_chat_42\\\"} PI_EXTERNAL_MCP_PRIVATE=1 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_42 PI_RESTRICTED_EXTERNAL_USER=0 PI_TRANSPORT_CHILD=1", "mem= "}},
+		"group":   {group, 102, []string{"omp#1", "role employee", "verified telegram:43", `last="hello from a colleague"`, "PI_EXTERNAL_CHAT_ID=tg_chat_-1002 PI_EXTERNAL_DEFAULT_DELIVERY={\\\"chatId\\\":-1002,\\\"platform\\\":\\\"telegram\\\",\\\"sessionKey\\\":\\\"tg_chat_-1002\\\"} PI_EXTERNAL_MCP_PRIVATE=0 PI_EXTERNAL_PLATFORM=telegram PI_EXTERNAL_USER_ID=tg_user_43 PI_RESTRICTED_EXTERNAL_USER=1 PI_TRANSPORT_CHILD=1", "mem=1 "}},
 	} {
 		if tc.b == nil {
 			t.Fatalf("%s: no reply in %v", name, api.sentBodies())
@@ -103,6 +103,9 @@ func TestTelegramThroughRouter(t *testing.T) {
 			if !strings.Contains(text, p) {
 				t.Errorf("%s reply %q lacks %q", name, text, p)
 			}
+		}
+		if strings.Contains(text, "\n— ") {
+			t.Errorf("%s reply %q is signed", name, text)
 		}
 		if rp, _ := tc.b["reply_parameters"].(map[string]any); rp["message_id"] != tc.reply {
 			t.Errorf("%s reply parameters %v", name, tc.b["reply_parameters"])

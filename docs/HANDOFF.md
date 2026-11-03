@@ -50,9 +50,9 @@ AGY retains the single-turn adapter because no multi-turn protocol is exposed.
 
 Stop now emits one command acknowledgement across interfaces, suppressing the
 cancelled turn's extra final reply while preserving storage/status completion.
-Router strips repeated matching trailing harness signatures before appending
-its own. The live duplicate's exact native text is unavailable; regression
-covers a native answer ending with the router's signature.
+Harness replies carry no signature (owner, 2026-11-03); `!which` names the
+harness. Router still strips repeated trailing `— <harness>` signatures a
+model echoes from history; regression covers a native answer ending with one.
 
 Regression map: harness `warm_test.go` (reuse/latency, launch isolation,
 idle/lifetime/LRU/reset/status, idle crash, native interrupt/run timeout);
@@ -726,8 +726,9 @@ usernames and tokens live only outside the repository.
    -config <scratch config> 2>> <scratch log>`. The owner sends, in a private
    chat with the test bot: a short synthetic prompt, `!status`, `!help`,
    `/start`; optionally a group test (reply to a bot message; for plain
-   `@bot` mentions see item 2). Expected: each answered as a reply, tagged
-   `— <harness>` or `— heimdall`; the log shows `turn N ... ended: done`.
+   `@bot` mentions see item 2). Expected: each answered as a reply; harness
+   answers unsigned, Heimdall's own replies end `— heimdall`; the log shows
+   `turn N ... ended: done`.
    Then the Telegram behaviour, each checked once: typing while a turn
    runs; a message mid-turn (steers); `stop`; `cancel`; `/reset`; a reply to
    an earlier message; a forwarded message; a photo ("what colour?"); a text

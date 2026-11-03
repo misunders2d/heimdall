@@ -13,6 +13,7 @@ const (
 	cmdMessage = "message" // plain text, or !<harness> / !next with Text
 	cmdHelp    = "help"
 	cmdStatus  = "status"
+	cmdWhich   = "which" // the harness this conversation uses
 	cmdStop    = "stop"
 	cmdCancel  = "cancel" // clear queued messages
 	cmdReset   = "reset"  // forget the caller's native sessions here
@@ -61,6 +62,8 @@ func parseCommand(text string) command {
 		return command{Kind: cmdHelp}
 	case "status":
 		return command{Kind: cmdStatus}
+	case "which":
+		return command{Kind: cmdWhich}
 	case "stop":
 		return command{Kind: cmdStop}
 	case "cancel":
@@ -102,6 +105,7 @@ func helpText(order []string) string {
 		"Heimdall commands:",
 		"!help — this list",
 		"!status — what is running and queued in this conversation (chat + thread)",
+		"!which — the harness this conversation (chat + thread) uses now",
 		"!stop (or stop) — stop the current turn and clear your queued messages",
 		"!cancel (or cancel, abort, nevermind) — clear your queued messages; the turn keeps running",
 		"!reset (or reset) — your next message here starts a fresh session (stops your running turn)",
@@ -111,7 +115,7 @@ func helpText(order []string) string {
 		"!<harness> <msg> — send only this message to <harness>",
 		"!next <msg> — queue as a follow-up instead of steering the running turn",
 		"Harnesses: " + strings.Join(harness.Names(), ", ") + ".",
-		"Messages sent while a turn runs steer it by default; replies are tagged with the harness that produced them.",
+		"Messages sent while a turn runs steer it by default.",
 		"The owner's stop and cancel clear everyone's queued messages; only the turn's sender or the owner can stop it.",
 	}, "\n")
 }

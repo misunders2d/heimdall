@@ -735,6 +735,9 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 	case cmdStatus:
 		c.answer(row, store.CommandEnd{Detail: "status"}, c.status())
 		return false
+	case cmdWhich:
+		c.answer(row, store.CommandEnd{Detail: "which"}, c.which())
+		return false
 	case cmdUse:
 		c.r.warm.Invalidate(c.key, "")
 		text := "This conversation now uses " + cmd.Harness + " (no fallback) until !use default."
@@ -939,6 +942,34 @@ func (c *conv) status() string {
 		held += len(a.rows)
 	}
 	fmt.Fprintf(&b, "Queued: %d message(s)", len(c.queue)+held)
+	return b.String()
+}
+
+// which names the harness this conversation uses now. Answers carry no
+// signature, so it also names the running turn's harness and, when fallback
+// or a one-off !<harness> made it differ, the one the last reply came from.
+func (c *conv) which() string {
+	order := strings.Join(c.r.opt.Order, " → ")
+	var b strings.Builder
+	selected, _ := c.r.store.ChatHarness(c.key)
+	if selected != "" {
+		fmt.Fprintf(&b, "%s (set with !use; !use default goes back to %s)", selected, order)
+	} else if len(c.r.opt.Order) > 0 {
+		selected = c.r.opt.Order[0]
+		fmt.Fprintf(&b, "%s (default order: %s)", selected, order)
+	} else {
+		b.WriteString("no harness (empty default order)")
+	}
+	if t := c.turn; t != nil {
+		h := t.harness
+		if h == "" {
+			h = "starting (" + strings.Join(t.candidates, " → ") + ")"
+		}
+		fmt.Fprintf(&b, "\nRunning now: %s.", h)
+	}
+	if last, err := c.r.store.LastTurnHarness(c.key); err == nil && last != "" && last != selected {
+		fmt.Fprintf(&b, "\nLast reply came from %s.", last)
+	}
 	return b.String()
 }
 
@@ -1396,10 +1427,8 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 			res.Answers = answers
 		}
 	}
-	tag := d.harness
-	if tag == "" {
-		tag = "heimdall"
-	}
+	// Harness answers carry no signature (!which tells); only Heimdall's
+	// own notice is signed. Notes stay as a plain footer.
 	notes := d.notes
 	if res.Warning != "" {
 		notes = append(notes, res.Warning)
@@ -1407,12 +1436,18 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	for _, s := range d.skipped {
 		notes = append(notes, "file not sent: "+s)
 	}
-	footer := "\n\n— " + tag
+	var footer string
 	if len(notes) > 0 {
 		for i := range notes {
 			notes[i] = c.r.scrub(notes[i])
 		}
-		footer += " (" + strings.Join(clipAll(notes, 160), "; ") + ")"
+		footer = "(" + strings.Join(clipAll(notes, 160), "; ") + ")"
+	}
+	if d.harness == "" {
+		footer = strings.TrimSpace("— heimdall " + footer)
+	}
+	if footer != "" {
+		footer = "\n\n" + footer
 	}
 	e := store.TurnEnd{Harness: d.harness, Session: res.SessionID, Forget: t.reset}
 	var text string
@@ -1454,7 +1489,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		text = "Attachment"
 	}
 	if text+footer != "" {
-		e.Reply.Text = c.r.scrub(stripHarnessTag(text, tag) + footer)
+		e.Reply.Text = c.r.scrub(stripHarnessTag(text, d.harness) + footer)
 	}
 	if e.State == store.TurnCancelled && t.stopped.Load() {
 		e.Reply = nil

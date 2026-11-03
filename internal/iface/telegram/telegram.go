@@ -497,11 +497,12 @@ func usernameByte(s string, i int) bool {
 }
 
 // slashCommands map Telegram /commands to Heimdall's: the hub's /start
-// (help), /stop, /reset and /chatid, plus /help, /status and /cancel.
+// (help), /stop, /reset and /chatid, plus /help, /status, /which and /cancel.
 var slashCommands = map[string]string{
 	"start":  "!help",
 	"help":   "!help",
 	"status": "!status",
+	"which":  "!which",
 	"stop":   "!stop",
 	"cancel": "!cancel",
 	"reset":  "!reset",

@@ -807,6 +807,7 @@ func TestSlashCommands(t *testing.T) {
 		"/start@Heimdall_Test_Bot":     "!help",
 		"/help":                        "!help",
 		"/status":                      "!status",
+		"/which@Heimdall_Test_Bot":     "!which",
 		"/stop":                        "!stop",
 		"/STOP@heimdall_test_bot":      "!stop",
 		"@Heimdall_Test_Bot /stop":     "!stop",

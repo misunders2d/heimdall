@@ -13,7 +13,7 @@ func TestReviewSlashControlsSharedTransports(t *testing.T) {
 			t.Fatal("targeted Telegram control", word)
 		}
 	}
-	for _, word := range []string{"help", "status"} {
+	for _, word := range []string{"help", "status", "which"} {
 		for _, prefix := range []string{"!", "/"} {
 			raw := prefix + word
 			if !UnmentionedCommand(raw, NormalizeSlash(raw, ""), "", []string{word}) {

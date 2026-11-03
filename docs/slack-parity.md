@@ -125,7 +125,7 @@ source-selection exceptions. No required transport item remains deferred.
 | G10 | **Clear rejection** (`ok:false`, not ambiguous) → the answer text is written into the status message instead (`chat.update`). | **ported** — Clear rejection attempts whole-answer status fallback. If that fails, persist delivery_failed and keep Final answer not sent visible across restart. `internal/iface/slack/send.go`, `progress.go`. |
 | G11 | Reaction-only answer deletes status first; compact to reacted text only if delete fails. Source: `extensions/slack.ts:584-600`, `:645-647`. | **improved** — Fresh final posts, stable outbound IDs, per-part reconciliation before retries, delete-before-compact status cleanup, rejection fallback. At-least-once remains. `internal/iface/slack/send.go:70` |
 | G12 | `stop` sets the status to "stopped". | **ported** — Optional generic lifecycle + native public progress; NFKC/privacy/budget filtering, seven-second change-only updates, disable-on-error and terminal states. `internal/iface/slack/progress.go:89` |
-| G13 | Command replies (`say`) and failure texts are separate thread messages; the status message is not used for them. | **generic reuse** — Commands and generic failures use durable separate replies, tagged by Heimdall/harness. `internal/router/router.go:671` |
+| G13 | Command replies (`say`) and failure texts are separate thread messages; the status message is not used for them. | **generic reuse** — Commands and generic failures use durable separate replies; Heimdall's own end `— heimdall`, harness answers are unsigned (`!which`). `internal/router/router.go:671` |
 
 ### H. Formatting and chunking
 

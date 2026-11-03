@@ -43,7 +43,7 @@ func UnmentionedCommand(raw, normalized, bot string, allowed []string) bool {
 			return IsCommand(normalized)
 		}
 	}
-	// help/status require their command spelling; bare words remain prompts.
+	// help/status/which require their command spelling; bare words remain prompts.
 	if !IsCommand(normalized) {
 		return false
 	}
@@ -54,7 +54,7 @@ func UnmentionedCommand(raw, normalized, bot string, allowed []string) bool {
 	word := strings.ToLower(words[0])
 	if strings.HasPrefix(word, "!") {
 		word = strings.TrimPrefix(word, "!")
-		if word != "help" && word != "status" {
+		if word != "help" && word != "status" && word != "which" {
 			return false
 		}
 	}
@@ -91,7 +91,7 @@ func NormalizeSlash(text, bot string) string {
 	switch strings.ToLower(word) {
 	case "abort", "nevermind":
 		return "!cancel"
-	case "stop", "cancel", "reset", "chatid", "help", "status":
+	case "stop", "cancel", "reset", "chatid", "help", "status", "which":
 		return "!" + strings.ToLower(word)
 	case "start":
 		return "!help"

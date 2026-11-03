@@ -150,7 +150,9 @@ the `heimdall-live` unit.
   (configurable). Fall back to the next harness only when the previous one
   failed before its turn started (before any side effect is possible).
   Explicit choices (`!use <harness>`, `!<harness> <msg>`) never fall back.
-  Every reply is tagged with the harness that produced it.
+  Harness replies carry no signature (owner, 2026-11-03); `!which` names the
+  conversation's harness, the running turn's, and the last reply's when it
+  differs. Heimdall's own notices end `— heimdall`.
 - **Steer and follow-up.** Mid-turn messages steer by default; `!next`
   queues instead. Steers that wait while another is handed over go to the
   harness together, as one steer framed in order with all their images (at
@@ -182,7 +184,7 @@ the `heimdall-live` unit.
   between a successful platform send and its local acknowledgement can repeat
   that one message. Say so; never claim exactly-once.
 - **Commands** use the `!` prefix on every interface (Slack forbids `/` in
-  threads): `!help`, `!status`, `!stop`, `!cancel`, `!reset`, `!chatid`,
+  threads): `!help`, `!status`, `!which`, `!stop`, `!cancel`, `!reset`, `!chatid`,
   `!use <harness>` (sticky per conversation: chat + thread), `!use default`,
   `!<harness> <msg>` (that message only), `!next <msg>`. The hub's control
   words work alone in a message without the `!`: `stop`, `cancel`

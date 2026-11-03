@@ -13,8 +13,8 @@ import (
 
 func TestDuplicateHarnessTag(t *testing.T) {
 	for _, text := range []string{"answer\n\n— claude", "answer\n— claude\n— claude", "answer"} {
-		if got := stripHarnessTag(text, "claude") + "\n\n— claude"; got != "answer\n\n— claude" {
-			t.Fatalf("duplicate footer: %q", got)
+		if got := stripHarnessTag(text, "claude"); got != "answer" {
+			t.Fatalf("echoed signature kept: %q", got)
 		}
 	}
 	if got := stripHarnessTag("— claude is quoted\nanswer", "claude"); got != "— claude is quoted\nanswer" {
@@ -105,8 +105,9 @@ func TestDuplicateHarnessTagDelivery(t *testing.T) {
 	e.start()
 	e.send(owner, "c1", "DUPLICATE_TAG")
 	out := e.reply()
-	if strings.Count(out.Text, "— claude") != 1 {
-		t.Fatalf("duplicate signature: %q", out.Text)
+	want(t, out, "DUPLICATE_TAG")
+	if strings.Contains(out.Text, "— claude") {
+		t.Fatalf("echoed signature delivered: %q", out.Text)
 	}
 }
 
@@ -120,7 +121,8 @@ func TestIdleExitRacingNextTurnRetriesSameHarness(t *testing.T) {
 	want(t, e.reply(), "turn=1")
 	e.send(owner, "c1", "after idle exit")
 	out := e.reply()
-	want(t, out, "after idle exit", "— omp")
+	want(t, out, "after idle exit")
+	unsigned(t, out)
 	if strings.Contains(out.Text, "failed") {
 		t.Fatalf("idle crash leaked to user: %s", out.Text)
 	}

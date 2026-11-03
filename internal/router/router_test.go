@@ -299,6 +299,14 @@ func want(t *testing.T, out core.Outbound, parts ...string) {
 	}
 }
 
+// unsigned fails a harness reply that carries a "— <name>" signature.
+func unsigned(t *testing.T, out core.Outbound) {
+	t.Helper()
+	if strings.Contains(out.Text, "\n— ") {
+		t.Fatalf("reply %q is signed", out.Text)
+	}
+}
+
 // waitReady waits until the owner's turn in chat is running on omp, as
 // !status reports it once the harness is ready.
 func (e *env) waitReady(chat string) { e.t.Helper(); e.waitReadyOn(chat, "omp") }
@@ -314,11 +322,12 @@ func (e *env) waitReadyOn(chat, h string) {
 	e.t.Fatal("turn never became ready")
 }
 
-func TestReplyTaggedAndSessionResumed(t *testing.T) {
+func TestReplyUnsignedAndSessionResumed(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex", "claude", "pi"}, "omp", "codex", "claude", "pi")
 	id := e.send(owner, "c1", "hello")
 	out := e.reply()
-	want(t, out, "omp#1 resumed=false", "— omp")
+	want(t, out, "omp#1 resumed=false")
+	unsigned(t, out)
 	want(t, out, "role owner", "verified fake:owner", `from \"owner\"`)
 	if out.ReplyTo != id || out.Conv.Chat != "c1" {
 		t.Fatalf("reply routing: %+v", out)
@@ -329,12 +338,15 @@ func TestReplyTaggedAndSessionResumed(t *testing.T) {
 func TestFallbackOnlyBeforeTurnStarted(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex", "claude"}, "omp", "codex", "claude")
 	e.send(owner, "c1", "x FAILPRE=omp")
-	want(t, e.reply(), "codex#1", "— codex (omp failed before starting: ")
+	out := e.reply()
+	want(t, out, "codex#1", "\n\n(omp failed before starting: ")
+	unsigned(t, out)
 
 	// After the harness was ready, a failure is reported, never retried elsewhere.
 	e.send(owner, "c2", "x FAILPOST=omp")
-	out := e.reply()
-	want(t, out, "⚠ omp failed: provider/model error — OMP ended before its request settled (omp exited: exit status 4); stderr: fake: crashed mid-turn. Please retry, or send reset if this keeps happening.", "— omp")
+	out = e.reply()
+	want(t, out, "⚠ omp failed: provider/model error — OMP ended before its request settled (omp exited: exit status 4); stderr: fake: crashed mid-turn. Please retry, or send reset if this keeps happening.")
+	unsigned(t, out)
 	if strings.Contains(out.Text, "codex") {
 		t.Fatalf("fell back after side effects were possible: %q", out.Text)
 	}
@@ -385,6 +397,43 @@ func TestUseIsStickyPerConversation(t *testing.T) {
 	in(t2, "!status", "Harness: default order")
 	in(t1, "!use default", "This conversation is back to the default order: omp → codex")
 	in(t1, "two", "omp#1")
+}
+
+// !which names the conversation's harness: sticky, else the default
+// order's first; the running turn's; and the last reply's when it differs.
+func TestWhich(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+	which := func(chat, text string) {
+		t.Helper()
+		e.send(owner, chat, "!which")
+		if out := e.reply(); out.Text != text+"\n— heimdall" {
+			t.Fatalf("!which = %q, want %q", out.Text, text)
+		}
+	}
+	which("c1", "omp (default order: omp → codex)")
+	e.send(owner, "c1", "!codex once")
+	want(t, e.reply(), "codex#1")
+	which("c1", "omp (default order: omp → codex)\nLast reply came from codex.")
+	e.send(owner, "c1", "!use codex")
+	want(t, e.reply(), "now uses codex")
+	which("c1", "codex (set with !use; !use default goes back to omp → codex)")
+	e.send(owner, "c1", "!use default")
+	want(t, e.reply(), "back to the default order")
+	e.send(owner, "c1", "plain")
+	want(t, e.reply(), "omp#1")
+	which("c1", "omp (default order: omp → codex)")
+
+	// Fallback answers on the next harness; other conversations are unaffected.
+	e.send(owner, "c2", "x FAILPRE=omp")
+	want(t, e.reply(), "codex#1", "(omp failed before starting: ")
+	which("c2", "omp (default order: omp → codex)\nLast reply came from codex.")
+	which("c3", "omp (default order: omp → codex)")
+
+	e.send(owner, "c3", "SLEEP")
+	e.waitReady("c3")
+	which("c3", "omp (default order: omp → codex)\nRunning now: omp.")
+	e.send(owner, "c3", "!stop")
+	want(t, e.reply(), "Stopping current run")
 }
 
 func TestMidTurnMessageSteers(t *testing.T) {
@@ -564,7 +613,11 @@ func TestStopCancelsTurn(t *testing.T) {
 func TestHelpStatusAndUnknownCommand(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	e.send(owner, "c1", "!help")
-	want(t, e.reply(), "!next <msg>", "!use default", "— heimdall")
+	out := e.reply()
+	want(t, out, "!next <msg>", "!use default", "!which — ", "— heimdall")
+	if strings.Contains(out.Text, "tagged") {
+		t.Fatalf("help still mentions tagged replies: %q", out.Text)
+	}
 	e.send(owner, "c1", "!status")
 	want(t, e.reply(), "Running: nothing", "Queued: 0")
 	e.send(owner, "c1", "!frobnicate")
@@ -628,6 +681,9 @@ func TestParseCommand(t *testing.T) {
 		"!cancel":         {Kind: cmdCancel},
 		"!reset":          {Kind: cmdReset},
 		"!chatid":         {Kind: cmdChatID},
+		"!which":          {Kind: cmdWhich},
+		"/which":          {Kind: cmdWhich},
+		"which":           {Kind: cmdMessage, Text: "which"},
 		"stop now":        {Kind: cmdMessage, Text: "stop now"},
 		"!next stop":      {Kind: cmdMessage, Next: true, Text: "stop"},
 	}
@@ -1242,7 +1298,8 @@ func TestReactions(t *testing.T) {
 	e.f.react.Store(true)
 	id := e.send(owner, "c1", "hi REACT=👍")
 	out := e.reply()
-	want(t, out, "omp#1", "— omp")
+	want(t, out, "omp#1")
+	unsigned(t, out)
 	if strings.Contains(out.Text, "[react:") || !slices.Equal(out.Reactions, []core.Reaction{{MsgID: id, Emoji: "👍"}}) || !out.Formatted {
 		t.Fatalf("reply %+v", out)
 	}
@@ -1256,7 +1313,7 @@ func TestReactions(t *testing.T) {
 		t.Fatalf("reaction-only reply %+v", out)
 	}
 	e.send(owner, "c1", "REACT=🦀 REACTONLY")
-	if out := e.reply(); out.Text != "Could not confirm reaction delivery.\n\n— omp" || out.Reactions != nil || out.Formatted {
+	if out := e.reply(); out.Text != "Could not confirm reaction delivery." || out.Reactions != nil || out.Formatted {
 		t.Fatalf("invalid reaction reply %+v", out)
 	}
 
@@ -1304,7 +1361,9 @@ func TestAlbumCaptionChoiceAppliesToAllParts(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
 	e.album(owner, "c1", "g1", "!codex what are these?", true)
 	e.album(owner, "c1", "g1", "", true)
-	want(t, e.reply(), "codex#1", "— codex")
+	out := e.reply()
+	want(t, out, "codex#1")
+	unsigned(t, out)
 	if inputs := fakeharness.Inputs(e.state); len(inputs) != 1 || inputs[0].Images != 2 {
 		t.Fatalf("inputs %+v", inputs)
 	}
@@ -1394,7 +1453,11 @@ func TestOutboxFilesAreSentAfterTheAnswer(t *testing.T) {
 	e.f.files.Store(true)
 	id := e.send(owner, "c1", "make WRITE=b.txt:second WRITE=a.png:first WRITE=empty:")
 	out := e.reply()
-	want(t, out, "omp#1", "— omp (file not sent: empty: empty)")
+	want(t, out, "omp#1")
+	if !strings.HasSuffix(out.Text, "\n\n(file not sent: empty: empty)") {
+		t.Fatalf("note footer: %q", out.Text)
+	}
+	unsigned(t, out)
 	var sent []string
 	for range 2 {
 		f := e.reply()
@@ -1615,7 +1678,8 @@ func TestClaudeLateTurnFailureKeepsTheAnswer(t *testing.T) {
 	e.waitReadyOn("c1", "claude")
 	e.send(owner, "c1", "also CHARLIE")
 	out := e.reply()
-	want(t, out, "claude#1 resumed=false", "— claude (a later message was not answered: Claude reported an error: fake late failure)")
+	want(t, out, "claude#1 resumed=false", "\n\n(a later message was not answered: Claude reported an error: fake late failure)")
+	unsigned(t, out)
 	e.send(owner, "c1", "after")
 	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
 }
@@ -1787,8 +1851,9 @@ func TestAnswerBeforeReadyNeverFallsBack(t *testing.T) {
 			e := setup(t, core.ModeCorporate, []string{"claude", "codex"}, "claude", "codex")
 			e.send(owner, "c1", "x "+word)
 			out := e.reply()
-			want(t, out, text, "— claude")
-			if in := fakeharness.Inputs(e.state); len(in) != 1 || in[0].Harness != "claude" || strings.Contains(out.Text, "— codex") {
+			want(t, out, text)
+			unsigned(t, out)
+			if in := fakeharness.Inputs(e.state); len(in) != 1 || in[0].Harness != "claude" {
 				t.Fatalf("fell back: reply %q, inputs %+v", out.Text, in)
 			}
 		})
@@ -1817,7 +1882,9 @@ func TestClaudeLateTurnExitWithoutResult(t *testing.T) {
 	e.send(owner, "c1", "work STEERLATE LATEEXIT")
 	e.waitReadyOn("c1", "claude")
 	e.send(owner, "c1", "also CHARLIE")
-	want(t, e.reply(), "claude#1 resumed=false", "— claude (a later message was not answered: Claude exited without answering it)")
+	out := e.reply()
+	want(t, out, "claude#1 resumed=false", "\n\n(a later message was not answered: Claude exited without answering it)")
+	unsigned(t, out)
 	e.send(owner, "c1", "after")
 	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
 }

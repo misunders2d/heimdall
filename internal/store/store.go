@@ -517,6 +517,17 @@ func (s *Store) ChatHarness(conv core.ConvKey) (string, error) {
 	return h, err
 }
 
+// LastTurnHarness is the harness that ran conv's newest ended turn ("" if
+// none). Candidates that failed before starting are unbound, so never count.
+func (s *Store) LastTurnHarness(conv core.ConvKey) (string, error) {
+	var h string
+	err := s.db.QueryRow(`SELECT harness FROM turns WHERE iface=? AND chat=? AND thread=? AND harness!='' AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1`, conv.Interface, conv.Chat, conv.Thread).Scan(&h)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return h, err
+}
+
 // setChatHarness makes harness sticky for conv; "" restores the default order.
 func setChatHarness(tx *sql.Tx, conv core.ConvKey, harness string) error {
 	if harness == "" {
