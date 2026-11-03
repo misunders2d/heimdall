@@ -1148,14 +1148,11 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 		parts = append(parts, recent)
 		contextParts = append(contextParts, recent)
 	}
-	if t.job != nil {
-		notes := t.job.Notes
-		if len(t.job.History) > 0 {
-			notes = append(notes, untrusted("job history", strings.Join(t.job.History, "\n---\n")))
-		}
-		parts, contextParts = append(parts, notes...), append(contextParts, notes...)
-	} else {
+	if t.job == nil {
 		c.react(t, batch)
+	} else if len(t.job.History) > 0 {
+		h := untrusted("job history", strings.Join(t.job.History, "\n---\n"))
+		parts, contextParts = append(parts, h), append(contextParts, h)
 	}
 	for _, it := range batch {
 		blocks, ims := c.files(t, it)
@@ -1163,6 +1160,11 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 		human = append(human, humanText(it, blocks))
 		contextParts = append(contextParts, frameContext(it))
 		images = append(images, ims...)
+	}
+	if t.job != nil {
+		// The job's own instructions (quiet, AgentNet delivery) follow its
+		// prompt in the native message: as turn context, Pi ignored them.
+		parts, human = append(parts, t.job.Notes...), append(human, t.job.Notes...)
 	}
 	if len(images) > maxImages {
 		images = images[:maxImages]

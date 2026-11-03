@@ -122,6 +122,15 @@ func TestScheduledQuietNotifyAndFiles(t *testing.T) {
 	}
 }
 
+// The quiet instruction follows the prompt in the native message, never
+// only in Pi's turn context (live Pi ignored it there).
+func TestScheduledNoteInNativeMessage(t *testing.T) {
+	e := schedEnv(t, []string{"pi"}, "pi")
+	id := e.addJob(`{"name":"quiet","schedule":{"every":"1h"},"quiet":true,"prompt":"check things"}`)
+	e.ask(ownerDM, "!job run "+id)
+	want(t, e.reply(), `last="[Scheduled job: if there is nothing new to report, answer exactly NO_UPDATE`, frameSch[:len(`scheduled job \"`)])
+}
+
 func TestScheduledFailureAndUnverifiedNotices(t *testing.T) {
 	e := schedEnv(t, []string{"omp"}, "omp")
 	// An unmet check on a shared target withholds the answer: the target
