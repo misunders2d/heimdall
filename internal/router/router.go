@@ -1234,7 +1234,10 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 	// A scheduled run is decided against, and runs for, its job's target;
 	// it never captures memory.
 	target, refused := c.key, false
-	from, actor, installation := t.from, batch[0].row.OAuthActor, batch[0].row.OAuthInstallation
+	from, actor, installation := t.from, "", ""
+	if len(batch) > 0 {
+		actor, installation = batch[0].row.OAuthActor, batch[0].row.OAuthInstallation
+	}
 	var identity error
 	if t.job != nil {
 		target, memory = t.job.Target.Conv, false
