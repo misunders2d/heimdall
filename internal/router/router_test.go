@@ -979,11 +979,12 @@ func TestTypingWhileTurnRuns(t *testing.T) {
 	e.send(owner, "c1", "work WAIT_STEER")
 	eventuallyTrue(t, "typing at turn start", func() bool { return e.f.typed.Load() == 1 })
 	e.waitReady("c1")
+	// Keep the turn active while checking the asynchronous steer indicator.
+	// A FINISH steer may settle before steerDone, correctly suppressing typing.
+	e.send(owner, "c1", "keep working")
+	eventuallyTrue(t, "typing after an accepted steer", func() bool { return e.f.typed.Load() == 2 })
 	e.send(owner, "c1", "and FINISH")
-	want(t, e.reply(), "omp#1", "steers=1")
-	if n := e.f.typed.Load(); n != 2 {
-		t.Fatalf("typing calls after start and one steer: %d", n)
-	}
+	want(t, e.reply(), "omp#1", "steers=2")
 
 	e.stop()
 	e.opt.TypingEvery = 30 * time.Millisecond
