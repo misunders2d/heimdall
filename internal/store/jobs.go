@@ -89,8 +89,12 @@ func insertJob(tx *sql.Tx, j Job) error {
 	if err != nil {
 		return err
 	}
+	created := unix(j.Created) // the anchor of fixed intervals
+	if created == 0 {
+		created = now()
+	}
 	_, err = tx.Exec(`INSERT INTO jobs(id,name,kind,creator,principal,created_iface,created_chat,created_thread,created_private,def,state,reason,edit_of,draft_expires_at,next_slot,next_due,version,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, j.ID, j.Name, j.Kind, j.Creator.Key(), string(principal), j.CreatedIn.Interface, j.CreatedIn.Chat, j.CreatedIn.Thread, j.CreatedPrivate, j.Def, j.State, j.Reason, j.EditOf, unix(j.DraftExpires), j.NextSlot, unix(j.NextDue), now(), now())
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, j.ID, j.Name, j.Kind, j.Creator.Key(), string(principal), j.CreatedIn.Interface, j.CreatedIn.Chat, j.CreatedIn.Thread, j.CreatedPrivate, j.Def, j.State, j.Reason, j.EditOf, unix(j.DraftExpires), j.NextSlot, unix(j.NextDue), created, now())
 	return err
 }
 

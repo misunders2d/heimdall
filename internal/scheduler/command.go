@@ -114,9 +114,9 @@ func (s *Scheduler) proposal(c Caller, raw []byte) (store.Job, error) {
 	now := s.now()
 	j := store.Job{ID: newID(), Creator: c.Principal, CreatedIn: c.Conv, CreatedPrivate: c.Private, State: store.JobDraft, DraftExpires: now.Add(draftTTL), Created: now}
 	var d Def
-	if raw, ok := head["edit"]; ok {
+	if edit, ok := head["edit"]; ok {
 		var id string
-		_ = json.Unmarshal(raw, &id)
+		_ = json.Unmarshal(edit, &id)
 		orig, err := s.own(c, id)
 		if err != nil {
 			return j, err

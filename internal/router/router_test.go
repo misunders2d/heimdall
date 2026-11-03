@@ -22,6 +22,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/fakeharness"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/scheduler"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -143,11 +144,12 @@ type env struct {
 	cancel   context.CancelFunc
 	done     chan error
 	opt      Options
-	seq      atomic.Int64 // message IDs stay unique across restarts
-	uploads  string       // the fake interface's upload directory
-	guard    string       // the prompt-injection log
-	logs     *syncBuffer  // the router's log
-	r        *Router      // the running router
+	seq      atomic.Int64      // message IDs stay unique across restarts
+	uploads  string            // the fake interface's upload directory
+	guard    string            // the prompt-injection log
+	logs     *syncBuffer       // the router's log
+	r        *Router           // the running router
+	sched    *scheduler.Config // the scheduler, when enabled
 }
 
 // syncBuffer is a log destination tests can read while the router writes.
@@ -235,6 +237,9 @@ func (e *env) start() {
 	var iface Interface = e.f
 	if e.platform != "" {
 		iface = namedFakeIface{e.f, e.platform}
+	}
+	if e.sched != nil {
+		e.opt.Jobs = scheduler.New(*e.sched, st, e.opt.Access, e.opt.Log)
 	}
 	r := New(e.opt, st, iface)
 	e.r = r

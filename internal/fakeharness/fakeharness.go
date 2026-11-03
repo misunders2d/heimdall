@@ -37,6 +37,8 @@
 //	               creates STATE/overlap. SIGTERM then creates
 //	               STATE/terminated and exits, unless NOTERM ignores it
 //
+//	SAY=BASE64     answer exactly the decoded text (standard encoding)
+//
 // The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" frame="FIRST HEIMDALL FRAME LINE" last="LAST LINE" ext="IDENTITY" home="HOME"
 // where IDENTITY lists the PI_EXTERNAL_*, A2A_CALLER_*, PI_RESTRICTED_* and
 // PI_TRANSPORT_CHILD variables the process received, sorted.
@@ -298,10 +300,17 @@ func lastLine(s string) string {
 }
 
 func (f *fake) answer() string {
+	for _, w := range strings.Fields(f.prompt) {
+		if enc, ok := strings.CutPrefix(w, "SAY="); ok {
+			if b, err := base64.StdEncoding.DecodeString(enc); err == nil {
+				return string(b)
+			}
+		}
+	}
 	lines := strings.Split(strings.TrimSpace(f.metadata+"\n"+f.prompt), "\n")
 	var ext []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "PI_EXTERNAL_") || strings.HasPrefix(kv, "A2A_CALLER_") || strings.HasPrefix(kv, "PI_RESTRICTED_") || strings.HasPrefix(kv, "PI_TRANSPORT_CHILD=") {
+		if strings.HasPrefix(kv, "PI_EXTERNAL_") || strings.HasPrefix(kv, "A2A_CALLER_") || strings.HasPrefix(kv, "PI_RESTRICTED_") || strings.HasPrefix(kv, "PI_TRANSPORT_CHILD=") || strings.HasPrefix(kv, "PI_SCHEDULER_TOOLS=") {
 			ext = append(ext, kv)
 		}
 	}

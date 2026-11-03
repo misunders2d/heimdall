@@ -200,6 +200,9 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	if !owner && (d.To != "here" && !t.Private || t.AgentNet != "") {
 		return fail("to: employee jobs deliver here or to your own private chat")
 	}
+	if t.AgentNet != "" && d.Kind != KindAgent {
+		return fail("to: an agentnet target needs an agent job: the agent delivers")
+	}
 	if d.Harness != "" && (!harness.Known(d.Harness) || !owner && !slices.Contains(s.cfg.EmployeeHarnesses, d.Harness)) {
 		return fail("harness %q is not available for this job", d.Harness)
 	}
