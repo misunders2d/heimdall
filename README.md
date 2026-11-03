@@ -196,7 +196,7 @@ Commands work the same on every interface:
 ```
 !help              list commands
 !status            what is running and queued in this conversation
-!which             the harness this conversation uses now
+!which             the harness this conversation uses now and its thinking level
 !stop              stop the current turn and clear your queued messages
 !cancel            clear your queued messages; the turn keeps running
 !reset             your next message here starts fresh native sessions

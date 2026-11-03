@@ -105,7 +105,7 @@ func helpText(order []string) string {
 		"Heimdall commands:",
 		"!help — this list",
 		"!status — what is running and queued in this conversation (chat + thread)",
-		"!which — the harness this conversation (chat + thread) uses now",
+		"!which — the harness this conversation (chat + thread) uses now and its thinking level",
 		"!stop (or stop) — stop the current turn and clear your queued messages",
 		"!cancel (or cancel, abort, nevermind) — clear your queued messages; the turn keeps running",
 		"!reset (or reset) — your next message here starts a fresh session (stops your running turn)",

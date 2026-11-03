@@ -51,7 +51,8 @@ AGY retains the single-turn adapter because no multi-turn protocol is exposed.
 Stop now emits one command acknowledgement across interfaces, suppressing the
 cancelled turn's extra final reply while preserving storage/status completion.
 Harness replies carry no signature (owner, 2026-11-03); `!which` names the
-harness. Router still strips repeated trailing `— <harness>` signatures a
+harness and its configured thinking level (Codex `model_reasoning_effort`,
+Claude `effortLevel`, Pi per-model or default level; else `default`). Router still strips repeated trailing `— <harness>` signatures a
 model echoes from history; regression covers a native answer ending with one.
 
 Regression map: harness `warm_test.go` (reuse/latency, launch isolation,

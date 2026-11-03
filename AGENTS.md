@@ -151,8 +151,9 @@ the `heimdall-live` unit.
   failed before its turn started (before any side effect is possible).
   Explicit choices (`!use <harness>`, `!<harness> <msg>`) never fall back.
   Harness replies carry no signature (owner, 2026-11-03); `!which` names the
-  conversation's harness, the running turn's, and the last reply's when it
-  differs. Heimdall's own notices end `— heimdall`.
+  conversation's harness and its configured thinking level (read from the
+  harness's own config; agents change it themselves), the running turn's,
+  and the last reply's when it differs. Heimdall's own notices end `— heimdall`.
 - **Steer and follow-up.** Mid-turn messages steer by default; `!next`
   queues instead. Steers that wait while another is handed over go to the
   harness together, as one steer framed in order with all their images (at
