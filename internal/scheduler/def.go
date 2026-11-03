@@ -50,6 +50,7 @@ type Def struct {
 	HistoryCtx bool          `json:"history_ctx,omitempty"`
 	Requires   []string      `json:"requires,omitempty"`
 	Timeout    string        `json:"timeout,omitempty"`
+	Paused     bool          `json:"paused,omitempty"` // creation only: the job starts paused (§7.5); never stored
 }
 
 // Expect are deterministic result checks (§3.8).
@@ -90,6 +91,9 @@ func decode(raw []byte, d *Def) error {
 
 // merge applies an edit's changed fields to d.
 func merge(d Def, changes map[string]json.RawMessage) (Def, error) {
+	if _, ok := changes["paused"]; ok {
+		return d, errors.New("paused: only when creating a job; use !job pause or !job resume")
+	}
 	raw, _ := json.Marshal(d)
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &fields)

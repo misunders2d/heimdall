@@ -20,7 +20,7 @@ import (
 var HelpLines = []string{
 	"!jobs [all] — your jobs (owner: all jobs)",
 	"!job show|history <id> — a job's schedule, next runs and options; its last runs",
-	"!job add <json> / !job edit <id> <json> — create (active) or change a job (docs/scheduler.md)",
+	"!job add <json> / !job edit <id> <json> — create (active, or paused with \"paused\":true) or change a job (docs/scheduler.md)",
 	"!job confirm|discard <id> — accept or drop a draft (or reply yes / no)",
 	"!job pause|resume|run|stop|rm <id> — pause, resume, run now, stop the running run, delete",
 	"!job renew <id> [duration] — extend its expiry (default 7d)",
@@ -186,6 +186,9 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 			b.WriteString("Changes:\n" + diff(orig.Def, j.Def))
 		}
 	}
+	if d.Paused {
+		b.WriteString("Starts paused: !job resume once confirmed.\n")
+	}
 	fmt.Fprintf(&b, "Confirm: !job confirm %s (or reply yes). Discard: !job discard %s (or no). Only you, here, within 24 h.\n— heimdall", j.ID, j.ID)
 	return b.String()
 }
@@ -321,14 +324,23 @@ func (s *Scheduler) add(c Caller, raw string) (string, *store.JobChange) {
 	if msg := s.capped(c); msg != "" {
 		return msg, nil
 	}
-	def, _ := json.Marshal(d)
 	next, _ := sched.Next(now)
-	j := store.Job{ID: newID(), Name: d.Name, Kind: d.Kind, Creator: c.Principal, CreatedIn: c.Conv, CreatedPrivate: c.Private, Def: string(def), State: store.JobActive, NextSlot: next.Key, NextDue: next.At, Created: now}
+	j := store.Job{ID: newID(), Name: d.Name, Kind: d.Kind, Creator: c.Principal, CreatedIn: c.Conv, CreatedPrivate: c.Private, State: store.JobActive, NextSlot: next.Key, NextDue: next.At, Created: now}
+	what := "created"
+	if d.Paused {
+		j.State, j.Reason, what = store.JobPaused, pausedAtCreation(c), "created paused (!job resume "+j.ID+" to start it)"
+		d.Paused = false
+	}
+	j.Def = mustJSON(d)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Job %s created: %q\n", j.ID, d.Name)
+	fmt.Fprintf(&b, "Job %s %s: %q\n", j.ID, what, d.Name)
 	s.describe(&b, c, j, d, sched)
 	return strings.TrimSpace(b.String()), &store.JobChange{Add: &j}
 }
+
+// pausedAtCreation is the reason of a job created paused: the creator's own
+// pause, never a scheduler one (heimdall sched health).
+func pausedAtCreation(c Caller) string { return "paused by " + c.Principal.Key() + " at creation" }
 
 // capped refuses an employee's 11th active job.
 func (s *Scheduler) capped(c Caller) string {
@@ -397,12 +409,18 @@ func (s *Scheduler) confirm(c Caller, id string) (string, *store.JobChange) {
 	if err != nil {
 		return "Draft not confirmed: " + err.Error(), nil
 	}
+	paused := d.Paused
+	d.Paused = false
 	set := s.applied(d, sched, version)
 	delete(set, "version") // confirming counts an edit's version
 	next, _ := sched.Next(now)
 	change := &store.JobChange{Confirm: &j, Set: set}
-	if j.EditOf != "" {
+	switch {
+	case j.EditOf != "":
 		return fmt.Sprintf("Job %s changed from draft %s. Next run: %s.", j.EditOf, j.ID, when(d, next.At)), change
+	case paused:
+		set["state"], set["reason"] = store.JobPaused, pausedAtCreation(c)
+		return fmt.Sprintf("Job %s is paused: %q. Start it with !job resume %s (next run would be %s).", j.ID, d.Name, j.ID, when(d, next.At)), change
 	}
 	return fmt.Sprintf("Job %s is active: %q. Next run: %s.", j.ID, d.Name, when(d, next.At)), change
 }

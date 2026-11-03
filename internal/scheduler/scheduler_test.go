@@ -655,3 +655,39 @@ func TestDueOneOffStarts(t *testing.T) {
 		t.Fatalf("one-off end: %+v", e.Run)
 	}
 }
+
+// A job can be created paused (§7.5 cutover: never both firing): by
+// !job add, or by a draft that carries it. It fires only once resumed.
+func TestCreatePaused(t *testing.T) {
+	r := newRig(t)
+	out := r.cmd(asBoss, `job add {"name":"cutover","schedule":{"every":"1h"},"paused":true,"prompt":"p"}`)
+	id := idRE.FindString(out)
+	if j := r.job(id); !strings.Contains(out, "created paused") || !strings.Contains(out, "Next:") || j.State != store.JobPaused || strings.Contains(j.Def, "paused") {
+		t.Fatalf("add paused: %q %+v", out, j)
+	}
+	r.now = r.now.Add(3 * time.Hour)
+	r.tick()
+	if len(r.rows) != 0 {
+		t.Fatal("a job created paused fired")
+	}
+	if h := r.s.Health(20 * time.Minute); slices.ContainsFunc(h.Issues, func(s string) bool { return strings.Contains(s, id) }) {
+		t.Fatalf("created paused counts as a scheduler pause: %v", h.Issues)
+	}
+	r.cmd(asBoss, "job resume "+id)
+	r.now = r.now.Add(time.Hour)
+	r.tick()
+	if len(r.rows) != 1 {
+		t.Fatal("not fired after resume")
+	}
+	_, d, card := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"name\":\"x\",\"schedule\":{\"every\":\"1h\"},\"paused\":true,\"prompt\":\"p\"}\n```"})
+	if d == nil || !strings.Contains(card, "paused") {
+		t.Fatalf("paused draft: %q", card)
+	}
+	r.apply(&store.JobChange{Add: d})
+	if out := r.cmd(asBoss, "job confirm "+d.ID); !strings.Contains(out, "paused") || r.job(d.ID).State != store.JobPaused {
+		t.Fatalf("confirm paused draft: %q %+v", out, r.job(d.ID))
+	}
+	if out := r.cmd(asBoss, "job edit "+id+` {"paused":true}`); !strings.Contains(out, "not changed") {
+		t.Fatalf("paused in an edit: %q", out)
+	}
+}
