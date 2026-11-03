@@ -12,7 +12,7 @@ import (
 func TestEmployeeLaunchPolicy(t *testing.T) {
 	l := Launch{Home: "/home/employee", Dir: "/home/employee/turn"}
 	for name, wants := range map[string][]string{
-		"pi":     {"--no-extensions", "--no-mcp", "privileged-tool-guard.ts", "admin-lifecycle-guard.ts", "--tools|read", "--extension|/opt/assistant/heimdall/employee-guard.ts", "mcp__*"},
+		"pi":     {"--no-extensions", "builtin:mcp", "--no-builtin-tools", "--tools|read,employee_mcp_status,mcp__mellanni__*,mcp__linear__*"},
 		"claude": {"--restricted", "Read(//root/**)", `"onFailure":"block"`, "Skill,Read,WebSearch", "--strict-mcp-config", `"disableSkillShellExecution":true`, `"autoMemoryEnabled":false`, "--permission-mode|dontAsk"},
 		"codex":  {`default_permissions="employee"`, `approval_policy="never"`, `"/home/employee/.codex"="deny"`, "--disable|hooks", "--disable|memories", "mcp_servers={}"},
 	} {

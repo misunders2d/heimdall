@@ -1,3 +1,8 @@
+> Employee Pi update: see [employee-pi.md](employee-pi.md). Caller-owned Mellanni/Linear
+> OAuth is the supported employee route; the older signed-token prerequisite
+> below is superseded for that route. Enable only Pi after its native probes.
+> Employees never sign into harnesses; business MCP uses their own sign-in.
+
 # Employee launch validation, 2026-11-02
 
 Employee turns run on Sergey's existing harness installs and logins. Employees

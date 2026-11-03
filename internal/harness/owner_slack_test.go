@@ -228,6 +228,11 @@ type mcpBuffer struct{ bytes.Buffer }
 
 func (b *mcpBuffer) Close() error { return nil }
 func TestPiNativeMCPUIRelayAndCallerBinding(t *testing.T) {
+	for _, role := range []core.Role{core.RoleOwner, core.RoleEmployee} {
+		t.Run(string(role), func(t *testing.T) { testPiMCPUIRelayRole(t, role) })
+	}
+}
+func testPiMCPUIRelayRole(t *testing.T, role core.Role) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	input := &mcpBuffer{}
@@ -240,7 +245,7 @@ func TestPiNativeMCPUIRelayAndCallerBinding(t *testing.T) {
 	if b.done || b.mcpInput != "oauth" {
 		t.Fatal("native sign-in not held")
 	}
-	caller := Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Role: core.RoleOwner, Private: true, Conv: core.ConvKey{Interface: "telegram", Chat: "42"}}
+	caller := Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Role: role, Private: true, Conv: core.ConvKey{Interface: "telegram", Chat: "42"}}
 	run := &Run{harness: "pi", caller: caller, bridge: b}
 	callback := "http://localhost:18765/callback?state=synthetic&code=synthetic"
 	stranger := caller.Principal
@@ -454,11 +459,11 @@ func TestPiT3OwnerOnly(t *testing.T) {
 						t.Fatal("Slack gate changed")
 					}
 				} else {
-					if len(servers) != 0 {
-						t.Fatal("file admin employee got MCP", servers)
+					if strings.Contains(strings.Join(servers, ","), "t3") || strings.Contains(strings.Join(servers, ","), "slack") {
+						t.Fatal("employee got owner MCP", servers)
 					}
 					env, err := piMCPEnv(Launch{Home: home}, c, nil)
-					if err != nil || envValue(env, "MCP_OAUTH_DIR") != mcpDenyPath || envValue(env, "PI_MCP_OAUTH_SERVERS") != `[]` {
+					if err != nil || strings.Contains(envValue(env, "PI_MCP_OAUTH_SERVERS"), "t3") || strings.Contains(envValue(env, "PI_MCP_OAUTH_SERVERS"), "slack") {
 						t.Fatal("employee MCP not denied", err)
 					}
 				}

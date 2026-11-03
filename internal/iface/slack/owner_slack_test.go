@@ -161,3 +161,28 @@ func TestMCPSignInPrivateOwnerIndependentOfSlackRead(t *testing.T) {
 		}
 	}
 }
+
+func TestEmployeeBusinessMCPPrivateDMIngress(t *testing.T) {
+	for _, validDM := range []bool{false, true} {
+		f := newSlackFake(t)
+		s, _ := testSlack(t, f)
+		s.botID = "Ubot"
+		s.opt.Owners = []string{"slack:uowner@example.test"}
+		f.setHook(func(w http.ResponseWriter, r *http.Request, _ map[string]any) bool {
+			if r.URL.Path != "/conversations.info" {
+				return false
+			}
+			fmt.Fprintf(w, `{"ok":true,"channel":{"is_im":%t,"is_mpim":false,"user":"Uemployee"}}`, validDM)
+			return true
+		})
+		var got core.Inbound
+		directEvent(t, s, f.event("D1", "im", "Uemployee", "mcp login mellanni", ""), func(_ context.Context, in core.Inbound) error { got = in; return nil })
+		if validDM {
+			if got.Text != "mcp login mellanni" || !got.Private || got.SlackPrivateOwnerVerified || got.OAuthActor != "sl_user_Uemployee" {
+				t.Fatal(got)
+			}
+		} else if got.InterfaceReply != mcpNotice || got.Text != omittedMCP {
+			t.Fatal("unverified DM command forwarded", got)
+		}
+	}
+}

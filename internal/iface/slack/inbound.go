@@ -33,7 +33,7 @@ type eventMessage struct {
 	Attachments    []any       `json:"attachments"`
 }
 
-const mcpNotice = "MCP sign-in through Heimdall is available only to owners in private chats using Pi. Do not paste OAuth codes elsewhere."
+const mcpNotice = "MCP sign-in requires a private DM using Pi. DM the bot `mcp login mellanni`. Do not paste OAuth codes elsewhere."
 
 var oauthURL = regexp.MustCompile(`(?i)https?://[^\s<>|]+`)
 var oauthAuthorize = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*\n\s*<?https?://[^\s<>|]+>?`)
@@ -146,6 +146,10 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	in.Text = hideOAuth(commandText)
 	embedded = hideOAuth(embedded)
 	ownerMCP := mcpCommand.MatchString(commandText) && s.owner(principal) && in.SlackPrivateOwnerVerified
+	if mcpCommand.MatchString(commandText) && !s.owner(principal) {
+		in.Private = s.privateCaller(ctx, m)
+		ownerMCP = in.Private // Router enforces approved employee servers and Pi enablement.
+	}
 	if ownerMCP {
 		in.Text = commandText
 	}

@@ -132,6 +132,15 @@ func hubLinear(env []string, home, platform, actor string) bool {
 // piMCPServers uses the verified role; file admins never grant owner MCPs.
 func piMCPServers(home string, c Caller, env []string, platform, actor, installation string) []string {
 	servers := []string{}
+	if c.Role == core.RoleEmployee {
+		if platform == "telegram" && telegramActor.MatchString(actor) || platform == "slack" && slackActor.MatchString(actor) && slackActor.MatchString(installation) && core.NormalizeEmail(c.Principal.Email) != "" {
+			servers = append(servers, "mellanni")
+			if slices.Contains(c.Capabilities, "mcp.linear") {
+				servers = append(servers, "linear")
+			}
+		}
+		return servers
+	}
 	if c.Role != core.RoleOwner {
 		return servers
 	}
@@ -163,7 +172,7 @@ func piMCPEnv(l Launch, c Caller, env []string) ([]string, error) {
 	// Hub's fixed root is deliberately preserved for root; other OS users must
 	// never receive root's home, policy, or credentials.
 	path := mcpOAuthScopePath(root, platform, actor, installation, servers)
-	if l.Home != "/root" {
+	if l.Home != "/root" && c.Role != core.RoleEmployee {
 		// The wrapper also hardcodes its config directory unless explicitly set.
 		// Never let an employee select the owner's native configuration.
 		filtered := env[:0]
@@ -233,4 +242,16 @@ func privateMCPDir(path string, l Launch) error {
 		}
 	}
 	return nil
+}
+
+// EmployeeMCPServers is shared by the native launch and router sign-in gate.
+func EmployeeMCPServers(c Caller) []string {
+	if c.Role != core.RoleEmployee {
+		return nil
+	}
+	actor := c.OAuthActor
+	if c.Principal.Platform == "telegram" {
+		actor = "tg_user_" + c.Principal.ID
+	}
+	return piMCPServers("", c, nil, c.Principal.Platform, actor, c.OAuthInstallation)
 }

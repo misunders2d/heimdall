@@ -106,6 +106,13 @@ func TestMCPStartNotifyOwnerPrivateGate(t *testing.T) {
 		l := launch(t, bin, "pi", false)
 		var notices atomic.Int32
 		run, err := harness.Start(context.Background(), harness.Spec{Harness: "pi", Session: harness.Session{ID: harness.NewSessionID("pi")}, Prompt: "MCP_UI", Launch: l, Caller: harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Role: tc.role, Private: tc.private}, MCPNotify: func(string) { notices.Add(1) }})
+		if tc.role == core.RoleEmployee {
+			if err == nil {
+				run.Cancel()
+				t.Fatal("employee model handoff without separate uid")
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}

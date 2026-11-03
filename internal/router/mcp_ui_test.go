@@ -187,3 +187,39 @@ func TestMCPTurnRoleAndSurfaceGate(t *testing.T) {
 		}
 	}
 }
+
+func TestEmployeeMCPLoginScope(t *testing.T) {
+	dir := t.TempDir()
+	for name, value := range map[string]string{"whitelist.json": `{"users":["tg_user_77","fixture@example.com"]}`, "blacklist.json": `{}`, "admins.json": `{}`, "identities.json": `{}`, "capabilities.json": `{"tg_user_77":["mcp.linear"],"fixture@example.com":["mcp.linear"]}`} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, platform := range []string{"telegram", "slack"} {
+		for _, private := range []bool{false, true} {
+			for _, server := range []string{"mellanni", "linear", "t3", "slack", "memento", "mellanni extra"} {
+				r := New(Options{EmployeeHarnesses: []string{"pi"}, Access: core.Access{Dir: dir}}, nil)
+				in := core.Inbound{From: core.Principal{Platform: platform, ID: "77", Email: "fixture@example.com"}, Conv: core.ConvKey{Interface: platform, Chat: "77"}, OAuthActor: "sl_user_U1", OAuthInstallation: "sl_user_B1", Origin: core.OriginLive, Private: private, Text: "mcp login " + server}
+				if platform == "slack" {
+					in.From = core.SlackPrincipal("fixture@example.com", "T1", "")
+				}
+				r.mcpControl(context.Background(), &in, core.RoleEmployee)
+				want := private && (server == "mellanni" || server == "linear")
+				if in.MCPControl != want {
+					t.Fatalf("%s private=%v server=%s got=%+v", platform, private, server, in)
+				}
+				if !want && !strings.Contains(in.InterfaceReply, "DM") {
+					t.Fatal("missing private sign-in guidance")
+				}
+			}
+		}
+	}
+	// Mellanni is unconditional for a verified admitted employee; Linear is not.
+	os.WriteFile(filepath.Join(dir, "capabilities.json"), []byte(`{}`), 0600)
+	r := New(Options{EmployeeHarnesses: []string{"pi"}, Access: core.Access{Dir: dir}}, nil)
+	in := core.Inbound{From: core.Principal{Platform: "telegram", ID: "77"}, Conv: core.ConvKey{Interface: "telegram", Chat: "77"}, Origin: core.OriginLive, Private: true, Text: "mcp login linear"}
+	r.mcpControl(context.Background(), &in, core.RoleEmployee)
+	if in.MCPControl {
+		t.Fatal("Linear sign-in without capability")
+	}
+}

@@ -14,6 +14,15 @@ func (s *Slack) privateOwner(ctx context.Context, m eventMessage, p core.Princip
 	if m.ChannelType != "im" || !s.owner(p) {
 		return false
 	}
+	return s.privateCaller(ctx, m)
+}
+
+// A live same-workspace human may sign into approved business MCP in a 1:1 DM.
+// Identity is already verified by liveUser/Verify; never trust channel_type alone.
+func (s *Slack) privateCaller(ctx context.Context, m eventMessage) bool {
+	if m.ChannelType != "im" {
+		return false
+	}
 	var result struct {
 		Channel struct {
 			IsIM   bool   `json:"is_im"`
@@ -47,7 +56,11 @@ func (s *Slack) mcpCallback(ctx context.Context, raw json.RawMessage, accept fun
 		return true, nil
 	}
 	privateOwner := s.privateOwner(ctx, m, p)
-	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: first(m.ThreadTS, m.TS)}, From: p, MsgID: m.TS, Origin: core.OriginLive, At: time.Now(), Text: value, Private: true, SlackPrivateOwnerVerified: privateOwner, SlackReadVerified: privateOwner && s.opt.OwnerSlackEnabled, OAuthActor: "sl_user_" + u.ID, OAuthInstallation: "sl_user_" + s.botID}
+	private := privateOwner
+	if !s.owner(p) {
+		private = s.privateCaller(ctx, m)
+	}
+	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: first(m.ThreadTS, m.TS)}, From: p, MsgID: m.TS, Origin: core.OriginLive, At: time.Now(), Text: value, Private: private, SlackPrivateOwnerVerified: privateOwner, SlackReadVerified: privateOwner && s.opt.OwnerSlackEnabled, OAuthActor: "sl_user_" + u.ID, OAuthInstallation: "sl_user_" + s.botID}
 	if m.Type != "message" || m.BotID != "" || m.Subtype != "" {
 		return true, nil
 	}

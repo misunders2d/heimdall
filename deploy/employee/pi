@@ -1,0 +1,3 @@
+#!/bin/sh
+# Deliberately bypass /usr/bin/pi, which forces the owner's home and A2A key.
+exec /opt/assistant/runtime/node /opt/assistant/heimdall/pi-employee-cli.mjs "$@"

@@ -2,13 +2,14 @@ package router
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/harness"
 )
 
-const mcpNotice = "MCP sign-in through Heimdall is available only to owners in private chats using Pi. Do not paste OAuth codes elsewhere."
+const mcpNotice = "MCP sign-in through Heimdall is available in private DMs using Pi. DM the bot `mcp login mellanni` to sign in. Do not paste OAuth codes elsewhere."
 
 func (r *Router) mcpControl(ctx context.Context, in *core.Inbound, role core.Role) bool {
 	callback := core.MCPCallback(in.Text)
@@ -21,8 +22,8 @@ func (r *Router) mcpControl(ctx context.Context, in *core.Inbound, role core.Rol
 	if !callback && !isCommand {
 		return false
 	}
-	eligible := role == core.RoleOwner && in.Private && !in.Ambient && in.Origin == core.OriginLive && (in.Conv.Interface == "telegram" || in.Conv.Interface == "slack")
-	if in.Conv.Interface == "slack" {
+	eligible := (role == core.RoleOwner || role == core.RoleEmployee && slices.Contains(r.opt.EmployeeHarnesses, "pi")) && in.Private && !in.Ambient && in.Origin == core.OriginLive && (in.Conv.Interface == "telegram" || in.Conv.Interface == "slack")
+	if in.Conv.Interface == "slack" && role == core.RoleOwner {
 		eligible = eligible && in.SlackPrivateOwnerVerified
 	}
 	if callback {
@@ -47,6 +48,11 @@ func (r *Router) mcpControl(ctx context.Context, in *core.Inbound, role core.Rol
 			_ = iface.Send(ctx, core.Outbound{Conv: in.Conv, ReplyTo: in.MsgID, Text: mcpNotice})
 		}
 		return true
+	}
+	if eligible && role == core.RoleEmployee {
+		fields := strings.Fields(command)
+		approved := harness.EmployeeMCPServers(harness.Caller{Role: role, Principal: in.From, OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInstallation, Capabilities: r.opt.Access.Capabilities(in.From, in.Conv)})
+		eligible = len(fields) == 3 && slices.Contains(approved, fields[2])
 	}
 	if eligible {
 		if strings.Contains(command, "slack") && (r.opt.OwnerSlack == nil || !r.opt.OwnerSlack.Enabled) {

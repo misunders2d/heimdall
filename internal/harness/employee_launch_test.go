@@ -23,10 +23,10 @@ func TestFakeEmployeePolicyAndOwnerSeparation(t *testing.T) {
 			c := caller
 			c.Capabilities = []string{"mcp.linear"}
 			r, e := harness.Start(context.Background(), harness.Spec{Harness: name, Caller: c, Launch: l, Prompt: "synthetic", Session: harness.Session{ID: harness.NewSessionID(name)}})
-			if name == "agy" {
+			if name == "agy" || name == "pi" {
 				if e == nil {
 					r.Cancel()
-					t.Fatal("employee AGY launched")
+					t.Fatal("employee harness launched without isolated broker")
 				}
 				return
 			}

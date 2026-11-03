@@ -252,6 +252,7 @@ func sessionArgs(name string, s Session, home string) ([]string, error) {
 
 // Start launches one turn. A returned error means nothing ran.
 func Start(ctx context.Context, spec Spec) (*Run, error) {
+	var employeeStarted <-chan struct{}
 	d, ok := defs[spec.Harness]
 	if !ok {
 		return nil, fmt.Errorf("unknown harness %q", spec.Harness)
@@ -334,9 +335,23 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		env = employeeEnv(env, spec.Caller)
 		env = setEnv(env, "HEIMDALL_TURN_DIR", spec.Launch.Dir)
 		if spec.Harness == "pi" {
-			env = setEnv(env, "MCP_OAUTH_DIR", mcpDenyPath)
-			env = setEnv(env, "PI_MCP_OAUTH_SERVERS", "[]")
-			env = setEnv(env, "PI_CODING_AGENT_DIR", filepath.Join(spec.Launch.Home, ".pi", "agent"))
+			var cleanup func()
+			env, cleanup, err = prepareEmployeePi(ctx, spec, env)
+			if err != nil {
+				return nil, err
+			}
+			defer func() {
+				if cleanup != nil {
+					cleanup()
+				}
+			}()
+			// Credentials live only as long as the native process, including failed starts.
+			defer func() {
+				if cleanup != nil && employeeStarted != nil {
+					go func(release func()) { <-employeeStarted; release() }(cleanup)
+					cleanup = nil
+				}
+			}()
 		}
 	}
 	contextDir, contextArgs, err := prepareContext(spec, extra)
@@ -352,6 +367,10 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	extra = contextArgs
 	env = setEnv(env, "HD_CONTEXT_DIR", contextDir)
 	runCtx, cancel := context.WithCancel(ctx)
+	if spec.Harness == "pi" && spec.Caller.Role == core.RoleEmployee {
+		cancel()
+		runCtx, cancel = context.WithTimeout(ctx, 25*time.Minute)
+	}
 	base := slices.Clone(d.args)
 	if spec.Caller.Role == core.RoleEmployee && spec.Harness == "claude" {
 		base = base[:len(base)-2]
@@ -398,7 +417,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	switch b := r.bridge.(type) {
 	case *piRPCBridge:
 		b.progress = spec.Progress
-		if spec.Harness == "pi" && spec.Caller.Role == "owner" && spec.Caller.Private {
+		if spec.Harness == "pi" && spec.Caller.Private {
 			b.mcpNotify = spec.MCPNotify
 		}
 	case *claudeStreamBridge:
@@ -418,6 +437,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		cancel()
 		return nil, fmt.Errorf("%s did not start: %w", spec.Harness, err)
 	}
+	employeeStarted = r.exited
 	contextStarted = true
 	if r.worker != nil {
 		go r.worker.wait()
@@ -714,7 +734,7 @@ func (r *Run) RespondMCP(ctx context.Context, p core.Principal, conv core.ConvKe
 		r.worker.mu.Unlock()
 		r = current
 	}
-	if r.harness != "pi" || r.caller.Role != core.RoleOwner || !r.caller.Private || p.Key() != r.caller.Principal.Key() || conv.Interface != r.caller.Conv.Interface || conv.Chat != r.caller.Conv.Chat || !core.MCPCallback(value) {
+	if r.harness != "pi" || !r.caller.Private || p.Key() != r.caller.Principal.Key() || conv.Interface != r.caller.Conv.Interface || conv.Chat != r.caller.Conv.Chat || !core.MCPCallback(value) {
 		return false
 	}
 	b, ok := r.bridge.(*piRPCBridge)

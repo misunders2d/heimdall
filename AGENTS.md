@@ -78,7 +78,8 @@ the `heimdall-live` unit.
   - Employee turns use Sergey's existing harness installs/logins. Employees
     never log in; no second login. Isolation is implementation work. Never
     copy credentials or expose owner homes. Keep employee turns disabled until
-    native restrictions and MEL-724 signed caller-token delivery are validated.
+    native restrictions and caller-owned business MCP OAuth are validated.
+    MEL-724 signed caller-token delivery remains separate connector work.
 - **Modes.** Both corporate and personal modes keep Memento owner-only.
   Employee turns force `MEMENTO_PROCESSING=1`, remove memory MCP and disable
   native memory hooks. ACL-safe company knowledge belongs to Mellanni.
@@ -207,8 +208,8 @@ thinking stream and live-session reply registration.
 
 - Anything the native automatic mode still escalates (an approval or input
   request) ends the turn as *needs human*. Exception: Pi native MCP sign-in
-  UI is relayed only for owners in private chats; the owner supplies the
-  callback, never Heimdall. Callback URLs/codes are ephemeral and never
+  UI is relayed for owners and enabled Pi employees in private chats; the
+  same verified caller supplies the callback, never Heimdall. Callback URLs/codes are ephemeral and never
   persisted, logged, echoed, or included in model context. Slack callback
   controls bypass raw-event staging; ordinary events retain persist-before-ack.
 - Sessions: Pi and OMP use a per-session `--session-dir` with `--continue`

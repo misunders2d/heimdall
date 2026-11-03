@@ -20,12 +20,14 @@ import (
 const SharedRoot = "/opt/assistant"
 
 // Employee tools are an allowlist. Ambient native MCP configuration is never trusted.
-// Business MCP remains empty until a connector can enforce per-caller credentials.
+// Pi business MCP uses a verified caller's own OAuth; other adapters stay scoped.
 func employeeArgs(name string, l Launch) ([]string, error) {
 	switch name {
 	case "agy":
 		return nil, errors.New("employee " + name + " turns are unavailable: native isolation has not been validated")
-	case "pi", "omp":
+	case "pi":
+		return []string{"--no-extensions", "--extension", "builtin:mcp", "--no-builtin-tools", "--tools", "read,employee_mcp_status,mcp__mellanni__*,mcp__linear__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource", "--no-prompt-templates", "--no-themes"}, nil
+	case "omp":
 		return []string{"--no-extensions", "--no-mcp", "--extension", SharedRoot + "/pi/extensions/privileged-tool-guard.ts", "--extension", SharedRoot + "/pi/extensions/admin-lifecycle-guard.ts", "--tools", "read", "--exclude-tools", "bash,powershell,edit,write,grep,find,ls,mcp__*", "--no-approve", "--extension", SharedRoot + "/heimdall/employee-guard.ts"}, nil
 	case "claude":
 		executable, err := os.Executable()

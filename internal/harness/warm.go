@@ -268,7 +268,8 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 		e.run.Stop("launch changed or expired")
 		<-e.run.Exited()
 	}
-	s.warm = s.Harness != "agy"
+	// Employee Pi gets a new access-only handoff and confined cwd every turn.
+	s.warm = s.Harness != "agy" && !(s.Harness == "pi" && s.Caller.Role == core.RoleEmployee)
 	r, err := Start(ctx, s)
 	if err == nil {
 		p.watch(r, key, fp, time.Now(), epoch)

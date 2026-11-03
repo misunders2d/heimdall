@@ -2018,7 +2018,7 @@ func TestTurnRechecksRoleAndAdmissionBeforeLaunch(t *testing.T) {
 }
 
 func TestEnabledEmployeeHarnessTurnDirAndCapabilities(t *testing.T) {
-	e := setup(t, core.ModeCorporate, []string{"pi"}, "pi")
+	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
 	e.stop()
 	dir := t.TempDir()
 	for name, data := range map[string]string{"whitelist.json": `{"users":["7"]}`, "blacklist.json": `{}`, "admins.json": `{}`, "identities.json": `{}`, "capabilities.json": `{"7":["mcp.linear"]}`} {
@@ -2029,7 +2029,7 @@ func TestEnabledEmployeeHarnessTurnDirAndCapabilities(t *testing.T) {
 	capture := filepath.Join(t.TempDir(), "launch.json")
 	t.Setenv("FAKE_CAPTURE_LAUNCH", capture)
 	e.opt.Access = core.Access{Dir: dir, Mode: core.ModeCorporate}
-	e.opt.EmployeeHarnesses = []string{"pi"}
+	e.opt.EmployeeHarnesses = []string{"claude"}
 	e.start()
 	e.sendAs(core.Principal{Platform: "telegram", ID: "7"}, "-101", "synthetic")
 	want(t, e.reply(), "role employee", "mem=1")
