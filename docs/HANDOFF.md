@@ -58,13 +58,17 @@ Pi and Codex installs, scratch config/data outside the repo,
 `MEMENTO_PROCESSING=1` (§15 numbering):
 
 - 3: Codex turned a natural-language request into a `heimdall-job` block; the
-  card showed the next three Kyiv runs; a bare `yes` activated it. Laptop Pi
-  instead asked an interactive question (its `ask-user-question` extension),
-  which Heimdall correctly ended as *needs human*.
+  card showed the next three Kyiv runs; a bare `yes` activated it
+  (`!job confirm` is unit-tested). Laptop Pi twice made a native input request
+  (the laptop loads the pack's `ask-user-question` extension; which extension
+  asked is not logged), correctly ended as *needs human*. On a retry with the
+  jobs note in its turn context, Pi answered in prose without the block.
 - 4: a 1-minute job delivered three times, `ok` in history; a notify job sent
   its text; a quiet job ran `quiet` and sent nothing (after the fix below).
 - 6: SIGKILL during a ready run; after restart one interrupted notice, history
-  `interrupted`, no re-run.
+  `interrupted`, no re-run. A run queued behind it (created, not started) ran
+  right after the restart. The killed Heimdall left its harness children
+  orphaned (removed by hand); on the hub the systemd unit's cgroup stops them.
 - 7: `heimdall drain` printed `idle`, exit 0; `heimdall sched health` was
   clean, then (Heimdall stopped) exit 1 with "due loop last ran 3m3s ago" and
   an overdue job; on restart one missed notice counted 3 slots and the next
@@ -90,7 +94,10 @@ so Pi/OMP hide their scheduler tools; `heimdall drain -config FILE` before the
 restart. Rollback: `scheduler.enabled=false` and restart (jobs kept), or the
 previous binary (schema step 14 only adds tables and a column).
 
-Open: live checks 5, 8, 9 and 10 on the hub; Pi/OMP scheduler source drift in
+Open: live checks 5, 8, 9 and 10 on the hub. Owner decision: Pi may not
+propose jobs while the first-message jobs note is turn context (Codex did);
+moving it into Pi's native prompt would touch every fresh Pi chat session, so
+it is left as §17 documents. Pi/OMP scheduler source drift in
 the pack (`test-omp-scheduler-parity` fails before and after the change);
 `scheduler.checkers` is rejected until 3b.
 
