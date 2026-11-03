@@ -436,6 +436,28 @@ func (s *Store) EndRun(e RunEnd, outs ...core.Outbound) error {
 	})
 }
 
+// EndRunUnlessHeld is EndRun, unless the scheduler value holdKey (a drain's
+// hold, unix ms) is later than now: then nothing changes and held is true.
+// The check and the settle share one transaction, so a drain that reported
+// idle never sees a message enqueued behind it.
+func (s *Store) EndRunUnlessHeld(holdKey string, now time.Time, e RunEnd, outs ...core.Outbound) (held bool, err error) {
+	err = s.tx(func(tx *sql.Tx) error {
+		var hold int64
+		if err := tx.QueryRow(`SELECT value FROM sched_meta WHERE key=?`, holdKey).Scan(&hold); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if hold > now.UnixMilli() {
+			held = true
+			return nil
+		}
+		if err := endRun(tx, e); err != nil {
+			return err
+		}
+		return enqueueAll(tx, outs)
+	})
+	return held, err
+}
+
 // HeldRun is a running run at startup, with its message's state and whether
 // its turn reached the harness's ready signal.
 type HeldRun struct {

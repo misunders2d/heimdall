@@ -777,3 +777,53 @@ func TestAdmitAtTurnStart(t *testing.T) {
 		t.Fatalf("temporary error: %v %+v", err, e.Run)
 	}
 }
+
+// A drain that begins while a notify run waits on Slack re-verification
+// holds it: no text is enqueued behind the drain, and the run stays pending
+// until the hold clears (re-review finding: notify bypassed the hold).
+func TestNotifyHeldDuringVerification(t *testing.T) {
+	r := newRig(t)
+	r.s.cfg.Interfaces = append(r.s.cfg.Interfaces, core.PlatformSlack)
+	slackBoss := core.SlackPrincipal("boss@example.com", "T1", "boss")
+	r.s.access.Owners[slackBoss.Key()] = true
+	hold := true
+	r.s.Reverify = func(_ context.Context, p core.Principal) (Verified, bool, error) {
+		if hold { // the drain starts while Slack answers
+			_ = r.st.SetMeta(MetaHold, r.now.Add(time.Hour).UnixMilli())
+		}
+		return Verified{Principal: p, OAuthActor: "sl_user_U1"}, true, nil
+	}
+	id := r.add(Caller{Principal: slackBoss, Role: core.RoleOwner, Conv: core.ConvKey{Interface: core.PlatformSlack, Chat: "D1"}, Private: true}, `{"name":"n","kind":"notify","schedule":{"every":"1h"},"text":"ping"}`)
+	r.now = r.now.Add(time.Hour)
+	r.tick()
+	if out := slackSent(r); len(out) != 0 {
+		t.Fatalf("notify enqueued behind a drain: %+v", out)
+	}
+	if got := r.runs(id)[0]; got.State != store.RunPending {
+		t.Fatalf("held notify run: %+v", got)
+	}
+	if idle, err := Drain(context.Background(), r.st, 50*time.Millisecond, 10*time.Millisecond); !idle || err != nil {
+		t.Fatalf("drain: %v %v", idle, err)
+	}
+	hold = false
+	if err := r.s.Recover(); err != nil { // a restart clears the hold
+		t.Fatal(err)
+	}
+	r.tick()
+	if out := slackSent(r); len(out) != 1 || out[0].Text != "ping" {
+		t.Fatalf("notify after the hold: %+v runs %+v", out, r.runs(id))
+	}
+}
+
+// slackSent drains the Slack outbound queue.
+func slackSent(r *rig) []core.Outbound {
+	var out []core.Outbound
+	for {
+		row, ok, err := r.st.NextOutbound(core.PlatformSlack)
+		if err != nil || !ok {
+			return out
+		}
+		_ = r.st.Sent(row.ID)
+		out = append(out, row.Outbound)
+	}
+}

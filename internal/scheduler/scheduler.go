@@ -347,7 +347,21 @@ func (s *Scheduler) launch(ctx context.Context, j store.Job, d Def, sched *sched
 		if sched.OneOff() && r.Trigger != "manual" {
 			end.JobState, end.JobReason = store.JobDone, "one-off ran"
 		}
-		s.endRun(j, d, end, core.Outbound{Conv: tgt.Conv, Text: d.Text})
+		// Verification may have waited on Slack while a drain began: the
+		// hold is checked in the transaction that enqueues the text, and a
+		// held run stays pending for the due loop after the hold.
+		outs := append([]core.Outbound{{Conv: tgt.Conv, Text: d.Text}}, s.endNotices(j, d, end)...)
+		held, err := s.st.EndRunUnlessHeld(MetaHold, s.now(), end, outs...)
+		switch {
+		case err != nil:
+			s.log.Printf("scheduler: run %d of job %s not settled: %v", end.ID, end.Job, err)
+		case held:
+			s.log.Printf("scheduler: run %d of job %s held by drain", end.ID, end.Job)
+		default:
+			s.log.Printf("scheduler: run %d of job %s: %s", end.ID, end.Job, end.State)
+			s.notify(outs...)
+			s.Wake()
+		}
 		return false
 	}
 	in := core.Inbound{Conv: core.ConvKey{Interface: tgt.Conv.Interface, Chat: core.SchedChat(j.ID)}, MsgID: fmt.Sprintf("run:%d:%d", r.ID, r.Attempt),
