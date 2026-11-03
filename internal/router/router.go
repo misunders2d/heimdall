@@ -1119,6 +1119,9 @@ func (c *conv) send(ctx context.Context, ev any) {
 func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 	c.observe(ctx, t, "start", harness.Progress{})
 	var notes []string
+	// gated holds employee-gate skips. They only reach the reply when no
+	// harness took the turn: a skipped engine is not news if another answered.
+	var gated []string
 	var prompt string
 	var images []harness.Image
 	memory := core.Memory(c.r.opt.Access.Mode, t.role, t.from)
@@ -1132,7 +1135,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			break
 		}
 		if t.role == core.RoleEmployee && !slices.Contains(c.r.opt.EmployeeHarnesses, h) {
-			notes = append(notes, h+": employee turns unavailable until native isolation and skill reading are validated")
+			gated = append(gated, h+": employee turns unavailable until native isolation and skill reading are validated")
 			continue
 		}
 
@@ -1248,6 +1251,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		notes = append(notes, h+" failed before starting: "+why)
 	}
+	notes = append(gated, notes...)
 	c.send(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes})
 }
 

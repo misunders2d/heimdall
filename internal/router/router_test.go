@@ -2052,3 +2052,26 @@ func TestEnabledEmployeeHarnessTurnDirAndCapabilities(t *testing.T) {
 		t.Fatalf("turn dir: %v", err)
 	}
 }
+
+// A harness the employee gate skips is not news when another one answered:
+// the reply carries no gate note (live Slack showed "(codex: employee turns
+// unavailable …; claude: …)" under a Pi answer).
+func TestEmployeeGateSkipsAreSilentWhenAnotherHarnessAnswers(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp", "claude"}, "omp", "claude")
+	e.stop()
+	dir := t.TempDir()
+	for name, data := range map[string]string{"whitelist.json": `{"users":["7"]}`, "blacklist.json": `{}`, "admins.json": `{}`, "identities.json": `{}`, "capabilities.json": `{}`} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.opt.Access = core.Access{Dir: dir, Mode: core.ModeCorporate}
+	e.opt.EmployeeHarnesses = []string{"claude"}
+	e.start()
+	e.sendAs(core.Principal{Platform: "telegram", ID: "7"}, "-101", "synthetic")
+	out := e.reply()
+	want(t, out, "role employee")
+	if strings.Contains(out.Text, "employee turns unavailable") {
+		t.Fatalf("gate note leaked into an answered turn: %q", out.Text)
+	}
+}
