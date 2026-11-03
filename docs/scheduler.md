@@ -705,6 +705,7 @@ Built on `main` 4f3f7e8. Where this section and the sections above differ, this 
 - `notify` jobs cannot target `agentnet:` (only an agent delivers there).
 - `heimdall sched health` lists every paused job; only those the scheduler paused count as issues.
 - The first-message note goes into the turn context for Codex, Claude and Pi, and at the top of the prompt for OMP and AGY.
+- A scheduled run's own notes (the quiet instruction, the AgentNet delivery instruction) follow its prompt in the native message on every harness. As turn context, live Pi ignored the quiet instruction.
 - A draft's card is Heimdall's own message after the answer; an answer that was only the block is replaced by the card.
 - `scheduler.checkers` is not accepted until 3b.
 - Size: about 2,800 non-comment Go lines (3,300 with comments) against the ~1,520 estimate; the operator CLI, the DST evaluation and the role checks of every command are the difference. No dependency beyond gronx.

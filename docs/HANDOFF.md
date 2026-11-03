@@ -44,6 +44,56 @@ mount layout for policy/skills, deployment files and remaining gates. No copies,
 no laptop skills, no owner credentials exposed. Historical handoff entries below
 are superseded wherever they conflict with this section.
 
+## Scheduler phase 3a — 2026-11-03
+
+Branch `feat/scheduler-3a` from `main` 4f3f7e8; design of record and as-built
+deviations in [scheduler.md](scheduler.md) (§17). Pack change (D3,
+`PI_SCHEDULER_TOOLS=0` hides the hub scheduler tools) is on pack branch
+`feat/pi-scheduler-tools-flag` from `origin/hub`, with offline test
+`scripts/test-scheduler-tools-flag.mjs`. Nothing deployed.
+
+Evidence: `go vet ./...`, `go test -race -count=1 ./...` and a
+`CGO_ENABLED=0` build pass. Laptop acceptance with `heimdall local`, the real
+Pi and Codex installs, scratch config/data outside the repo,
+`MEMENTO_PROCESSING=1` (§15 numbering):
+
+- 3: Codex turned a natural-language request into a `heimdall-job` block; the
+  card showed the next three Kyiv runs; a bare `yes` activated it. Laptop Pi
+  instead asked an interactive question (its `ask-user-question` extension),
+  which Heimdall correctly ended as *needs human*.
+- 4: a 1-minute job delivered three times, `ok` in history; a notify job sent
+  its text; a quiet job ran `quiet` and sent nothing (after the fix below).
+- 6: SIGKILL during a ready run; after restart one interrupted notice, history
+  `interrupted`, no re-run.
+- 7: `heimdall drain` printed `idle`, exit 0; `heimdall sched health` was
+  clean, then (Heimdall stopped) exit 1 with "due loop last ran 3m3s ago" and
+  an overdue job; on restart one missed notice counted 3 slots and the next
+  slot ran.
+- 11: in a scheduled Pi turn `env` showed no `HEIMDALL_*` name (a planted
+  `HEIMDALL_` variable in Heimdall's environment was absent),
+  `PI_SCHEDULER_TOOLS=0`, `PI_EXTERNAL_MCP_PRIVATE=0`, `MEMENTO_PROCESSING=1`;
+  the log held no message text; `sched export` held no secrets.
+- 12: `enabled:false`: `!jobs` and `!job add` say not enabled, all jobs kept,
+  no tick or run for 80 s, no `PI_SCHEDULER_TOOLS` in a Pi turn.
+- Not run live: 5 (Telegram target delivery; no test bot), 8 (employee jobs;
+  needs root), 9 live tool hiding (pack not deployed), 10 (AgentNet). Fakes and
+  unit tests cover them.
+
+Fix from acceptance: job notes (quiet instruction, AgentNet delivery) went to
+Pi's turn context, where live Pi ignored the quiet instruction twice. They now
+follow the prompt in the native message (`TestScheduledNoteInNativeMessage`).
+
+Deploy (owner): add the `scheduler` block from
+`deploy/contabo/config.example.json`; build
+`CGO_ENABLED=0 go build -o heimdall ./cmd/heimdall`; deploy the pack branch
+so Pi/OMP hide their scheduler tools; `heimdall drain -config FILE` before the
+restart. Rollback: `scheduler.enabled=false` and restart (jobs kept), or the
+previous binary (schema step 14 only adds tables and a column).
+
+Open: live checks 5, 8, 9 and 10 on the hub; Pi/OMP scheduler source drift in
+the pack (`test-omp-scheduler-parity` fails before and after the change);
+`scheduler.checkers` is rejected until 3b.
+
 ## Warm workers — 2026-11-01
 
 Implementation: `internal/harness/warm.go` owns bounded retained transports;
