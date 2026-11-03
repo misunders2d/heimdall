@@ -94,10 +94,15 @@ so Pi/OMP hide their scheduler tools; `heimdall drain -config FILE` before the
 restart. Rollback: `scheduler.enabled=false` and restart (jobs kept), or the
 previous binary (schema step 14 only adds tables and a column).
 
-Open: live checks 5, 8, 9 and 10 on the hub. Owner decision: Pi may not
-propose jobs while the first-message jobs note is turn context (Codex did);
-moving it into Pi's native prompt would touch every fresh Pi chat session, so
-it is left as §17 documents. Pi/OMP scheduler source drift in
+Open: live checks 5, 8, 9 and 10 on the hub. Pi did not propose jobs while
+the first-message jobs note was turn context (Codex did); by orchestrator
+decision (2026-11-03) the note now follows the prompt in the first message
+of each new Pi session, never in scheduled turns
+(`TestJobNoteInPiFirstMessage`); not yet re-checked with live Pi. A scheduled
+Pi run whose extension asks for input (the pack's `ask_user_question`)
+ends at once as `failed`, cause `needs_human: …`, with a notice
+(`TestScheduledNeedsHumanFailsFast`). Rebased onto `main` fe58149 (employee
+Google sign-in, `!which` model). Pi/OMP scheduler source drift in
 the pack (`test-omp-scheduler-parity` fails before and after the change);
 `scheduler.checkers` is rejected until 3b.
 

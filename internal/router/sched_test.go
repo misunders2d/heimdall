@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/fakeharness"
 	"github.com/misunders2d/heimdall/internal/scheduler"
 	"github.com/misunders2d/heimdall/internal/store"
 )
@@ -129,6 +130,60 @@ func TestScheduledNoteInNativeMessage(t *testing.T) {
 	id := e.addJob(`{"name":"quiet","schedule":{"every":"1h"},"quiet":true,"prompt":"check things"}`)
 	e.ask(ownerDM, "!job run "+id)
 	want(t, e.reply(), `last="[Scheduled job: if there is nothing new to report, answer exactly NO_UPDATE`, frameSch[:len(`scheduled job \"`)])
+}
+
+// Pi gets the jobs note after the prompt in the first message of a fresh
+// native session, not as turn context (live Pi ignored it there); Claude
+// keeps it as turn context. Later messages and scheduled turns never carry it.
+func TestJobNoteInPiFirstMessage(t *testing.T) {
+	for _, h := range []string{"pi", "claude"} {
+		t.Run(h, func(t *testing.T) {
+			e := schedEnv(t, []string{h}, h)
+			e.ask(ownerDM, "hello")
+			e.ask(ownerDM, "again")
+			in := fakeharness.Inputs(e.state)
+			if len(in) != 2 {
+				t.Fatalf("inputs %+v", in)
+			}
+			inText, inContext := strings.Contains(in[0].Text, scheduler.Note), strings.Contains(in[0].Context, scheduler.Note)
+			if h == "pi" && (!inText || inContext || !strings.HasSuffix(in[0].Text, scheduler.Note) || !strings.Contains(in[0].Text, "hello")) {
+				t.Fatalf("pi first input text %q context %q", in[0].Text, in[0].Context)
+			}
+			if h == "claude" && (inText || !inContext) {
+				t.Fatalf("claude first input text %q context %q", in[0].Text, in[0].Context)
+			}
+			if in[0].Context == "" {
+				t.Fatalf("%s lost its turn context", h)
+			}
+			if strings.Contains(in[1].Text, "Heimdall jobs:") {
+				t.Fatalf("note repeated: %q", in[1].Text)
+			}
+			id := e.addJob(`{"name":"nightly","schedule":{"every":"1h"},"prompt":"check things"}`)
+			e.ask(ownerDM, "!job run "+id)
+			e.reply()
+			in = fakeharness.Inputs(e.state)
+			if last := in[len(in)-1]; !strings.Contains(last.Text, "check things") || strings.Contains(last.Text+last.Context, "Heimdall jobs:") {
+				t.Fatalf("scheduled input %+v", last)
+			}
+		})
+	}
+}
+
+// A Pi extension asking for interactive input (the pack's ask_user_question,
+// an approval, a sign-in) in a scheduled run ends the run at once: failed
+// with the needs_human cause in history, and a notice to the creator.
+func TestScheduledNeedsHumanFailsFast(t *testing.T) {
+	e := schedEnv(t, []string{"pi"}, "pi")
+	id := e.addJob(`{"name":"asker","schedule":{"every":"1h"},"prompt":"ASK_HUMAN"}`)
+	e.ask(ownerDM, "!job run "+id)
+	out := e.reply()
+	want(t, out, "failed", "Cause: "+scheduler.NeedsHumanCause, "— heimdall")
+	if out.Conv != ownerDM {
+		t.Fatalf("notice to %s", out.Conv)
+	}
+	if h := e.history(id); !strings.Contains(h, " failed") || !strings.Contains(h, scheduler.NeedsHumanCause) {
+		t.Fatalf("history %q", h)
+	}
 }
 
 func TestScheduledFailureAndUnverifiedNotices(t *testing.T) {

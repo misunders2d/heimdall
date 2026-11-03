@@ -688,7 +688,7 @@ For 3b, add:
 
 ## 17. Phase 3a as built
 
-Built on `main` 4f3f7e8. Where this section and the sections above differ, this section describes the code.
+Built on `main` 4f3f7e8, rebased onto `main` fe58149 (employee Google sign-in, `!which` model). Where this section and the sections above differ, this section describes the code.
 
 **Layout**
 - `internal/schedule`: specs to slots (gronx for cron fields, wall clock evaluated as UTC, the cronie DST rule of §3.4, `time/tzdata` embedded).
@@ -704,7 +704,8 @@ Built on `main` 4f3f7e8. Where this section and the sections above differ, this 
 - Identity variables: `PI_EXTERNAL_CHAT_ID` and `PI_EXTERNAL_DEFAULT_DELIVERY` follow the conversation's interface (the job's target), so a Telegram owner's job into a Slack channel gets the Slack chat. For live turns nothing changes. An `agentnet:` job runs with the conversation it was created in.
 - `notify` jobs cannot target `agentnet:` (only an agent delivers there).
 - `heimdall sched health` lists every paused job; only those the scheduler paused count as issues.
-- The first-message note goes into the turn context for Codex, Claude and Pi, and at the top of the prompt for OMP and AGY.
+- The first-message note goes into the turn context for Codex and Claude, after the prompt in the message for Pi, and at the top of the prompt for OMP and AGY. As turn context live Pi ignored it and never proposed a job (orchestrator decision, 2026-11-03: about 300 characters in the first message of a new native session only, never in scheduled turns).
+- A harness that asks for interactive input in a scheduled run (Pi's pack `ask_user_question` tool reaches native UI because RPC mode has a UI; an approval; a sign-in, since scheduled turns relay none) ends the turn at once with nothing answered. The run is `failed` with the cause `needs_human: …` in `!job history` and the failure notice; it counts towards `pause_after` and is not retried.
 - A scheduled run's own notes (the quiet instruction, the AgentNet delivery instruction) follow its prompt in the native message on every harness. As turn context, live Pi ignored the quiet instruction.
 - A draft's card is Heimdall's own message after the answer; an answer that was only the block is replaced by the card.
 - `scheduler.checkers` is not accepted until 3b.

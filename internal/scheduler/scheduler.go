@@ -559,6 +559,11 @@ var (
 	agentnetOK = regexp.MustCompile(`(?m)^[ \t]*AGENTNET_SENT [^\s]+[ \t]*\z`)
 )
 
+// NeedsHumanCause is a run's cause when the harness asked for interactive
+// input (a question tool, an approval or a sign-in): nobody is there to
+// answer, so the turn ends at once, nothing approved.
+const NeedsHumanCause = "needs_human: the harness asked for interactive input (a question, approval or sign-in) that a scheduled run cannot answer"
+
 // End decides a scheduled turn's outcome (§3.8–3.10): the run's state, what
 // is delivered where, and the notices; the router stores it with the turn.
 func (s *Scheduler) End(o Outcome) store.TurnEnd {
@@ -597,7 +602,7 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 		}
 		run = s.retry(j, t.Def, sched, r, s.now(), cause)
 	case res.NeedsHuman != "":
-		fail("needs a native approval or input (sign-in?)")
+		fail(NeedsHumanCause)
 	case res.Cancelled:
 		fail("cancelled or timed out")
 	case res.Failure != "":

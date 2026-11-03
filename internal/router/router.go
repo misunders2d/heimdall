@@ -1327,8 +1327,12 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			}
 		}
 		if c.r.opt.Jobs != nil && t.job == nil && !sess.Resume && !batch[0].row.MCPControl {
-			// A new native session learns once how to propose a job.
-			if turnContext != "" || nativePrompt != prompt {
+			// A new native session learns once how to propose a job. Pi
+			// reads it after the prompt in the message: as turn context,
+			// live Pi ignored it.
+			if h == "pi" {
+				nativePrompt = strings.TrimSpace(nativePrompt + "\n\n" + scheduler.Note)
+			} else if turnContext != "" || nativePrompt != prompt {
 				turnContext = strings.TrimSpace(scheduler.Note + "\n\n" + turnContext)
 			} else {
 				nativePrompt = scheduler.Note + "\n\n" + nativePrompt
