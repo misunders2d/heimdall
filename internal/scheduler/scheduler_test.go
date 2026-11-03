@@ -711,3 +711,40 @@ func TestSharedRepliesHidePrompt(t *testing.T) {
 		t.Fatalf("shared card: %q", card)
 	}
 }
+
+// A drain's hold stops every run not yet started, at its turn's start: a
+// run handed to the router before the hold (waiting for a slot) goes back
+// to waiting, and drain counts it as busy until then.
+func TestHoldAtTurnStart(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"h","schedule":{"every":"1h"},"prompt":"p"}`)
+	r.now = r.now.Add(time.Hour)
+	r.tick()
+	if len(r.rows) != 1 {
+		t.Fatalf("dispatched %d", len(r.rows))
+	}
+	if idle, err := Drain(context.Background(), r.st, 50*time.Millisecond, 10*time.Millisecond); idle || err != nil {
+		t.Fatalf("drain idle while a handed-over run waits for its turn: %v %v", idle, err)
+	}
+	_ = r.st.SetMeta(MetaHold, r.now.Add(time.Hour).UnixMilli())
+	if _, ok := r.s.Begin(r.rows[0]); ok {
+		t.Fatal("a held run started")
+	}
+	if got := r.runs(id)[0]; got.State != store.RunPending || got.Attempt != 0 || got.Inbound != 0 {
+		t.Fatalf("held run: %+v", got)
+	}
+	if idle, err := Drain(context.Background(), r.st, 50*time.Millisecond, 10*time.Millisecond); !idle || err != nil {
+		t.Fatalf("drain not idle once the run was held: %v %v", idle, err)
+	}
+	if err := r.s.Recover(); err != nil { // a restart clears the hold
+		t.Fatal(err)
+	}
+	r.rows = nil
+	r.tick()
+	if len(r.rows) != 1 {
+		t.Fatalf("held run not handed over again: %+v", r.runs(id))
+	}
+	if _, ok := r.s.Begin(r.rows[0]); !ok {
+		t.Fatalf("held run did not start after the hold: %+v", r.runs(id))
+	}
+}

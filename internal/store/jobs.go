@@ -385,14 +385,24 @@ type RunEnd struct {
 	Cause     string
 	Retry     time.Time // set: back to pending, due then, as the next attempt
 	Replay    bool      // with Retry: the run's one re-run after a restart
-	Inbound   int64     // set: its message, still pending, is cancelled
+	Held      bool      // with Retry: held back before it started, the same attempt
+	Inbound   int64     // set: its message, still pending, is cancelled (with Retry: dropped)
 	JobState  string    // set: the job becomes paused or done
 	JobReason string
 }
 
 func endRun(tx *sql.Tx, e RunEnd) error {
 	if !e.Retry.IsZero() {
-		_, err := tx.Exec(`UPDATE job_runs SET state=?,attempt=attempt+1,not_before=?,cause=?,inbound_id=NULL,replayed=replayed OR ? WHERE id=?`, RunPending, e.Retry.UnixMilli(), clip(e.Cause), e.Replay, e.ID)
+		attempt := `attempt+1`
+		if e.Held {
+			attempt = `attempt`
+		}
+		if _, err := tx.Exec(`UPDATE job_runs SET state=?,attempt=`+attempt+`,not_before=?,cause=?,inbound_id=NULL,replayed=replayed OR ? WHERE id=?`, RunPending, e.Retry.UnixMilli(), clip(e.Cause), e.Replay, e.ID); err != nil {
+			return err
+		}
+		// A message that never started goes: the run's next start stores
+		// its own (run:<id>:<attempt>), and nothing replays this one.
+		_, err := tx.Exec(`DELETE FROM inbound WHERE id=? AND state=?`, e.Inbound, InPending)
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE job_runs SET state=?,cause=?,ended_at=? WHERE id=?`, e.State, clip(e.Cause), now(), e.ID); err != nil {
@@ -527,10 +537,11 @@ func (s *Store) Prune(at time.Time, runAge, jobAge time.Duration) error {
 	})
 }
 
-// Busy counts running turns and undelivered replies: drain waits for both
-// to be zero.
+// Busy counts running turns, scheduled runs handed to the router (started
+// or still waiting for their turn) and undelivered replies: drain waits for
+// all to be zero.
 func (s *Store) Busy() (turns, replies int, err error) {
-	if err = s.db.QueryRow(`SELECT count(*) FROM turns WHERE state=?`, TurnRunning).Scan(&turns); err != nil {
+	if err = s.db.QueryRow(`SELECT (SELECT count(*) FROM turns WHERE state=?)+(SELECT count(*) FROM job_runs WHERE state=?)`, TurnRunning, RunRunning).Scan(&turns); err != nil {
 		return 0, 0, err
 	}
 	replies, err = s.Undelivered()

@@ -138,8 +138,9 @@ func (s *Scheduler) Export() ([]byte, error) {
 }
 
 // Drain holds new scheduled runs until timeout and waits for every running
-// turn to end and every reply to be delivered: idle true then. Live chat
-// is not held. The hold clears when Heimdall starts.
+// turn to end, every run handed to the router to start or be held at its
+// turn's start (Begin), and every reply to be delivered: idle true then.
+// Live chat is not held. The hold clears when Heimdall starts.
 func Drain(ctx context.Context, st *store.Store, timeout, poll time.Duration) (idle bool, err error) {
 	deadline := time.Now().Add(timeout)
 	if err := st.SetMeta(MetaHold, deadline.UnixMilli()); err != nil {

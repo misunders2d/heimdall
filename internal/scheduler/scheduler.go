@@ -160,7 +160,7 @@ func (s *Scheduler) tick(ctx context.Context) time.Time {
 			soonest(s.fire(j, d, sched, now))
 		}
 	}
-	if hold, _ := s.st.Meta(MetaHold); hold <= now.UnixMilli() {
+	if !s.held(now) {
 		soonest(s.start(ctx, now))
 	}
 	if now.Sub(s.pruned) > time.Hour {
@@ -170,6 +170,12 @@ func (s *Scheduler) tick(ctx context.Context) time.Time {
 		}
 	}
 	return next
+}
+
+// held reports a drain's hold: no run starts.
+func (s *Scheduler) held(now time.Time) bool {
+	hold, _ := s.st.Meta(MetaHold)
+	return hold > now.UnixMilli()
 }
 
 func parse(j store.Job) (Def, *schedule.Schedule, error) {
@@ -493,8 +499,9 @@ type Turn struct {
 }
 
 // Begin is called as a scheduled message's turn starts. ok false: the run
-// may no longer start (job paused or removed, later than grace) and was
-// settled, its message cancelled.
+// may not start now. It was settled (job paused or removed, later than
+// grace), its message cancelled; or a drain holds it, and it waits again
+// with its message dropped.
 func (s *Scheduler) Begin(row store.InboundRow) (*Turn, bool) {
 	ref := row.Run
 	r, rerr := s.st.Run(ref.Run)
@@ -503,12 +510,18 @@ func (s *Scheduler) Begin(row store.InboundRow) (*Turn, bool) {
 	now := s.now()
 	end := store.RunEnd{ID: ref.Run, Job: ref.Job, Inbound: row.ID}
 	switch {
-	case rerr != nil || !ok || err != nil || r.State != store.RunRunning || r.Inbound != row.ID:
-		end.State, end.Cause = store.RunCancelled, "run no longer current"
+	case rerr != nil || r.State != store.RunRunning || r.Inbound != row.ID:
+		// Not the run's current message: only the message goes.
+		_ = s.st.SetInbound(row.ID, store.InCancelled, "run no longer current")
+		return nil, false
+	case !ok || err != nil:
+		end.State, end.Cause = store.RunCancelled, "job missing or unreadable"
 	case j.State == store.JobDeleted || j.State == store.JobDone || j.State == store.JobPaused && r.Trigger != "manual":
 		end.State, end.Cause = store.RunCancelled, "job "+j.State
 	case now.Sub(r.Due) > s.grace(d, sched):
 		end.State, end.Cause = store.RunMissed, "not started within grace"
+	case s.held(now):
+		end.Retry, end.Held, end.Cause = now, true, "held by heimdall drain"
 	default:
 		t := &Turn{Job: j.ID, Name: j.Name, Run: r.ID, Attempt: r.Attempt, Due: r.Due, Def: d}
 		t.Target, _ = s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate})
