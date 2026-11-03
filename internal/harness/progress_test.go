@@ -83,3 +83,27 @@ func TestProgressWiredIntoNativeAdapters(t *testing.T) {
 		t.Fatalf("native wiring %+v", got)
 	}
 }
+
+// A Pi tool result whose details say auth_needed (the employee Google
+// runtime's, an ordinary result) names the service needing a sign-in;
+// other results, and other harnesses' result fields, name none.
+func TestPiToolResultSignIn(t *testing.T) {
+	for _, tc := range []struct{ style, event, want string }{
+		{"pi", `{"type":"tool_execution_end","toolName":"google_gmail_search","isError":false,"result":{"content":[{"type":"text","text":"Send google login in a DM."}],"details":{"status":"auth_needed"}}}`, "google"},
+		{"pi", `{"type":"tool_execution_end","toolName":"crm_read","result":{"details":{"status":"auth_needed","service":"mellanni"}}}`, "mellanni"},
+		{"pi", `{"type":"tool_execution_end","toolName":"google_drive_list","result":{"details":{"status":"success"}}}`, ""},
+		{"pi", `{"type":"tool_execution_end","toolName":"bash","result":{"content":[],"details":"text"}}`, ""},
+		{"claude", `{"type":"result","result":"auth_needed"}`, ""},
+	} {
+		var got []string
+		var tracker progressTracker
+		tracker.event(tc.style, []byte(tc.event), func(p Progress) {
+			if p.SignIn != "" {
+				got = append(got, p.SignIn)
+			}
+		})
+		if strings.Join(got, ",") != tc.want {
+			t.Errorf("%s: sign-in %v, want %q", tc.event, got, tc.want)
+		}
+	}
+}

@@ -11,6 +11,10 @@ type Progress struct {
 	Phase, Text, Tool string
 	Reset             bool
 	Error             bool
+	// SignIn names the service a tool's result said needs a sign-in: a
+	// structured auth_needed result (details.status), which Pi reports as an
+	// ordinary tool result, not an error. Scheduled runs fail on it.
+	SignIn string
 }
 
 // Ported telemetry correlation from AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5:
@@ -40,6 +44,26 @@ func (t *progressTracker) add(key string, index int, text string, emit func(Prog
 	t.text = tailProgress(t.text+text, 2000)
 	emit(Progress{Phase: "thinking", Text: t.text, Reset: true})
 }
+
+// signIn is the service a Pi tool result asks a sign-in for, or "": its
+// details.status is auth_needed (the employee Google runtime), with
+// details.service, else the google_ tool prefix, else the tool's name.
+func signIn(tool string, result json.RawMessage) string {
+	var r struct {
+		Details struct{ Status, Service string }
+	}
+	if json.Unmarshal(result, &r) != nil || r.Details.Status != "auth_needed" {
+		return ""
+	}
+	switch {
+	case r.Details.Service != "":
+		return r.Details.Service
+	case strings.HasPrefix(tool, "google_"):
+		return "google"
+	}
+	return tool
+}
+
 func tailProgress(s string, n int) string {
 	r := []rune(s)
 	if len(r) > n {
@@ -54,6 +78,7 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 	var e struct {
 		Type, Method, ToolName string
 		IsError                bool
+		Result                 json.RawMessage
 		AssistantMessageEvent  json.RawMessage
 		Event                  json.RawMessage
 		Params                 json.RawMessage
@@ -78,7 +103,7 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		case "tool_execution_start":
 			emit(Progress{Phase: "tools", Tool: e.ToolName})
 		case "tool_execution_end":
-			emit(Progress{Phase: "tools", Tool: e.ToolName, Error: e.IsError})
+			emit(Progress{Phase: "tools", Tool: e.ToolName, Error: e.IsError, SignIn: signIn(e.ToolName, e.Result)})
 		case "message_update":
 			var u struct {
 				Type, Delta, Content string

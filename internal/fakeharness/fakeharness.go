@@ -20,6 +20,9 @@
 //	               and never acknowledge it
 //	SLEEP          stay busy for 30 seconds
 //	ASK_HUMAN      request native approval/input
+//	SIGNIN_NEEDED  (pi/omp) run a google_gmail_search tool whose result is
+//	               the employee Google runtime's auth_needed (an ordinary
+//	               result, isError false), then answer normally
 //	SLOWACK        (pi/omp) take each steer 1 s after it arrived
 //	STEERREPLY     (pi/omp) before taking each steer, give the input before
 //	               it its own final text, "reply N: LAST LINE", as OMP
@@ -459,6 +462,11 @@ func (f *fake) piRPC() {
 			}
 		}
 		f.failPost()
+		if f.has("SIGNIN_NEEDED") {
+			f.emit(map[string]any{"type": "tool_execution_start", "toolName": "google_gmail_search"})
+			f.emit(map[string]any{"type": "tool_execution_end", "toolName": "google_gmail_search", "isError": false,
+				"result": map[string]any{"content": []map[string]any{{"type": "text", "text": "Send `google login` in a DM."}}, "details": map[string]any{"status": "auth_needed"}}})
+		}
 		if f.has("MCP_UI") {
 			f.emit(map[string]any{"type": "extension_ui_request", "method": "notify", "message": "Sign in to MCP server slack in your browser: https://example.invalid/?state=x"})
 		}

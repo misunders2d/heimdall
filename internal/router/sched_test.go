@@ -352,3 +352,26 @@ func TestScheduledCreatorCheckedAtTurnStart(t *testing.T) {
 		}
 	}
 }
+
+// A tool that answers auth_needed (the employee Google runtime does, as an
+// ordinary tool result) fails a scheduled run even though the model then
+// explains it in a normal answer: the notice names the right sign-in, and
+// pause_after such runs pause the job.
+func TestScheduledSignInNeededFails(t *testing.T) {
+	e := schedEnv(t, []string{"pi"}, "pi")
+	id := e.addJob(`{"name":"mail","schedule":{"every":"1h"},"prompt":"SIGNIN_NEEDED check mail"}`)
+	for i := range 3 {
+		want(t, e.ask(ownerDM, "!job run "+id), "runs now")
+		out := e.reply()
+		want(t, out, "failed", "sign-in needed: google", "google login", "— heimdall")
+		if strings.Contains(out.Text, "omp#") || strings.Contains(out.Text, "pi#") {
+			t.Fatalf("run %d delivered the answer: %q", i, out.Text)
+		}
+		if i == 2 {
+			want(t, e.reply(), "was paused", "google login")
+		}
+	}
+	if j, _, _ := e.st.Job(id); j.State != store.JobPaused {
+		t.Fatalf("job %s after 3 sign-in failures", j.State)
+	}
+}

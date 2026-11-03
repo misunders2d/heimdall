@@ -448,22 +448,50 @@ func (s *Scheduler) endRun(j store.Job, d Def, end store.RunEnd, outs ...core.Ou
 	s.Wake()
 }
 
+// signInCause starts a run's cause when a tool result said a service needs
+// a sign-in; the services follow.
+const signInCause = "sign-in needed: "
+
 // endNotices are the notices a run's end needs beyond its own: a failure
-// notice, and a pause notice.
+// notice, and a pause notice, both with the sign-in to send when the run
+// failed for one.
 func (s *Scheduler) endNotices(j store.Job, d Def, end store.RunEnd) []core.Outbound {
 	var outs []core.Outbound
+	hint := signInHint(j.ID, d, end.Cause)
 	if end.State == store.RunFailed && end.Cause != "identity" {
 		run, _ := s.st.Run(end.ID)
-		outs = s.notices(j, d, true, s.text(j, d, "failed", run.Due, end.Cause, run.Attempt+1))
+		outs = s.notices(j, d, true, s.text(j, d, "failed."+hint, run.Due, end.Cause, run.Attempt+1))
 	}
 	if end.JobState == store.JobPaused && end.Cause != "identity" {
-		hint := ""
-		if len(d.Requires) > 0 {
-			hint = fmt.Sprintf(" If it needs a sign-in (%s): send mcp login in your private chat, then !job resume %s.", strings.Join(d.Requires, ", "), j.ID)
-		}
 		outs = append(outs, s.notices(j, d, false, s.text(j, d, "was paused: "+end.JobReason+"."+hint, time.Time{}, "", 0))...)
 	}
 	return outs
+}
+
+// signInHint is the sign-in a failed run's creator sends (§4): for the
+// services a tool result named, else the job's requires when the failure
+// looks like a sign-in. Google's is google login; any other is mcp login.
+func signInHint(id string, d Def, cause string) string {
+	services := d.Requires
+	if named, ok := strings.CutPrefix(cause, signInCause); ok {
+		services = strings.Split(named, ", ")
+	} else if cause != "sign-in or credentials" && cause != NeedsHumanCause {
+		return ""
+	}
+	var logins []string
+	for _, name := range services {
+		login := "mcp login"
+		if name == "google" {
+			login = "google login"
+		}
+		if !slices.Contains(logins, login) {
+			logins = append(logins, login)
+		}
+	}
+	if len(logins) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" To sign in (%s): send %s in your private chat with the bot, then !job resume %s if the job was paused.", strings.Join(services, ", "), strings.Join(logins, " and "), id)
 }
 
 func (s *Scheduler) setState(j store.Job, state, reason string, outs ...core.Outbound) {
@@ -593,6 +621,7 @@ type Outcome struct {
 	Notes    []string // why candidates failed before starting
 	Files    []core.File
 	Tools    []string // native tool names seen
+	SignIn   []string // services a tool result said need a sign-in (harness.Progress.SignIn)
 }
 
 var (
@@ -654,6 +683,9 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 		fail("cancelled or timed out")
 	case res.Failure != "":
 		fail(category(res.Failure))
+	case len(o.SignIn) > 0:
+		// The model may explain it in a normal answer: the run still failed.
+		fail(signInCause + strings.Join(o.SignIn, ", "))
 	case t.Target.AgentNet != "":
 		if agentnetOK.MatchString(text) {
 			run.State = store.RunOK

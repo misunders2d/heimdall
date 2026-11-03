@@ -543,6 +543,7 @@ type turn struct {
 	batch    []item            // the messages the turn started with
 	job      *scheduler.Turn   // a scheduled run's job; nil for a chat turn
 	tools    []string          // native tool names seen, for the job's expect checks (t.mu)
+	signIn   []string          // services a tool result said need a sign-in, for the job's outcome (t.mu)
 }
 
 type readyEvent struct {
@@ -1322,14 +1323,18 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok && t.job == nil {
 			progress = func(p harness.Progress) { c.observe(ctx, t, "progress", p) }
 		}
-		if t.job != nil && len(t.job.Def.Expect.Tools) > 0 {
-			// Tool names only, for the job's checks; nothing is shown.
+		if t.job != nil {
+			// Tool names and sign-in requests only, for the job's outcome;
+			// nothing is shown.
 			progress = func(p harness.Progress) {
-				if p.Tool != "" {
-					t.mu.Lock()
+				t.mu.Lock()
+				if p.Tool != "" && len(t.job.Def.Expect.Tools) > 0 {
 					t.tools = append(t.tools, p.Tool)
-					t.mu.Unlock()
 				}
+				if p.SignIn != "" && !slices.Contains(t.signIn, p.SignIn) {
+					t.signIn = append(t.signIn, p.SignIn)
+				}
+				t.mu.Unlock()
 			}
 		}
 		nativePrompt, instructions, turnContext := prompt, "", ""
@@ -1741,14 +1746,14 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 // files go to the job's target, not to the run's own conversation.
 func (c *conv) jobEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEnd {
 	t.mu.Lock()
-	tools := t.tools
+	tools, signIn := t.tools, t.signIn
 	t.mu.Unlock()
 	files := make([]core.File, len(d.files))
 	for i, f := range d.files {
 		files[i] = core.File{Path: f.Path, Name: f.Name, MIME: mimeOf(f.Name)}
 	}
 	res.Answer = stripHarnessTag(res.Answer, d.harness)
-	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Identity: d.identity, Notes: d.notes, Files: files, Tools: tools})
+	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Identity: d.identity, Notes: d.notes, Files: files, Tools: tools, SignIn: signIn})
 	e.Harness, e.Session, e.Clean = d.harness, res.SessionID, e.State == store.TurnDone && !res.Unclean
 	if e.Reply != nil {
 		e.Reply.Text = c.r.scrub(e.Reply.Text)
