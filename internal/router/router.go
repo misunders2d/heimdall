@@ -1155,9 +1155,6 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 	}
 	if t.job == nil {
 		c.react(t, batch)
-	} else if len(t.job.History) > 0 {
-		h := untrusted("job history", strings.Join(t.job.History, "\n---\n"))
-		parts, contextParts = append(parts, h), append(contextParts, h)
 	}
 	for _, it := range batch {
 		blocks, ims := c.files(t, it)

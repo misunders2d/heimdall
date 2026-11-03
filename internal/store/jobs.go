@@ -498,26 +498,6 @@ func (s *Store) PrivateChat(p core.Principal) (core.ConvKey, bool, error) {
 	return k, err == nil, err
 }
 
-// JobReplies are the newest n texts delivered for a job's runs, newest
-// first.
-func (s *Store) JobReplies(job string, n int) ([]string, error) {
-	rows, err := s.db.Query(`SELECT text FROM outbound WHERE state=? AND text!='' AND json_valid(extra)
-AND json_extract(extra,'$.turn_id') IN (SELECT id FROM turns WHERE chat=?) ORDER BY id DESC LIMIT ?`, OutSent, core.SchedChat(job), n)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var t string
-		if err := rows.Scan(&t); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
-
 // Prune drops ended runs older than runAge (keeping each job's newest 100),
 // deleted jobs older than jobAge, and expired drafts.
 func (s *Store) Prune(at time.Time, runAge, jobAge time.Duration) error {

@@ -47,7 +47,6 @@ type Def struct {
 	Overlap    string        `json:"overlap"`
 	Session    string        `json:"session"`
 	Idempotent bool          `json:"idempotent,omitempty"`
-	HistoryCtx bool          `json:"history_ctx,omitempty"`
 	Requires   []string      `json:"requires,omitempty"`
 	Timeout    string        `json:"timeout,omitempty"`
 	Paused     bool          `json:"paused,omitempty"` // creation only: the job starts paused (§7.5); never stored

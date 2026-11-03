@@ -550,7 +550,6 @@ type Turn struct {
 	Target    Target
 	Timeout   time.Duration // 0: the harness default
 	Notes     []string      // Heimdall's instructions for this run
-	History   []string      // the job's last delivered replies, untrusted
 }
 
 // Begin is called as a scheduled message's turn starts. ok false: the run
@@ -587,17 +586,6 @@ func (s *Scheduler) Begin(row store.InboundRow) (*Turn, bool) {
 		}
 		if t.Target.AgentNet != "" {
 			t.Notes = append(t.Notes, fmt.Sprintf("[Scheduled job: deliver the result with the `agentnet` CLI to `%s`. End your answer with `AGENTNET_SENT <message-id>`.]", t.Target.AgentNet))
-		}
-		if d.HistoryCtx {
-			replies, _ := s.st.JobReplies(j.ID, 3)
-			size := 0
-			for _, text := range replies {
-				if size += len(text); size > 8<<10 {
-					break
-				}
-				t.History = append(t.History, text)
-			}
-			slices.Reverse(t.History)
 		}
 		return t, true
 	}

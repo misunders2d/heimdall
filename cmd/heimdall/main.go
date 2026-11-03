@@ -246,17 +246,27 @@ func listHarnesses(args []string) error {
 
 // newJobs is the scheduler when the config enables it, else nil.
 func newJobs(cfg *config.Config, st *store.Store, logger *log.Logger, ifaces []router.Interface) *scheduler.Scheduler {
-	c := cfg.Scheduler
-	if !c.On() {
+	if !cfg.Scheduler.On() {
 		return nil
 	}
 	var names []string
 	for _, i := range ifaces {
 		names = append(names, i.Name())
 	}
-	return scheduler.New(scheduler.Config{DefaultTZ: c.DefaultTZ, MaxConcurrent: c.MaxConcurrent, PerCreator: c.PerCreator,
+	return scheduler.New(schedulerConfig(cfg, names), st, cfg.Access(), logger)
+}
+
+// schedulerConfig is the scheduler's part of cfg. Without a scheduler
+// section (heimdall sched on a config that never enabled it), the grace
+// defaults apply.
+func schedulerConfig(cfg *config.Config, interfaces []string) scheduler.Config {
+	c := cfg.Scheduler
+	if c == nil {
+		c = &config.Scheduler{GraceRecurringSeconds: 7200, GraceOneOffSeconds: 86400}
+	}
+	return scheduler.Config{DefaultTZ: c.DefaultTZ, MaxConcurrent: c.MaxConcurrent, PerCreator: c.PerCreator,
 		GraceRecurring: time.Duration(c.GraceRecurringSeconds) * time.Second, GraceOneOff: time.Duration(c.GraceOneOffSeconds) * time.Second,
-		PauseAfter: c.PauseAfter, EmployeeHarnesses: cfg.EmployeeHarnesses, Interfaces: names}, st, cfg.Access(), logger)
+		PauseAfter: c.PauseAfter, EmployeeHarnesses: cfg.EmployeeHarnesses, Interfaces: interfaces}
 }
 
 // sched is the operator's view of scheduled jobs. It works whether the
@@ -282,11 +292,7 @@ func sched(args []string) error {
 		return err
 	}
 	defer st.Close()
-	c := cfg.Scheduler
-	if c == nil {
-		c = &config.Scheduler{GraceRecurringSeconds: 7200, GraceOneOffSeconds: 86400}
-	}
-	s := scheduler.New(scheduler.Config{DefaultTZ: c.DefaultTZ, GraceRecurring: time.Duration(c.GraceRecurringSeconds) * time.Second, GraceOneOff: time.Duration(c.GraceOneOffSeconds) * time.Second}, st, cfg.Access(), nil)
+	s := scheduler.New(schedulerConfig(cfg, nil), st, cfg.Access(), nil)
 	switch sub {
 	case "list", "show":
 		fmt.Println(s.Admin(sub, id))

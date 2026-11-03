@@ -550,19 +550,13 @@ func (s *Scheduler) show(c Caller, id string) string {
 	}
 	fmt.Fprintf(&b, ", by %s, version %d\n", j.Creator.Key(), j.Version)
 	s.describe(&b, c, j, d, sched, false)
-	opts, _ := json.Marshal(struct {
-		Quiet      bool     `json:"quiet,omitempty"`
-		Grace      string   `json:"grace,omitempty"`
-		Until      string   `json:"until,omitempty"`
-		Expect     Expect   `json:"expect,omitzero"`
-		Overlap    string   `json:"overlap"`
-		Session    string   `json:"session"`
-		Idempotent bool     `json:"idempotent,omitempty"`
-		HistoryCtx bool     `json:"history_ctx,omitempty"`
-		Requires   []string `json:"requires,omitempty"`
-		Timeout    string   `json:"timeout,omitempty"`
-	}{d.Quiet, d.Grace, d.Until, d.Expect, d.Overlap, d.Session, d.Idempotent, d.HistoryCtx, d.Requires, d.Timeout})
-	fmt.Fprintf(&b, "Options: %s\n", opts)
+	// The options are the definition without what describe showed.
+	var opts map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(mustJSON(d)), &opts)
+	for _, k := range []string{"name", "kind", "schedule", "tz", "to", "prompt", "text", "harness"} {
+		delete(opts, k)
+	}
+	fmt.Fprintf(&b, "Options: %s\n", mustJSON(opts))
 	b.WriteString(s.runs(j, d, 5))
 	return strings.TrimSpace(b.String())
 }
