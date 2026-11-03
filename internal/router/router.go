@@ -951,8 +951,8 @@ func (c *conv) status() string {
 	return b.String()
 }
 
-// which names the harness this conversation uses now and the thinking level
-// it is configured with for the asking caller's role. Answers carry no
+// which names the harness this conversation uses now and the model and
+// thinking level it is configured with for the asking caller's role. Answers carry no
 // signature, so it also names the running turn's harness and, when fallback
 // or a one-off !<harness> made it differ, the one the last reply came from.
 func (c *conv) which(role core.Role) string {
@@ -968,14 +968,17 @@ func (c *conv) which(role core.Role) string {
 		b.WriteString("no harness (empty default order)")
 	}
 	if selected != "" {
-		level := ""
+		model, level := "", ""
 		if launch, err := c.r.opt.Accounts.Prepare(role, false, harness.Binary(selected)); err == nil {
-			level = harness.Thinking(selected, launch)
+			model, level = harness.Model(selected, launch), harness.Thinking(selected, launch)
+		}
+		if model == "" {
+			model = "default"
 		}
 		if level == "" {
 			level = "default"
 		}
-		fmt.Fprintf(&b, "\nThinking: %s", level)
+		fmt.Fprintf(&b, "\nModel: %s\nThinking: %s", model, level)
 	}
 	if t := c.turn; t != nil {
 		h := t.harness

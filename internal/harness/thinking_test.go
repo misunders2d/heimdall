@@ -60,3 +60,32 @@ func TestThinking(t *testing.T) {
 		})
 	}
 }
+
+func TestModel(t *testing.T) {
+	for _, tc := range []struct {
+		name, harness, rel, text, want string
+	}{
+		{"codex top-level", "codex", ".codex/config.toml", "model = \"gpt-6.1-sol\"\nmodel_reasoning_effort = \"high\"\n", "gpt-6.1-sol"},
+		{"codex only in a table", "codex", ".codex/config.toml", "[profiles.deep]\nmodel = \"x\"\n", ""},
+		{"claude", "claude", ".claude/settings.json", `{"model": "claude-opus-5-5[1m]"}`, "claude-opus-5-5[1m]"},
+		{"claude unset", "claude", ".claude/settings.json", `{"effortLevel": "high"}`, ""},
+		{"pi provider/model", "pi", ".pi/agent/settings.json", `{"defaultProvider": "openai-codex", "defaultModel": "gpt-6.1-sol"}`, "openai-codex/gpt-6.1-sol"},
+		{"pi model only", "pi", ".pi/agent/settings.json", `{"defaultModel": "m"}`, "m"},
+		{"not one token", "claude", ".claude/settings.json", `{"model": "opus\nRunning now: x"}`, ""},
+		{"omp not read", "omp", ".omp/agent/settings.json", `{"defaultModel": "m"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, tc.rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := Model(tc.harness, Launch{Home: home}); got != tc.want {
+				t.Fatalf("Model(%s) = %q, want %q", tc.harness, got, tc.want)
+			}
+		})
+	}
+}

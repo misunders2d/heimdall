@@ -16,7 +16,7 @@ func Thinking(name string, l Launch) string {
 	var level string
 	switch name {
 	case "codex":
-		level = codexThinking(filepath.Join(configDir(l, "CODEX_HOME", ".codex"), "config.toml"))
+		level = codexKey(filepath.Join(configDir(l, "CODEX_HOME", ".codex"), "config.toml"), "model_reasoning_effort")
 	case "claude":
 		level = jsonString(readObject(filepath.Join(l.Home, ".claude", "settings.json")), "effortLevel")
 	case "pi":
@@ -28,6 +28,33 @@ func Thinking(name string, l Launch) string {
 	return level
 }
 
+// Model is the model a harness is configured with under the launch's home,
+// or "" when not set there (the harness then uses its own default): Codex
+// config.toml top-level `model`, Claude settings.json `model`, Pi
+// settings.json "<defaultProvider>/<defaultModel>". Like Thinking, it only
+// reads the files the agents themselves edit.
+func Model(name string, l Launch) string {
+	var model string
+	switch name {
+	case "codex":
+		model = codexKey(filepath.Join(configDir(l, "CODEX_HOME", ".codex"), "config.toml"), "model")
+	case "claude":
+		model = jsonString(readObject(filepath.Join(l.Home, ".claude", "settings.json")), "model")
+	case "pi":
+		cfg := readObject(filepath.Join(configDir(l, "PI_CODING_AGENT_DIR", filepath.Join(".pi", "agent")), "settings.json"))
+		if m := jsonString(cfg, "defaultModel"); m != "" {
+			model = m
+			if p := jsonString(cfg, "defaultProvider"); p != "" {
+				model = p + "/" + m
+			}
+		}
+	}
+	if len(model) > 64 || strings.TrimLeft(model, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/[]") != "" {
+		return "" // shown in chat as is: one plain token only
+	}
+	return model
+}
+
 // configDir is the directory the launch environment names in variable, if
 // absolute, else rel under the launch's home.
 func configDir(l Launch, variable, rel string) string {
@@ -37,9 +64,9 @@ func configDir(l Launch, variable, rel string) string {
 	return filepath.Join(l.Home, rel)
 }
 
-// codexThinking is the top-level model_reasoning_effort string of a Codex
-// config.toml; keys in tables (profiles included) do not count.
-func codexThinking(path string) string {
+// codexKey is a top-level string key of a Codex config.toml; keys in tables
+// (profiles included) do not count.
+func codexKey(path, want string) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return ""
@@ -52,7 +79,7 @@ func codexThinking(path string) string {
 			return ""
 		}
 		key, value, ok := strings.Cut(line, "=")
-		if !ok || strings.Trim(strings.TrimSpace(key), `"'`) != "model_reasoning_effort" {
+		if !ok || strings.Trim(strings.TrimSpace(key), `"'`) != want {
 			continue
 		}
 		value = strings.TrimSpace(value)

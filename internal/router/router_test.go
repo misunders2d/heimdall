@@ -402,7 +402,7 @@ func TestUseIsStickyPerConversation(t *testing.T) {
 }
 
 // !which names the conversation's harness: sticky, else the default
-// order's first; its configured thinking level; the running turn's; and
+// order's first; its configured model and thinking level; the running turn's; and
 // the last reply's when it differs.
 func TestWhich(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
@@ -413,13 +413,13 @@ func TestWhich(t *testing.T) {
 			t.Fatalf("!which = %q, want %q", out.Text, text)
 		}
 	}
-	which("c1", "omp (default order: omp → codex)\nThinking: default")
+	which("c1", "omp (default order: omp → codex)\nModel: default\nThinking: default")
 	e.send(owner, "c1", "!codex once")
 	want(t, e.reply(), "codex#1")
-	which("c1", "omp (default order: omp → codex)\nThinking: default\nLast reply came from codex.")
+	which("c1", "omp (default order: omp → codex)\nModel: default\nThinking: default\nLast reply came from codex.")
 	e.send(owner, "c1", "!use codex")
 	want(t, e.reply(), "now uses codex")
-	which("c1", "codex (set with !use; !use default goes back to omp → codex)\nThinking: default")
+	which("c1", "codex (set with !use; !use default goes back to omp → codex)\nModel: default\nThinking: default")
 
 	// Codex's own config under the caller's home: only the top-level key.
 	codexDir := filepath.Join(os.Getenv("HOME"), ".codex")
@@ -433,25 +433,25 @@ func TestWhich(t *testing.T) {
 		}
 	}
 	config("[profiles.deep]\nmodel_reasoning_effort = \"xhigh\"\n")
-	which("c1", "codex (set with !use; !use default goes back to omp → codex)\nThinking: default")
+	which("c1", "codex (set with !use; !use default goes back to omp → codex)\nModel: default\nThinking: default")
 	config("model = \"gpt\"\nmodel_reasoning_effort = \"high\"\n[profiles.deep]\nmodel_reasoning_effort = \"xhigh\"\n")
-	which("c1", "codex (set with !use; !use default goes back to omp → codex)\nThinking: high")
+	which("c1", "codex (set with !use; !use default goes back to omp → codex)\nModel: gpt\nThinking: high")
 
 	e.send(owner, "c1", "!use default")
 	want(t, e.reply(), "back to the default order")
 	e.send(owner, "c1", "plain")
 	want(t, e.reply(), "omp#1")
-	which("c1", "omp (default order: omp → codex)\nThinking: default")
+	which("c1", "omp (default order: omp → codex)\nModel: default\nThinking: default")
 
 	// Fallback answers on the next harness; other conversations are unaffected.
 	e.send(owner, "c2", "x FAILPRE=omp")
 	want(t, e.reply(), "codex#1", "(omp failed before starting: ")
-	which("c2", "omp (default order: omp → codex)\nThinking: default\nLast reply came from codex.")
-	which("c3", "omp (default order: omp → codex)\nThinking: default")
+	which("c2", "omp (default order: omp → codex)\nModel: default\nThinking: default\nLast reply came from codex.")
+	which("c3", "omp (default order: omp → codex)\nModel: default\nThinking: default")
 
 	e.send(owner, "c3", "SLEEP")
 	e.waitReady("c3")
-	which("c3", "omp (default order: omp → codex)\nThinking: default\nRunning now: omp.")
+	which("c3", "omp (default order: omp → codex)\nModel: default\nThinking: default\nRunning now: omp.")
 	e.send(owner, "c3", "!stop")
 	want(t, e.reply(), "Stopping current run")
 }
