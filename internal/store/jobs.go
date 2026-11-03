@@ -98,14 +98,35 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, j.ID, j.Name, j.Kind, j.Creator.
 	return err
 }
 
-// AddJob stores a job (or draft) and its notices in one transaction.
-func (s *Store) AddJob(j Job, outs ...core.Outbound) error {
-	return s.tx(func(tx *sql.Tx) error {
-		if err := insertJob(tx, j); err != nil {
-			return err
-		}
-		return enqueueAll(tx, outs)
-	})
+// JobChange is what one job command changes. The router stores it with the
+// command's answer in one transaction (AnswerCommand), so a crash between
+// the two can neither lose the answer nor replay the change.
+type JobChange struct {
+	Add     *Job   // a new job or draft
+	Update  string // a job Set changes
+	Confirm *Job   // a draft Set confirms (a new job, or an edit of its job)
+	Set     Set
+	Drop    string // a draft to delete
+	Run     *Run   // a manual run
+}
+
+func (ch *JobChange) apply(tx *sql.Tx) error {
+	switch {
+	case ch == nil:
+	case ch.Add != nil:
+		return insertJob(tx, *ch.Add)
+	case ch.Update != "":
+		return updateJob(tx, ch.Update, ch.Set)
+	case ch.Confirm != nil:
+		return confirmDraft(tx, *ch.Confirm, ch.Set)
+	case ch.Drop != "":
+		_, err := tx.Exec(`DELETE FROM jobs WHERE id=? AND state=?`, ch.Drop, JobDraft)
+		return err
+	case ch.Run != nil:
+		_, err := createRun(tx, *ch.Run, "", time.Time{}, nil)
+		return err
+	}
+	return nil
 }
 
 // Job is one job by ID.
@@ -192,29 +213,23 @@ func updateJob(tx *sql.Tx, id string, set Set) error {
 	return err
 }
 
-// ConfirmDraft makes a new job's draft active, or applies an edit draft to
-// its job (version+1) and drops the draft, with set's columns, in one
-// transaction.
-func (s *Store) ConfirmDraft(draft Job, set Set) error {
-	return s.tx(func(tx *sql.Tx) error {
-		if draft.EditOf == "" {
+// confirmDraft makes a new job's draft a job (active unless set says
+// otherwise), or applies an edit draft to its job (version+1) and drops the
+// draft, with set's columns.
+func confirmDraft(tx *sql.Tx, draft Job, set Set) error {
+	if draft.EditOf == "" {
+		if _, ok := set["state"]; !ok {
 			set["state"] = JobActive
-			return updateJob(tx, draft.ID, set)
 		}
-		if _, err := tx.Exec(`UPDATE jobs SET version=version+1 WHERE id=?`, draft.EditOf); err != nil {
-			return err
-		}
-		if err := updateJob(tx, draft.EditOf, set); err != nil {
-			return err
-		}
-		_, err := tx.Exec(`DELETE FROM jobs WHERE id=? AND state=?`, draft.ID, JobDraft)
+		return updateJob(tx, draft.ID, set)
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET version=version+1 WHERE id=?`, draft.EditOf); err != nil {
 		return err
-	})
-}
-
-// DeleteDraft drops a draft.
-func (s *Store) DeleteDraft(id string) error {
-	_, err := s.db.Exec(`DELETE FROM jobs WHERE id=? AND state=?`, id, JobDraft)
+	}
+	if err := updateJob(tx, draft.EditOf, set); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`DELETE FROM jobs WHERE id=? AND state=?`, draft.ID, JobDraft)
 	return err
 }
 
@@ -251,36 +266,41 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 // skipped slot counts towards the job's skips in a row; a pending run
 // resets them.
 func (s *Store) CreateRun(r Run, nextSlot string, nextDue time.Time, outs ...core.Outbound) (created bool, err error) {
+	err = s.tx(func(tx *sql.Tx) error {
+		created, err = createRun(tx, r, nextSlot, nextDue, outs)
+		return err
+	})
+	return created, err
+}
+
+func createRun(tx *sql.Tx, r Run, nextSlot string, nextDue time.Time, outs []core.Outbound) (created bool, err error) {
 	ended := int64(0)
 	if r.State != RunPending {
 		ended = now()
 	}
-	err = s.tx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`INSERT INTO job_runs(job_id,version,slot,due_at,trigger,state,cause,not_before,ended_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,slot) DO NOTHING`,
-			r.Job, r.Version, r.Slot, unix(r.Due), r.Trigger, r.State, clip(r.Cause), unix(r.NotBefore), ended)
-		if err != nil {
-			return err
-		}
-		n, _ := res.RowsAffected()
-		created = n == 1
-		skips := `skips`
-		switch {
-		case created && r.State == RunSkipped:
-			skips = `skips+1`
-		case created && r.State == RunPending:
-			skips = `0`
-		}
-		if r.Trigger == "manual" {
-			_, err = tx.Exec(`UPDATE jobs SET skips=`+skips+` WHERE id=?`, r.Job)
-		} else {
-			_, err = tx.Exec(`UPDATE jobs SET next_slot=?,next_due=?,skips=`+skips+` WHERE id=?`, nextSlot, unix(nextDue), r.Job)
-		}
-		if err != nil || !created {
-			return err
-		}
-		return enqueueAll(tx, outs)
-	})
-	return created, err
+	res, err := tx.Exec(`INSERT INTO job_runs(job_id,version,slot,due_at,trigger,state,cause,not_before,ended_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,slot) DO NOTHING`,
+		r.Job, r.Version, r.Slot, unix(r.Due), r.Trigger, r.State, clip(r.Cause), unix(r.NotBefore), ended)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	created = n == 1
+	skips := `skips`
+	switch {
+	case created && r.State == RunSkipped:
+		skips = `skips+1`
+	case created && r.State == RunPending:
+		skips = `0`
+	}
+	if r.Trigger == "manual" {
+		_, err = tx.Exec(`UPDATE jobs SET skips=`+skips+` WHERE id=?`, r.Job)
+	} else {
+		_, err = tx.Exec(`UPDATE jobs SET next_slot=?,next_due=?,skips=`+skips+` WHERE id=?`, nextSlot, unix(nextDue), r.Job)
+	}
+	if err != nil || !created {
+		return created, err
+	}
+	return created, enqueueAll(tx, outs)
 }
 
 // RunFilter selects runs; zero fields match everything.

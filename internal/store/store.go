@@ -515,15 +515,16 @@ func (s *Store) Session(conv core.ConvKey, who, harness string) (id string, clea
 // CommandEnd is how a ! command was answered.
 type CommandEnd struct {
 	Detail     string
-	SetHarness bool   // !use: make Harness sticky for the conversation
-	Harness    string // "" restores the default order
-	Forget     string // reset: forget this caller's sessions in the conversation
-	Reply      core.Outbound
+	SetHarness bool          // !use: make Harness sticky for the conversation
+	Harness    string        // "" restores the default order
+	Forget     string        // reset: forget this caller's sessions in the conversation
+	Job        *JobChange    // a job command's change
+	Reply      core.Outbound // none without a conversation
 }
 
-// AnswerCommand settles a ! command: its message, any harness choice and
-// its reply in one transaction. If it fails nothing is recorded and the
-// message stays pending, to be answered after a restart.
+// AnswerCommand settles a ! command: its message, any harness choice or job
+// change, and its reply in one transaction. If it fails nothing is recorded
+// and the message stays pending, to be answered after a restart.
 func (s *Store) AnswerCommand(item int64, conv core.ConvKey, e CommandEnd) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -543,8 +544,13 @@ func (s *Store) AnswerCommand(item int64, conv core.ConvKey, e CommandEnd) error
 			return err
 		}
 	}
-	if _, err := enqueue(tx, e.Reply); err != nil {
+	if err := e.Job.apply(tx); err != nil {
 		return err
+	}
+	if e.Reply.Conv.Interface != "" {
+		if _, err := enqueue(tx, e.Reply); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

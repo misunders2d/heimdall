@@ -54,9 +54,33 @@ func newRig(t *testing.T) *rig {
 	return r
 }
 
+// cmd runs a job command and stores its change, as the router does with
+// the command's answer.
+func (r *rig) cmd(c Caller, text string) string {
+	r.t.Helper()
+	out, change := r.s.Command(c, text)
+	r.apply(change)
+	return out
+}
+
+// answer is a bare yes or no, stored as the router stores it.
+func (r *rig) answer(c Caller, text string) (string, bool) {
+	r.t.Helper()
+	out, change, ok := r.s.Answer(c, text)
+	r.apply(change)
+	return out, ok
+}
+
+func (r *rig) apply(change *store.JobChange) {
+	r.t.Helper()
+	if err := r.st.AnswerCommand(0, core.ConvKey{}, store.CommandEnd{Detail: "job", Job: change}); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
 func (r *rig) add(c Caller, def string) string {
 	r.t.Helper()
-	out := r.s.Command(c, "job add "+def)
+	out := r.cmd(c, "job add "+def)
 	id := idRE.FindString(out)
 	if !strings.Contains(out, "created") || id == "" {
 		r.t.Fatalf("not created: %s", out)
@@ -69,7 +93,7 @@ func (r *rig) tick() { r.s.tick(context.Background()) }
 // run runs a job now (!job run), a second later than the last one.
 func (r *rig) run(id string) {
 	r.now = r.now.Add(time.Second)
-	r.s.Command(asBoss, "job run "+id)
+	r.cmd(asBoss, "job run "+id)
 	r.tick()
 }
 
@@ -324,8 +348,8 @@ func TestRetriesIdentityAndRole(t *testing.T) {
 	verify = func(_ context.Context, p core.Principal) (Verified, bool, error) {
 		return Verified{Principal: p, OAuthActor: "sl_user_U1", OAuthInstallation: "sl_user_B1"}, true, nil
 	}
-	r3.s.Command(Caller{Principal: slackBoss, Role: core.RoleOwner}, "job resume "+sid)
-	r3.s.Command(Caller{Principal: slackBoss, Role: core.RoleOwner}, "job run "+sid)
+	r3.cmd(Caller{Principal: slackBoss, Role: core.RoleOwner}, "job resume "+sid)
+	r3.cmd(Caller{Principal: slackBoss, Role: core.RoleOwner}, "job run "+sid)
 	r3.tick()
 	if len(r3.rows) != 1 || r3.rows[0].OAuthActor != "sl_user_U1" || r3.rows[0].Run.Target.Interface != core.PlatformSlack {
 		t.Fatalf("verified run: %+v", r3.rows)
@@ -339,7 +363,7 @@ func TestEndOutcomes(t *testing.T) {
 	if e := r.finish("NO_UPDATE", Outcome{Harness: "pi"}); e.Reply != nil || e.Run.State != store.RunQuiet {
 		t.Fatalf("quiet: %+v", e)
 	}
-	if !strings.Contains(r.s.Command(asBoss, "job history "+quiet), "quiet") {
+	if !strings.Contains(r.cmd(asBoss, "job history "+quiet), "quiet") {
 		t.Fatal("history")
 	}
 	// The job's own blocks are dropped (jobs never create jobs); [job: done]
@@ -379,7 +403,7 @@ func TestEndOutcomes(t *testing.T) {
 	if r.job(ck).State != store.JobPaused {
 		t.Fatalf("not paused after 3 unverified: %+v", r.job(ck))
 	}
-	r.s.Command(asBoss, "job resume "+ck)
+	r.cmd(asBoss, "job resume "+ck)
 	r.run(ck)
 	if e := r.finish("result", Outcome{Harness: "pi", Tools: []string{"web_search"}}); e.Run.State != store.RunOK || e.Reply.Text != "result" {
 		t.Fatalf("tool matched: %+v", e.Run)
@@ -413,7 +437,7 @@ func TestRoleRulesAndCommands(t *testing.T) {
 		`{"name":"x","schedule":{"every":"1h"},"harness":"codex","prompt":"p"}`,
 		`{"name":"x","schedule":{"every":"1h"},"timeout":"10m","prompt":"p"}`,
 	} {
-		if out := r.s.Command(asWork, "job add "+def); !strings.Contains(out, "not created") {
+		if out := r.cmd(asWork, "job add "+def); !strings.Contains(out, "not created") {
 			t.Errorf("employee %s: %s", def, out)
 		}
 	}
@@ -423,48 +447,55 @@ func TestRoleRulesAndCommands(t *testing.T) {
 		`{"name":"x","kind":"watch","schedule":{"every":"1h"},"prompt":"p"}`,
 		`{"name":"x","schedule":{"every":"1h"},"prompt":"p","bogus":1}`,
 	} {
-		if out := r.s.Command(asBoss, "job add "+def); !strings.Contains(out, "not created") && !strings.Contains(out, "Usage") {
+		if out := r.cmd(asBoss, "job add "+def); !strings.Contains(out, "not created") && !strings.Contains(out, "Usage") {
 			t.Errorf("owner %s: %s", def, out)
 		}
+	}
+	// A command changes nothing itself: the router stores its change with
+	// the answer.
+	if _, change := r.s.Command(asWork, `job add {"name":"x","schedule":{"every":"1h"},"prompt":"p"}`); change == nil || change.Add == nil {
+		t.Fatal("job add returned no change")
+	} else if jobs, _ := r.st.Jobs(store.JobFilter{}); len(jobs) != 0 {
+		t.Fatalf("job add wrote %d job(s) before its answer", len(jobs))
 	}
 	mine := r.add(asWork, `{"name":"worker job","schedule":{"every":"1h"},"prompt":"p"}`)
 	for range 9 {
 		r.add(asWork, `{"name":"more","schedule":{"every":"1h"},"prompt":"p"}`)
 	}
-	if out := r.s.Command(asWork, `job add {"name":"11th","schedule":{"every":"1h"},"prompt":"p"}`); !strings.Contains(out, "at most 10") {
+	if out := r.cmd(asWork, `job add {"name":"11th","schedule":{"every":"1h"},"prompt":"p"}`); !strings.Contains(out, "at most 10") {
 		t.Fatalf("cap: %s", out)
 	}
 	boss := r.add(asBoss, `{"name":"boss job","schedule":{"cron":["0 9 * * MON"]},"prompt":"secret plan"}`)
-	if out := r.s.Command(asWork, "job show "+boss); !strings.Contains(out, "no job") {
+	if out := r.cmd(asWork, "job show "+boss); !strings.Contains(out, "no job") {
 		t.Fatalf("employee sees owner job: %s", out)
 	}
-	if out := r.s.Command(asBoss, "jobs all"); !strings.Contains(out, "worker job") || !strings.Contains(out, "by telegram:2") {
+	if out := r.cmd(asBoss, "jobs all"); !strings.Contains(out, "worker job") || !strings.Contains(out, "by telegram:2") {
 		t.Fatalf("owner list: %s", out)
 	}
-	if out := r.s.Command(inGroup, "jobs"); strings.Contains(out, "next") || !strings.Contains(out, "boss job") {
+	if out := r.cmd(inGroup, "jobs"); strings.Contains(out, "next") || !strings.Contains(out, "boss job") {
 		t.Fatalf("shared list shows more than names: %s", out)
 	}
-	if out := r.s.Command(asBoss, "job show "+boss); !strings.Contains(out, "2026-11-09 09:00 EET (07:00 UTC)") || !strings.Contains(out, "secret plan") {
+	if out := r.cmd(asBoss, "job show "+boss); !strings.Contains(out, "2026-11-09 09:00 EET (07:00 UTC)") || !strings.Contains(out, "secret plan") {
 		t.Fatalf("show: %s", out)
 	}
 	// An edit applies from the next run, with its diff.
-	out := r.s.Command(asWork, "job edit "+mine+` {"prompt":"q"}`)
+	out := r.cmd(asWork, "job edit "+mine+` {"prompt":"q"}`)
 	if !strings.Contains(out, `prompt: "p" → "q"`) || r.job(mine).Version != 2 {
 		t.Fatalf("edit: %s %+v", out, r.job(mine))
 	}
-	if out := r.s.Command(asWork, "job pause "+mine); !strings.Contains(out, "paused") || r.job(mine).State != store.JobPaused {
+	if out := r.cmd(asWork, "job pause "+mine); !strings.Contains(out, "paused") || r.job(mine).State != store.JobPaused {
 		t.Fatal(out)
 	}
-	if out := r.s.Command(asWork, "job resume "+mine); !strings.Contains(out, "resumed") {
+	if out := r.cmd(asWork, "job resume "+mine); !strings.Contains(out, "resumed") {
 		t.Fatal(out)
 	}
-	if out := r.s.Command(asWork, "job renew "+mine+" 30d"); !strings.Contains(out, "renewed until 2026-12-03") {
+	if out := r.cmd(asWork, "job renew "+mine+" 30d"); !strings.Contains(out, "renewed until 2026-12-03") {
 		t.Fatal(out)
 	}
-	if out := r.s.Command(asWork, "job frobnicate"); !strings.Contains(out, "Job commands") {
+	if out := r.cmd(asWork, "job frobnicate"); !strings.Contains(out, "Job commands") {
 		t.Fatal(out)
 	}
-	if out := r.s.Command(asWork, "job rm "+mine); !strings.Contains(out, "deleted") || r.job(mine).State != store.JobDeleted {
+	if out := r.cmd(asWork, "job rm "+mine); !strings.Contains(out, "deleted") || r.job(mine).State != store.JobDeleted {
 		t.Fatal(out)
 	}
 	// Expiry ends a job with a notice.
@@ -484,28 +515,26 @@ func TestDrafts(t *testing.T) {
 	if clean[0] != "ok" || draft == nil || !strings.Contains(card, "Confirm: !job confirm "+draft.ID) || !strings.HasSuffix(card, "— heimdall") {
 		t.Fatalf("draft %q %q", clean, card)
 	}
-	if err := r.st.AddJob(*draft); err != nil {
-		t.Fatal(err)
-	}
+	r.apply(&store.JobChange{Add: draft})
 	// Only the same caller, in the same conversation.
 	other := Caller{Principal: worker, Role: core.RoleEmployee, Conv: bossDM}
-	if _, handled := r.s.Answer(other, "yes"); handled {
+	if _, handled := r.answer(other, "yes"); handled {
 		t.Fatal("someone else's yes was taken")
 	}
-	if out := r.s.Command(Caller{Principal: boss, Role: core.RoleOwner, Conv: team}, "job confirm "+draft.ID); !strings.Contains(out, "No draft") {
+	if out := r.cmd(Caller{Principal: boss, Role: core.RoleOwner, Conv: team}, "job confirm "+draft.ID); !strings.Contains(out, "No draft") {
 		t.Fatalf("confirmed elsewhere: %s", out)
 	}
 	// Two drafts: a bare yes asks which.
 	_, second, _ := r.s.Draft(asBoss, []string{block})
-	_ = r.st.AddJob(*second)
-	if out, _ := r.s.Answer(asBoss, " YES "); !strings.Contains(out, "Several job drafts") {
+	r.apply(&store.JobChange{Add: second})
+	if out, _ := r.answer(asBoss, " YES "); !strings.Contains(out, "Several job drafts") {
 		t.Fatalf("two drafts: %s", out)
 	}
-	if out, _ := r.s.Answer(asBoss, "ні"); !strings.Contains(out, "Several") {
+	if out, _ := r.answer(asBoss, "ні"); !strings.Contains(out, "Several") {
 		t.Fatal(out)
 	}
-	r.s.Command(asBoss, "job discard "+second.ID)
-	if out, ok := r.s.Answer(asBoss, "так"); !ok || !strings.Contains(out, "is active") || r.job(draft.ID).State != store.JobActive {
+	r.cmd(asBoss, "job discard "+second.ID)
+	if out, ok := r.answer(asBoss, "так"); !ok || !strings.Contains(out, "is active") || r.job(draft.ID).State != store.JobActive {
 		t.Fatalf("confirm: %s", out)
 	}
 	// An edit draft shows its diff; an expired draft cannot be confirmed.
@@ -513,9 +542,9 @@ func TestDrafts(t *testing.T) {
 	if edit == nil || !strings.Contains(card, `prompt: "summarize" → "shorter"`) {
 		t.Fatalf("edit card %q", card)
 	}
-	_ = r.st.AddJob(*edit)
+	r.apply(&store.JobChange{Add: edit})
 	r.now = r.now.Add(25 * time.Hour)
-	if out := r.s.Command(asBoss, "job confirm "+edit.ID); !strings.Contains(out, "expired") {
+	if out := r.cmd(asBoss, "job confirm "+edit.ID); !strings.Contains(out, "expired") {
 		t.Fatalf("expired: %s", out)
 	}
 	// Invalid or several blocks: an error card, nothing stored.

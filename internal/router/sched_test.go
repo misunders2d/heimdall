@@ -1,6 +1,7 @@
 package router
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -269,4 +270,34 @@ func TestJobStopAndRemove(t *testing.T) {
 	want(t, e.ask(ownerDM, "!job rm "+id), "deleted")
 	want(t, e.ask(ownerDM, "!jobs"), "No jobs")
 	e.noReply(500 * time.Millisecond)
+}
+
+// A job command's change is stored with its answer, in one transaction: a
+// crash between the two can neither lose the answer nor replay the change.
+// Here the answer cannot be stored (every outbound insert fails), so the
+// command stays pending and is answered after the restart, once: one job.
+func TestJobCommandStoredWithItsAnswer(t *testing.T) {
+	e := schedEnv(t, []string{"omp"}, "omp")
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER no_reply BEFORE INSERT ON outbound BEGIN SELECT RAISE(ABORT, 'disk full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	e.f.in <- core.Inbound{Conv: ownerDM, MsgID: "add1", From: tgOwner, Origin: core.OriginLive, Private: true,
+		Text: `!job add {"name":"once only","schedule":{"every":"1h"},"prompt":"p"}`}
+	eventuallyTrue(t, "the answer failed", func() bool { return strings.Contains(e.logs.String(), "command job not recorded") })
+	if _, err := db.Exec(`DROP TRIGGER no_reply`); err != nil {
+		t.Fatal(err)
+	}
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.start()
+	want(t, e.reply(), "created")
+	jobs, err := e.st.Jobs(store.JobFilter{States: []string{store.JobActive, store.JobPaused}})
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("a replayed !job add left %d jobs (%v)", len(jobs), err)
+	}
 }

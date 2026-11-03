@@ -722,6 +722,9 @@ func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
 	}
 	c.r.release(row.Inbound)
 	c.r.wake(c.key.Interface)
+	if e.Job != nil {
+		c.r.opt.Jobs.Wake()
+	}
 }
 
 // handle routes one stored message and steers the running turn with it if
@@ -759,19 +762,19 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 	}
 	if j := c.r.opt.Jobs; j != nil && row.Origin == core.OriginLive {
 		// A bare yes or no answers the caller's one draft here.
-		if text, ok := j.Answer(c.caller(row, role), row.Text); ok {
-			c.answer(row, store.CommandEnd{Detail: "job answer"}, text)
+		if text, change, ok := j.Answer(c.caller(row, role), row.Text); ok {
+			c.answer(row, store.CommandEnd{Detail: "job answer", Job: change}, text)
 			return false
 		}
 	}
 	cmd := parseCommand(row.Text)
 	switch cmd.Kind {
 	case cmdJob:
-		text := "The scheduler is not enabled here."
+		text, change := "The scheduler is not enabled here.", (*store.JobChange)(nil)
 		if j := c.r.opt.Jobs; j != nil {
-			text = j.Command(c.caller(row, role), cmd.Text)
+			text, change = j.Command(c.caller(row, role), cmd.Text)
 		}
-		c.answer(row, store.CommandEnd{Detail: "job"}, text)
+		c.answer(row, store.CommandEnd{Detail: "job", Job: change}, text)
 		return false
 	case cmdInvalid:
 		c.answer(row, store.CommandEnd{Detail: "invalid"}, cmd.Error)

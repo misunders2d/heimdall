@@ -52,27 +52,29 @@ var (
 
 // Answer handles a bare yes or no while the caller has drafts waiting in
 // this conversation; handled false otherwise (the text is then an ordinary
-// message, or cancel's usual command).
-func (s *Scheduler) Answer(c Caller, text string) (reply string, handled bool) {
+// message, or cancel's usual command). The change is stored with the reply.
+func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.JobChange, handled bool) {
 	w := strings.ToLower(strings.TrimSpace(text))
 	confirm, discard := slices.Contains(yes, w), slices.Contains(no, w)
 	if !confirm && !discard {
-		return "", false
+		return "", nil, false
 	}
 	drafts := s.drafts(c)
 	switch {
 	case len(drafts) == 0:
-		return "", false
+		return "", nil, false
 	case len(drafts) > 1:
 		var ids []string
 		for _, d := range drafts {
 			ids = append(ids, d.ID)
 		}
-		return "Several job drafts wait here (" + strings.Join(ids, ", ") + "): send !job confirm <id> or !job discard <id>.", true
+		return "Several job drafts wait here (" + strings.Join(ids, ", ") + "): send !job confirm <id> or !job discard <id>.", nil, true
 	case confirm:
-		return s.confirm(c, drafts[0].ID), true
+		reply, change = s.confirm(c, drafts[0].ID)
+	default:
+		reply, change = s.discard(c, drafts[0].ID)
 	}
-	return s.discard(c, drafts[0].ID), true
+	return reply, change, true
 }
 
 func (s *Scheduler) drafts(c Caller) []store.Job {
@@ -250,11 +252,13 @@ func newID() string {
 	return "j" + string(b)
 }
 
-// Command answers !jobs and !job … (text after the "!").
-func (s *Scheduler) Command(c Caller, text string) string {
+// Command answers !jobs and !job … (text after the "!"). It changes
+// nothing itself: the router stores the change with the reply, in one
+// transaction, then wakes the due loop.
+func (s *Scheduler) Command(c Caller, text string) (reply string, change *store.JobChange) {
 	word, rest := cut(text)
 	if strings.ToLower(word) == "jobs" {
-		return s.list(c, strings.EqualFold(rest, "all"))
+		return s.list(c, strings.EqualFold(rest, "all")), nil
 	}
 	sub, rest := cut(rest)
 	id, arg := cut(rest)
@@ -264,9 +268,9 @@ func (s *Scheduler) Command(c Caller, text string) string {
 	case "edit":
 		return s.edit(c, id, arg)
 	case "show":
-		return s.show(c, id)
+		return s.show(c, id), nil
 	case "history":
-		return s.history(c, id)
+		return s.history(c, id), nil
 	case "confirm":
 		return s.confirm(c, id)
 	case "discard":
@@ -274,7 +278,7 @@ func (s *Scheduler) Command(c Caller, text string) string {
 	case "pause", "resume", "run", "stop", "rm", "renew":
 		return s.manage(c, strings.ToLower(sub), id, arg)
 	}
-	return "Job commands:\n" + strings.Join(HelpLines, "\n")
+	return "Job commands:\n" + strings.Join(HelpLines, "\n"), nil
 }
 
 func cut(s string) (string, string) {
@@ -298,30 +302,26 @@ func (s *Scheduler) own(c Caller, id string) (store.Job, error) {
 	return j, nil
 }
 
-func (s *Scheduler) add(c Caller, raw string) string {
+func (s *Scheduler) add(c Caller, raw string) (string, *store.JobChange) {
 	var d Def
 	if err := decode([]byte(raw), &d); err != nil {
-		return "Usage: !job add {\"name\":…,\"schedule\":{\"cron\":[\"0 9 * * MON\"]},\"prompt\":…}. " + err.Error()
+		return "Usage: !job add {\"name\":…,\"schedule\":{\"cron\":[\"0 9 * * MON\"]},\"prompt\":…}. " + err.Error(), nil
 	}
 	now := s.now()
 	sched, err := s.validate(&d, c, now, now)
 	if err != nil {
-		return "Job not created: " + err.Error()
+		return "Job not created: " + err.Error(), nil
 	}
 	if msg := s.capped(c); msg != "" {
-		return msg
+		return msg, nil
 	}
 	def, _ := json.Marshal(d)
 	next, _ := sched.Next(now)
 	j := store.Job{ID: newID(), Name: d.Name, Kind: d.Kind, Creator: c.Principal, CreatedIn: c.Conv, CreatedPrivate: c.Private, Def: string(def), State: store.JobActive, NextSlot: next.Key, NextDue: next.At, Created: now}
-	if err := s.st.AddJob(j); err != nil {
-		return "Job not created: " + err.Error()
-	}
-	s.Wake()
 	var b strings.Builder
 	fmt.Fprintf(&b, "Job %s created: %q\n", j.ID, d.Name)
 	s.describe(&b, c, j, d, sched)
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(b.String()), &store.JobChange{Add: &j}
 }
 
 // capped refuses an employee's 11th active job.
@@ -335,30 +335,26 @@ func (s *Scheduler) capped(c Caller) string {
 	return ""
 }
 
-func (s *Scheduler) edit(c Caller, id, raw string) string {
+func (s *Scheduler) edit(c Caller, id, raw string) (string, *store.JobChange) {
 	var changes map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &changes); err != nil || id == "" {
-		return "Usage: !job edit <id> {\"field\": value, …}"
+		return "Usage: !job edit <id> {\"field\": value, …}", nil
 	}
 	j, err := s.own(c, id)
 	if err != nil {
-		return err.Error()
+		return err.Error(), nil
 	}
 	od, _, _ := parse(j)
 	d, err := merge(od, changes)
 	if err != nil {
-		return "Job not changed: " + err.Error()
+		return "Job not changed: " + err.Error(), nil
 	}
 	now := s.now()
 	sched, err := s.validate(&d, s.creator(j, c), j.Created, now)
 	if err != nil {
-		return "Job not changed: " + err.Error()
+		return "Job not changed: " + err.Error(), nil
 	}
-	if err := s.st.UpdateJob(j.ID, s.applied(d, sched, j.Version+1)); err != nil {
-		return "Job not changed: " + err.Error()
-	}
-	s.Wake()
-	return fmt.Sprintf("Job %s changed (from its next run):\n%s", j.ID, diff(j.Def, mustJSON(d)))
+	return fmt.Sprintf("Job %s changed (from its next run):\n%s", j.ID, diff(j.Def, mustJSON(d))), &store.JobChange{Update: j.ID, Set: s.applied(d, sched, j.Version+1)}
 }
 
 // applied are the columns a job gets from definition d: its next slot from
@@ -370,119 +366,104 @@ func (s *Scheduler) applied(d Def, sched *schedule.Schedule, version int) store.
 
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 
-func (s *Scheduler) confirm(c Caller, id string) string {
+func (s *Scheduler) confirm(c Caller, id string) (string, *store.JobChange) {
 	j, ok, err := s.st.Job(id)
 	if err != nil || !ok || j.State != store.JobDraft || j.Creator.Key() != c.Principal.Key() || j.CreatedIn != c.Conv {
-		return fmt.Sprintf("No draft %q of yours in this conversation.", id)
+		return fmt.Sprintf("No draft %q of yours in this conversation.", id), nil
 	}
 	now := s.now()
 	if !j.DraftExpires.After(now) {
-		_ = s.st.DeleteDraft(j.ID)
-		return fmt.Sprintf("Draft %s expired; nothing was created.", id)
+		return fmt.Sprintf("Draft %s expired; nothing was created.", id), &store.JobChange{Drop: j.ID}
 	}
 	d, _, _ := parse(j)
 	who, version := c, 1
 	if j.EditOf != "" {
 		orig, err := s.own(c, j.EditOf)
 		if err != nil {
-			return err.Error()
+			return err.Error(), nil
 		}
 		who, version = s.creator(orig, c), orig.Version+1
 		j.Created = orig.Created
 	} else if msg := s.capped(c); msg != "" {
-		return msg
+		return msg, nil
 	}
 	sched, err := s.validate(&d, who, j.Created, now)
 	if err != nil {
-		return "Draft not confirmed: " + err.Error()
+		return "Draft not confirmed: " + err.Error(), nil
 	}
 	set := s.applied(d, sched, version)
-	delete(set, "version") // ConfirmDraft counts an edit's version
-	if err := s.st.ConfirmDraft(j, set); err != nil {
-		return "Draft not confirmed: " + err.Error()
-	}
-	s.Wake()
+	delete(set, "version") // confirming counts an edit's version
 	next, _ := sched.Next(now)
+	change := &store.JobChange{Confirm: &j, Set: set}
 	if j.EditOf != "" {
-		return fmt.Sprintf("Job %s changed from draft %s. Next run: %s.", j.EditOf, j.ID, when(d, next.At))
+		return fmt.Sprintf("Job %s changed from draft %s. Next run: %s.", j.EditOf, j.ID, when(d, next.At)), change
 	}
-	return fmt.Sprintf("Job %s is active: %q. Next run: %s.", j.ID, d.Name, when(d, next.At))
+	return fmt.Sprintf("Job %s is active: %q. Next run: %s.", j.ID, d.Name, when(d, next.At)), change
 }
 
-func (s *Scheduler) discard(c Caller, id string) string {
+func (s *Scheduler) discard(c Caller, id string) (string, *store.JobChange) {
 	j, ok, err := s.st.Job(id)
 	if err != nil || !ok || j.State != store.JobDraft || j.Creator.Key() != c.Principal.Key() || j.CreatedIn != c.Conv {
-		return fmt.Sprintf("No draft %q of yours in this conversation.", id)
+		return fmt.Sprintf("No draft %q of yours in this conversation.", id), nil
 	}
-	if err := s.st.DeleteDraft(id); err != nil {
-		return "Draft not discarded: " + err.Error()
-	}
-	return fmt.Sprintf("Draft %s discarded.", id)
+	return fmt.Sprintf("Draft %s discarded.", id), &store.JobChange{Drop: id}
 }
 
-func (s *Scheduler) manage(c Caller, sub, id, arg string) string {
+func (s *Scheduler) manage(c Caller, sub, id, arg string) (string, *store.JobChange) {
 	j, err := s.own(c, id)
 	if err != nil {
-		return err.Error()
+		return err.Error(), nil
 	}
 	d, sched, _ := parse(j)
 	now := s.now()
-	defer s.Wake()
+	set := func(set store.Set, what string) (string, *store.JobChange) {
+		return fmt.Sprintf("Job %s %s.", id, what), &store.JobChange{Update: id, Set: set}
+	}
 	switch sub {
 	case "pause":
 		if j.State != store.JobActive {
-			return fmt.Sprintf("Job %s is %s.", id, j.State)
+			return fmt.Sprintf("Job %s is %s.", id, j.State), nil
 		}
-		return s.set(id, store.Set{"state": store.JobPaused, "reason": "paused by " + c.Principal.Key()}, "paused")
+		return set(store.Set{"state": store.JobPaused, "reason": "paused by " + c.Principal.Key()}, "paused")
 	case "resume":
 		if j.State != store.JobPaused || sched == nil {
-			return fmt.Sprintf("Job %s is %s.", id, j.State)
+			return fmt.Sprintf("Job %s is %s.", id, j.State), nil
 		}
 		next, ok := sched.Next(now)
 		if !ok {
-			return fmt.Sprintf("Job %s has no future run; edit its schedule.", id)
+			return fmt.Sprintf("Job %s has no future run; edit its schedule.", id), nil
 		}
-		return s.set(id, store.Set{"state": store.JobActive, "reason": "", "fails": 0, "skips": 0, "next_slot": next.Key, "next_due": next.At}, "resumed; next run "+when(d, next.At))
+		return set(store.Set{"state": store.JobActive, "reason": "", "fails": 0, "skips": 0, "next_slot": next.Key, "next_due": next.At}, "resumed; next run "+when(d, next.At))
 	case "run":
 		if j.State != store.JobActive && j.State != store.JobPaused {
-			return fmt.Sprintf("Job %s is %s.", id, j.State)
+			return fmt.Sprintf("Job %s is %s.", id, j.State), nil
 		}
 		r := store.Run{Job: j.ID, Version: j.Version, Slot: fmt.Sprintf("manual:%d", now.UnixMilli()), Due: now, Trigger: "manual", State: store.RunPending}
-		if _, err := s.st.CreateRun(r, "", time.Time{}); err != nil {
-			return "Run not created: " + err.Error()
-		}
-		return fmt.Sprintf("Job %s runs now.", id)
+		return fmt.Sprintf("Job %s runs now.", id), &store.JobChange{Run: &r}
 	case "stop":
 		if s.stopRun(j.ID) {
-			return fmt.Sprintf("Stopping job %s's running run.", id)
+			return fmt.Sprintf("Stopping job %s's running run.", id), nil
 		}
-		return fmt.Sprintf("Job %s has no running run.", id)
+		return fmt.Sprintf("Job %s has no running run.", id), nil
 	case "rm":
-		msg := s.set(id, store.Set{"state": store.JobDeleted, "reason": "removed by " + c.Principal.Key()}, "deleted")
+		msg, change := set(store.Set{"state": store.JobDeleted, "reason": "removed by " + c.Principal.Key()}, "deleted")
 		if s.stopRun(j.ID) {
 			msg += " Its running run is being stopped."
 		}
-		return msg
+		return msg, change
 	case "renew":
 		dur, err := span(or(arg, "7d"))
 		if err != nil || dur <= 0 || dur > 90*24*time.Hour {
-			return "Usage: !job renew <id> [duration up to 90d]"
+			return "Usage: !job renew <id> [duration up to 90d]", nil
 		}
 		from := now
 		if u, err := time.Parse(time.RFC3339, d.Until); err == nil && u.After(now) {
 			from = u
 		}
 		d.Until = from.Add(dur).UTC().Format(time.RFC3339)
-		return s.set(id, store.Set{"def": mustJSON(d)}, "renewed until "+when(d, from.Add(dur)))
+		return set(store.Set{"def": mustJSON(d)}, "renewed until "+when(d, from.Add(dur)))
 	}
-	return ""
-}
-
-func (s *Scheduler) set(id string, set store.Set, what string) string {
-	if err := s.st.UpdateJob(id, set); err != nil {
-		return fmt.Sprintf("Job %s not changed: %v", id, err)
-	}
-	return fmt.Sprintf("Job %s %s.", id, what)
+	return "", nil
 }
 
 func (s *Scheduler) stopRun(id string) bool {
