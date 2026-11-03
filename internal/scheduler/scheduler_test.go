@@ -8,6 +8,7 @@ import (
 	"log"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -209,15 +210,23 @@ func TestRecoverAfterRestart(t *testing.T) {
 	r := newRig(t)
 	plain := r.add(asWork, `{"name":"plain","schedule":{"every":"1h"},"prompt":"p"}`)
 	idem := r.add(asBoss, `{"name":"idem","schedule":{"every":"1h"},"prompt":"p"}`)
+	early := r.add(Caller{Principal: core.Principal{Platform: core.PlatformTelegram, ID: "3"}, Role: core.RoleEmployee, Conv: core.ConvKey{Interface: core.PlatformTelegram, Chat: "3"}, Private: true}, `{"name":"early","schedule":{"every":"1h"},"prompt":"p"}`)
 	_ = r.st.UpdateJob(idem, store.Set{"def": strings.Replace(r.job(idem).Def, `"session"`, `"idempotent":true,"session"`, 1)})
 	r.now = r.now.Add(time.Hour)
 	r.tick()
 	if len(r.rows) != 2 {
 		t.Fatalf("dispatched %d", len(r.rows))
 	}
+	r.s.cfg.MaxConcurrent = 3
+	r.tick()
+	if len(r.rows) != 3 {
+		t.Fatalf("dispatched %d", len(r.rows))
+	}
 	for _, row := range r.rows {
 		turn, _ := r.st.StartTurn(row.Conv, core.RoleOwner, row.From.Key(), "", []int64{row.ID})
-		_ = r.st.TurnReady(turn)
+		if row.Run.Job != early { // early's harness never signalled ready
+			_ = r.st.TurnReady(turn)
+		}
 	}
 	if _, err := r.st.Recover(func(store.Interrupted) core.Outbound { return core.Outbound{} }, func(store.InboundRow) core.Outbound { return core.Outbound{} }); err != nil {
 		t.Fatal(err)
@@ -231,9 +240,13 @@ func TestRecoverAfterRestart(t *testing.T) {
 	if got := r.runs(idem)[0]; got.State != store.RunPending || got.Cause != "re-run after restart" {
 		t.Fatalf("idempotent: %+v", got)
 	}
+	if got := r.runs(early)[0]; got.State != store.RunPending || !strings.HasPrefix(got.Cause, "queued again") || got.Attempt != 1 {
+		t.Fatalf("interrupted before ready: %+v", got)
+	}
 	// Its one re-run, interrupted again, is never re-run.
 	r.rows = nil
 	r.tick()
+	r.rows = slices.DeleteFunc(r.rows, func(row store.InboundRow) bool { return row.Run.Job != idem })
 	turn, _ := r.st.StartTurn(r.rows[0].Conv, core.RoleOwner, r.rows[0].From.Key(), "", []int64{r.rows[0].ID})
 	_ = r.st.TurnReady(turn)
 	_, _ = r.st.Recover(func(store.Interrupted) core.Outbound { return core.Outbound{} }, func(store.InboundRow) core.Outbound { return core.Outbound{} })
@@ -370,6 +383,12 @@ func TestEndOutcomes(t *testing.T) {
 	r.run(ck)
 	if e := r.finish("result", Outcome{Harness: "pi", Tools: []string{"web_search"}}); e.Run.State != store.RunOK || e.Reply.Text != "result" {
 		t.Fatalf("tool matched: %+v", e.Run)
+	}
+	// An empty answer fails (a backstop: adapters already fail blank
+	// native answers).
+	r.run(ck)
+	if e := r.finish("  ", Outcome{Harness: "pi", Tools: []string{"web_search"}}); e.Run.State != store.RunFailed || e.Run.Cause != "empty answer" || e.Reply != nil {
+		t.Fatalf("empty: %+v", e.Run)
 	}
 	// Stopped by command; native failures get a fixed category only.
 	r.run(ck)

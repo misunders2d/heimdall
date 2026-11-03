@@ -84,7 +84,13 @@ func Main() {
 		os.Exit(1)
 	}
 	if capture := os.Getenv("FAKE_CAPTURE_LAUNCH"); capture != "" {
-		data, _ := json.Marshal(map[string]any{"turn_dir": os.Getenv("HEIMDALL_TURN_DIR"), "capabilities": os.Getenv("HEIMDALL_CALLER_CAPABILITIES"), "args": os.Args[1:], "oauth": os.Getenv("MCP_OAUTH_DIR"), "servers": os.Getenv("PI_MCP_OAUTH_SERVERS"), "client": os.Getenv("SLACK_CLIENT_ID"), "secret": os.Getenv("SLACK_CLIENT_SECRET"), "memory": os.Getenv("MEMENTO_PROCESSING"), "restricted": os.Getenv("PI_RESTRICTED_EXTERNAL_USER")})
+		inherited := []string{} // HEIMDALL_* variables other than the turn's own
+		for _, kv := range os.Environ() {
+			if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "HEIMDALL_") && k != "HEIMDALL_TURN_DIR" && k != "HEIMDALL_CALLER_CAPABILITIES" {
+				inherited = append(inherited, k)
+			}
+		}
+		data, _ := json.Marshal(map[string]any{"heimdall": inherited, "turn_dir": os.Getenv("HEIMDALL_TURN_DIR"), "capabilities": os.Getenv("HEIMDALL_CALLER_CAPABILITIES"), "args": os.Args[1:], "oauth": os.Getenv("MCP_OAUTH_DIR"), "servers": os.Getenv("PI_MCP_OAUTH_SERVERS"), "client": os.Getenv("SLACK_CLIENT_ID"), "secret": os.Getenv("SLACK_CLIENT_SECRET"), "memory": os.Getenv("MEMENTO_PROCESSING"), "restricted": os.Getenv("PI_RESTRICTED_EXTERNAL_USER")})
 		_ = os.WriteFile(capture, data, 0600)
 	}
 	f := &fake{name: name, state: os.Getenv(envState), in: bufio.NewScanner(os.Stdin), out: json.NewEncoder(os.Stdout)}

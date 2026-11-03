@@ -3,6 +3,8 @@ package router
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -67,6 +69,9 @@ func (e *env) history(id string) string {
 }
 
 func TestScheduledRunDeliversToItsTarget(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "launch.json")
+	t.Setenv("FAKE_CAPTURE_LAUNCH", capture)
+	t.Setenv("HEIMDALL_TELEGRAM_TOKEN", "never-in-a-harness")
 	e := schedEnv(t, []string{"omp"}, "omp")
 	id := e.addJob(`{"name":"nightly","schedule":{"cron":["0 3 * * *"]},"to":"tg:-100","prompt":"check things"}`)
 	typed := e.f.typed.Load()
@@ -77,7 +82,11 @@ func TestScheduledRunDeliversToItsTarget(t *testing.T) {
 	}
 	// Identity: the creator, in the target chat; no memory, no private
 	// chat, no hub scheduler tools; framed as the job.
-	want(t, out, "mem=1", "PI_EXTERNAL_CHAT_ID=tg_chat_-100", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_SCHEDULER_TOOLS=0", "PI_EXTERNAL_USER_ID=fake_user_owner", frameSch)
+	want(t, out, "mem=1", "PI_EXTERNAL_CHAT_ID=tg_chat_-100", "PI_EXTERNAL_MCP_PRIVATE=0", "PI_SCHEDULER_TOOLS=0", "PI_EXTERNAL_USER_ID=fake_user_owner", frameSch,
+		`PI_EXTERNAL_DEFAULT_DELIVERY={\"chatId\":-100,\"platform\":\"telegram\",\"sessionKey\":\"tg_chat_-100\"}`)
+	if raw, err := os.ReadFile(capture); err != nil || !strings.Contains(string(raw), `"heimdall":[]`) {
+		t.Fatalf("harness environment: %s %v", raw, err)
+	}
 	if e.f.typed.Load() != typed {
 		t.Fatal("a scheduled run showed typing")
 	}

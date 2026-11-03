@@ -205,3 +205,29 @@ func TestOwnerSlackLoadValidation(t *testing.T) {
 		t.Fatal("write scope accepted at load")
 	}
 }
+
+func TestSchedulerBlock(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"corporate","owners":["telegram:1"],"max_parallel":3,"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
+	c, err := Parse([]byte(`{` + base + `,"scheduler":{"enabled":true,"default_tz":"Europe/Kyiv"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := c.Scheduler; !s.On() || s.MaxConcurrent != 2 || s.PerCreator != 1 || s.GraceRecurringSeconds != 7200 || s.GraceOneOffSeconds != 86400 || s.PauseAfter != 3 {
+		t.Fatalf("defaults %+v", s)
+	}
+	if c, err = Parse([]byte(`{` + base + `,"scheduler":{"enabled":false}}`)); err != nil || c.Scheduler.On() {
+		t.Fatalf("disabled without a zone: %v", err)
+	}
+	for _, bad := range []string{
+		`"scheduler":{"enabled":true}`,
+		`"scheduler":{"enabled":true,"default_tz":"Local"}`,
+		`"scheduler":{"enabled":true,"default_tz":"Mars/Base"}`,
+		`"scheduler":{"enabled":true,"default_tz":"UTC","max_concurrent":3}`,
+		`"scheduler":{"enabled":true,"default_tz":"UTC","pause_after":-1}`,
+		`"scheduler":{"enabled":true,"default_tz":"UTC","checkers":{}}`,
+	} {
+		if _, err := Parse([]byte(`{` + base + `,` + bad + `}`)); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}
