@@ -109,10 +109,10 @@ type Access struct {
 }
 
 type Broker struct {
-	mu                                     sync.Mutex
+	locks                                  sync.Map // caller key -> *sync.Mutex
 	root, clientID, clientSecret, redirect string
 	client                                 *http.Client
-	tokenURL, userURL                      string
+	tokenURL, userURL, revokeURL           string
 	now                                    func() time.Time
 }
 
@@ -130,7 +130,7 @@ func New(cfg *Config, dataDir string) (*Broker, error) {
 	if id == "" || secret == "" {
 		return nil, errors.New("employee Google client environment is missing")
 	}
-	b := &Broker{root: filepath.Join(dataDir, "google-employees"), clientID: id, clientSecret: secret, redirect: cfg.RedirectURI, tokenURL: "https://oauth2.googleapis.com/token", userURL: "https://www.googleapis.com/oauth2/v2/userinfo", now: time.Now, client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	b := &Broker{root: filepath.Join(dataDir, "google-employees"), clientID: id, clientSecret: secret, redirect: cfg.RedirectURI, tokenURL: "https://oauth2.googleapis.com/token", revokeURL: "https://oauth2.googleapis.com/revoke", userURL: "https://www.googleapis.com/oauth2/v2/userinfo", now: time.Now, client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	if err := b.secureDir(b.root); err != nil {
 		return nil, err
 	}
@@ -148,7 +148,7 @@ func (b *Broker) secureDir(path string) error {
 		current = filepath.Join(current, part)
 		st, err := os.Lstat(current)
 		if os.IsNotExist(err) {
-			if err = os.Mkdir(current, 0700); err != nil {
+			if err = os.Mkdir(current, 0700); err != nil && !os.IsExist(err) {
 				return errors.New("Google store unavailable")
 			}
 			st, err = os.Lstat(current)
@@ -168,6 +168,21 @@ func (b *Broker) secureDir(path string) error {
 	}
 	return nil
 }
+
+// lock serialises one caller's store. Google network calls run under it, so
+// a global lock would stall every other caller (and Telegram's ordered
+// updates) behind one slow sign-in or refresh.
+func (b *Broker) lock(c Caller) func() {
+	key, err := c.key()
+	if err != nil {
+		key = "" // unverified callers fail in dir(); share one lock
+	}
+	m, _ := b.locks.LoadOrStore(key, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 func (b *Broker) dir(c Caller) (string, error) {
 	key, err := c.key()
 	if err != nil {
@@ -225,8 +240,7 @@ func nonce() string {
 }
 
 func (b *Broker) Login(c Caller, conv core.ConvKey) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer b.lock(c)()
 	dir, err := b.dir(c)
 	if err != nil {
 		return "", err
@@ -299,8 +313,7 @@ func (b *Broker) user(ctx context.Context, token string) (string, string, error)
 }
 
 func (b *Broker) Complete(ctx context.Context, c Caller, conv core.ConvKey, callback string) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer b.lock(c)()
 	dir, err := b.dir(c)
 	if err != nil {
 		return "", err
@@ -346,6 +359,7 @@ func (b *Broker) Complete(ctx context.Context, c Caller, conv core.ConvKey, call
 	// Slack has an independently verified email. Refuse accidentally selected
 	// owner/other accounts; Telegram binds its Google identity on first consent.
 	if c.Principal.Platform == "slack" && email != core.NormalizeEmail(c.Principal.Email) {
+		b.revoke(t.Refresh)
 		return "", errors.New("Google account must match your verified Slack email")
 	}
 	cred := credential{Email: email, Subject: subject, Refresh: t.Refresh, Access: t.Access, Expires: b.now().Add(time.Duration(t.Expires) * time.Second), Scopes: scopes}
@@ -355,9 +369,26 @@ func (b *Broker) Complete(ctx context.Context, c Caller, conv core.ConvKey, call
 	return email, nil
 }
 
+// revoke asks Google to invalidate a dropped refresh token. Best effort: a
+// failure leaves only the local deletion, as before.
+func (b *Broker) revoke(token string) {
+	if token == "" || b.revokeURL == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", b.revokeURL, strings.NewReader(url.Values{"token": {token}}.Encode()))
+	if err != nil {
+		return
+	}
+	req.Header.Set("content-type", "application/x-www-form-urlencoded")
+	if resp, err := b.client.Do(req); err == nil {
+		resp.Body.Close()
+	}
+}
+
 func (b *Broker) Status(c Caller) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer b.lock(c)()
 	dir, err := b.dir(c)
 	if err != nil {
 		return "", err
@@ -369,11 +400,14 @@ func (b *Broker) Status(c Caller) (string, error) {
 	return cred.Email, err
 }
 func (b *Broker) Logout(c Caller) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer b.lock(c)()
 	dir, err := b.dir(c)
 	if err != nil {
 		return err
+	}
+	var cred credential
+	if read(filepath.Join(dir, "credentials.json"), &cred) == nil {
+		b.revoke(cred.Refresh)
 	}
 	for _, name := range []string{"credentials.json", "pending.json"} {
 		if err = os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
@@ -383,8 +417,7 @@ func (b *Broker) Logout(c Caller) error {
 	return nil
 }
 func (b *Broker) Snapshot(ctx context.Context, c Caller) (Access, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer b.lock(c)()
 	dir, err := b.dir(c)
 	if err != nil {
 		return Access{}, err

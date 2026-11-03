@@ -104,7 +104,11 @@ func prepareEmployeePi(ctx context.Context, spec Spec, env []string) ([]string, 
 	if spec.Google != nil {
 		c := spec.Caller
 		// Failure is auth-needed for Google only; other employee tools still run.
-		access, _ = spec.Google.Snapshot(ctx, googleoauth.Caller{Principal: c.Principal, Actor: c.OAuthActor, Installation: c.OAuthInstallation})
+		var gerr error
+		access, gerr = spec.Google.Snapshot(ctx, googleoauth.Caller{Principal: c.Principal, Actor: c.OAuthActor, Installation: c.OAuthInstallation})
+		if gerr != nil && spec.Log != nil {
+			spec.Log("employee Google unavailable: " + gerr.Error())
+		}
 	}
 	if err = writeEmployeeGoogleAccess(dir, access, l); err != nil {
 		return nil, nil, err

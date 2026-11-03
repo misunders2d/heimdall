@@ -294,3 +294,69 @@ func TestConfigValidationAndDisabledBroker(t *testing.T) {
 		t.Fatal("disabled Google changed existing runtime")
 	}
 }
+
+// Review fix: logout revokes the dropped refresh token at Google.
+func TestLogoutRevokesRefreshToken(t *testing.T) {
+	b, c, conv, _ := fixture(t)
+	connect(t, b, c, conv)
+	revoked := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		revoked <- r.Form.Get("token")
+	}))
+	t.Cleanup(srv.Close)
+	b.revokeURL = srv.URL
+	if err := b.Logout(c); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case tok := <-revoked:
+		if tok != "SYNTHETIC_REFRESH" {
+			t.Fatal("wrong token revoked")
+		}
+	default:
+		t.Fatal("refresh token not revoked")
+	}
+	if email, err := b.Status(c); err != nil || email != "" {
+		t.Fatal("still connected", email, err)
+	}
+}
+
+// Review fix: one caller's slow Google call must not block another caller.
+func TestSlowCallerDoesNotBlockOthers(t *testing.T) {
+	b, c, conv, _ := fixture(t)
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered <- struct{}{}
+		<-release
+		w.WriteHeader(500)
+	}))
+	t.Cleanup(slow.Close)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	callback := begin(t, b, c, conv)
+	b.tokenURL = slow.URL // only the first caller's exchange is in flight
+	done := make(chan struct{})
+	go func() { _, _ = b.Complete(context.Background(), c, conv, callback); close(done) }()
+	<-entered
+	other := c
+	other.Actor = "sl_user_U2"
+	finished := make(chan error, 1)
+	go func() { _, err := b.Login(other, conv); finished <- err }()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("other caller blocked behind a slow Google call")
+	}
+	close(release)
+	<-done
+}

@@ -152,7 +152,9 @@ func run(args []string) error {
 	defer cancel()
 	google, err := googleoauth.New(cfg.EmployeeGoogle, cfg.DataDir)
 	if err != nil {
-		return err
+		// Employee Google is optional: owner and other turns keep running.
+		logger.Printf("employee Google disabled: %v", err)
+		google = nil
 	}
 	r := router.New(router.Options{Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)

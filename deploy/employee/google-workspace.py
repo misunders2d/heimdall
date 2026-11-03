@@ -509,7 +509,7 @@ def calendar_create_event(args: dict[str, Any]) -> dict[str, Any]:
     event = service.events().insert(
         calendarId=calendar_id,
         body=_event_body(args, partial=False),
-        sendUpdates=args.get("send_updates") or "all",
+        sendUpdates=args.get("send_updates") or "none",
     ).execute()
     return {"status": "success", "event": {"id": event.get("id"), "summary": event.get("summary"), "start": event.get("start"), "end": event.get("end"), "htmlLink": event.get("htmlLink"), "status": event.get("status")}}
 
@@ -530,7 +530,7 @@ def calendar_update_event(args: dict[str, Any]) -> dict[str, Any]:
         calendarId=calendar_id,
         eventId=event_id,
         body=body,
-        sendUpdates=args.get("send_updates") or "all",
+        sendUpdates=args.get("send_updates") or "none",
     ).execute()
     return {"status": "success", "event": {"id": event.get("id"), "summary": event.get("summary"), "start": event.get("start"), "end": event.get("end"), "htmlLink": event.get("htmlLink"), "status": event.get("status")}}
 

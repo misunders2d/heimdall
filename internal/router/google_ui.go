@@ -42,7 +42,7 @@ func (r *Router) googleControl(ctx context.Context, in core.Inbound, role core.R
 		case command == "google login":
 			var link string
 			link, err = r.opt.Google.Login(caller, in.Conv)
-			reply = "Open this link and approve access with your own Google account:\n" + link + "\nThe final page may say Authorization failed; that is expected. Copy its entire address and paste it here in this same DM within 10 minutes. Do not post it elsewhere."
+			reply = "Open this link and approve access with your own Google account:\n" + link + "\nThe final page may say Authorization failed; that is expected. Copy its entire address and paste it here in this same DM within 10 minutes, as the only text in the message (no other words). Do not post it elsewhere."
 		case command == "google status":
 			var email string
 			email, err = r.opt.Google.Status(caller)
