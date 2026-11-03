@@ -19,6 +19,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/googleoauth"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/schedule"
 )
 
 // DefaultOrder is the harness order used when a chat has no `!use` choice.
@@ -42,7 +43,23 @@ type Config struct {
 	Slack             *Slack                   `json:"slack,omitempty"`
 	Telegram          *Telegram                `json:"telegram,omitempty"`
 	PromptGuard       *PromptGuard             `json:"prompt_guard,omitempty"`
+	Scheduler         *Scheduler               `json:"scheduler,omitempty"`
 }
+
+// Scheduler configures scheduled jobs (docs/scheduler.md §10). Jobs are
+// kept in the store whether it is enabled or not.
+type Scheduler struct {
+	Enabled               bool   `json:"enabled"`
+	DefaultTZ             string `json:"default_tz"`                        // IANA zone; required when enabled
+	MaxConcurrent         int    `json:"max_concurrent,omitempty"`          // scheduled turns at once; default 2, at most max_parallel-1
+	PerCreator            int    `json:"per_creator,omitempty"`             // running runs per creator; default 1
+	GraceRecurringSeconds int    `json:"grace_recurring_seconds,omitempty"` // default 7200
+	GraceOneOffSeconds    int    `json:"grace_oneoff_seconds,omitempty"`    // default 86400
+	PauseAfter            int    `json:"pause_after,omitempty"`             // failed or unverified runs in a row; default 3
+}
+
+// On reports whether the scheduler runs.
+func (s *Scheduler) On() bool { return s != nil && s.Enabled }
 
 // PromptGuard sizes the prompt-injection log, <data_dir>/prompt-guard.log:
 // the hub's scoring of every admitted message, logged as metadata only. It
@@ -265,6 +282,27 @@ func (c *Config) fill(staged bool) error {
 	}
 	if c.MaxParallel < 1 {
 		return errors.New("max_parallel must be at least 1")
+	}
+	if s := c.Scheduler; s != nil {
+		for _, d := range []struct {
+			v   *int
+			def int
+		}{{&s.MaxConcurrent, 2}, {&s.PerCreator, 1}, {&s.GraceRecurringSeconds, 7200}, {&s.GraceOneOffSeconds, 86400}, {&s.PauseAfter, 3}} {
+			if *d.v == 0 {
+				*d.v = d.def
+			}
+			if *d.v < 1 {
+				return errors.New("scheduler: counts and seconds must be positive")
+			}
+		}
+		if s.Enabled {
+			if _, err := schedule.Zone(s.DefaultTZ); err != nil {
+				return fmt.Errorf("scheduler.default_tz: %w", err)
+			}
+			if s.MaxConcurrent > c.MaxParallel-1 {
+				return fmt.Errorf("scheduler.max_concurrent must be at most max_parallel-1 (%d), so live chat keeps a slot", c.MaxParallel-1)
+			}
+		}
 	}
 	for role, r := range c.RunAs {
 		if role != core.RoleOwner && role != core.RoleEmployee {

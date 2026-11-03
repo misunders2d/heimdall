@@ -138,6 +138,10 @@ type Spec struct {
 	Session      Session
 	Launch       Launch
 	Caller       Caller // required: the process carries the caller's identity
+	// OneShot runs the turn in a process of its own that is never retained
+	// or reused (scheduled runs), so it never displaces a chat's warm one.
+	OneShot bool
+	Timeout time.Duration // the turn's limit instead of run_timeout_seconds, if set
 	// Log, if set, gets one metadata line (never native output) when the
 	// process is stopped after its answer.
 	Log func(string)

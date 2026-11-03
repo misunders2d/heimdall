@@ -209,7 +209,26 @@ type Inbound struct {
 	// is downloading its files), so the router keeps holding the group. It
 	// carries no message and is never stored.
 	Announce bool
+	// Run is set on a scheduled job's message (Origin scheduled): its run,
+	// and where the reply goes.
+	Run *ScheduledRun
 }
+
+// ScheduledRun is the job run a scheduled message starts. Its conversation
+// is the job's own (SchedChat), so runs of one job never overlap; replies
+// go to Target.
+type ScheduledRun struct {
+	Job     string  `json:"job"`
+	Run     int64   `json:"run"`
+	Attempt int     `json:"attempt,omitempty"`
+	Target  ConvKey `json:"target"`
+}
+
+// SchedChat is the chat of job's own conversation, on its target's interface.
+func SchedChat(job string) string { return "sched:" + job }
+
+// IsSched reports a scheduled job's own conversation.
+func (k ConvKey) IsSched() bool { return strings.HasPrefix(k.Chat, "sched:") }
 
 // Attachment is a file a message carried. The interface downloads it into
 // Heimdall's own storage (Stored); when the turn starts the router copies it

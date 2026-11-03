@@ -59,7 +59,7 @@ func identityVars(c Caller) ([]string, error) {
 	}
 	vars = append(vars, "PI_EXTERNAL_MCP_PRIVATE="+private, "PI_TRANSPORT_CHILD=1")
 	var delivery any
-	switch c.Principal.Platform {
+	switch chatPlatform(c) {
 	case core.PlatformSlack:
 		delivery = map[string]any{"platform": "slack", "channel": c.Conv.Chat, "thread_ts": c.Conv.Thread, "sessionKey": "sl_channel_" + c.Conv.Chat + "_thread_" + regexp.MustCompile(`[^A-Za-z0-9_.-]`).ReplaceAllString(firstThread(c.Conv.Thread), "_")}
 	case core.PlatformTelegram:
@@ -81,6 +81,16 @@ func identityVars(c Caller) ([]string, error) {
 	return vars, nil
 }
 
+// chatPlatform is the platform of the caller's chat: the conversation's
+// interface, which for a scheduled job is its target's and may differ from
+// the creator's platform; otherwise the caller's.
+func chatPlatform(c Caller) string {
+	if i := c.Conv.Interface; i == core.PlatformTelegram || i == core.PlatformSlack {
+		return i
+	}
+	return c.Principal.Platform
+}
+
 // callerVars is the caller's own identity in the hub's variables.
 func callerVars(c Caller) ([]string, error) {
 	p := c.Principal
@@ -94,7 +104,7 @@ func callerVars(c Caller) ([]string, error) {
 	var platform, user, chat, email string
 	switch p.Platform {
 	case core.PlatformTelegram:
-		platform, user, chat = "telegram", "tg_user_"+p.ID, "tg_chat_"+c.Conv.Chat
+		platform, user = "telegram", "tg_user_"+p.ID
 	case core.PlatformSlack:
 		// The verified email is the Slack identity; the hub uses it as the
 		// user ID when Slack supplies one.
@@ -102,7 +112,7 @@ func callerVars(c Caller) ([]string, error) {
 		if e == "" {
 			return nil, errors.New("slack caller without a verified email")
 		}
-		platform, user, chat, email = "slack", e, "sl_channel_"+c.Conv.Chat, e
+		platform, user, email = "slack", e, e
 	case "agentnet":
 		// Inert compatibility only: AgentNet is a separate module, never
 		// a Heimdall interface. Hub A2A tools fail closed without identity.
@@ -110,7 +120,15 @@ func callerVars(c Caller) ([]string, error) {
 	default:
 		// No hub equivalent (local test interface). Never a bare "local" or
 		// "system": hub guards trust those as the hub's own admin.
-		platform, user, chat = p.Platform, p.Platform+"_user_"+p.ID, p.Platform+"_chat_"+c.Conv.Chat
+		platform, user = p.Platform, p.Platform+"_user_"+p.ID
+	}
+	switch chatPlatform(c) {
+	case core.PlatformTelegram:
+		chat = "tg_chat_" + c.Conv.Chat
+	case core.PlatformSlack:
+		chat = "sl_channel_" + c.Conv.Chat
+	default:
+		chat = p.Platform + "_chat_" + c.Conv.Chat
 	}
 	vars := []string{
 		"PI_EXTERNAL_PLATFORM=" + platform,

@@ -237,9 +237,16 @@ func launchFingerprint(s Spec) [32]byte {
 	return sha256.Sum256(b)
 }
 func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
-	p.mu.Lock()
 	key := warmKey{s.Caller.Conv, s.Caller.Principal.Key(), s.Harness}
 	fp := launchFingerprint(s)
+	if s.OneShot {
+		r, err := Start(ctx, s)
+		if err == nil {
+			p.watch(r, key, fp, time.Now(), 0, s.Timeout)
+		}
+		return r, err
+	}
+	p.mu.Lock()
 	epoch := p.epochs[key.Conv]
 	retiring := p.retiring[key]
 	e := p.entries[key]
@@ -261,7 +268,7 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 		if !e.run.cancelled.Load() && s.Session.Resume && s.Session.ID == e.run.Result().SessionID && e.fingerprint == fp && time.Since(e.born) < time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second {
 			r, err := e.run.worker.next(s)
 			if err == nil {
-				p.watch(r, key, fp, e.born, epoch)
+				p.watch(r, key, fp, e.born, epoch, s.Timeout)
 				return r, nil
 			}
 		}
@@ -272,11 +279,11 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 	s.warm = s.Harness != "agy" && !(s.Harness == "pi" && s.Caller.Role == core.RoleEmployee)
 	r, err := Start(ctx, s)
 	if err == nil {
-		p.watch(r, key, fp, time.Now(), epoch)
+		p.watch(r, key, fp, time.Now(), epoch, s.Timeout)
 	}
 	return r, err
 }
-func (p *Pool) watch(r *Run, key warmKey, fp [32]byte, born time.Time, epoch uint64) {
+func (p *Pool) watch(r *Run, key warmKey, fp [32]byte, born time.Time, epoch uint64, limit time.Duration) {
 	r.pooled = make(chan struct{})
 	go func() {
 		defer func() {
@@ -286,7 +293,10 @@ func (p *Pool) watch(r *Run, key warmKey, fp [32]byte, born time.Time, epoch uin
 				close(r.pooled)
 			}
 		}()
-		timer := time.NewTimer(time.Duration(p.cfg.RunTimeoutSeconds) * time.Second)
+		if limit <= 0 {
+			limit = time.Duration(p.cfg.RunTimeoutSeconds) * time.Second
+		}
+		timer := time.NewTimer(limit)
 		defer timer.Stop()
 		life := time.NewTimer(max(time.Nanosecond, time.Until(born.Add(time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second))))
 		defer life.Stop()

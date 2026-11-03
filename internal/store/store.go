@@ -128,25 +128,47 @@ UPDATE interface_events SET completed_at=received_at WHERE complete=1;
 CREATE INDEX interface_events_expiry ON interface_events(iface,completed_at) WHERE complete=1;`,
 	`CREATE TABLE caller_notices(principal TEXT NOT NULL,owner TEXT NOT NULL,PRIMARY KEY(principal,owner));
  INSERT INTO caller_notices(principal,owner) SELECT principal,'*' FROM callers;`,
+	// Scheduler (docs/scheduler.md §8): jobs, one run per job and slot, the
+	// due loop's tick and hold, and the ready marker that decides whether an
+	// interrupted run may be queued again.
+	`CREATE TABLE jobs(
+	id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+	creator TEXT NOT NULL, principal TEXT NOT NULL,
+	created_iface TEXT NOT NULL, created_chat TEXT NOT NULL, created_thread TEXT NOT NULL, created_private INTEGER NOT NULL,
+	def TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', edit_of TEXT NOT NULL DEFAULT '',
+	draft_expires_at INTEGER NOT NULL DEFAULT 0, next_slot TEXT NOT NULL DEFAULT '', next_due INTEGER NOT NULL DEFAULT 0,
+	version INTEGER NOT NULL DEFAULT 1, fails INTEGER NOT NULL DEFAULT 0, skips INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX jobs_state ON jobs(state, next_due);
+CREATE TABLE job_runs(
+	id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, version INTEGER NOT NULL,
+	slot TEXT NOT NULL, due_at INTEGER NOT NULL, trigger TEXT NOT NULL,
+	state TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, not_before INTEGER NOT NULL DEFAULT 0,
+	inbound_id INTEGER, cause TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL DEFAULT 0, ended_at INTEGER NOT NULL DEFAULT 0,
+	UNIQUE(job_id, slot));
+CREATE INDEX job_runs_state ON job_runs(state, due_at);
+CREATE TABLE sched_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+ALTER TABLE turns ADD COLUMN ready INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
 // text.
 type inExtra struct {
-	MCPControl        bool              `json:"mcp_control,omitempty"`
-	SlackReadVerified bool              `json:"slack_read_verified,omitempty"`
-	OAuthActor        string            `json:"oauth_actor,omitempty"`
-	OAuthInstallation string            `json:"oauth_installation,omitempty"`
-	Context           string            `json:"context,omitempty"`
-	ControlIngress    int               `json:"control_ingress,omitempty"`
-	InterfaceReply    string            `json:"interface_reply,omitempty"`
-	Attachments       []core.Attachment `json:"attachments,omitempty"`
-	Group             string            `json:"group,omitempty"`
+	MCPControl        bool               `json:"mcp_control,omitempty"`
+	SlackReadVerified bool               `json:"slack_read_verified,omitempty"`
+	OAuthActor        string             `json:"oauth_actor,omitempty"`
+	OAuthInstallation string             `json:"oauth_installation,omitempty"`
+	Context           string             `json:"context,omitempty"`
+	ControlIngress    int                `json:"control_ingress,omitempty"`
+	InterfaceReply    string             `json:"interface_reply,omitempty"`
+	Attachments       []core.Attachment  `json:"attachments,omitempty"`
+	Group             string             `json:"group,omitempty"`
+	Run               *core.ScheduledRun `json:"run,omitempty"`
 }
 
 func inExtraOf(in core.Inbound) (string, error) {
-	x := inExtra{MCPControl: in.MCPControl, SlackReadVerified: in.SlackReadVerified, OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInstallation, ControlIngress: in.ControlIngress, InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group}
-	if !x.MCPControl && !x.SlackReadVerified && x.OAuthActor == "" && x.OAuthInstallation == "" && x.ControlIngress == 0 && x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" {
+	x := inExtra{MCPControl: in.MCPControl, SlackReadVerified: in.SlackReadVerified, OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInstallation, ControlIngress: in.ControlIngress, InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group, Run: in.Run}
+	if !x.MCPControl && !x.SlackReadVerified && x.OAuthActor == "" && x.OAuthInstallation == "" && x.ControlIngress == 0 && x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" && x.Run == nil {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -158,6 +180,7 @@ func (x inExtra) apply(in *core.Inbound) {
 	in.OAuthActor, in.OAuthInstallation = x.OAuthActor, x.OAuthInstallation
 	in.ControlIngress = x.ControlIngress
 	in.Context, in.Attachments, in.Group, in.InterfaceReply = x.Context, x.Attachments, x.Group, x.InterfaceReply
+	in.Run = x.Run
 }
 
 // outExtra is the outbound extra column: delivery details beyond the text.
@@ -251,7 +274,13 @@ func (s *Store) AddInbound(in core.Inbound) (row InboundRow, dup bool, err error
 	if err != nil {
 		return row, false, err
 	}
-	res, err := s.db.Exec(`INSERT INTO inbound(iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,state,private,extra)
+	return addInbound(s.db, in, at, extra)
+}
+
+func addInbound(db interface {
+	Exec(string, ...any) (sql.Result, error)
+}, in core.Inbound, at time.Time, extra string) (row InboundRow, dup bool, err error) {
+	res, err := db.Exec(`INSERT INTO inbound(iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,state,private,extra)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHING`,
 		in.Conv.Interface, in.Conv.Chat, in.Conv.Thread, in.MsgID, in.From.Platform, in.From.ID, in.From.Name, in.From.Email, in.From.Team, in.From.KeyID, in.Origin, in.Text, at.UnixMilli(), InPending, in.Private, extra)
 	if err != nil {
@@ -406,6 +435,9 @@ type TurnEnd struct {
 	Forget    bool   // the caller reset their sessions: keep none for this conversation
 	Reply     *core.Outbound
 	Files     []core.Outbound // sent after Reply
+	Notices   []core.Outbound // Heimdall's own messages (job notices, draft cards), after Files
+	Run       *RunEnd         // a scheduled turn's run
+	Draft     *Job            // a job draft the answer proposed
 }
 
 // EndTurn settles a turn, its messages, its session binding and its reply
@@ -437,8 +469,18 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 			return 0, err
 		}
 	}
-	for _, f := range e.Files {
+	for _, f := range append(e.Files, e.Notices...) {
 		if _, err = enqueue(tx, f); err != nil {
+			return 0, err
+		}
+	}
+	if e.Run != nil {
+		if err = endRun(tx, *e.Run); err != nil {
+			return 0, err
+		}
+	}
+	if e.Draft != nil {
+		if err = insertJob(tx, *e.Draft); err != nil {
 			return 0, err
 		}
 	}
@@ -709,8 +751,11 @@ func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice 
 				return rec, err
 			}
 		}
-		if _, err := enqueue(tx, turnNotice(t)); err != nil {
-			return rec, err
+		// A scheduled run's notice is the scheduler's (no notice here).
+		if out := turnNotice(t); out.Conv.Interface != "" {
+			if _, err := enqueue(tx, out); err != nil {
+				return rec, err
+			}
 		}
 	}
 	rows, err = tx.Query(`SELECT id,iface,chat,thread,msg_id,platform,user_id,turn_id FROM inbound WHERE state=? ORDER BY id`, InSteering)

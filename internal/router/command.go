@@ -19,6 +19,7 @@ const (
 	cmdReset   = "reset"  // forget the caller's native sessions here
 	cmdChatID  = "chatid" // show the conversation's and caller's IDs
 	cmdUse     = "use"
+	cmdJob     = "job"     // !jobs and !job …: the scheduler's commands (Text)
 	cmdInvalid = "invalid" // answered with Error, never sent to a harness
 )
 
@@ -72,6 +73,8 @@ func parseCommand(text string) command {
 		return command{Kind: cmdReset}
 	case "chatid":
 		return command{Kind: cmdChatID}
+	case "job", "jobs":
+		return command{Kind: cmdJob, Text: strings.TrimSpace(word + " " + rest)}
 	case "use":
 		switch arg := strings.ToLower(rest); {
 		case arg == "":

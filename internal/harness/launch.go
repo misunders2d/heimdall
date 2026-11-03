@@ -229,6 +229,12 @@ func lookPath(bin, path string) (string, error) {
 	return "", os.ErrNotExist
 }
 
+// WithEnv is l with name set to value in its environment.
+func (l Launch) WithEnv(name, value string) Launch {
+	l.Env = setEnv(l.Env, name, value)
+	return l
+}
+
 func setEnv(env []string, name, value string) []string {
 	out := env[:0:0]
 	for _, kv := range env {

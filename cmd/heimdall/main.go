@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/iface/slack"
 	"github.com/misunders2d/heimdall/internal/iface/telegram"
 	"github.com/misunders2d/heimdall/internal/router"
+	"github.com/misunders2d/heimdall/internal/scheduler"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -42,6 +44,11 @@ const usage = `usage:
       show where each harness is found for each role's OS user
   heimdall check-config -config FILE
       offline validation; missing employee account is a warning
+  heimdall sched list|show ID|health|export -config FILE
+      scheduled jobs: list, one job, health JSON (exit 1 on any issue), definitions as JSON
+  heimdall drain -config FILE [-timeout 30m]
+      hold new scheduled runs and wait until no turn runs and every reply is
+      delivered: exit 0 when idle, 75 on timeout (run before a restart)
   heimdall version`
 
 func main() {
@@ -69,6 +76,10 @@ func main() {
 		err = listHarnesses(os.Args[2:])
 	case "check-config":
 		err = checkConfig(os.Args[2:])
+	case "sched":
+		err = sched(os.Args[2:])
+	case "drain":
+		err = drain(os.Args[2:])
 	case "version":
 		fmt.Println("heimdall", version)
 	default:
@@ -148,6 +159,12 @@ func run(args []string) error {
 		}
 		interfaces = append(interfaces, sl)
 	}
+	jobs := newJobs(cfg, st, logger, interfaces)
+	for _, i := range interfaces {
+		if sl, ok := i.(*slack.Slack); ok && jobs != nil {
+			jobs.Reverify = sl.Reverify // Slack creators are verified live at every fire
+		}
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	google, err := googleoauth.New(cfg.EmployeeGoogle, cfg.DataDir)
@@ -156,7 +173,7 @@ func run(args []string) error {
 		logger.Printf("employee Google disabled: %v", err)
 		google = nil
 	}
-	r := router.New(router.Options{Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, interfaces...)
+	r := router.New(router.Options{Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")
@@ -184,7 +201,7 @@ func runLocal(args []string) error {
 	defer cancel()
 	l := local.New(os.Stdin, os.Stdout, *as, *chat)
 	logger := log.New(os.Stderr, "heimdall: ", log.LstdFlags)
-	r := router.New(router.Options{EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax()}, st, l)
+	r := router.New(router.Options{EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: newJobs(cfg, st, logger, []router.Interface{l})}, st, l)
 	go func() {
 		select {
 		case <-l.EOF():
@@ -224,6 +241,100 @@ func listHarnesses(args []string) error {
 			fmt.Printf("  %-7s %s\n", h, l.Path)
 		}
 	}
+	return nil
+}
+
+// newJobs is the scheduler when the config enables it, else nil.
+func newJobs(cfg *config.Config, st *store.Store, logger *log.Logger, ifaces []router.Interface) *scheduler.Scheduler {
+	c := cfg.Scheduler
+	if !c.On() {
+		return nil
+	}
+	var names []string
+	for _, i := range ifaces {
+		names = append(names, i.Name())
+	}
+	return scheduler.New(scheduler.Config{DefaultTZ: c.DefaultTZ, MaxConcurrent: c.MaxConcurrent, PerCreator: c.PerCreator,
+		GraceRecurring: time.Duration(c.GraceRecurringSeconds) * time.Second, GraceOneOff: time.Duration(c.GraceOneOffSeconds) * time.Second,
+		PauseAfter: c.PauseAfter, EmployeeHarnesses: cfg.EmployeeHarnesses, Interfaces: names}, st, cfg.Access(), logger)
+}
+
+// sched is the operator's view of scheduled jobs. It works whether the
+// scheduler is enabled or not: jobs are kept either way.
+func sched(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: heimdall sched list|show ID|health|export -config FILE")
+	}
+	sub, id := args[0], ""
+	args = args[1:]
+	if sub == "show" {
+		if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+			return errors.New("usage: heimdall sched show ID -config FILE")
+		}
+		id, args = args[0], args[1:]
+	}
+	cfg, err := loadConfig(flag.NewFlagSet("sched", flag.ExitOnError), args)
+	if err != nil {
+		return err
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	c := cfg.Scheduler
+	if c == nil {
+		c = &config.Scheduler{GraceRecurringSeconds: 7200, GraceOneOffSeconds: 86400}
+	}
+	s := scheduler.New(scheduler.Config{DefaultTZ: c.DefaultTZ, GraceRecurring: time.Duration(c.GraceRecurringSeconds) * time.Second, GraceOneOff: time.Duration(c.GraceOneOffSeconds) * time.Second}, st, cfg.Access(), nil)
+	switch sub {
+	case "list", "show":
+		fmt.Println(s.Admin(sub, id))
+	case "health":
+		h := s.Health(time.Duration(cfg.Harness.RunTimeoutSeconds) * time.Second)
+		out, _ := json.MarshalIndent(h, "", "  ")
+		fmt.Println(string(out))
+		if !h.OK {
+			os.Exit(1)
+		}
+	case "export":
+		out, err := s.Export()
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+	default:
+		return fmt.Errorf("unknown sched command %q", sub)
+	}
+	return nil
+}
+
+// drain holds new scheduled runs and waits until Heimdall is idle: exit 0,
+// or 75 (EX_TEMPFAIL) on timeout.
+func drain(args []string) error {
+	fs := flag.NewFlagSet("drain", flag.ExitOnError)
+	timeout := fs.Duration("timeout", 30*time.Minute, "how long to wait")
+	cfg, err := loadConfig(fs, args)
+	if err != nil {
+		return err
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	idle, err := scheduler.Drain(ctx, st, *timeout, time.Second)
+	if err != nil {
+		return err
+	}
+	if !idle {
+		fmt.Fprintln(os.Stderr, "heimdall: drain timed out: turns still running or replies undelivered")
+		st.Close()
+		os.Exit(75)
+	}
+	fmt.Println("idle")
 	return nil
 }
 

@@ -347,7 +347,7 @@ func TestFirstMessage(t *testing.T) {
 	}
 	// Reopen as a database from before the callers step: whoever wrote
 	// before it is not new.
-	if _, err := s.db.Exec(`DROP TABLE caller_notices; DROP TABLE interface_progress; DROP TABLE interface_events; DROP TABLE callers; PRAGMA user_version=8`); err != nil {
+	if _, err := s.db.Exec(`DROP TABLE caller_notices; DROP TABLE interface_progress; DROP TABLE interface_events; DROP TABLE callers; DROP TABLE job_runs; DROP TABLE jobs; DROP TABLE sched_meta; ALTER TABLE turns DROP COLUMN ready; PRAGMA user_version=8`); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
