@@ -1284,13 +1284,13 @@ func TestDraftReplyPunctuation(t *testing.T) {
 			}
 		})
 	}
-	for _, reply := range []string{"yes, but maybe in a separate folder", "yes. please", "no, keep it", "not ok.", "!yes", "yesterday", "..."} {
+	for _, reply := range []string{"ok?", "yes?", "да?", "no?", "  Yes?  ", "no!?", "yes, but maybe in a separate folder", "yes. please", "no, keep it", "not ok.", "!yes", "yesterday", "..."} {
 		t.Run(reply, func(t *testing.T) {
 			r := newRig(t)
 			_, draft, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n" + `{"name":"x","schedule":{"every":"5m"},"prompt":"p"}` + "\n```"})
 			r.apply(&store.JobChange{Add: draft})
 			if _, handled := r.answer(asBoss, reply); handled || r.job(draft.ID).State != store.JobDraft {
-				t.Fatalf("longer reply %q changed draft", reply)
+				t.Fatalf("non-answer %q changed draft", reply)
 			}
 		})
 	}

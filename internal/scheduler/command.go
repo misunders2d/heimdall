@@ -57,6 +57,10 @@ var (
 // this conversation; handled false otherwise (the text is then an ordinary
 // message, or cancel's usual command). The change is stored with the reply.
 func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.JobChange, handled bool) {
+	// A question is not consent to confirm or discard a draft.
+	if strings.HasSuffix(strings.TrimSpace(text), "?") {
+		return "", nil, false
+	}
 	w := strings.ToLower(strings.TrimRightFunc(strings.TrimSpace(text), func(r rune) bool {
 		return unicode.IsPunct(r) || unicode.IsSpace(r)
 	}))
