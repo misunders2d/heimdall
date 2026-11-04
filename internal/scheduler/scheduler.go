@@ -424,6 +424,9 @@ func (s *Scheduler) refusal(j store.Job, d Def, r store.Run, why string) (store.
 // retry is a run's next attempt after a failure before its turn was ready,
 // or its failure when no attempt or grace is left.
 func (s *Scheduler) retry(j store.Job, d Def, sched *schedule.Schedule, r store.Run, now time.Time, cause string) store.RunEnd {
+	if r.Replayed && (d.RerunOnTimeout || strings.Contains(r.Cause, "timeout retry")) {
+		return s.failed(j, r, cause)
+	}
 	if r.Attempt < len(backoff) {
 		wait := backoff[r.Attempt]
 		at := now.Add(wait + time.Duration((rand.Float64()*0.4-0.2)*float64(wait)))
@@ -531,9 +534,34 @@ func (s *Scheduler) Recover() error {
 		return err
 	}
 	now := s.now()
+	// Timeout retries never cross a router restart: old effect/process state
+	// cannot be reconciled here. Existing ordinary idempotent recovery stays.
+	runs, err := s.st.Runs(store.RunFilter{States: []string{store.RunPending, store.RunRunning}})
+	if err != nil {
+		return err
+	}
+	discarded := map[int64]bool{}
+	for _, r := range runs {
+		j, _, _ := s.st.Job(r.Job)
+		d, _, _ := parse(j)
+		if r.Replayed && (d.RerunOnTimeout || strings.Contains(r.Cause, "timeout retry")) {
+			discarded[r.ID] = true
+			s.endRun(j, d, store.RunEnd{ID: r.ID, Job: r.Job, State: store.RunInterrupted, Inbound: r.Inbound, Cause: "timeout retry discarded on restart"}, s.notices(j, d, true, s.text(j, d, "was interrupted by a restart and was not re-run", r.Due, "restart", r.Attempt+1))...)
+		}
+	}
 	for _, h := range held {
+		if discarded[h.ID] {
+			continue
+		}
 		j, _, _ := s.st.Job(h.Job)
 		d, sched, _ := parse(j)
+		if d.RerunOnTimeout && (h.Replayed || h.Ready && h.InState == store.InInterrupted) {
+			if h.Replayed {
+				continue
+			} // settled with notice above
+			s.endRun(j, d, store.RunEnd{ID: h.ID, Job: h.Job, State: store.RunInterrupted, Inbound: h.Inbound, Cause: "timeout retry disabled after restart"}, s.notices(j, d, true, s.text(j, d, "was interrupted by a restart and was not re-run", h.Due, "restart", h.Attempt+1))...)
+			continue
+		}
 		switch h.InState {
 		case store.InPending:
 		case store.InInterrupted:
@@ -559,6 +587,7 @@ type Turn struct {
 	Job, Name string
 	Run       int64
 	Attempt   int
+	Replayed  bool
 	Due       time.Time
 	Def       Def
 	Target    Target
@@ -591,10 +620,20 @@ func (s *Scheduler) Begin(row store.InboundRow) (*Turn, bool) {
 	case s.held(now):
 		end.Retry, end.Held, end.Cause = now, true, "held by heimdall drain"
 	default:
-		t := &Turn{Job: j.ID, Name: j.Name, Run: r.ID, Attempt: r.Attempt, Due: r.Due, Def: d}
+		t := &Turn{Job: j.ID, Name: j.Name, Run: r.ID, Attempt: r.Attempt, Replayed: r.Replayed, Due: r.Due, Def: d}
 		t.Target, _ = s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate})
 		t.Target.Conv = ref.Target
 		t.Timeout, _ = span(d.Timeout)
+		if d.RerunOnTimeout && r.Replayed {
+			remaining := r.Due.Add(2 * t.Timeout).Sub(now)
+			if remaining <= 0 {
+				failed := s.failed(j, r, "timeout retry budget exhausted")
+				failed.Inbound = row.ID
+				s.endRun(j, d, failed, s.endNotices(j, d, failed)...)
+				return nil, false
+			}
+			t.Timeout = min(t.Timeout, remaining)
+		}
 		if d.Quiet {
 			t.Notes = append(t.Notes, "[Scheduled job: if there is nothing new to report, answer exactly "+QuietToken+" and nothing else.]")
 		}
@@ -641,8 +680,8 @@ const NeedsHumanCause = "needs_human: the harness asked for interactive input (a
 func (s *Scheduler) End(o Outcome) store.TurnEnd {
 	t, res := o.Turn, o.Result
 	j, _, _ := s.st.Job(t.Job)
-	_, sched, _ := parse(j)
-	r := store.Run{ID: t.Run, Job: t.Job, Due: t.Due, Attempt: t.Attempt}
+	current, sched, _ := parse(j)
+	r := store.Run{ID: t.Run, Job: t.Job, Due: t.Due, Attempt: t.Attempt, Replayed: t.Replayed}
 	e := store.TurnEnd{State: store.TurnDone, ItemState: store.InDone}
 	run := store.RunEnd{ID: t.Run, Job: t.Job}
 	fail := func(cause string) {
@@ -672,6 +711,19 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 	case o.Refused:
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "creator refused"
 		run, e.Notices = s.refusal(j, t.Def, r, "admission or role changed")
+	case res.Cancelled && res.Cause.Limited():
+		fail(string(res.Cause))
+		role, admitted := s.access.Role(j.Creator)
+		persisted, _ := s.st.Run(t.Run)
+		retryDisabled := strings.HasPrefix(persisted.Cause, "timeout retry disabled")
+		limit, _ := span(t.Def.Timeout)
+		// Repeat-safe is an explicit owner assertion. One rerun, same durable
+		// slot, fresh session, bounded by two configured turn limits from due.
+		if res.Cause == harness.CauseTimeout && t.Def.RerunOnTimeout && current.RerunOnTimeout && t.Def.Idempotent && !t.Replayed && t.Attempt == 0 &&
+			!retryDisabled && admitted && role == core.RoleOwner && j.State == store.JobActive && len(o.SignIn) == 0 && res.NeedsHuman == "" && res.Failure == "" &&
+			s.now().Before(t.Due.Add(2*limit)) && s.now().Sub(t.Due) <= s.grace(t.Def, sched) {
+			run = store.RunEnd{ID: t.Run, Job: t.Job, Retry: s.now(), Replay: true, Cause: "repeat-safe timeout retry"}
+		}
 	case o.Harness == "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "no harness could start"
 		cause := "harness did not start"
@@ -682,7 +734,7 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 	case res.NeedsHuman != "":
 		fail(NeedsHumanCause)
 	case res.Cancelled:
-		fail("cancelled or timed out")
+		fail("cancelled")
 	case res.Failure != "":
 		fail(category(res.Failure))
 	case len(o.SignIn) > 0:

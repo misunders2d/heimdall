@@ -32,24 +32,25 @@ const QuietToken = "NO_UPDATE"
 // Def is a job definition (docs/scheduler.md §2.2): what !job add, !job
 // edit and model drafts carry, checked by one validator.
 type Def struct {
-	Name       string        `json:"name"`
-	Kind       string        `json:"kind"`
-	Schedule   schedule.Spec `json:"schedule"`
-	TZ         string        `json:"tz"`
-	To         string        `json:"to"`
-	Prompt     string        `json:"prompt,omitempty"`
-	Text       string        `json:"text,omitempty"`
-	Harness    string        `json:"harness,omitempty"`
-	Quiet      bool          `json:"quiet,omitempty"`
-	Grace      string        `json:"grace,omitempty"`
-	Until      string        `json:"until,omitempty"` // normalized: RFC 3339 UTC
-	Expect     Expect        `json:"expect,omitzero"`
-	Overlap    string        `json:"overlap"`
-	Session    string        `json:"session"`
-	Idempotent bool          `json:"idempotent,omitempty"`
-	Requires   []string      `json:"requires,omitempty"`
-	Timeout    string        `json:"timeout,omitempty"`
-	Paused     bool          `json:"paused,omitempty"` // creation only: the job starts paused (§7.5); never stored
+	Name           string        `json:"name"`
+	Kind           string        `json:"kind"`
+	Schedule       schedule.Spec `json:"schedule"`
+	TZ             string        `json:"tz"`
+	To             string        `json:"to"`
+	Prompt         string        `json:"prompt,omitempty"`
+	Text           string        `json:"text,omitempty"`
+	Harness        string        `json:"harness,omitempty"`
+	Quiet          bool          `json:"quiet,omitempty"`
+	Grace          string        `json:"grace,omitempty"`
+	Until          string        `json:"until,omitempty"` // normalized: RFC 3339 UTC
+	Expect         Expect        `json:"expect,omitzero"`
+	Overlap        string        `json:"overlap"`
+	Session        string        `json:"session"`
+	RerunOnTimeout bool          `json:"rerun_on_timeout,omitempty"`
+	Idempotent     bool          `json:"idempotent,omitempty"`
+	Requires       []string      `json:"requires,omitempty"`
+	Timeout        string        `json:"timeout,omitempty"`
+	Paused         bool          `json:"paused,omitempty"` // creation only: the job starts paused (§7.5); never stored
 }
 
 // Expect are deterministic result checks (§3.8).
@@ -243,6 +244,9 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	default:
 		return fail("session: fresh or job")
 	}
+	if d.RerunOnTimeout && (!owner || !d.Idempotent || d.Kind != KindAgent || d.Timeout == "" || d.Session != "fresh" || t.AgentNet != "") {
+		return fail("rerun_on_timeout: owner agent jobs only; requires idempotent, explicit timeout, fresh session and a platform target")
+	}
 	if d.Idempotent && !owner {
 		return fail("idempotent: owner jobs only")
 	}
@@ -257,6 +261,8 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	if d.Timeout != "" {
 		if to, err := span(d.Timeout); !owner || err != nil || to < time.Minute || to > 2*time.Hour {
 			return fail("timeout: 1m to 2h, owner jobs only")
+		} else if d.RerunOnTimeout && s.grace(*d, sched) < to {
+			return fail("rerun_on_timeout: grace must be at least timeout")
 		}
 	}
 	return t, sched, nil

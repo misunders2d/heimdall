@@ -165,6 +165,18 @@ func inlineImages(images []Image) []map[string]any {
 	return out
 }
 
+// EndCause distinguishes a user cancellation from a resource limit. It is
+// metadata, never permission to replay a turn or resume an interrupted session.
+type EndCause string
+
+const (
+	CauseStop     EndCause = "stop"
+	CauseTimeout  EndCause = "timeout"
+	CauseLifetime EndCause = "lifetime"
+)
+
+func (c EndCause) Limited() bool { return c == CauseTimeout || c == CauseLifetime }
+
 // Result is how a turn ended. Exactly one of Answer, Failure, NeedsHuman is
 // set, unless the turn was cancelled.
 type Result struct {
@@ -173,6 +185,7 @@ type Result struct {
 	Failure    string   // technical reason the turn ended without a native outcome
 	NeedsHuman string   // native approval or input required; nothing was approved
 	Cancelled  bool
+	Cause      EndCause
 	Ready      bool   // the harness accepted the turn (signalled ready, answered or asked for approval): side effects were possible
 	SessionID  string // native session to resume next time, if known
 	// Unclean marks an answer whose native session must not be resumed: the
@@ -205,6 +218,8 @@ type Run struct {
 	log          func(string)
 	stop         sync.Once
 	cancelled    atomic.Bool
+	endMu        sync.Mutex // serializes terminal publication and cancellation
+	cause        EndCause
 }
 
 type outcome struct {
@@ -469,7 +484,12 @@ func (r *Run) finishExit(runErr error) {
 	r.bridge.finish()
 	r.bridge.close()
 	stopGroup(r.cmd)
+	r.endMu.Lock()
+	defer r.endMu.Unlock()
 	o := r.bridge.outcome()
+	if r.cause == "" && r.ctx != nil && errors.Is(r.ctx.Err(), context.DeadlineExceeded) {
+		r.cause = CauseTimeout
+	}
 	res := Result{Answer: o.answer, Answers: o.answers, Failure: o.failure, NeedsHuman: o.human, SessionID: o.session, Warning: o.warning, Unclean: o.unclean}
 	select {
 	case <-r.bridge.readyCh():
@@ -477,8 +497,11 @@ func (r *Run) finishExit(runErr error) {
 	default:
 	}
 	switch {
+	case r.cause.Limited() && settled && res.Answer != "" && res.Failure == "" && res.NeedsHuman == "":
+		res.Cause, res.Unclean = r.cause, true
+		res.Warning = joinWarnings(res.Warning, "Turn limit reached; published answers kept, session discarded. Work was not re-run; check existing effects before resending.")
 	case r.cancelled.Load() || r.ctx.Err() != nil && !settled:
-		res = Result{Cancelled: true, Ready: res.Ready, SessionID: res.SessionID}
+		res = Result{Cancelled: true, Cause: r.cause, Failure: res.Failure, NeedsHuman: res.NeedsHuman, Ready: res.Ready, SessionID: res.SessionID}
 	case settled && res.Failure == "" && o.atExit && runErr != nil:
 		// The answers stand; the work after them ended in a failed exit.
 		res.Unclean = true
@@ -515,14 +538,22 @@ func (r *Run) early() {
 	case <-r.exited:
 		return
 	}
+	r.endMu.Lock()
+	if r.cause == "" && r.ctx != nil && errors.Is(r.ctx.Err(), context.DeadlineExceeded) {
+		r.cause = CauseTimeout
+	}
 	o := r.bridge.outcome()
-	if r.cancelled.Load() {
+	if r.cancelled.Load() && !r.cause.Limited() || o.atExit {
+		r.endMu.Unlock()
 		return
 	}
-	if o.atExit {
-		return // published as the process exited: wait settles it with the exit status
+	res := Result{Answer: o.answer, Answers: o.answers, SessionID: o.session, Ready: true, Warning: o.warning, Unclean: o.unclean}
+	if r.cause.Limited() {
+		res.Cause, res.Unclean = r.cause, true
+		res.Warning = joinWarnings(res.Warning, "Turn limit reached; published answers kept, session discarded. Work was not re-run; check existing effects before resending.")
 	}
-	r.finalize(Result{Answer: o.answer, Answers: o.answers, SessionID: o.session, Ready: true, Warning: o.warning, Unclean: o.unclean})
+	r.finalize(res)
+	r.endMu.Unlock()
 	if r.worker != nil {
 		return
 	}
@@ -628,8 +659,35 @@ func (r *Run) Result() Result { <-r.done; return r.result }
 func (r *Run) SessionID() string { return r.bridge.outcome().session }
 
 // Cancel stops the turn and its process group.
-func (r *Run) Cancel() {
-	r.cancelled.Store(true)
+func (r *Run) Cancel() { r.cancelFor(CauseStop) }
+
+// cancelFor returns false when a limit lost to an already published result.
+func (r *Run) cancelFor(cause EndCause) bool {
+	r.endMu.Lock()
+	if cause.Limited() {
+		select {
+		case <-r.done:
+			r.endMu.Unlock()
+			return false
+		default:
+		}
+		o := r.bridge.outcome()
+		if !r.cancelled.Load() && o.answer != "" && !o.atExit {
+			r.finalize(Result{Answer: o.answer, Answers: o.answers, SessionID: o.session, Ready: true, Warning: o.warning, Unclean: o.unclean})
+			r.endMu.Unlock()
+			return false
+		}
+	}
+	// Explicit stop overrides a pending limit and also retires a worker that
+	// published its answer just before the command arrived.
+	if !r.cancelled.Load() || cause == CauseStop {
+		r.cause = cause
+	}
+	already := r.cancelled.Swap(true)
+	r.endMu.Unlock()
+	if already {
+		return true
+	}
 	if r.worker != nil {
 		go func() {
 			go r.interrupt()
@@ -642,10 +700,14 @@ func (r *Run) Cancel() {
 	} else {
 		r.Stop("on cancellation")
 	}
+	return true
 }
 
 // SteerContext stages metadata separately before the bridge hands over input.
 func (r *Run) SteerContext(ctx context.Context, id, text string, images []Image, contextText string) SteerOutcome {
+	if r.cancelled.Load() {
+		return SteerQueued
+	}
 	if b, ok := r.bridge.(*codexBridge); ok {
 		return b.steerContext(ctx, id, text, images, contextText)
 	}
@@ -663,6 +725,9 @@ func (r *Run) SteerContext(ctx context.Context, id, text string, images []Image,
 // Steer passes text, and images where the harness takes them, into the
 // running turn. id must be unique per input.
 func (r *Run) Steer(ctx context.Context, id, text string, images []Image) SteerOutcome {
+	if r.cancelled.Load() {
+		return SteerQueued
+	}
 	if !defs[r.harness].steer {
 		return SteerUnsupported
 	}

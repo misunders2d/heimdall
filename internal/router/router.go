@@ -725,6 +725,9 @@ func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
 	c.r.release(row.Inbound)
 	c.r.wake(c.key.Interface)
 	if e.Job != nil {
+		if e.Job.StopJob != "" {
+			c.r.stopJob(e.Job.StopJob)
+		}
 		c.r.opt.Jobs.Wake()
 	}
 }
@@ -1124,6 +1127,11 @@ func (c *conv) start(ctx context.Context) {
 		c.r.mu.Lock()
 		c.r.jobs[job.Job] = t
 		c.r.mu.Unlock()
+		// Register first, then read the durable command fence. A committed stop
+		// either sees this registration or is observed here before launch.
+		if r, err := c.r.store.Run(job.Run); err != nil || r.State != store.RunRunning {
+			t.stopped.Store(true)
+		}
 	}
 	c.r.log.Printf("turn %d in %s: %d message(s), role %s, candidates %s", id, c.key, len(batch), t.role, strings.Join(t.candidates, ","))
 	c.startTyping(ctx, t)
@@ -1367,6 +1375,23 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		spec := harness.Spec{MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
 		if t.job != nil {
 			spec.OneShot, spec.Timeout = true, t.job.Timeout
+			if t.job.Def.RerunOnTimeout {
+				// All candidates share this execution's limit. A rerun additionally
+				// shares the slot's absolute recovery deadline.
+				deadline := t.started.Add(t.job.Timeout)
+				if t.job.Replayed {
+					limit, _ := time.ParseDuration(t.job.Def.Timeout)
+					if recovery := t.job.Due.Add(2 * limit); recovery.Before(deadline) {
+						deadline = recovery
+					}
+				}
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					c.send(ctx, doneEvent{t: t, harness: h, res: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}, notes: notes})
+					return
+				}
+				spec.Timeout = min(spec.Timeout, remaining)
+			}
 		}
 		run, err := c.startCandidate(ctx, t, spec)
 		if err != nil {
@@ -1406,9 +1431,17 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			return
 		}
 		<-run.Exited()
-		c.unbind(t, h, prev, clean)
-		if res.Cancelled {
+		if !res.Cause.Limited() {
+			c.unbind(t, h, prev, clean)
+		}
+		if res.Cancelled && !res.Cause.Limited() {
 			break
+		}
+		if res.Cancelled {
+			// Preserve a pre-ready limit result. It must not become a generic
+			// startup failure (or a scheduler startup retry).
+			c.send(ctx, doneEvent{t: t, harness: h, res: res, notes: notes})
+			return
 		}
 		why := res.Failure
 		if why == "" {
@@ -1614,6 +1647,11 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		}
 	}
 	if t.job != nil {
+		// A timeout rerun may be dispatched as soon as EndTurn commits. Reap
+		// the old native process before making that durable transition.
+		if run != nil && res.Cause.Limited() {
+			<-run.Exited()
+		}
 		c.settle(ctx, t, c.jobEnd(t, d, res))
 		return
 	}
@@ -1658,6 +1696,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	case res.Cancelled && t.stopped.Load():
 		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, "stopped by stop or reset"
 		text = "⏹ Stopped."
+	case res.Cancelled && res.Cause.Limited():
+		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, string(res.Cause)
+		text = "⏱ This turn hit its " + string(res.Cause) + " limit and was stopped. Work may be unfinished and was not re-run. Anything it already did may stand; check existing task IDs, results and sends before resending. Your next message starts a fresh session.\n— heimdall"
 	case d.harness == "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "no harness could start"
 		text = "⚠ No harness could take this turn."

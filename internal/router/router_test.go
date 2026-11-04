@@ -2082,3 +2082,38 @@ func TestEmployeeGateSkipsAreSilentWhenAnotherHarnessAnswers(t *testing.T) {
 		t.Fatalf("gate note leaked into an answered turn: %q", out.Text)
 	}
 }
+
+func TestTimeoutCauseAndFreshSession(t *testing.T) {
+	for _, prompt := range []string{"HANGPRE=omp", "HANGTERM"} {
+		t.Run(prompt, func(t *testing.T) {
+			e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+			e.stop()
+			stopOnce.Delete(e.st)
+			e.opt.Harness.RunTimeoutSeconds = 1
+			e.start()
+			e.send(owner, "c1", "hi")
+			want(t, e.reply(), "resumed=false")
+			e.send(owner, "c1", prompt)
+			out := e.reply()
+			want(t, out, "timeout limit", "was not re-run", "fresh session")
+			if strings.Contains(out.Text, "cancelled") || strings.Contains(out.Text, "codex#") {
+				t.Fatal(out.Text)
+			}
+			e.send(owner, "c1", "next")
+			want(t, e.reply(), "omp#1 resumed=false")
+		})
+	}
+}
+
+func TestPreReadyStopKeepsPriorCleanSession(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "hi")
+	want(t, e.reply(), "resumed=false")
+	e.send(owner, "c1", "HANGPRE=omp")
+	e.waitFile("hang-pre")
+	e.send(owner, "c1", "!stop")
+	want(t, e.reply(), "Stopping current run")
+	eventuallyTrue(t, "stopped", e.r.Idle)
+	e.send(owner, "c1", "next")
+	want(t, e.reply(), "resumed=true")
+}

@@ -187,7 +187,11 @@ Scheduled runs never capture memory (`MEMENTO_PROCESSING=1`). There is no per-jo
 
 - **Retries.** Only failures before the turn's ready signal are retried. That is the same no-side-effects boundary as harness fallback.
   - Backoff 1 min, 5 min, 15 min (±20%), at most 3 attempts, all within `grace`.
-  - After the ready signal, nothing is replayed.
+  - Timeout and worker lifetime limits fail without retry, even before ready, unless the explicit repeat-safe timeout option below applies. A turn may have produced effects without acknowledging readiness.
+  - Owner agent jobs may set `"rerun_on_timeout":true` together with `"idempotent":true`, explicit `timeout`, `session:"fresh"`, and a platform target (never AgentNet). This asserts that repeating the entire prompt and its effects is safe. It is a rerun, not checkpoint continuation or exactly-once execution.
+  - At most one timeout rerun uses the existing run/slot and durable replay flag. The first execution keeps its configured timeout within ordinary grace, even if queued. A rerun must finish within twice `timeout` from the slot due time, also constrained by grace; native interruption/termination can add shutdown grace. The old native process exits before retry is persisted. No native interrupted session is resumed.
+  - Explicit stop, pause and deletion fence pending retries transactionally. Confirmed removal of the opt-in cancels pending timeout retries. Restart discards timeout retries with a notice; ordinary pre-ready recovery of a first execution stays unchanged. Creator admission and role are checked again at dispatch and turn start. Auth/approval failures and lifetime expiry never trigger a timeout rerun. A repeated hang exhausts the single retry; no semantic progress is inferred.
+  - After the ready signal, nothing is replayed except that explicit repeat-safe timeout option.
 - **Always checked:** the answer is not empty (unless it is the quiet token), and the turn ended at the harness's native result event.
 - **Optional `expect` checks:**
   - `tools`: name patterns matched against native tool telemetry (`internal/harness/progress.go`). Telemetry carries names only, so a CLI run from the shell shows up only as the shell tool; use `files` or a checker for those.
@@ -564,8 +568,8 @@ All run with `go vet ./...` and `go test -race ./...`, using fake clocks and fak
 - A persisted outbound row is delivered after restart.
 
 **Retries and harness**
-- A pre-ready failure is retried 3 times with backoff, within grace.
-- A post-ready failure is never retried.
+- A pre-ready failure is retried 3 times with backoff, within grace, except timeout and worker lifetime limits (failed without retry).
+- A post-ready failure is never retried except the explicit owner repeat-safe timeout option above.
 - An explicit harness never falls back; the default order falls back only before the ready signal.
 
 **Identity**
