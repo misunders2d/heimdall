@@ -1,3 +1,4 @@
+// Protocol decoding compared with AgentNet cabe5c3c81893a85f9e236c29b1cde37b3440035.
 // Result/readiness handling compared with AgentNet dc39af639f18d8e452a54bf4417f7c60814ebd4d.
 // Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
 package harness
@@ -219,23 +220,19 @@ func (b *claudeStreamBridge) Write(data []byte) (int, error) {
 // proves work started, even when no exact initial replay was observed.
 func (b *claudeStreamBridge) event(raw []byte) {
 	var e struct {
-		Type    string          `json:"type"`
-		Subtype string          `json:"subtype"`
-		Session string          `json:"session_id"`
-		UUID    string          `json:"uuid"`
-		Replay  bool            `json:"isReplay"`
-		Parent  json.RawMessage `json:"parent_tool_use_id"`
-		Message struct {
-			ID      string          `json:"id"`
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"message"`
+		Type    string            `json:"type"`
+		Subtype string            `json:"subtype"`
+		Session string            `json:"session_id"`
+		UUID    string            `json:"uuid"`
+		Replay  bool              `json:"isReplay"`
+		Parent  json.RawMessage   `json:"parent_tool_use_id"`
+		Message json.RawMessage   `json:"message"`
 		Result  string            `json:"result"`
 		IsError bool              `json:"is_error"`
 		Denials []json.RawMessage `json:"permission_denials"`
 	}
-	if json.Unmarshal(raw, &e) != nil {
-		b.fail("Claude sent an unreadable protocol line; no answer was used")
+	if err := json.Unmarshal(raw, &e); err != nil {
+		skippedProtocolLine("claude", raw, err)
 		return
 	}
 	b.mu.Lock()
@@ -262,12 +259,23 @@ func (b *claudeStreamBridge) event(raw []byte) {
 		}
 		b.session = e.Session
 	}
+	var message struct {
+		ID      string          `json:"id"`
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if e.Type == "assistant" || e.Type == "user" {
+		if err := json.Unmarshal(e.Message, &message); err != nil {
+			skippedProtocolLine("claude", raw, err)
+			return
+		}
+	}
 	b.telemetry.event("claude", raw, b.progress)
 	switch e.Type {
 	case "assistant":
 		// Native output proves this process took the turn even if hooks changed
 		// the replayed prompt. Never admit replay or subagent output as evidence.
-		if e.Session == "" || e.Session != b.session || e.Replay || e.Message.Role != "assistant" || (len(e.Parent) != 0 && string(e.Parent) != "null") {
+		if e.Session == "" || e.Session != b.session || e.Replay || message.Role != "assistant" || (len(e.Parent) != 0 && string(e.Parent) != "null") {
 			return
 		}
 		b.active = true
@@ -275,11 +283,11 @@ func (b *claudeStreamBridge) event(raw []byte) {
 		// Partial-message mode emits completed blocks separately with one message
 		// ID. Keep only the latest message; commentary before a tool call is not
 		// a final answer. Publication still waits for the native result.
-		if e.Message.ID == "" || e.Message.ID != b.assistantID {
-			b.assistantID, b.assistantText = e.Message.ID, ""
+		if message.ID == "" || message.ID != b.assistantID {
+			b.assistantID, b.assistantText = message.ID, ""
 		}
 		var blocks []struct{ Type, Text string }
-		if json.Unmarshal(e.Message.Content, &blocks) == nil {
+		if json.Unmarshal(message.Content, &blocks) == nil {
 			for _, block := range blocks {
 				switch block.Type {
 				case "text":
@@ -290,10 +298,10 @@ func (b *claudeStreamBridge) event(raw []byte) {
 			}
 		}
 	case "user":
-		if b.session == "" || e.Session != b.session || e.UUID == "" || !e.Replay || string(e.Parent) != "null" || e.Message.Role != "user" {
+		if b.session == "" || e.Session != b.session || e.UUID == "" || !e.Replay || string(e.Parent) != "null" || message.Role != "user" {
 			return
 		}
-		text, ok := claudeText(e.Message.Content)
+		text, ok := claudeText(message.Content)
 		if !ok {
 			return
 		}

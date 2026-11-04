@@ -305,13 +305,47 @@ func (s *Slack) context(ctx context.Context, m eventMessage, k core.ConvKey) (st
 		method = "conversations.replies"
 		args = map[string]any{"channel": m.Channel, "ts": m.ThreadTS, "limit": 40}
 	}
-	var response struct {
-		Messages []eventMessage `json:"messages"`
+	var messages []eventMessage
+	var fetchErr error
+	cursor := ""
+	const maxThreadPages = 25
+	for page := 0; page < maxThreadPages; page++ {
+		if m.ThreadTS != "" {
+			args["limit"], args["latest"], args["inclusive"] = 200, m.TS, false
+			if cursor != "" {
+				args["cursor"] = cursor
+			}
+		}
+		var response struct {
+			Messages []eventMessage `json:"messages"`
+			Metadata struct {
+				Next string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		fetchErr = s.bot.call(ctx, method, args, &response)
+		if fetchErr != nil {
+			break
+		}
+		messages = append(messages, response.Messages...)
+		slices.SortFunc(messages, func(a, b eventMessage) int { return compareTS(a.TS, b.TS) })
+		if len(messages) > 40 && m.ThreadTS != "" {
+			messages = messages[len(messages)-40:]
+		}
+		next := response.Metadata.Next
+		if m.ThreadTS == "" || next == "" {
+			break
+		}
+		if next == cursor || page == maxThreadPages-1 {
+			// A bounded prefix cannot stand in for the newest thread context.
+			messages = nil
+			blocks = append(blocks, "[Slack thread history paging bound reached; live history unavailable.]")
+			break
+		}
+		cursor = next
 	}
-	if err := s.bot.call(ctx, method, args, &response); err != nil {
+	if fetchErr != nil {
 		blocks = append(blocks, "[Slack live history fetch failed; verify history scopes and channel access.]")
 	} else {
-		messages := response.Messages
 		slices.SortFunc(messages, func(a, b eventMessage) int { return compareTS(a.TS, b.TS) })
 		var lines []string
 		for _, p := range messages {

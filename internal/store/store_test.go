@@ -381,3 +381,43 @@ func TestInboundOAuthActorInstallationRoundTrip(t *testing.T) {
 		t.Fatal(rows, err)
 	}
 }
+
+func TestEarlierSessionCallerAndRecency(t *testing.T) {
+	s := open(t)
+	put := func(k core.ConvKey, who, h, id string, at int) {
+		t.Helper()
+		_, err := s.db.Exec(`INSERT INTO sessions(iface,chat,thread,principal,harness,native_id,clean,updated_at) VALUES(?,?,?,?,?,?,1,?)`, k.Interface, k.Chat, k.Thread, who, h, id, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(conv, "x:u", "claude", "old", 1)
+	put(conv, "x:u", "codex", "new", 2)
+	put(conv, "x:other", "pi", "foreign", 10)
+	other := conv
+	other.Thread = "other"
+	put(other, "x:u", "omp", "foreign", 20)
+	for _, tt := range []struct {
+		chosen string
+		resume bool
+		want   string
+	}{{"pi", false, "new"}, {"claude", true, "new"}, {"codex", true, ""}} {
+		_, id, err := s.EarlierSession(conv, "x:u", tt.chosen, tt.resume)
+		if err != nil || id != tt.want {
+			t.Fatalf("%+v: %q %v", tt, id, err)
+		}
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = forgetSessions(tx, conv, "x:u"); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, id, err := s.EarlierSession(conv, "x:u", "pi", false); err != nil || id != "" {
+		t.Fatalf("reset: %q %v", id, err)
+	}
+}

@@ -1889,14 +1889,13 @@ func TestAnswerBeforeReadyNeverFallsBack(t *testing.T) {
 }
 
 // A fallback starts the next harness only once the failed one's process
-// exited, though its failure was known before (an unreadable protocol
-// line while the process kept running). A guard: Done closes before ready
+// exited after sending an unreadable protocol line. A guard: Done closes before ready
 // only when the process exited, so the router's own wait is not what
 // this test can fail on today.
 func TestFallbackWaitsForTheFailedProcessToExit(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
 	e.send(owner, "c1", "x BADLINE=omp")
-	want(t, e.reply(), "codex#1", "omp failed before starting: OMP sent an unreadable protocol line")
+	want(t, e.reply(), "codex#1", "omp failed before starting:")
 	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
 		t.Fatal("the fallback started while the failed harness process still ran")
 	}
@@ -2080,5 +2079,58 @@ func TestEmployeeGateSkipsAreSilentWhenAnotherHarnessAnswers(t *testing.T) {
 	want(t, out, "role employee")
 	if strings.Contains(out.Text, "employee turns unavailable") {
 		t.Fatalf("gate note leaked into an answered turn: %q", out.Text)
+	}
+}
+
+func TestSessionPointerScopesAndUncleanPrevious(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"pi"}, "pi")
+	e.send(owner, "pointer", "hello")
+	e.reply()
+	k := core.ConvKey{Interface: "fake", Chat: "pointer"}
+	id, _, err := e.st.Session(k, owner, "pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := harness.Launch{Home: t.TempDir()}
+	dir := filepath.Join(l.Home, ".local", "state", "heimdall", "sessions", "pi", id)
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "native.jsonl"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := &conv{r: e.r, key: k}
+	tr := &turn{role: core.RoleOwner, who: owner}
+	// A failed same-harness turn points to prev even before its row is replaced.
+	if got := c.sessionPointer(tr, "pi", harness.Session{}, id, false, l, false); !strings.Contains(got, dir) {
+		t.Fatal(got)
+	}
+	if got := c.sessionPointer(tr, "claude", harness.Session{}, "", false, l, false); !strings.Contains(got, dir) {
+		t.Fatal(got)
+	}
+	if got := c.sessionPointer(tr, "pi", harness.Session{Resume: true}, id, true, l, false); got != "" {
+		t.Fatal(got)
+	}
+	for _, kind := range []string{"employee", "job", "control", "other caller"} {
+		cp := turn{role: tr.role, who: tr.who}
+		control := false
+		switch kind {
+		case "employee":
+			cp.role = core.RoleEmployee
+		case "job":
+			cp.job = &scheduler.Turn{}
+		case "control":
+			control = true
+		case "other caller":
+			cp.who = "fake:other"
+		}
+		if got := c.sessionPointer(&cp, "claude", harness.Session{}, "", false, l, control); got != "" {
+			t.Fatalf("%s: %s", kind, got)
+		}
+	}
+	e.send(owner, "pointer", "!reset")
+	e.reply()
+	if got := c.sessionPointer(tr, "claude", harness.Session{}, "", false, l, false); got != "" {
+		t.Fatal(got)
 	}
 }

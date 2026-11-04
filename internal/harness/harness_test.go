@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/user"
@@ -748,5 +749,27 @@ func TestActiveCancelSendsSIGTERMAndMarksCancelled(t *testing.T) {
 	}
 	if res := r.Result(); !res.Cancelled || res.Answer != "" || res.Failure != "" {
 		t.Fatalf("result %+v", res)
+	}
+}
+
+func TestClaudeSkipsUnusedProtocolLines(t *testing.T) {
+	for _, noise := range []string{"BLANKLINE", "WRONGTYPE"} {
+		for _, noResult := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/noResult=%v", noise, noResult), func(t *testing.T) {
+				bin, _ := fakeharness.Install(t, "claude")
+				prompt := "hello " + noise
+				if noResult {
+					prompt += " NORESULT"
+				}
+				got := turn(t, launch(t, bin, "claude", false), "claude", prompt, harness.Session{ID: harness.NewSessionID("claude")})
+				if noResult {
+					if got.Answer != "" || got.Failure == "" {
+						t.Fatalf("missing result: %+v", got)
+					}
+				} else if got.Failure != "" || !strings.Contains(got.Answer, "hello") {
+					t.Fatalf("result: %+v", got)
+				}
+			})
+		}
 	}
 }

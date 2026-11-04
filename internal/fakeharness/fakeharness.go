@@ -621,6 +621,18 @@ func (f *fake) claude() {
 			f.steers = append(f.steers, text)
 			return true
 		})
+		if f.has("BLANKLINE") || f.has("WRONGTYPE") {
+			f.emit(map[string]any{"type": "assistant", "session_id": id, "message": map[string]any{"id": "final", "role": "assistant", "content": []map[string]string{{"type": "text", "text": "complete answer"}}}})
+			if f.has("BLANKLINE") {
+				fmt.Fprintln(os.Stdout)
+			}
+			if f.has("WRONGTYPE") {
+				f.emit(map[string]any{"type": "system", "message": "optional status"})
+			}
+			if f.has("NORESULT") {
+				return
+			}
+		}
 		result(f.answer())
 		if f.has("LINGER=") {
 			return

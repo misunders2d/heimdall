@@ -60,14 +60,11 @@ func Model(name string, l Launch) string {
 // Code's transcript for session id under the launch's home, or "". Claude
 // writes ~/.claude/projects/<cwd>/<id>.jsonl; only the tail is read.
 func ClaudeSessionModel(l Launch, id string) string {
-	if id == "" || len(id) > 64 || strings.TrimLeft(id, "abcdefABCDEF0123456789-") != "" {
+	path := SessionPath("claude", l, id)
+	if path == "" {
 		return ""
 	}
-	paths, _ := filepath.Glob(filepath.Join(l.Home, ".claude", "projects", "*", id+".jsonl"))
-	if len(paths) != 1 {
-		return ""
-	}
-	f, err := os.Open(paths[0])
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}

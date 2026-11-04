@@ -1310,6 +1310,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				notes = append(notes, "new "+h+" session: the previous turn there did not finish cleanly")
 			}
 		}
+		sessionNote := c.sessionPointer(t, h, sess, prev, clean, launch, batch[0].row.MCPControl)
 		// Recorded before the harness gets any input: a crash from here on
 		// leaves this session not resumable.
 		if err := c.r.store.BindTurn(t.id, c.key, t.who, h, sess.ID); err != nil {
@@ -1354,6 +1355,15 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				turnContext = strings.TrimSpace(scheduler.Note + "\n\n" + turnContext)
 			} else {
 				nativePrompt = scheduler.Note + "\n\n" + nativePrompt
+			}
+		}
+		if sessionNote != "" {
+			if h == "pi" {
+				nativePrompt = strings.TrimSpace(nativePrompt + "\n\n" + sessionNote)
+			} else if h == "claude" || h == "codex" {
+				turnContext = strings.TrimSpace(sessionNote + "\n\n" + turnContext)
+			} else {
+				nativePrompt = sessionNote + "\n\n" + nativePrompt
 			}
 		}
 		var notify func(string)
@@ -1442,6 +1452,27 @@ func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, 
 		done.files, done.skipped = c.collect(t)
 	}
 	c.send(ctx, done)
+}
+
+// sessionPointer uses only existing bindings, before BindTurn overwrites them.
+func (c *conv) sessionPointer(t *turn, h string, sess harness.Session, prev string, clean bool, launch harness.Launch, control bool) string {
+	sessionNote := ""
+	var err error
+	if t.role == core.RoleOwner && t.job == nil && !control {
+		earlierHarness, earlierID := h, prev
+		if prev == "" || clean {
+			earlierHarness, earlierID, err = c.r.store.EarlierSession(c.key, t.who, h, sess.Resume)
+			if err != nil {
+				c.r.log.Printf("earlier session lookup failed")
+			}
+		}
+		if err == nil {
+			if path := harness.SessionPath(earlierHarness, launch, earlierID); path != "" {
+				sessionNote = fmt.Sprintf("Earlier work in this conversation is in the %s session file %q. Read the end first, only if you need it.", earlierHarness, path)
+			}
+		}
+	}
+	return sessionNote
 }
 
 // unbind restores h's session binding after h failed before its turn was
