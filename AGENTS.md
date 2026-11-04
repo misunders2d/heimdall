@@ -220,9 +220,19 @@ the `heimdall-live` unit.
     from due time, after old process exit. Stop/pause/delete fence retries;
     timeout retries never cross restart. This repeats work, not checkpoints.
     Other interrupted runs are never re-run, except `idempotent` jobs (once).
-  - Models only propose jobs, through the answer block. A human confirms in
+  - Models propose jobs only when asked, through the answer block. Direct owner
+    person turns apply new jobs and edits with the reply in one transaction,
+    without a card. Non-owners, removals and any `rerun_on_timeout` job still
+    require a human confirmation in
     the same conversation within 24 h (`!job confirm`, or a bare yes/no that
-    Heimdall matches itself). Blocks from scheduled turns are ignored.
+    Heimdall matches itself, ignoring surrounding whitespace and trailing
+    punctuation, whole replies only). Exactly one waiting draft, the same
+    caller and conversation are required for word replies. Cards preview at
+    most 200 prompt/text characters everywhere, link to `!job show <id>`
+    for the full prompt in private, show a plain schedule with timezone and
+    only the next run, and fit one Slack message; removal cards keep the
+    same schedule format. Shared-chat privacy stays unchanged. Blocks from
+    scheduled turns are ignored; MCP controls never auto-apply.
   - Notices are fixed templates ending `— heimdall`; no model text in
     shared channels.
   - AgentNet: owner jobs may name an address; the agent delivers; Heimdall

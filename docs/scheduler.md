@@ -20,7 +20,7 @@ Principles:
   - The scheduler adds a store, a due loop, commands and notices.
 - **Runs as its creator.** The creator's role, capabilities and mode are evaluated at every fire, never only at creation.
 - **Never twice.** Enqueue is exactly-once per scheduled slot. Delivery is at-least-once: one duplicate message is possible after a crash, and Heimdall never claims exactly-once.
-- **The model proposes, a human confirms.** No model output can activate a job.
+- **The model proposes only when asked.** Direct owner person turns apply new jobs and edits with the reply in one transaction. Non-owners, removals and jobs with `rerun_on_timeout` enabled still require confirmation. Scheduled turns never apply blocks; MCP controls never auto-apply.
 - **No new service.** One new dependency, `adhocore/gronx`, for cron parsing; the IANA zone data is stdlib `time/tzdata`.
 - **Deterministic detection.** Watches use scripts and cursors; the LLM runs only on a match.
 - **Long work goes elsewhere.** Multi-hour work is delegated to laptops through T3. A job only starts it, and a watch tracks it.
@@ -249,25 +249,27 @@ States: `pending`, `running`, `ok`, `quiet`, `failed`, `unverified`, `skipped`, 
 
 ## 5. Natural-language drafts
 
-People ask in plain language ("remind me every Monday at 9 to …"). The harness turns that into a draft; the person confirms it.
+People ask in plain language ("remind me every Monday at 9 to …"). The harness proposes a block only when asked. Direct owner requests for new jobs or edits apply immediately; other requests use a draft and confirmation.
 
 1. **The block.** The model ends its answer with a fenced block:
-   ```` ```heimdall-job ```` then a job definition (§2.2), or `{"edit": "<job id>", …changed fields}`, then ```` ``` ````.
+   ```` ```heimdall-job ```` then a job definition (§2.2), or `{"edit": "<job id>", …changed fields}`, or `{"remove":"<job id>"}`, then ```` ``` ````.
    At most one block per answer. This is a directive with no file path, like the `[react: …]` lines, so the outbox rule that Heimdall never sends a path the model names still holds.
-2. **Strip and validate.** Heimdall removes the block from the delivered answer and validates it with the same validator as `!job add`, under the caller's role rules.
-3. **Draft and card.** Heimdall stores a `draft` that expires after 24 h, and posts a card showing:
-   - the schedule in words, and the next 3 fires in local time and UTC;
+2. **Strip and validate.** Heimdall removes the block from the delivered answer and validates it with the same validator as `!job add`, under the caller's role rules. Removal checks the same job authority as `!job rm`; unknown or unauthorized IDs produce an error and change nothing.
+3. **Apply or ask.** On direct owner person turns (not scheduled, MCP control or ambient), valid new jobs and edits without `rerun_on_timeout` apply through the same confirmation checks and `confirmDraft`, atomically with the reply. No draft remains. A signed one-line notice gives the job ID, active/paused state, name, schedule and zone, target when elsewhere, next run and `!job rm` command; edits name changed fields. The running scheduler is woken immediately. Existing cap rules remain: owners uncapped, employees at most ten active/paused jobs.
+
+   For non-owners, removal, or any resulting definition with `rerun_on_timeout` enabled, Heimdall stores a `draft` that expires after 24 h, and posts a card showing:
+   - the schedule in words (intervals such as `every 5m`, cron expressions retained, plain dates for one-offs), its timezone, and only the next run in local time and UTC;
    - the target, and the conversation the draft was made in;
    - the harness and kind;
-   - the prompt: in full in private chats, as a 200-character preview in shared ones;
+   - the prompt or notification text: at most a 200-character preview everywhere, followed by `Full prompt: !job show <id>`; private `!job show` keeps showing the full content, shared-chat privacy is unchanged;
    - for an edit, a field-by-field diff;
    - `!job confirm <id>` and `!job discard <id>`.
-   The card ends `— heimdall`.
-4. **Confirm.** Only the same verified caller can confirm, in the same conversation, within 24 h; confirm from anyone or anywhere else is rejected. Confirming makes a new job `active`, or applies an edit.
-   - A whole reply of `yes`, `ok`, `confirm`, `да` or `так` (trimmed, any case) from that caller in that conversation confirms when exactly one of their drafts waits there; `no`, `cancel`, `нет` or `ні` discards it. With two or more, Heimdall asks for the ID. Heimdall matches these words itself; the model never confirms. In shared chats the reply needs addressing like any message.
-5. **Invalid block.** A card names the error; nothing is stored.
-6. **Blocks from scheduled turns are ignored**, so jobs never create jobs. `[job: done]` still works.
-7. **Telling the model.** A note of about 300 characters goes into the frame of the first message of each native session (not into scheduled turns). It describes the block format and says Heimdall will ask for confirmation.
+   The short card fits one Slack message and ends `— heimdall`.
+4. **Confirm.** Only the same verified caller can confirm, in the same conversation, within 24 h; confirm from anyone or anywhere else is rejected. Confirming makes a new job `active`, applies an edit, or removes the named job. Removal cards show the target job ID, name, schedule and next run. Confirmation rechecks current removal authority and uses the same running-run stop and retry fencing as `!job rm`. Discard leaves the target untouched. Removal drafts use the existing 24-hour expiry and caller/conversation binding.
+   - A whole reply of `yes`, `ok`, `confirm`, `да` or `так` (surrounding whitespace and trailing Unicode punctuation ignored, any case; e.g. `yes.`, `Yes!`, `ok.`, `да.`, `no.`) from that caller in that conversation confirms when exactly one of their drafts waits there; `no`, `cancel`, `нет` or `ні` discards it. Longer replies such as "yes, but maybe in a separate folder" never confirm. With two or more, Heimdall asks for the ID. Heimdall matches these words itself; the model never confirms. In shared chats the reply needs addressing like any message.
+5. **Invalid block, multiple blocks or cap exceeded.** One line names the error; nothing is stored.
+6. **Blocks from scheduled turns are ignored**, so scheduled jobs never propose creating, editing or removing jobs. `[job: done]` still works.
+7. **Telling the model.** A role-specific note goes into the frame of the first message of each native session (not into scheduled turns). It describes the block format. Owners are told to propose only when asked, that new jobs and edits apply at once, and that removal and `rerun_on_timeout` still ask. Non-owners retain the confirmation wording.
 
 This replaces Pi's model-called `schedule_*` tools. With those tools, a prompt-injected model could schedule directly (`extensions/scheduler.ts:1128-1170`).
 
@@ -468,7 +470,7 @@ Logs carry metadata only: job, run, slot, state, lateness, harness, attempt, cau
 | D1 | Cron library | gronx (fallback robfig/cron v3). Technical call. |
 | D2 | Default time zone | Owner's zone, set in config; each job may override. |
 | D3 | Pi scheduler tools in Heimdall turns | Switched off with `PI_SCHEDULER_TOOLS=0`, shipped with the scheduler (§11). Technical call. |
-| D4 | Natural-language creation in v1 | Yes: draft and confirm through the answer block (§5). |
+| D4 | Natural-language creation in v1 | Yes: immediate owner new/edit; otherwise draft and confirm (§5). |
 | D5 | AgentNet delivery | A job may carry `to: agentnet:<address>`. The agent delivers with the CLI; Heimdall posts nothing to chat on success and posts failure or missing-marker notices to the creator. Owner jobs only. No AgentNet interface. |
 | D6 | AgentNet peers creating jobs | No. Technical call. |
 | D8 | Memory for scheduled runs | Never captured (`MEMENTO_PROCESSING=1`); no opt-in. |
@@ -614,7 +616,7 @@ All run with `go vet ./...` and `go test -race ./...`, using fake clocks and fak
 
 **Drafts**
 - The block is parsed and stripped.
-- An invalid block gets an error card.
+- An invalid or multiple block, or an exceeded cap, gets one error line and no stored proposal.
 - Confirm works only for the same caller, in the same conversation, within 24 h; others are rejected.
 - An expired draft cannot be confirmed.
 - An edit shows its diff.
@@ -655,7 +657,7 @@ Use a scratch config and data directory outside the repo, a separate test bot (n
    - Every test group in §14 exists.
    - The pack test passes.
 2. **Review.** One independent review of the full diff against this document.
-3. **Create, two ways.** With `!job add`, and with a natural-language request → draft card → `!job confirm`. `!job show` gives the right next-3 fires in the default zone.
+3. **Create, two ways.** With `!job add`, and with a natural-language owner request → immediate activation (employee or removal/repeat-safe request → draft card → `!job confirm`). `!job show` gives the right next-3 fires in the default zone.
 4. **Fire.** A one-minute owner job fires and delivers to its target; `!job history` shows `ok`. A quiet job sends nothing. A `notify` job sends its text.
 5. **Target separate from creation.** A job created in a private chat with a group target delivers to the group, and its notices go to the private chat.
 6. **Crash.** `kill -9` during a run, then restart: interrupted notice, no re-run. A run created but not started, still within grace, runs after the restart.
@@ -685,7 +687,7 @@ For 3b, add:
   - a fresh session by default;
   - no progress messages.
 - Retry only before the ready signal. Interrupted runs are never re-run, except `idempotent` jobs (once).
-- Models only propose jobs, through the answer block. A human confirms in the same conversation within 24 h. Blocks from scheduled turns are ignored.
+- Models propose jobs only when asked, through the answer block. Direct owner new jobs and edits apply atomically with the reply; non-owners, removals and `rerun_on_timeout` jobs require confirmation in the same conversation within 24 h. Blocks from scheduled turns are ignored; MCP controls never auto-apply.
 - Notices are fixed templates ending `— heimdall`; no model text in shared channels.
 - AgentNet: owner jobs may name an address; the agent delivers; Heimdall never talks to AgentNet.
 - Watches: deterministic checkers from config only, running as the creator, with an expiry. One Slack consumer and one Telegram poller.
@@ -712,7 +714,7 @@ Built on `main` 4f3f7e8, rebased onto `main` fe58149 (employee Google sign-in, `
 - The first-message note goes into the turn context for Codex and Claude, after the prompt in the message for Pi, and at the top of the prompt for OMP and AGY. As turn context live Pi ignored it and never proposed a job (orchestrator decision, 2026-11-03: about 300 characters in the first message of a new native session only, never in scheduled turns).
 - A harness that asks for interactive input in a scheduled run (Pi's pack `ask_user_question` tool reaches native UI because RPC mode has a UI; an approval; a sign-in, since scheduled turns relay none) ends the turn at once with nothing answered. The run is `failed` with the cause `needs_human: …` in `!job history` and the failure notice; it counts towards `pause_after` and is not retried.
 - A scheduled run's own notes (the quiet instruction, the AgentNet delivery instruction) follow its prompt in the native message on every harness. As turn context, live Pi ignored the quiet instruction.
-- A draft's card is Heimdall's own message after the answer; an answer that was only the block is replaced by the card.
+- Heimdall's own notice follows the answer; an answer that was only the block is replaced by the immediate status line or, where confirmation is required, the draft card.
 - `scheduler.checkers` is not accepted until 3b.
 - Size (before the review fixes below): about 2,800 non-comment Go lines (3,300 with comments) against the ~1,520 estimate; the operator CLI, the DST evaluation and the role checks of every command are the difference. No dependency beyond gronx.
 

@@ -441,6 +441,7 @@ type TurnEnd struct {
 	Notices   []core.Outbound // Heimdall's own messages (job notices, draft cards), after Files
 	Run       *RunEnd         // a scheduled turn's run
 	Draft     *Job            // a job draft the answer proposed
+	Job       *JobChange      // activation of that draft, in this same transaction
 }
 
 // EndTurn settles a turn, its messages, its session binding and its reply
@@ -497,6 +498,9 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 		if err = insertJob(tx, *e.Draft); err != nil {
 			return 0, err
 		}
+	}
+	if err = e.Job.apply(tx); err != nil {
+		return 0, err
 	}
 	return replyID, tx.Commit()
 }

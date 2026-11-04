@@ -258,7 +258,9 @@ session and a platform target: one repeat-safe rerun, bounded by twice the
 timeout from due time; stop/pause/delete/restart cancel it. See
 [retry limits](docs/scheduler.md#38-retries-and-result-checks). Employees: at most every
 hour, here or their private chat, 10 jobs. Asked in plain language, a harness proposes a
-job; Heimdall shows a card and only the person confirms.
+job, an edit, or removal (`{"remove":"<id>"}` in a `heimdall-job` block);
+Heimdall shows a card and only the person confirms. Removal follows `!job rm`
+authority and running-run behavior; discard leaves the job untouched.
 
 Runs deliver to their target with no typing or progress, never capture
 memory, and send failures as fixed notices. Operators:

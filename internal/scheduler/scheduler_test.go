@@ -16,6 +16,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/schedule"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -518,20 +519,28 @@ func TestDrafts(t *testing.T) {
 	}
 	r.apply(&store.JobChange{Add: draft})
 	// Only the same caller, in the same conversation.
+	for _, caller := range []Caller{asWork, inGroup} {
+		if show := r.cmd(caller, "job show "+draft.ID); !strings.Contains(show, "no job") {
+			t.Fatalf("draft shown to another caller/conversation: %s", show)
+		}
+	}
 	other := Caller{Principal: worker, Role: core.RoleEmployee, Conv: bossDM}
-	if _, handled := r.answer(other, "yes"); handled {
+	if _, handled := r.answer(other, "yes."); handled {
 		t.Fatal("someone else's yes was taken")
 	}
 	if out := r.cmd(Caller{Principal: boss, Role: core.RoleOwner, Conv: team}, "job confirm "+draft.ID); !strings.Contains(out, "No draft") {
 		t.Fatalf("confirmed elsewhere: %s", out)
 	}
+	if _, handled := r.answer(inGroup, "yes."); handled {
+		t.Fatal("punctuated reply confirmed elsewhere")
+	}
 	// Two drafts: a bare yes asks which.
 	_, second, _ := r.s.Draft(asBoss, []string{block})
 	r.apply(&store.JobChange{Add: second})
-	if out, _ := r.answer(asBoss, " YES "); !strings.Contains(out, "Several job drafts") {
+	if out, _ := r.answer(asBoss, " YES! "); !strings.Contains(out, "Several job drafts") {
 		t.Fatalf("two drafts: %s", out)
 	}
-	if out, _ := r.answer(asBoss, "ні"); !strings.Contains(out, "Several") {
+	if out, _ := r.answer(asBoss, "ні…"); !strings.Contains(out, "Several") {
 		t.Fatal(out)
 	}
 	r.cmd(asBoss, "job discard "+second.ID)
@@ -547,6 +556,9 @@ func TestDrafts(t *testing.T) {
 	r.now = r.now.Add(25 * time.Hour)
 	if out := r.cmd(asBoss, "job confirm "+edit.ID); !strings.Contains(out, "expired") {
 		t.Fatalf("expired: %s", out)
+	}
+	if _, handled := r.answer(asBoss, "yes."); handled {
+		t.Fatal("punctuated reply confirmed expired draft")
 	}
 	// Invalid or several blocks: an error card, nothing stored.
 	if _, d, card := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"name\":1}\n```"}); d != nil || !strings.Contains(card, "not valid") {
@@ -1138,5 +1150,287 @@ func TestPauseResumeDoesNotReviveCurrentTimeoutRetry(t *testing.T) {
 	got, _ := r.st.Run(turn.Run)
 	if got.State != store.RunFailed {
 		t.Fatalf("run left active: %+v", got)
+	}
+}
+
+func TestRemovalDrafts(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		creator, proposer Caller
+	}{
+		{"owner", asBoss, asBoss},
+		{"employee own job", asWork, asWork},
+		{"owner removes employee job", asWork, asBoss},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			id := r.add(tc.creator, `{"name":"standup","schedule":{"every":"1h"},"prompt":"p"}`)
+			stops := 0
+			r.s.stop = func(job string) bool {
+				if job != id {
+					t.Fatalf("stopped %s", job)
+				}
+				stops++
+				return true
+			}
+			propose := func() *store.Job {
+				clean, d, card := r.s.Draft(tc.proposer, []string{"Sure.\n```heimdall-job\n{\"remove\":\"" + id + "\"}\n```"})
+				if d == nil || clean[0] != "Sure." {
+					t.Fatalf("draft: %v %s", d, card)
+				}
+				for _, want := range []string{"remove job " + id, "standup", "Schedule: every 1h in Europe/Kyiv", "Next:", "Confirm: !job confirm " + d.ID, "Discard: !job discard " + d.ID} {
+					if !strings.Contains(card, want) {
+						t.Fatalf("missing %q: %s", want, card)
+					}
+				}
+				r.apply(&store.JobChange{Add: d})
+				if r.job(id).State != store.JobActive || stops != 0 {
+					t.Fatal("proposal changed target")
+				}
+				return d
+			}
+			d := propose()
+			other := tc.proposer
+			other.Principal = core.Principal{Platform: core.PlatformTelegram, ID: "999"}
+			if out := r.cmd(other, "job confirm "+d.ID); !strings.Contains(out, "No draft") {
+				t.Fatal(out)
+			}
+			elsewhere := tc.proposer
+			elsewhere.Conv = team
+			if out := r.cmd(elsewhere, "job confirm "+d.ID); !strings.Contains(out, "No draft") {
+				t.Fatal(out)
+			}
+			if out, ok := r.answer(tc.proposer, "no"); !ok || !strings.Contains(out, "discarded") {
+				t.Fatal(out)
+			}
+			if r.job(id).State != store.JobActive || stops != 0 {
+				t.Fatal("discard changed target")
+			}
+			d = propose()
+			if out, ok := r.answer(tc.proposer, "yes"); !ok || !strings.Contains(out, "deleted") || !strings.Contains(out, "being stopped") {
+				t.Fatal(out)
+			}
+			if r.job(id).State != store.JobDeleted || stops != 1 {
+				t.Fatal("confirm did not remove/stop target")
+			}
+			if _, ok, err := r.st.Job(d.ID); ok || err != nil {
+				t.Fatalf("draft retained: %v %v", ok, err)
+			}
+			if out := r.cmd(tc.proposer, "job confirm "+d.ID); !strings.Contains(out, "No draft") || stops != 1 {
+				t.Fatal(out)
+			}
+		})
+	}
+}
+
+func TestRemovalDraftRefusals(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"owner job","schedule":{"every":"1h"},"prompt":"p"}`)
+	for _, tc := range []struct {
+		caller Caller
+		raw    string
+	}{
+		{asWork, `{"remove":"` + id + `"}`},
+		{asBoss, `{"remove":"missing"}`},
+		{asBoss, `{"remove":true}`},
+		{asBoss, `{"remove":""}`},
+		{asBoss, `{"remove":"` + id + `","edit":"` + id + `"}`},
+		{asBoss, `{"remove":"` + id + `","paused":true}`},
+	} {
+		_, d, card := r.s.Draft(tc.caller, []string{"```heimdall-job\n" + tc.raw + "\n```"})
+		if d != nil || !strings.Contains(card, "not valid") || r.job(id).State != store.JobActive {
+			t.Fatalf("%s: %v %s", tc.raw, d, card)
+		}
+	}
+	_, d, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"remove\":\"" + id + "\"}\n```"})
+	r.apply(&store.JobChange{Add: d})
+	// Losing owner authority after proposal must be caught at confirmation.
+	demoted := asBoss
+	demoted.Role = core.RoleEmployee
+	// An owner proposes removing another caller's job, then loses owner role.
+	otherID := r.add(asWork, `{"name":"employee job","schedule":{"every":"1h"},"prompt":"p"}`)
+	_, other, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"remove\":\"" + otherID + "\"}\n```"})
+	r.apply(&store.JobChange{Add: other})
+	if out := r.cmd(demoted, "job confirm "+other.ID); !strings.Contains(out, "no job") || r.job(otherID).State != store.JobActive {
+		t.Fatal(out)
+	}
+	r.cmd(asBoss, "job rm "+id)
+	if out := r.cmd(asBoss, "job confirm "+d.ID); !strings.Contains(out, "no job") {
+		t.Fatal(out)
+	}
+	// Expired removal must leave its target alone.
+	r.now = r.now.Add(25 * time.Hour)
+	if out := r.cmd(asBoss, "job confirm "+other.ID); !strings.Contains(out, "expired") || r.job(otherID).State != store.JobActive {
+		t.Fatal(out)
+	}
+}
+
+func TestDraftReplyPunctuation(t *testing.T) {
+	for _, reply := range []string{"yes.", "Yes!", "ok.", "да.", "так…", "confirm?!", " YES , …  ", "no.", "cancel!", "нет…", "ні,"} {
+		t.Run(reply, func(t *testing.T) {
+			r := newRig(t)
+			_, draft, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n" + `{"name":"x","schedule":{"every":"5m"},"prompt":"p"}` + "\n```"})
+			if draft == nil {
+				t.Fatal("no draft")
+			}
+			r.apply(&store.JobChange{Add: draft})
+			out, handled := r.answer(asBoss, reply)
+			want := store.JobActive
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(reply)), "no") || strings.HasPrefix(reply, "cancel") || strings.HasPrefix(reply, "нет") || strings.HasPrefix(reply, "ні") {
+				want = "" // Discard drops the draft row.
+			}
+			if !handled || r.job(draft.ID).State != want {
+				t.Fatalf("reply %q: %q, state %s, want %s", reply, out, r.job(draft.ID).State, want)
+			}
+		})
+	}
+	for _, reply := range []string{"ok?", "yes?", "да?", "no?", "  Yes?  ", "no!?", "yes, but maybe in a separate folder", "yes. please", "no, keep it", "not ok.", "!yes", "yesterday", "..."} {
+		t.Run(reply, func(t *testing.T) {
+			r := newRig(t)
+			_, draft, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n" + `{"name":"x","schedule":{"every":"5m"},"prompt":"p"}` + "\n```"})
+			r.apply(&store.JobChange{Add: draft})
+			if _, handled := r.answer(asBoss, reply); handled || r.job(draft.ID).State != store.JobDraft {
+				t.Fatalf("non-answer %q changed draft", reply)
+			}
+		})
+	}
+}
+
+func TestShortDraftCards(t *testing.T) {
+	for _, c := range []Caller{asBoss, inGroup} {
+		for _, kind := range []string{KindAgent, KindNotify} {
+			t.Run(fmt.Sprintf("private=%t/%s", c.Private, kind), func(t *testing.T) {
+				r := newRig(t)
+				body := strings.Repeat("界&<>", 600)
+				d := Def{Name: "short card", Kind: kind, Schedule: schedule.Spec{Every: "5m"}}
+				if kind == KindNotify {
+					d.Text = body
+				} else {
+					d.Prompt = body
+				}
+				_, draft, card := r.s.Draft(c, []string{"```heimdall-job\n" + mustJSON(d) + "\n```"})
+				if draft == nil {
+					t.Fatal(card)
+				}
+				preview := string([]rune(body)[:200]) + "…"
+				for _, want := range []string{preview, "Full prompt: !job show " + draft.ID, "Schedule: every 5m in Europe/Kyiv"} {
+					if !strings.Contains(card, want) {
+						t.Fatalf("missing %q: %s", want, card)
+					}
+				}
+				// Slack escapes these characters before splitting at its 3000-rune budget.
+				escaped := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(card)
+				if len([]rune(escaped)) > 3000 || strings.Contains(card, body) {
+					t.Fatalf("card exceeds one Slack message: %d runes", len([]rune(escaped)))
+				}
+				if strings.Count(card, " UTC)") != 1 {
+					t.Fatalf("card must show only one next run: %s", card)
+				}
+				r.apply(&store.JobChange{Add: draft})
+				private := c
+				private.Private = true
+				if show := r.cmd(private, "job show "+draft.ID); !strings.Contains(show, body) || strings.Count(show, " UTC)") != 3 {
+					t.Fatal("private show lost full content or next three runs")
+				}
+				if show := r.cmd(inGroup, "job show "+draft.ID); strings.Contains(show, preview) {
+					t.Fatal("shared show exposed content")
+				}
+			})
+		}
+	}
+}
+
+func TestScheduleWords(t *testing.T) {
+	for _, tc := range []struct {
+		spec schedule.Spec
+		want string
+	}{
+		{schedule.Spec{Every: "5m"}, "every 5m"},
+		{schedule.Spec{Every: "2d", At: "09:00", From: "2026-11-05"}, "every 2d at 09:00 from 2026-11-05"},
+		{schedule.Spec{Cron: []string{"0 9 * * MON", "0 17 * * FRI"}}, "cron 0 9 * * MON; 0 17 * * FRI"},
+		{schedule.Spec{At: "2026-11-05T09:00"}, "at 2026-11-05 09:00"},
+	} {
+		if got := scheduleWords(tc.spec); got != tc.want {
+			t.Errorf("got %q, want %q", got, tc.want)
+		}
+	}
+}
+
+func TestPrepareOwnerAndConfirmationExceptions(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw     string
+		caller        Caller
+		direct, apply bool
+	}{
+		{"new", `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}`, asBoss, true, true},
+		{"paused", `{"name":"x","schedule":{"every":"1h"},"prompt":"p","paused":true}`, asBoss, true, true},
+		{"employee", `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}`, asWork, true, false},
+		{"mcp control", `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}`, asBoss, false, false},
+		{"timeout", `{"name":"x","schedule":{"every":"1h"},"prompt":"p","idempotent":true,"rerun_on_timeout":true,"timeout":"1m"}`, asBoss, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			_, draft, change, notice := r.s.Prepare(tc.caller, []string{"```heimdall-job\n" + tc.raw + "\n```"}, tc.direct)
+			if draft == nil || (change != nil) != tc.apply {
+				t.Fatalf("draft=%+v change=%+v notice=%s", draft, change, notice)
+			}
+			if tc.apply {
+				if strings.Contains(notice, "\n") || strings.Contains(notice, "confirm") {
+					t.Fatal(notice)
+				}
+				if _, err := r.st.EndTurn(0, tc.caller.Conv, tc.caller.Principal.Key(), store.TurnEnd{Draft: draft, Job: change, Reply: &core.Outbound{Conv: tc.caller.Conv, Text: notice}}); err != nil {
+					t.Fatal(err)
+				}
+				j := r.job(draft.ID)
+				want := store.JobActive
+				if tc.name == "paused" {
+					want = store.JobPaused
+				}
+				if j.State != want {
+					t.Fatalf("job: %+v", j)
+				}
+				if tc.name == "new" {
+					r.now = r.now.Add(time.Hour)
+					r.tick()
+					if len(r.rows) != 1 {
+						t.Fatalf("activated job did not fire: %+v", r.rows)
+					}
+				}
+
+			} else if !strings.Contains(notice, "Confirm:") {
+				t.Fatal(notice)
+			}
+		})
+	}
+}
+
+func TestPrepareRefusesInvalidMultipleAndCap(t *testing.T) {
+	for _, name := range []string{"invalid", "multiple", "cap"} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			block := "```heimdall-job\n" + `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}` + "\n```"
+			switch name {
+			case "invalid":
+				block = "```heimdall-job\n{}\n```"
+			case "multiple":
+				block += "\n" + block
+			case "cap":
+				for range 10 {
+					r.add(asWork, `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}`)
+				}
+			}
+			c := asBoss
+			if name == "cap" {
+				c = asWork
+			}
+			_, draft, change, notice := r.s.Prepare(c, []string{block}, true)
+			if draft != nil || change != nil || notice == "" || strings.Contains(notice, "\n") {
+				t.Fatalf("%+v %+v %q", draft, change, notice)
+			}
+			rows, _ := r.st.Jobs(store.JobFilter{States: []string{store.JobDraft}})
+			if len(rows) != 0 {
+				t.Fatal(rows)
+			}
+		})
 	}
 }
