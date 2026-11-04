@@ -451,6 +451,17 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 		return 0, err
 	}
 	defer tx.Rollback()
+	if e.Run != nil {
+		var state string
+		if err = tx.QueryRow(`SELECT state FROM job_runs WHERE id=?`, e.Run.ID).Scan(&state); err != nil {
+			return 0, err
+		}
+		if state == RunCancelled {
+			e.State, e.ItemState, e.Clean = TurnCancelled, InCancelled, false
+			e.Reply, e.Files, e.Notices = nil, nil, nil
+			e.Run = &RunEnd{ID: e.Run.ID, Job: e.Run.Job, State: RunCancelled, Cause: "stopped by command"}
+		}
+	}
 	if _, err = tx.Exec(`UPDATE turns SET state=?,detail=?,ended_at=? WHERE id=? AND state=?`, e.State, e.Detail, now(), turn, TurnRunning); err != nil {
 		return 0, err
 	}

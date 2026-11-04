@@ -14,3 +14,17 @@ func TestFailureStatusDoesNotClaimDeliveryFailure(t *testing.T) {
 		}
 	}
 }
+
+// Time limits persist as failed turns, so both live and recovered status use
+// the failed phase. Only an explicit cancellation claims stopped by request.
+func TestTimeoutFailureStatusDoesNotClaimUserStop(t *testing.T) {
+	s := &Slack{name: "bot"}
+	text := s.statusText(&statusUpdate{phase: "failed"})
+	if strings.Contains(text, "by request") || !strings.Contains(text, "Work failed") {
+		t.Fatal(text)
+	}
+	text = s.statusText(&statusUpdate{phase: "cancelled"})
+	if !strings.Contains(text, "by request") {
+		t.Fatal(text)
+	}
+}

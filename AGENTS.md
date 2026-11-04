@@ -207,8 +207,12 @@ the `heimdall-live` unit.
     the captured target; `Private=false`; no `owner_slack`;
     `MEMENTO_PROCESSING=1` (never memory, no opt-in); a fresh session by
     default; no progress messages; never a warm worker.
-  - Retry only before the ready signal. Interrupted runs are never re-run,
-    except `idempotent` jobs (once).
+  - Retry only before the ready signal, except explicit owner-only
+    `rerun_on_timeout` jobs: declared idempotent, fresh session, explicit
+    timeout, platform target; one repeat-safe rerun within twice the timeout
+    from due time, after old process exit. Stop/pause/delete fence retries;
+    timeout retries never cross restart. This repeats work, not checkpoints.
+    Other interrupted runs are never re-run, except `idempotent` jobs (once).
   - Models only propose jobs, through the answer block. A human confirms in
     the same conversation within 24 h (`!job confirm`, or a bare yes/no that
     Heimdall matches itself). Blocks from scheduled turns are ignored.

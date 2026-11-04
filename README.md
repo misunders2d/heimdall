@@ -252,7 +252,11 @@ also `{"every":"15m"}`, `{"every":"2w","at":"09:00"}`, `{"at":"2026-12-01T09:00"
 or, for owners, `agentnet:<address>`. `"kind":"notify"` sends a fixed `text`.
 Options: `quiet` (answer `NO_UPDATE` sends nothing), `expect`
 (`tools`/`files`/`prefix` checks), `grace`, `until`, `overlap`, `session`,
-`requires`, `timeout`, and at creation `paused`. Employees: at most every
+`requires`, `timeout`, and at creation `paused`. Owner agent jobs can explicitly
+opt into `rerun_on_timeout` with `idempotent`, an explicit `timeout`, a fresh
+session and a platform target: one repeat-safe rerun, bounded by twice the
+timeout from due time; stop/pause/delete/restart cancel it. See
+[retry limits](docs/scheduler.md#38-retries-and-result-checks). Employees: at most every
 hour, here or their private chat, 10 jobs. Asked in plain language, a harness proposes a
 job; Heimdall shows a card and only the person confirms.
 
