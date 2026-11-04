@@ -16,6 +16,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/schedule"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -518,20 +519,28 @@ func TestDrafts(t *testing.T) {
 	}
 	r.apply(&store.JobChange{Add: draft})
 	// Only the same caller, in the same conversation.
+	for _, caller := range []Caller{asWork, inGroup} {
+		if show := r.cmd(caller, "job show "+draft.ID); !strings.Contains(show, "no job") {
+			t.Fatalf("draft shown to another caller/conversation: %s", show)
+		}
+	}
 	other := Caller{Principal: worker, Role: core.RoleEmployee, Conv: bossDM}
-	if _, handled := r.answer(other, "yes"); handled {
+	if _, handled := r.answer(other, "yes."); handled {
 		t.Fatal("someone else's yes was taken")
 	}
 	if out := r.cmd(Caller{Principal: boss, Role: core.RoleOwner, Conv: team}, "job confirm "+draft.ID); !strings.Contains(out, "No draft") {
 		t.Fatalf("confirmed elsewhere: %s", out)
 	}
+	if _, handled := r.answer(inGroup, "yes."); handled {
+		t.Fatal("punctuated reply confirmed elsewhere")
+	}
 	// Two drafts: a bare yes asks which.
 	_, second, _ := r.s.Draft(asBoss, []string{block})
 	r.apply(&store.JobChange{Add: second})
-	if out, _ := r.answer(asBoss, " YES "); !strings.Contains(out, "Several job drafts") {
+	if out, _ := r.answer(asBoss, " YES! "); !strings.Contains(out, "Several job drafts") {
 		t.Fatalf("two drafts: %s", out)
 	}
-	if out, _ := r.answer(asBoss, "ні"); !strings.Contains(out, "Several") {
+	if out, _ := r.answer(asBoss, "ні…"); !strings.Contains(out, "Several") {
 		t.Fatal(out)
 	}
 	r.cmd(asBoss, "job discard "+second.ID)
@@ -547,6 +556,9 @@ func TestDrafts(t *testing.T) {
 	r.now = r.now.Add(25 * time.Hour)
 	if out := r.cmd(asBoss, "job confirm "+edit.ID); !strings.Contains(out, "expired") {
 		t.Fatalf("expired: %s", out)
+	}
+	if _, handled := r.answer(asBoss, "yes."); handled {
+		t.Fatal("punctuated reply confirmed expired draft")
 	}
 	// Invalid or several blocks: an error card, nothing stored.
 	if _, d, card := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"name\":1}\n```"}); d != nil || !strings.Contains(card, "not valid") {
@@ -1166,7 +1178,7 @@ func TestRemovalDrafts(t *testing.T) {
 				if d == nil || clean[0] != "Sure." {
 					t.Fatalf("draft: %v %s", d, card)
 				}
-				for _, want := range []string{"remove job " + id, "standup", "Schedule:", "Next:", "Confirm: !job confirm " + d.ID, "Discard: !job discard " + d.ID} {
+				for _, want := range []string{"remove job " + id, "standup", "Schedule: every 1h in Europe/Kyiv", "Next:", "Confirm: !job confirm " + d.ID, "Discard: !job discard " + d.ID} {
 					if !strings.Contains(card, want) {
 						t.Fatalf("missing %q: %s", want, card)
 					}
@@ -1250,5 +1262,96 @@ func TestRemovalDraftRefusals(t *testing.T) {
 	r.now = r.now.Add(25 * time.Hour)
 	if out := r.cmd(asBoss, "job confirm "+other.ID); !strings.Contains(out, "expired") || r.job(otherID).State != store.JobActive {
 		t.Fatal(out)
+	}
+}
+
+func TestDraftReplyPunctuation(t *testing.T) {
+	for _, reply := range []string{"yes.", "Yes!", "ok.", "да.", "так…", "confirm?!", " YES , …  ", "no.", "cancel!", "нет…", "ні,"} {
+		t.Run(reply, func(t *testing.T) {
+			r := newRig(t)
+			_, draft, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n" + `{"name":"x","schedule":{"every":"5m"},"prompt":"p"}` + "\n```"})
+			if draft == nil {
+				t.Fatal("no draft")
+			}
+			r.apply(&store.JobChange{Add: draft})
+			out, handled := r.answer(asBoss, reply)
+			want := store.JobActive
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(reply)), "no") || strings.HasPrefix(reply, "cancel") || strings.HasPrefix(reply, "нет") || strings.HasPrefix(reply, "ні") {
+				want = "" // Discard drops the draft row.
+			}
+			if !handled || r.job(draft.ID).State != want {
+				t.Fatalf("reply %q: %q, state %s, want %s", reply, out, r.job(draft.ID).State, want)
+			}
+		})
+	}
+	for _, reply := range []string{"yes, but maybe in a separate folder", "yes. please", "no, keep it", "not ok.", "!yes", "yesterday", "..."} {
+		t.Run(reply, func(t *testing.T) {
+			r := newRig(t)
+			_, draft, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n" + `{"name":"x","schedule":{"every":"5m"},"prompt":"p"}` + "\n```"})
+			r.apply(&store.JobChange{Add: draft})
+			if _, handled := r.answer(asBoss, reply); handled || r.job(draft.ID).State != store.JobDraft {
+				t.Fatalf("longer reply %q changed draft", reply)
+			}
+		})
+	}
+}
+
+func TestShortDraftCards(t *testing.T) {
+	for _, c := range []Caller{asBoss, inGroup} {
+		for _, kind := range []string{KindAgent, KindNotify} {
+			t.Run(fmt.Sprintf("private=%t/%s", c.Private, kind), func(t *testing.T) {
+				r := newRig(t)
+				body := strings.Repeat("界&<>", 600)
+				d := Def{Name: "short card", Kind: kind, Schedule: schedule.Spec{Every: "5m"}}
+				if kind == KindNotify {
+					d.Text = body
+				} else {
+					d.Prompt = body
+				}
+				_, draft, card := r.s.Draft(c, []string{"```heimdall-job\n" + mustJSON(d) + "\n```"})
+				if draft == nil {
+					t.Fatal(card)
+				}
+				preview := string([]rune(body)[:200]) + "…"
+				for _, want := range []string{preview, "Full prompt: !job show " + draft.ID, "Schedule: every 5m in Europe/Kyiv"} {
+					if !strings.Contains(card, want) {
+						t.Fatalf("missing %q: %s", want, card)
+					}
+				}
+				// Slack escapes these characters before splitting at its 3000-rune budget.
+				escaped := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(card)
+				if len([]rune(escaped)) > 3000 || strings.Contains(card, body) {
+					t.Fatalf("card exceeds one Slack message: %d runes", len([]rune(escaped)))
+				}
+				if strings.Count(card, " UTC)") != 1 {
+					t.Fatalf("card must show only one next run: %s", card)
+				}
+				r.apply(&store.JobChange{Add: draft})
+				private := c
+				private.Private = true
+				if show := r.cmd(private, "job show "+draft.ID); !strings.Contains(show, body) || strings.Count(show, " UTC)") != 3 {
+					t.Fatal("private show lost full content or next three runs")
+				}
+				if show := r.cmd(inGroup, "job show "+draft.ID); strings.Contains(show, preview) {
+					t.Fatal("shared show exposed content")
+				}
+			})
+		}
+	}
+}
+
+func TestScheduleWords(t *testing.T) {
+	for _, tc := range []struct {
+		spec schedule.Spec
+		want string
+	}{
+		{schedule.Spec{Every: "5m"}, "every 5m"},
+		{schedule.Spec{Every: "2d", At: "09:00", From: "2026-11-05"}, "every 2d at 09:00 from 2026-11-05"},
+		{schedule.Spec{Cron: []string{"0 9 * * MON", "0 17 * * FRI"}}, "cron 0 9 * * MON; 0 17 * * FRI"},
+		{schedule.Spec{At: "2026-11-05T09:00"}, "at 2026-11-05 09:00"},
+	} {
+		if got := scheduleWords(tc.spec); got != tc.want {
+			t.Errorf("got %q, want %q", got, tc.want)
+		}
 	}
 }

@@ -44,7 +44,7 @@ func cutBlocks(text string) (string, []string) {
 }
 
 // yes and no are whole replies that confirm or discard the caller's one
-// draft in this conversation (exact, trimmed, any case).
+// draft in this conversation (whole reply, any case, trailing punctuation ignored).
 var (
 	yes = []string{"yes", "ok", "confirm", "да", "так"}
 	no  = []string{"no", "cancel", "нет", "ні"}
@@ -54,7 +54,9 @@ var (
 // this conversation; handled false otherwise (the text is then an ordinary
 // message, or cancel's usual command). The change is stored with the reply.
 func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.JobChange, handled bool) {
-	w := strings.ToLower(strings.TrimSpace(text))
+	w := strings.ToLower(strings.TrimRightFunc(strings.TrimSpace(text), func(r rune) bool {
+		return unicode.IsPunct(r) || unicode.IsSpace(r)
+	}))
 	confirm, discard := slices.Contains(yes, w), slices.Contains(no, w)
 	if !confirm && !discard {
 		return "", nil, false
@@ -199,12 +201,11 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 	if id := removalID(j); id != "" {
 		orig, _, _ := s.st.Job(id)
 		d, _, _ := parse(orig)
-		spec, _ := json.Marshal(d.Schedule)
 		next := "none (" + orig.State + ")"
 		if orig.State == store.JobActive && !orig.NextDue.IsZero() {
 			next = when(d, orig.NextDue)
 		}
-		return fmt.Sprintf("📝 Job draft %s (remove job %s): %q\nSchedule: %s in %s\nNext: %s\nRemoval uses !job rm behavior, including stopping its running run.\nConfirm: !job confirm %s (or reply yes). Discard: !job discard %s (or no). Only you, here, within 24 h.\n— heimdall", j.ID, id, orig.Name, spec, d.TZ, next, j.ID, j.ID)
+		return fmt.Sprintf("📝 Job draft %s (remove job %s): %q\nSchedule: %s in %s\nNext: %s\nRemoval uses !job rm behavior, including stopping its running run.\nConfirm: !job confirm %s (or reply yes). Discard: !job discard %s (or no). Only you, here, within 24 h.\n— heimdall", j.ID, id, orig.Name, scheduleWords(d.Schedule), d.TZ, next, j.ID, j.ID)
 	}
 	d, sched, _ := parse(j)
 	var b strings.Builder
@@ -226,19 +227,22 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 	return b.String()
 }
 
-// describe writes a job's schedule, next fires, target and content. The
-// prompt or text is shown in full in private chats; in shared ones only a
-// draft's card previews it (§5.3), every other reply omits it (§4).
+// describe writes a job's schedule, next fires, target and content. Cards
+// preview the content everywhere (§5.3); other replies show it in full only
+// in private chats (§4).
 func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, sched *schedule.Schedule, card bool) {
 	fmt.Fprintf(b, "Kind: %s, harness %s\n", d.Kind, or(d.Harness, "default order"))
 	if d.RerunOnTimeout {
 		fmt.Fprintf(b, "Repeat-safe timeout rerun: ENABLED. Confirming asserts the whole prompt and its effects are safe to repeat (idempotent). One rerun, fresh session; timeout %s; rerun deadline twice timeout from due time.\n", d.Timeout)
 	}
-	spec, _ := json.Marshal(d.Schedule)
-	fmt.Fprintf(b, "Schedule: %s in %s\n", spec, d.TZ)
+	fmt.Fprintf(b, "Schedule: %s in %s\n", scheduleWords(d.Schedule), d.TZ)
 	if sched != nil {
 		var fires []string
-		for _, f := range sched.Fires(s.now(), 3) {
+		n := 3
+		if card {
+			n = 1
+		}
+		for _, f := range sched.Fires(s.now(), n) {
 			fires = append(fires, when(d, f.At))
 		}
 		fmt.Fprintf(b, "Next: %s\n", or(strings.Join(fires, "; "), "none"))
@@ -252,13 +256,33 @@ func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, s
 		body, label = d.Text, "Text"
 	}
 	switch {
-	case c.Private:
-	case !card:
+	case !card && !c.Private:
 		body = "(shown only in private chats)"
-	case len([]rune(body)) > 200:
+	case card && len([]rune(body)) > 200:
 		body = string([]rune(body)[:200]) + "…"
 	}
 	fmt.Fprintf(b, "%s: %s\n", label, body)
+	if card {
+		fmt.Fprintf(b, "Full prompt: !job show %s\n", j.ID)
+	}
+}
+
+// scheduleWords keeps cron expressions and renders intervals and one-offs plainly.
+func scheduleWords(sp schedule.Spec) string {
+	if len(sp.Cron) > 0 {
+		return "cron " + strings.Join(sp.Cron, "; ")
+	}
+	if sp.Every == "" {
+		return "at " + strings.ReplaceAll(sp.At, "T", " ")
+	}
+	text := "every " + sp.Every
+	if sp.At != "" {
+		text += " at " + sp.At
+	}
+	if sp.From != "" {
+		text += " from " + sp.From
+	}
+	return text
 }
 
 // diff lists the fields an edit changes; hide leaves out the prompt's and
@@ -595,7 +619,12 @@ func (s *Scheduler) list(c Caller, all bool) string {
 func (s *Scheduler) show(c Caller, id string) string {
 	j, err := s.own(c, id)
 	if err != nil {
-		return err.Error()
+		drafts := s.drafts(c)
+		i := slices.IndexFunc(drafts, func(d store.Job) bool { return d.ID == id && removalID(d) == "" })
+		if i < 0 {
+			return err.Error()
+		}
+		j = drafts[i]
 	}
 	d, sched, _ := parse(j)
 	var b strings.Builder
