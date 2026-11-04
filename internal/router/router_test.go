@@ -2101,15 +2101,34 @@ func TestSessionPointerScopesAndUncleanPrevious(t *testing.T) {
 	}
 	c := &conv{r: e.r, key: k}
 	tr := &turn{role: core.RoleOwner, who: owner}
-	// A failed same-harness turn points to prev even before its row is replaced.
-	if got := c.sessionPointer(tr, "pi", harness.Session{}, id, false, l, false); !strings.Contains(got, dir) {
+	// The newest binding is unclean and still available before BindTurn replaces it.
+	if err := e.st.BindTurn(0, k, owner, "pi", id); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.sessionPointer(tr, "pi", harness.Session{}, l, false); !strings.Contains(got, dir) {
 		t.Fatal(got)
 	}
-	if got := c.sessionPointer(tr, "claude", harness.Session{}, "", false, l, false); !strings.Contains(got, dir) {
+	if got := c.sessionPointer(tr, "claude", harness.Session{}, l, false); !strings.Contains(got, dir) {
 		t.Fatal(got)
 	}
-	if got := c.sessionPointer(tr, "pi", harness.Session{Resume: true}, id, true, l, false); got != "" {
+	if got := c.sessionPointer(tr, "pi", harness.Session{Resume: true}, l, false); got != "" {
 		t.Fatal(got)
+	}
+	// Another harness worked after the unclean Pi session.
+	time.Sleep(2 * time.Millisecond) // session timestamps have millisecond resolution
+	newID := "11111111-2222-4333-8444-555555555555" // supplied by Codex, not preallocated
+	newPath := filepath.Join(l.Home, ".codex", "sessions", "2026", "01", "01", "rollout-"+newID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.BindTurn(0, k, owner, "codex", newID); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.sessionPointer(tr, "pi", harness.Session{}, l, false); !strings.Contains(got, newPath) || strings.Contains(got, dir) {
+		t.Fatalf("newer Codex binding: %s", got)
 	}
 	for _, kind := range []string{"employee", "job", "control", "other caller"} {
 		cp := turn{role: tr.role, who: tr.who}
@@ -2124,13 +2143,13 @@ func TestSessionPointerScopesAndUncleanPrevious(t *testing.T) {
 		case "other caller":
 			cp.who = "fake:other"
 		}
-		if got := c.sessionPointer(&cp, "claude", harness.Session{}, "", false, l, control); got != "" {
+		if got := c.sessionPointer(&cp, "claude", harness.Session{}, l, control); got != "" {
 			t.Fatalf("%s: %s", kind, got)
 		}
 	}
 	e.send(owner, "pointer", "!reset")
 	e.reply()
-	if got := c.sessionPointer(tr, "claude", harness.Session{}, "", false, l, false); got != "" {
+	if got := c.sessionPointer(tr, "claude", harness.Session{}, l, false); got != "" {
 		t.Fatal(got)
 	}
 }

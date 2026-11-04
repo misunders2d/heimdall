@@ -621,6 +621,16 @@ func (f *fake) claude() {
 			f.steers = append(f.steers, text)
 			return true
 		})
+		if f.has("BADRESULT") {
+			f.emit(map[string]any{"type": "assistant", "session_id": id, "message": map[string]any{"id": "final", "role": "assistant", "content": []map[string]string{{"type": "text", "text": "must not publish"}}}})
+			f.emit(map[string]any{"type": "result", "session_id": id, "result": 42})
+			// Keep stream mode alive until Heimdall closes input on failure.
+			for {
+				if _, ok := f.read(); !ok {
+					return
+				}
+			}
+		}
 		if f.has("BLANKLINE") || f.has("WRONGTYPE") {
 			f.emit(map[string]any{"type": "assistant", "session_id": id, "message": map[string]any{"id": "final", "role": "assistant", "content": []map[string]string{{"type": "text", "text": "complete answer"}}}})
 			if f.has("BLANKLINE") {

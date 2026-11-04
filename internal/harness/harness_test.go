@@ -773,3 +773,23 @@ func TestClaudeSkipsUnusedProtocolLines(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeUnreadableResultFailsPromptly(t *testing.T) {
+	bin, _ := fakeharness.Install(t, "claude")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	r, err := harness.Start(ctx, harness.Spec{Harness: "claude", Prompt: "hello BADRESULT", Session: harness.Session{ID: harness.NewSessionID("claude")}, Launch: launch(t, bin, "claude", false), Caller: protocolCaller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Cancel()
+	select {
+	case <-r.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("unreadable result did not end the turn promptly")
+	}
+	got := r.Result()
+	if got.Failure != "Claude sent an unreadable protocol line; no answer was used" || got.Answer != "" {
+		t.Fatalf("result: %+v", got)
+	}
+}

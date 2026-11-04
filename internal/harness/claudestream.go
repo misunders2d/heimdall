@@ -232,7 +232,9 @@ func (b *claudeStreamBridge) event(raw []byte) {
 		Denials []json.RawMessage `json:"permission_denials"`
 	}
 	if err := json.Unmarshal(raw, &e); err != nil {
-		skippedProtocolLine("claude", raw, err)
+		if skippedProtocolLine("claude", raw, err) == "result" {
+			b.fail("Claude sent an unreadable protocol line; no answer was used")
+		}
 		return
 	}
 	b.mu.Lock()

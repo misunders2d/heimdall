@@ -7,7 +7,7 @@ import (
 )
 
 // Never log raw protocol data or error strings (which can contain values).
-func skippedProtocolLine(name string, raw []byte, err error) {
+func skippedProtocolLine(name string, raw []byte, err error) string {
 	kind := "syntax"
 	var typeErr *json.UnmarshalTypeError
 	if errors.As(err, &typeErr) {
@@ -23,4 +23,5 @@ func skippedProtocolLine(name string, raw []byte, err error) {
 		event = e.Type
 	}
 	log.Printf("native protocol skipped harness=%s length=%d event=%s error=%s", name, len(raw), event, kind)
+	return event
 }

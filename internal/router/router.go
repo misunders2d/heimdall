@@ -1310,7 +1310,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				notes = append(notes, "new "+h+" session: the previous turn there did not finish cleanly")
 			}
 		}
-		sessionNote := c.sessionPointer(t, h, sess, prev, clean, launch, batch[0].row.MCPControl)
+		sessionNote := c.sessionPointer(t, h, sess, launch, batch[0].row.MCPControl)
 		// Recorded before the harness gets any input: a crash from here on
 		// leaves this session not resumable.
 		if err := c.r.store.BindTurn(t.id, c.key, t.who, h, sess.ID); err != nil {
@@ -1455,16 +1455,12 @@ func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, 
 }
 
 // sessionPointer uses only existing bindings, before BindTurn overwrites them.
-func (c *conv) sessionPointer(t *turn, h string, sess harness.Session, prev string, clean bool, launch harness.Launch, control bool) string {
+func (c *conv) sessionPointer(t *turn, h string, sess harness.Session, launch harness.Launch, control bool) string {
 	sessionNote := ""
-	var err error
 	if t.role == core.RoleOwner && t.job == nil && !control {
-		earlierHarness, earlierID := h, prev
-		if prev == "" || clean {
-			earlierHarness, earlierID, err = c.r.store.EarlierSession(c.key, t.who, h, sess.Resume)
-			if err != nil {
-				c.r.log.Printf("earlier session lookup failed")
-			}
+		earlierHarness, earlierID, err := c.r.store.EarlierSession(c.key, t.who, h, sess.Resume)
+		if err != nil {
+			c.r.log.Printf("earlier session lookup failed")
 		}
 		if err == nil {
 			if path := harness.SessionPath(earlierHarness, launch, earlierID); path != "" {
