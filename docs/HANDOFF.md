@@ -799,6 +799,11 @@ usernames and tokens live only outside the repository.
 - **Steers that wait go together**: every steer waiting while another is
   handed over is one steer (frames in order, images capped at 10 per
   input as before). An unknown outcome is one notice to the first message.
+- **Claude refusals**: `system.permission_denied` and result
+  `permission_denials` record recoverable tool refusals. A successful result
+  with answer text is delivered with a safe `Result.Warning` note (tool name
+  only); the session stays clean. No answer after a refusal remains needs-human.
+  Native `control_request` still requires a human; no permission response is sent.
 - **Claude drain**: a stop is a stop (Cancelled, session not resumed); a
   late turn that fails keeps the answers given, notes why, and leaves the
   session unclean (`Result.Unclean`, `Result.Warning`). So does an exit

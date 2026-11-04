@@ -2211,3 +2211,26 @@ func TestPreReadyStopKeepsPriorCleanSession(t *testing.T) {
 	e.send(owner, "c1", "next")
 	want(t, e.reply(), "resumed=true")
 }
+
+func TestClaudeRefusalDelivery(t *testing.T) {
+	for _, kind := range []string{"DENIAL_SYSTEM", "DENIAL_RESULT"} {
+		t.Run(kind, func(t *testing.T) {
+			e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
+			e.send(owner, "c1", "work "+kind)
+			out := e.reply()
+			want(t, out, "claude#1 resumed=false", "\n\n(An action was refused by Claude's native safety check (Bash).)")
+			if strings.Contains(out.Text, "PRIVATE_COMMAND") || strings.Contains(out.Text, "needs a native approval") {
+				t.Fatalf("unsafe or lost answer: %q", out.Text)
+			}
+			e.send(owner, "c1", "after")
+			want(t, e.reply(), "claude#2 resumed=true")
+		})
+	}
+	for _, prompt := range []string{"DENIAL_SYSTEM DENIAL_EMPTY", "DENIAL_RESULT DENIAL_EMPTY", "ASK_HUMAN"} {
+		t.Run(prompt, func(t *testing.T) {
+			e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
+			e.send(owner, "c1", prompt)
+			want(t, e.reply(), "claude needs a native approval or input", "Nothing was approved")
+		})
+	}
+}

@@ -46,6 +46,7 @@ type claudeStreamBridge struct {
 	answers                    []string // each result's text, in order
 	draining                   bool     // a result came with steers pending: no new input, wait for theirs
 	awaiting                   int      // steers Claude replayed while draining whose result has not come
+	refusal                    string   // safe, informational note; does not invalidate the session
 	warning                    string   // the late turn ended badly: the answers stand, the session is not resumed
 	atExit                     bool     // published when the process exited during a drain
 	pending                    map[string]*pendingSteer
@@ -186,6 +187,9 @@ func (b *claudeStreamBridge) outcome() outcome {
 	o := outcome{failure: b.failure, human: b.human, session: b.session}
 	if b.published {
 		o.answer, o.answers, o.warning, o.unclean, o.atExit = b.answer, slices.Clone(b.answers), b.warning, b.warning != "", b.atExit
+		if b.refusal != "" {
+			o.warning = joinWarnings(o.warning, b.refusal)
+		}
 	}
 	return o
 }
@@ -220,16 +224,19 @@ func (b *claudeStreamBridge) Write(data []byte) (int, error) {
 // proves work started, even when no exact initial replay was observed.
 func (b *claudeStreamBridge) event(raw []byte) {
 	var e struct {
-		Type    string            `json:"type"`
-		Subtype string            `json:"subtype"`
-		Session string            `json:"session_id"`
-		UUID    string            `json:"uuid"`
-		Replay  bool              `json:"isReplay"`
-		Parent  json.RawMessage   `json:"parent_tool_use_id"`
-		Message json.RawMessage   `json:"message"`
-		Result  string            `json:"result"`
-		IsError bool              `json:"is_error"`
-		Denials []json.RawMessage `json:"permission_denials"`
+		Type     string          `json:"type"`
+		Subtype  string          `json:"subtype"`
+		Session  string          `json:"session_id"`
+		UUID     string          `json:"uuid"`
+		Replay   bool            `json:"isReplay"`
+		Parent   json.RawMessage `json:"parent_tool_use_id"`
+		Message  json.RawMessage `json:"message"`
+		Result   string          `json:"result"`
+		IsError  bool            `json:"is_error"`
+		ToolName string          `json:"tool_name"`
+		Denials  []struct {
+			ToolName string `json:"tool_name"`
+		} `json:"permission_denials"`
 	}
 	if err := json.Unmarshal(raw, &e); err != nil {
 		if skippedProtocolLine("claude", raw, err) == "result" {
@@ -335,8 +342,8 @@ func (b *claudeStreamBridge) event(raw []byte) {
 		case e.Session == "" || e.Session != b.session:
 			b.failLocked("Claude reported a result for another session; no answer was used")
 			return
-		case len(e.Denials) > 0:
-			b.humanLocked("Claude's native permission setup denied an action this request needed; review it in a native session")
+		case (len(e.Denials) > 0 || b.refusal != "") && strings.TrimSpace(e.Result) == "" && strings.TrimSpace(b.assistantText) == "":
+			b.humanLocked("Claude could not obtain native permission; review it in a native session")
 			return
 		case e.IsError:
 			why := "Claude reported an error"
@@ -347,6 +354,9 @@ func (b *claudeStreamBridge) event(raw []byte) {
 			}
 			b.failLocked(why)
 			return
+		}
+		for _, denial := range e.Denials {
+			b.refusalLocked(denial.ToolName)
 		}
 		if strings.TrimSpace(e.Result) == "" {
 			e.Result = b.assistantText
@@ -372,9 +382,26 @@ func (b *claudeStreamBridge) event(raw []byte) {
 		b.humanLocked("Claude needs native approval or input; no response or permission override was invented")
 	case "system":
 		if e.Subtype == "permission_denied" {
-			b.humanLocked("Claude could not obtain native permission; review it in a native session")
+			b.refusalLocked(e.ToolName)
 		}
 	}
+}
+
+// A refusal is a tool error Claude can recover from, not an input wait.
+// Only a bounded tool identifier may reach chats; never copy inputs or reasons.
+func (b *claudeStreamBridge) refusalLocked(tool string) {
+	if b.refusal == "" {
+		b.refusal = "An action was refused by Claude's native safety check."
+	}
+	if tool == "" || len(tool) > 80 {
+		return
+	}
+	for _, c := range tool {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '.') {
+			return
+		}
+	}
+	b.refusal = "An action was refused by Claude's native safety check (" + tool + ")."
 }
 
 func (b *claudeStreamBridge) publishLocked() {
