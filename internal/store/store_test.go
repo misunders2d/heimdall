@@ -421,3 +421,39 @@ func TestEarlierSessionCallerAndRecency(t *testing.T) {
 		t.Fatalf("reset: %q %v", id, err)
 	}
 }
+
+func TestTurnReplyAndJobActivationAtomic(t *testing.T) {
+	for _, fail := range []string{"none", "reply", "activation"} {
+		t.Run(fail, func(t *testing.T) {
+			s := open(t)
+			in, _, _ := s.AddInbound(msg("atomic"))
+			turn, err := s.StartTurn(conv, core.RoleOwner, "x:u", "atomic", []int64{in.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			draft := Job{ID: "jatomic", Name: "atomic", Kind: "agent", Creator: in.From, CreatedIn: conv, State: JobDraft, Def: "{}"}
+			set := Set{"state": JobActive}
+			if fail == "activation" {
+				set["invalid_column"] = true
+			}
+			if fail == "reply" {
+				if _, err := s.db.Exec(`CREATE TRIGGER reject_reply BEFORE INSERT ON outbound BEGIN SELECT RAISE(ABORT,'test'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = s.EndTurn(turn, conv, "x:u", TurnEnd{State: TurnDone, ItemState: InDone, Draft: &draft, Job: &JobChange{Confirm: &draft, Set: set}, Reply: &core.Outbound{Conv: conv, Text: "active"}})
+			if (err != nil) != (fail != "none") {
+				t.Fatalf("error: %v", err)
+			}
+			j, ok, _ := s.Job(draft.ID)
+			n, _ := s.Undelivered()
+			if fail == "none" {
+				if !ok || j.State != JobActive || n != 1 {
+					t.Fatalf("job=%+v ok=%v replies=%d", j, ok, n)
+				}
+			} else if ok || n != 0 {
+				t.Fatalf("partial commit job=%+v replies=%d", j, n)
+			}
+		})
+	}
+}

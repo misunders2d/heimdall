@@ -1355,3 +1355,82 @@ func TestScheduleWords(t *testing.T) {
 		}
 	}
 }
+
+func TestPrepareOwnerAndConfirmationExceptions(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw     string
+		caller        Caller
+		direct, apply bool
+	}{
+		{"new", `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}`, asBoss, true, true},
+		{"paused", `{"name":"x","schedule":{"every":"1h"},"prompt":"p","paused":true}`, asBoss, true, true},
+		{"employee", `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}`, asWork, true, false},
+		{"mcp control", `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}`, asBoss, false, false},
+		{"timeout", `{"name":"x","schedule":{"every":"1h"},"prompt":"p","idempotent":true,"rerun_on_timeout":true,"timeout":"1m"}`, asBoss, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			_, draft, change, notice := r.s.Prepare(tc.caller, []string{"```heimdall-job\n" + tc.raw + "\n```"}, tc.direct)
+			if draft == nil || (change != nil) != tc.apply {
+				t.Fatalf("draft=%+v change=%+v notice=%s", draft, change, notice)
+			}
+			if tc.apply {
+				if strings.Contains(notice, "\n") || strings.Contains(notice, "confirm") {
+					t.Fatal(notice)
+				}
+				if _, err := r.st.EndTurn(0, tc.caller.Conv, tc.caller.Principal.Key(), store.TurnEnd{Draft: draft, Job: change, Reply: &core.Outbound{Conv: tc.caller.Conv, Text: notice}}); err != nil {
+					t.Fatal(err)
+				}
+				j := r.job(draft.ID)
+				want := store.JobActive
+				if tc.name == "paused" {
+					want = store.JobPaused
+				}
+				if j.State != want {
+					t.Fatalf("job: %+v", j)
+				}
+				if tc.name == "new" {
+					r.now = r.now.Add(time.Hour)
+					r.tick()
+					if len(r.rows) != 1 {
+						t.Fatalf("activated job did not fire: %+v", r.rows)
+					}
+				}
+
+			} else if !strings.Contains(notice, "Confirm:") {
+				t.Fatal(notice)
+			}
+		})
+	}
+}
+
+func TestPrepareRefusesInvalidMultipleAndCap(t *testing.T) {
+	for _, name := range []string{"invalid", "multiple", "cap"} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			block := "```heimdall-job\n" + `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}` + "\n```"
+			switch name {
+			case "invalid":
+				block = "```heimdall-job\n{}\n```"
+			case "multiple":
+				block += "\n" + block
+			case "cap":
+				for range 10 {
+					r.add(asWork, `{"name":"x","schedule":{"every":"1h"},"prompt":"p"}`)
+				}
+			}
+			c := asBoss
+			if name == "cap" {
+				c = asWork
+			}
+			_, draft, change, notice := r.s.Prepare(c, []string{block}, true)
+			if draft != nil || change != nil || notice == "" || strings.Contains(notice, "\n") {
+				t.Fatalf("%+v %+v %q", draft, change, notice)
+			}
+			rows, _ := r.st.Jobs(store.JobFilter{States: []string{store.JobDraft}})
+			if len(rows) != 0 {
+				t.Fatal(rows)
+			}
+		})
+	}
+}

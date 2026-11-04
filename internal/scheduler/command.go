@@ -32,6 +32,9 @@ const draftTTL = 24 * time.Hour
 // propose a job: Heimdall asks the person to confirm it.
 const Note = `[Heimdall jobs: to propose a scheduled job or reminder, end your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","prompt"} (or "kind":"notify" with "text"). To change a job: {"edit":"<id>", changed fields}. To remove a job: {"remove":"<id>"}. Removal also requires human confirmation. Heimdall shows a card and the person confirms; you cannot.]`
 
+// OwnerNote describes the direct owner request path; risky changes still ask.
+const OwnerNote = `[Heimdall jobs: propose only when the person asked for a job or reminder. End your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","prompt"} (or "kind":"notify" with "text"). To edit: {"edit":"<id>", changed fields}. Heimdall applies new jobs and edits at once. Removal ({"remove":"<id>"}) and any job with rerun_on_timeout enabled still ask for human confirmation.]`
+
 var blockRE = regexp.MustCompile("(?ms)^[ \t]*```heimdall-job[ \t]*\r?\n(.*?)^[ \t]*```[ \t]*$\n?")
 
 // cutBlocks takes job blocks out of an answer.
@@ -107,6 +110,66 @@ func (s *Scheduler) Draft(c Caller, answers []string) (clean []string, draft *st
 		return clean, nil, "⚠ The proposed job is not valid, so nothing was stored: " + err.Error() + "\n— heimdall"
 	}
 	return clean, &j, s.card(c, j)
+}
+
+// Prepare keeps confirmation for employees, removals and repeat-safe assertions.
+// The caller persists both draft and change in the reply's transaction.
+func (s *Scheduler) Prepare(c Caller, answers []string, direct bool) ([]string, *store.Job, *store.JobChange, string) {
+	clean, j, notice := s.Draft(c, answers)
+	if j == nil {
+		return clean, nil, nil, strings.ReplaceAll(notice, "\n", " ")
+	}
+	if removalID(*j) != "" {
+		return clean, j, nil, notice
+	}
+	if j.EditOf == "" {
+		if msg := s.capped(c); msg != "" {
+			return clean, nil, nil, "⚠ " + msg + " — heimdall"
+		}
+	}
+	d, _, _ := parse(*j)
+	if !direct || c.Role != core.RoleOwner || d.RerunOnTimeout {
+		return clean, j, nil, notice
+	}
+	msg, change := s.confirmJob(c, *j)
+	if change == nil {
+		return clean, nil, nil, "⚠ " + strings.ReplaceAll(msg, "\n", " ") + " — heimdall"
+	}
+	id, state, edits := j.ID, "active", ""
+	if j.EditOf != "" {
+		id = j.EditOf
+		orig, _, _ := s.st.Job(id)
+		var before, after map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(orig.Def), &before)
+		_ = json.Unmarshal([]byte(j.Def), &after)
+		var fields []string
+		for k, v := range after {
+			if string(before[k]) != string(v) {
+				fields = append(fields, k)
+			}
+		}
+		for k := range before {
+			if _, ok := after[k]; !ok {
+				fields = append(fields, k)
+			}
+		}
+		slices.Sort(fields)
+		edits = " Changed: " + or(strings.Join(fields, ", "), "none") + "."
+		state = orig.State
+	}
+	if st, ok := change.Set["state"].(string); ok {
+		state = st
+	}
+	target := ""
+	if d.To != "here" {
+		target = ", to " + d.To
+	}
+	next := "none"
+	if due, ok := change.Set["next_due"].(time.Time); ok {
+		next = when(d, due)
+	}
+	notice = fmt.Sprintf("✅ Job %s %s: %q. %s in %s%s.%s Next: %s. Stop: !job rm %s — heimdall", id, state, d.Name, scheduleWords(d.Schedule), d.TZ, target, edits, next, id)
+	return clean, j, change, strings.ReplaceAll(notice, "\n", " ")
 }
 
 // removal is stored in a draft's definition; it never becomes a runnable job.
@@ -472,6 +535,12 @@ func (s *Scheduler) confirm(c Caller, id string) (string, *store.JobChange) {
 		}
 		return reply, change
 	}
+	return s.confirmJob(c, j)
+}
+
+// confirmJob shares activation checks for human confirmation and direct owner requests.
+func (s *Scheduler) confirmJob(c Caller, j store.Job) (string, *store.JobChange) {
+	now := s.now()
 	d, _, _ := parse(j)
 	who, version := c, 1
 	if j.EditOf != "" {

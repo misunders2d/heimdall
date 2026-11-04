@@ -15,6 +15,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/fakeharness"
+	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/scheduler"
 	"github.com/misunders2d/heimdall/internal/store"
 )
@@ -148,8 +149,8 @@ func TestJobNoteInPiFirstMessage(t *testing.T) {
 			if len(in) != 2 {
 				t.Fatalf("inputs %+v", in)
 			}
-			inText, inContext := strings.Contains(in[0].Text, scheduler.Note), strings.Contains(in[0].Context, scheduler.Note)
-			if h == "pi" && (!inText || inContext || !strings.HasSuffix(in[0].Text, scheduler.Note) || !strings.Contains(in[0].Text, "hello")) {
+			inText, inContext := strings.Contains(in[0].Text, scheduler.OwnerNote), strings.Contains(in[0].Context, scheduler.OwnerNote)
+			if h == "pi" && (!inText || inContext || !strings.HasSuffix(in[0].Text, scheduler.OwnerNote) || !strings.Contains(in[0].Text, "hello")) {
 				t.Fatalf("pi first input text %q context %q", in[0].Text, in[0].Context)
 			}
 			if h == "claude" && (inText || !inContext) {
@@ -229,17 +230,12 @@ func TestJobDraftConfirmAndNote(t *testing.T) {
 	block := "Sure.\n```heimdall-job\n{\"name\":\"standup\",\"schedule\":{\"cron\":[\"0 9 * * MON-FRI\"]},\"prompt\":\"summarize\"}\n```"
 	answer := e.ask(ownerDM, say(block))
 	card := e.reply()
-	if answer.Text != "Sure." || !strings.Contains(card.Text, "Job draft") || !strings.Contains(card.Text, "Next:") {
+	if answer.Text != "Sure." || !strings.Contains(card.Text, " active:") || !strings.Contains(card.Text, "Next:") {
 		t.Fatalf("answer %q card %q", answer.Text, card.Text)
 	}
 	id := jobIDRE.FindString(card.Text)
-	if j, _, _ := e.st.Job(id); j.State != store.JobDraft {
-		t.Fatalf("draft %+v", j)
-	}
-	// Someone else's yes is an ordinary message; the owner's confirms.
-	want(t, e.ask(ownerDM, "yes"), "is active")
 	if j, _, _ := e.st.Job(id); j.State != store.JobActive {
-		t.Fatalf("job %+v", j)
+		t.Fatalf("draft %+v", j)
 	}
 	// An invalid block gets an error card; nothing is stored.
 	// The answer was only the block: the card alone answers.
@@ -392,4 +388,62 @@ func TestJobRemovalProposalNeedsHuman(t *testing.T) {
 		t.Fatalf("not removed: %+v", j)
 	}
 	want(t, e.ask(ownerDM, "!job confirm "+draft), "No draft")
+}
+
+func TestOwnerProposalEditAndScheduledBlock(t *testing.T) {
+	e := schedEnv(t, []string{"omp"}, "omp")
+	block := func(raw string) string { return "```heimdall-job\n" + raw + "\n```" }
+	out := e.ask(ownerDM, say(block(`{"name":"new","schedule":{"every":"1h"},"prompt":"read"}`)))
+	want(t, out, " active:", "Next:", "Stop: !job rm", "— heimdall")
+	if strings.Contains(out.Text, "\n") || strings.Contains(out.Text, "confirm") {
+		t.Fatal(out.Text)
+	}
+	id := jobIDRE.FindString(out.Text)
+	if rows, _ := e.st.Jobs(store.JobFilter{States: []string{store.JobDraft}}); len(rows) != 0 {
+		t.Fatalf("drafts: %+v", rows)
+	}
+	out = e.ask(ownerDM, say(block(`{"edit":"`+id+`","name":"edited"}`)))
+	want(t, out, "Changed: name")
+	if j, _, _ := e.st.Job(id); j.Name != "edited" || j.Version != 2 {
+		t.Fatalf("edit: %+v", j)
+	}
+	// The scheduler runs the newly activated job without restarting.
+	e.ask(ownerDM, "!job run "+id)
+	out = e.reply()
+	if out.Conv != ownerDM {
+		t.Fatalf("target: %+v", out)
+	}
+	// A scheduled owner answer cannot create another job.
+	nested := block(`{"name":"nested","schedule":{"every":"1h"},"prompt":"no"}`)
+	e.ask(ownerDM, "!job edit "+id+` {"prompt":"`+say(nested)+`"}`)
+	e.ask(ownerDM, "!job run "+id)
+	e.reply()
+	if jobs, _ := e.st.Jobs(store.JobFilter{}); len(jobs) != 1 {
+		t.Fatalf("scheduled proposal applied: %+v", jobs)
+	}
+}
+
+func TestMCPControlProposalNeverAutoApplies(t *testing.T) {
+	e := schedEnv(t, []string{"pi"}, "pi")
+	e.cancel()
+	<-e.done
+	stopOnce.Store(e.st, true)
+	t.Cleanup(func() { e.st.Close() })
+	row, _, err := e.st.AddInbound(core.Inbound{Conv: ownerDM, From: tgOwner, MsgID: "control", Origin: core.OriginLive, Private: true, MCPControl: true, Text: "/mcp login test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := e.st.StartTurn(ownerDM, core.RoleOwner, tgOwner.Key(), "control", []int64{row.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &turn{id: id, role: core.RoleOwner, from: tgOwner, who: tgOwner.Key(), private: true, started: time.Now(), batch: []item{{row: row}}}
+	tr.done = &doneEvent{harness: "pi", res: harness.Result{Answer: "```heimdall-job\n" + `{"name":"control","schedule":{"every":"1h"},"prompt":"p"}` + "\n```"}}
+	c := &conv{r: e.r, key: ownerDM, turn: tr}
+	e.r.sem <- struct{}{}
+	c.finish(context.Background(), tr)
+	jobs, err := e.st.Jobs(store.JobFilter{})
+	if err != nil || len(jobs) != 1 || jobs[0].State != store.JobDraft {
+		t.Fatalf("MCP job=%+v error=%v", jobs, err)
+	}
 }

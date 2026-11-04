@@ -1354,15 +1354,19 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			}
 		}
 		if c.r.opt.Jobs != nil && t.job == nil && !sess.Resume && !batch[0].row.MCPControl {
+			note := scheduler.Note
+			if t.role == core.RoleOwner {
+				note = scheduler.OwnerNote
+			}
 			// A new native session learns once how to propose a job. Pi
 			// reads it after the prompt in the message: as turn context,
 			// live Pi ignored it.
 			if h == "pi" {
-				nativePrompt = strings.TrimSpace(nativePrompt + "\n\n" + scheduler.Note)
+				nativePrompt = strings.TrimSpace(nativePrompt + "\n\n" + note)
 			} else if turnContext != "" || nativePrompt != prompt {
-				turnContext = strings.TrimSpace(scheduler.Note + "\n\n" + turnContext)
+				turnContext = strings.TrimSpace(note + "\n\n" + turnContext)
 			} else {
-				nativePrompt = scheduler.Note + "\n\n" + nativePrompt
+				nativePrompt = note + "\n\n" + nativePrompt
 			}
 		}
 		if sessionNote != "" {
@@ -1683,15 +1687,17 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		return
 	}
 	var draft *store.Job
+	var jobChange *store.JobChange
 	var card string
 	if j := c.r.opt.Jobs; j != nil && d.harness != "" && res.Failure == "" && res.NeedsHuman == "" && !res.Cancelled {
-		// A proposed job becomes a draft and a card; the block is never sent.
+		// Direct owner requests apply with the notice; other proposals ask.
+		// The block itself is never sent.
 		answers := res.Answers
 		if len(answers) == 0 {
 			answers = []string{res.Answer}
 		}
 		var clean []string
-		if clean, draft, card = j.Draft(scheduler.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}, answers); card != "" {
+		if clean, draft, jobChange, card = j.Prepare(scheduler.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}, answers, t.job == nil && !t.batch[0].row.MCPControl && t.batch[0].row.Origin == core.OriginLive); card != "" {
 			res.Answers, res.Answer = clean, strings.Join(slices.DeleteFunc(slices.Clone(clean), func(a string) bool { return a == "" }), "\n\n")
 		}
 	}
@@ -1768,9 +1774,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	if e.State == store.TurnDone {
 		e.Files = c.fileReplies(t, d.files)
 		if card != "" {
-			e.Draft, e.Notices = draft, []core.Outbound{{Conv: c.key, ReplyTo: t.replyTo, Text: c.r.scrub(card)}}
+			e.Draft, e.Job, e.Notices = draft, jobChange, []core.Outbound{{Conv: c.key, ReplyTo: t.replyTo, Text: c.r.scrub(card)}}
 			if e.Reply != nil && e.Reply.Text == "" && len(e.Reply.Reactions) == 0 {
-				e.Reply = nil // the answer was only the block: the card says it
+				e.Reply = nil // only the block: Heimdall's notice says it
 			}
 		}
 	} else {
@@ -1790,6 +1796,9 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 	}
 	if !(e.State == store.TurnCancelled && t.stopped.Load()) {
 		c.observe(ctx, t, e.State, harness.Progress{})
+	}
+	if e.Job != nil && c.r.opt.Jobs != nil {
+		c.r.opt.Jobs.Wake()
 	}
 	c.r.wake(c.key.Interface)
 	for _, o := range e.Notices {
