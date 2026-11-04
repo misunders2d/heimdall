@@ -198,6 +198,9 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 // draft's card previews it (§5.3), every other reply omits it (§4).
 func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, sched *schedule.Schedule, card bool) {
 	fmt.Fprintf(b, "Kind: %s, harness %s\n", d.Kind, or(d.Harness, "default order"))
+	if d.RerunOnTimeout {
+		fmt.Fprintf(b, "Repeat-safe timeout rerun: ENABLED. Confirming asserts the whole prompt and its effects are safe to repeat (idempotent). One rerun, fresh session; timeout %s; rerun deadline twice timeout from due time.\n", d.Timeout)
+	}
 	spec, _ := json.Marshal(d.Schedule)
 	fmt.Fprintf(b, "Schedule: %s in %s\n", spec, d.TZ)
 	if sched != nil {
@@ -452,7 +455,15 @@ func (s *Scheduler) manage(c Caller, sub, id, arg string) (string, *store.JobCha
 	d, sched, _ := parse(j)
 	now := s.now()
 	set := func(set store.Set, what string) (string, *store.JobChange) {
-		return fmt.Sprintf("Job %s %s.", id, what), &store.JobChange{Update: id, Set: set}
+		change := &store.JobChange{Update: id, Set: set}
+		if d.RerunOnTimeout && (what == "paused" || what == "deleted") {
+			change.CancelPendingRetries = id
+			if what == "deleted" {
+				change.StopJob = id
+				change.CancelRetries = id
+			}
+		}
+		return fmt.Sprintf("Job %s %s.", id, what), change
 	}
 	switch sub {
 	case "pause":
@@ -476,6 +487,9 @@ func (s *Scheduler) manage(c Caller, sub, id, arg string) (string, *store.JobCha
 		r := store.Run{Job: j.ID, Version: j.Version, Slot: fmt.Sprintf("manual:%d", now.UnixMilli()), Due: now, Trigger: "manual", State: store.RunPending}
 		return fmt.Sprintf("Job %s runs now.", id), &store.JobChange{Run: &r}
 	case "stop":
+		if d.RerunOnTimeout {
+			return fmt.Sprintf("Stopping job %s's current run and pending timeout retry.", id), &store.JobChange{CancelRetries: id, StopJob: id}
+		}
 		if s.stopRun(j.ID) {
 			return fmt.Sprintf("Stopping job %s's running run.", id), nil
 		}

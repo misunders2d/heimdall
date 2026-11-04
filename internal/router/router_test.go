@@ -2115,7 +2115,7 @@ func TestSessionPointerScopesAndUncleanPrevious(t *testing.T) {
 		t.Fatal(got)
 	}
 	// Another harness worked after the unclean Pi session.
-	time.Sleep(2 * time.Millisecond) // session timestamps have millisecond resolution
+	time.Sleep(2 * time.Millisecond)                // session timestamps have millisecond resolution
 	newID := "11111111-2222-4333-8444-555555555555" // supplied by Codex, not preallocated
 	newPath := filepath.Join(l.Home, ".codex", "sessions", "2026", "01", "01", "rollout-"+newID+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(newPath), 0700); err != nil {
@@ -2152,4 +2152,62 @@ func TestSessionPointerScopesAndUncleanPrevious(t *testing.T) {
 	if got := c.sessionPointer(tr, "claude", harness.Session{}, l, false); got != "" {
 		t.Fatal(got)
 	}
+}
+
+func TestTimeoutCauseAndFreshSession(t *testing.T) {
+	// TempDir includes the subtest name. Keep fake control words out of
+	// session paths, which OMP receives in the next turn's pointer note.
+	for _, tc := range []struct{ name, prompt string }{
+		{"pre_ready", "HANGPRE=omp"},
+		{"termination", "HANGTERM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
+			e.stop()
+			stopOnce.Delete(e.st)
+			e.opt.Harness.RunTimeoutSeconds = 1
+			home := os.Getenv("HOME")
+			e.start()
+			e.send(owner, "c1", "hi")
+			want(t, e.reply(), "resumed=false")
+			k := core.ConvKey{Interface: "fake", Chat: "c1"}
+			id, _, err := e.st.Session(k, owner, "omp")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(home, ".local", "state", "heimdall", "sessions", "omp", id, "native.jsonl")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			e.send(owner, "c1", tc.prompt)
+			out := e.reply()
+			want(t, out, "timeout limit", "was not re-run", "fresh session")
+			if strings.Contains(out.Text, "cancelled") || strings.Contains(out.Text, "codex#") {
+				t.Fatal(out.Text)
+			}
+			e.send(owner, "c1", "next")
+			out = e.reply()
+			want(t, out, "omp#1 resumed=false")
+			inputs := fakeharness.Inputs(e.state)
+			if len(inputs) != 3 || !strings.Contains(inputs[2].Text, filepath.Dir(path)) {
+				t.Fatalf("next turn missing timed-out session pointer %q: %+v", filepath.Dir(path), inputs)
+			}
+		})
+	}
+}
+
+func TestPreReadyStopKeepsPriorCleanSession(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.send(owner, "c1", "hi")
+	want(t, e.reply(), "resumed=false")
+	e.send(owner, "c1", "HANGPRE=omp")
+	e.waitFile("hang-pre")
+	e.send(owner, "c1", "!stop")
+	want(t, e.reply(), "Stopping current run")
+	eventuallyTrue(t, "stopped", e.r.Idle)
+	e.send(owner, "c1", "next")
+	want(t, e.reply(), "resumed=true")
 }

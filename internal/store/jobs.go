@@ -102,15 +102,33 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, j.ID, j.Name, j.Kind, j.Creator.
 // command's answer in one transaction (AnswerCommand), so a crash between
 // the two can neither lose the answer nor replay the change.
 type JobChange struct {
-	Add     *Job   // a new job or draft
-	Update  string // a job Set changes
-	Confirm *Job   // a draft Set confirms (a new job, or an edit of its job)
-	Set     Set
-	Drop    string // a draft to delete
-	Run     *Run   // a manual run
+	Add                  *Job   // a new job or draft
+	Update               string // a job Set changes
+	Confirm              *Job   // a draft Set confirms (a new job, or an edit of its job)
+	Set                  Set
+	Drop                 string // a draft to delete
+	Run                  *Run   // a manual run
+	CancelRetries        string // timeout retry fence, stored with command answer
+	CancelPendingRetries string // pause/edit: pending replay only
+	StopJob              string // router callback after command commit, not persisted
 }
 
 func (ch *JobChange) apply(tx *sql.Tx) error {
+	if ch != nil && ch.CancelRetries != "" {
+		// Fence running attempts too: a concurrent EndTurn must not resurrect
+		// a pending rerun after stop/pause/delete has committed.
+		if _, err := tx.Exec(`UPDATE job_runs SET state=?,cause=?,ended_at=? WHERE job_id=? AND (state=? OR (state=? AND replayed=1))`, RunCancelled, "timeout retry cancelled by command", now(), ch.CancelRetries, RunRunning, RunPending); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE inbound SET state=? WHERE id IN (SELECT inbound_id FROM job_runs WHERE job_id=? AND state=?) AND state=?`, InCancelled, ch.CancelRetries, RunCancelled, InPending); err != nil {
+			return err
+		}
+	}
+	if ch != nil && ch.CancelPendingRetries != "" {
+		if err := cancelPendingTimeoutRetries(tx, ch.CancelPendingRetries); err != nil {
+			return err
+		}
+	}
 	switch {
 	case ch == nil:
 	case ch.Add != nil:
@@ -127,6 +145,22 @@ func (ch *JobChange) apply(tx *sql.Tx) error {
 		return err
 	}
 	return nil
+}
+
+// cancelPendingTimeoutRetries leaves a running attempt alone, and fences
+// a stale timeout outcome racing a confirmed edit that disabled the opt-in.
+func cancelPendingTimeoutRetries(tx *sql.Tx, job string) error {
+	// A dispatched retry whose inbound is still pending has not started yet.
+	pending := `job_id=? AND replayed=1 AND (state=? OR (state=? AND inbound_id IN (SELECT id FROM inbound WHERE state=?)))`
+	if _, err := tx.Exec(`UPDATE inbound SET state=? WHERE state=? AND id IN (SELECT inbound_id FROM job_runs WHERE `+pending+`)`, InCancelled, InPending, job, RunPending, RunRunning, InPending); err != nil {
+		return err
+	}
+	// Inbound cancelled above must also match the dispatched row below.
+	if _, err := tx.Exec(`UPDATE job_runs SET state=?,cause=?,ended_at=? WHERE job_id=? AND replayed=1 AND (state=? OR (state=? AND inbound_id IN (SELECT id FROM inbound WHERE state=?)))`, RunCancelled, "timeout retry cancelled by command", now(), job, RunPending, RunRunning, InCancelled); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE job_runs SET cause=? WHERE job_id=? AND state=?`, "timeout retry disabled by command", job, RunRunning)
+	return err
 }
 
 // Job is one job by ID.
@@ -197,6 +231,29 @@ func (s *Store) UpdateJob(id string, set Set, outs ...core.Outbound) error {
 }
 
 func updateJob(tx *sql.Tx, id string, set Set) error {
+	if _, ok := set["def"].(string); ok {
+		var oldDef string
+		if err := tx.QueryRow(`SELECT def FROM jobs WHERE id=?`, id).Scan(&oldDef); err != nil {
+			return err
+		}
+		var before, after struct {
+			Rerun bool `json:"rerun_on_timeout"`
+		}
+		_ = json.Unmarshal([]byte(oldDef), &before)
+		if next, ok := set["def"].(string); ok {
+			_ = json.Unmarshal([]byte(next), &after)
+		} else {
+			after = before
+		}
+		if before.Rerun && !after.Rerun {
+			if err := cancelPendingTimeoutRetries(tx, id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`UPDATE job_runs SET cause=? WHERE job_id=? AND state=?`, "timeout retry disabled by edit", id, RunRunning); err != nil {
+				return err
+			}
+		}
+	}
 	q, args := `UPDATE jobs SET updated_at=?`, []any{now()}
 	for _, k := range settable {
 		if v, ok := set[k]; ok {
@@ -392,6 +449,22 @@ type RunEnd struct {
 }
 
 func endRun(tx *sql.Tx, e RunEnd) error {
+	var prior, cause string
+	if err := tx.QueryRow(`SELECT state,cause FROM job_runs WHERE id=?`, e.ID).Scan(&prior, &cause); err != nil {
+		return err
+	}
+	if prior == RunCancelled {
+		return nil
+	}
+	if !e.Retry.IsZero() && prior == RunInterrupted {
+		return nil
+	}
+	if !e.Retry.IsZero() && strings.HasPrefix(cause, "timeout retry disabled") {
+		// The current attempt may finish after pause/resume or an edit. Settle
+		// it as failed rather than leaving a running row or reviving a retry.
+		e.Retry = time.Time{}
+		e.State, e.Cause = RunFailed, cause
+	}
 	if !e.Retry.IsZero() {
 		attempt := `attempt+1`
 		if e.Held {

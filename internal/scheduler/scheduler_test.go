@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"path/filepath"
@@ -825,5 +826,317 @@ func slackSent(r *rig) []core.Outbound {
 		}
 		_ = r.st.Sent(row.ID)
 		out = append(out, row.Outbound)
+	}
+}
+
+func timeoutJob(t *testing.T) (*rig, string) {
+	t.Helper()
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"repeat-safe","schedule":{"every":"1h"},"prompt":"read report","idempotent":true,"rerun_on_timeout":true,"timeout":"1m"}`)
+	r.now = r.now.Add(time.Hour)
+	r.tick()
+	return r, id
+}
+
+func TestRepeatSafeTimeoutOnce(t *testing.T) {
+	r, _ := timeoutJob(t)
+	r.now = r.now.Add(time.Minute)
+	e := r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout, Ready: true}})
+	if e.Run.Retry.IsZero() || !e.Run.Replay {
+		t.Fatalf("not retried: %+v", e.Run)
+	}
+	r.rows = nil
+	r.s.start(context.Background(), r.now)
+	if len(r.rows) != 1 {
+		t.Fatal("retry not dispatched")
+	}
+	turn, ok := r.s.Begin(r.rows[0])
+	if !ok || !turn.Replayed || turn.Timeout != time.Minute {
+		t.Fatalf("%+v", turn)
+	}
+	e = r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout, Ready: true}})
+	if !e.Run.Retry.IsZero() || e.Run.State != store.RunFailed {
+		t.Fatalf("unbounded: %+v", e.Run)
+	}
+}
+
+func TestTimeoutRetryCommandAndRestartFences(t *testing.T) {
+	for _, action := range []string{"stop", "pause", "rm", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			r, id := timeoutJob(t)
+			r.now = r.now.Add(time.Minute)
+			e := r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+			if e.Run.Retry.IsZero() {
+				t.Fatal("missing retry")
+			}
+			if action == "restart" {
+				if err := r.s.Recover(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				r.cmd(asBoss, "!job "+action+" "+id)
+			}
+			r.rows = nil
+			r.s.start(context.Background(), r.now)
+			if len(r.rows) != 0 {
+				t.Fatal("cancelled retry dispatched")
+			}
+		})
+	}
+}
+
+func TestTimeoutRetryBudgetAndSafetyGates(t *testing.T) {
+	for _, kind := range []string{"budget", "stop", "approval", "auth", "auth_failure", "lifetime", "authority"} {
+		t.Run(kind, func(t *testing.T) {
+			r, _ := timeoutJob(t)
+			o := Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}}
+			switch kind {
+			case "budget":
+				// Begin precedes the elapsed execution budget; End observes it later.
+				row := r.rows[0]
+				turn, ok := r.s.Begin(row)
+				if !ok {
+					t.Fatal("begin")
+				}
+				r.now = r.now.Add(2 * time.Minute)
+				o.Turn = turn
+				e := r.s.End(o)
+				if !e.Run.Retry.IsZero() {
+					t.Fatal("budget ignored")
+				}
+				return
+			case "stop":
+				o.Stopped = true
+			case "approval":
+				o.Result.NeedsHuman = "approval needed"
+			case "auth_failure":
+				o.Result.Failure = "sign-in or credentials"
+			case "auth":
+				o.SignIn = []string{"google"}
+			case "lifetime":
+				o.Result.Cause = harness.CauseLifetime
+			case "authority":
+				r.s.access.Owners = map[string]bool{}
+			}
+			e := r.finish("", o)
+			if !e.Run.Retry.IsZero() {
+				t.Fatalf("unsafe retry %s: %+v", kind, e.Run)
+			}
+		})
+	}
+}
+
+func TestTimeoutNoOptInNeverRetriesEvenBeforeReady(t *testing.T) {
+	r := newRig(t)
+	r.add(asBoss, `{"name":"normal","schedule":{"every":"1h"},"prompt":"p"}`)
+	r.now = r.now.Add(time.Hour)
+	r.tick()
+	e := r.finish("", Outcome{Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+	if !e.Run.Retry.IsZero() || e.Detail != "timeout" {
+		t.Fatalf("%+v", e)
+	}
+}
+
+func TestTimeoutRetryStopFenceWinsLateEnd(t *testing.T) {
+	r, id := timeoutJob(t)
+	row := r.rows[0]
+	turn, ok := r.s.Begin(row)
+	if !ok {
+		t.Fatal("begin")
+	}
+	// Command commits while the timeout result is on its way to EndTurn.
+	r.cmd(asBoss, "!job stop "+id)
+	e := r.s.End(Outcome{Turn: turn, Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+	if err := r.st.EndRun(*e.Run); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := r.st.Run(turn.Run)
+	if got.State != store.RunCancelled {
+		t.Fatalf("resurrected: %+v", got)
+	}
+}
+
+func TestTimeoutRetryCannotRecoverInterruptedTurn(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(fmt.Sprint(ready), func(t *testing.T) {
+			r, id := timeoutJob(t)
+			row := r.rows[0]
+			turn, err := r.st.StartTurn(row.Conv, core.RoleOwner, row.From.Key(), "", []int64{row.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ready {
+				if err := r.st.TurnReady(turn); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = r.st.Recover(func(store.Interrupted) core.Outbound { return core.Outbound{} }, func(store.InboundRow) core.Outbound { return core.Outbound{} })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.s.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			want := store.RunPending
+			if ready {
+				want = store.RunInterrupted
+			}
+			if got := r.runs(id)[0]; got.State != want {
+				t.Fatalf("unexpected recovery: %+v", got)
+			}
+		})
+	}
+}
+
+func TestTimeoutRetryConfigRequiresRepeatSafeOwner(t *testing.T) {
+	for _, change := range []string{"employee", "idempotent", "timeout", "session", "target"} {
+		t.Run(change, func(t *testing.T) {
+			r := newRig(t)
+			d := `{"name":"x","schedule":{"every":"1h"},"prompt":"p","idempotent":true,"rerun_on_timeout":true,"timeout":"1m"}`
+			caller := asBoss
+			switch change {
+			case "employee":
+				caller = asWork
+			case "idempotent":
+				d = strings.Replace(d, `"idempotent":true`, `"idempotent":false`, 1)
+			case "timeout":
+				d = strings.Replace(d, `,"timeout":"1m"`, ``, 1)
+			case "session":
+				d = strings.Replace(d, `"prompt":"p"`, `"prompt":"p","session":"job"`, 1)
+			case "target":
+				d = strings.Replace(d, `"prompt":"p"`, `"prompt":"p","to":"agentnet:peer"`, 1)
+			}
+			if out := r.cmd(caller, "job add "+d); !strings.Contains(out, "not created") {
+				t.Fatal(out)
+			}
+		})
+	}
+}
+
+func TestTimeoutRetryCardShowsOwnerAssertion(t *testing.T) {
+	r := newRig(t)
+	j, err := r.s.proposal(asBoss, []byte(`{"name":"x","schedule":{"every":"1h"},"prompt":"p","idempotent":true,"rerun_on_timeout":true,"timeout":"1m"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := r.s.card(asBoss, j)
+	for _, want := range []string{"Repeat-safe timeout rerun: ENABLED", "safe to repeat", "idempotent", "timeout 1m", "One rerun"} {
+		if !strings.Contains(card, want) {
+			t.Fatal(card)
+		}
+	}
+}
+
+func TestQueuedFirstTimeoutJobGetsFullLimit(t *testing.T) {
+	r, _ := timeoutJob(t)
+	r.now = r.now.Add(3 * time.Minute)
+	turn, ok := r.s.Begin(r.rows[0])
+	if !ok || turn.Timeout != time.Minute {
+		t.Fatalf("queued first execution refused: %+v", turn)
+	}
+}
+
+func TestDisablingTimeoutRetryCancelsPendingReplay(t *testing.T) {
+	r, id := timeoutJob(t)
+	r.now = r.now.Add(time.Minute)
+	e := r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+	if e.Run.Retry.IsZero() {
+		t.Fatal("no retry")
+	}
+	text := r.cmd(asBoss, `job edit `+id+` {"rerun_on_timeout":false}`)
+	if !strings.Contains(text, "changed") {
+		t.Fatal(text)
+	}
+	r.rows = nil
+	r.s.start(context.Background(), r.now)
+	if len(r.rows) != 0 {
+		t.Fatal("disabled retry dispatched")
+	}
+}
+
+func TestStopFenceSuppressesLateSuccessfulDelivery(t *testing.T) {
+	r, id := timeoutJob(t)
+	row := r.rows[0]
+	turn, err := r.st.StartTurn(row.Conv, core.RoleOwner, row.From.Key(), "", []int64{row.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.cmd(asBoss, "job stop "+id)
+	e := store.TurnEnd{State: store.TurnDone, ItemState: store.InDone, Reply: &core.Outbound{Conv: bossDM, Text: "MUST NOT SEND"}, Run: &store.RunEnd{ID: row.Run.Run, Job: id, State: store.RunOK}}
+	if _, err := r.st.EndTurn(turn, row.Conv, row.From.Key(), e); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := r.st.Run(row.Run.Run)
+	if got.State != store.RunCancelled {
+		t.Fatalf("late success revived cancelled run: %+v", got)
+	}
+	out, ok, err := r.st.NextOutbound(bossDM.Interface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok && out.Text == "MUST NOT SEND" {
+		t.Fatal("cancelled result sent")
+	}
+}
+
+func TestPauseFencesDispatchedTimeoutRetry(t *testing.T) {
+	r, id := timeoutJob(t)
+	r.now = r.now.Add(time.Minute)
+	r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+	r.rows = nil
+	r.s.start(context.Background(), r.now)
+	if len(r.rows) != 1 {
+		t.Fatal("retry not dispatched")
+	}
+	row := r.rows[0]
+	r.cmd(asBoss, "job pause "+id)
+	if _, ok := r.s.Begin(row); ok {
+		t.Fatal("paused dispatched retry started")
+	}
+}
+
+func TestTimeoutRetryRunningRestartHasNotice(t *testing.T) {
+	r, _ := timeoutJob(t)
+	r.now = r.now.Add(time.Minute)
+	r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+	r.rows = nil
+	r.s.start(context.Background(), r.now)
+	row := r.rows[0]
+	_, err := r.st.StartTurn(row.Conv, core.RoleOwner, row.From.Key(), "", []int64{row.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.st.Recover(func(store.Interrupted) core.Outbound { return core.Outbound{} }, func(store.InboundRow) core.Outbound { return core.Outbound{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	out, ok, err := r.st.NextOutbound(bossDM.Interface)
+	if err != nil || !ok || !strings.Contains(out.Text, "interrupted by a restart") {
+		t.Fatalf("silent restart: %+v %v", out, err)
+	}
+}
+
+func TestPauseResumeDoesNotReviveCurrentTimeoutRetry(t *testing.T) {
+	r, id := timeoutJob(t)
+	row := r.rows[0]
+	turn, ok := r.s.Begin(row)
+	if !ok {
+		t.Fatal("begin")
+	}
+	r.cmd(asBoss, "job pause "+id)
+	r.cmd(asBoss, "job resume "+id)
+	e := r.s.End(Outcome{Turn: turn, Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+	if !e.Run.Retry.IsZero() {
+		t.Fatal("pause/resume restored retry permission")
+	}
+	if err := r.st.EndRun(*e.Run); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := r.st.Run(turn.Run)
+	if got.State != store.RunFailed {
+		t.Fatalf("run left active: %+v", got)
 	}
 }

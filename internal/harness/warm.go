@@ -265,7 +265,7 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 		<-retiring.Exited()
 	}
 	if e != nil {
-		if !e.run.cancelled.Load() && s.Session.Resume && s.Session.ID == e.run.Result().SessionID && e.fingerprint == fp && time.Since(e.born) < time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second {
+		if !e.run.cancelled.Load() && s.Session.Resume && s.Session.ID == e.run.Result().SessionID && e.fingerprint == fp && time.Since(e.born)+p.runLimit(s.Timeout) < time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second {
 			r, err := e.run.worker.next(s)
 			if err == nil {
 				p.watch(r, key, fp, e.born, epoch, s.Timeout)
@@ -283,6 +283,13 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 	}
 	return r, err
 }
+func (p *Pool) runLimit(limit time.Duration) time.Duration {
+	if limit > 0 {
+		return limit
+	}
+	return time.Duration(p.cfg.RunTimeoutSeconds) * time.Second
+}
+
 func (p *Pool) watch(r *Run, key warmKey, fp [32]byte, born time.Time, epoch uint64, limit time.Duration) {
 	r.pooled = make(chan struct{})
 	go func() {
@@ -299,14 +306,21 @@ func (p *Pool) watch(r *Run, key warmKey, fp [32]byte, born time.Time, epoch uin
 		timer := time.NewTimer(limit)
 		defer timer.Stop()
 		life := time.NewTimer(max(time.Nanosecond, time.Until(born.Add(time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second))))
+		var lifetime <-chan time.Time
+		if r.worker != nil {
+			lifetime = life.C
+		}
 		defer life.Stop()
 		select {
 		case <-r.Done():
 		case <-timer.C:
-			r.Cancel()
-			return
-		case <-life.C:
-			r.Cancel()
+			if r.cancelFor(CauseTimeout) {
+				return
+			}
+		case <-lifetime:
+			if !r.cancelFor(CauseLifetime) {
+				r.Stop("worker lifetime reached after answer")
+			}
 			return
 		case <-r.Exited():
 			return

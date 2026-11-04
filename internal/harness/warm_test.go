@@ -230,7 +230,7 @@ func TestWarmInterruptAndRunTimeout(t *testing.T) {
 			case <-time.After(8 * time.Second):
 				t.Fatal("timeout failed")
 			}
-			if !r.Result().Cancelled {
+			if !r.Result().Cancelled || r.Result().Cause != harness.CauseTimeout {
 				t.Fatal("not cancelled")
 			}
 			if _, err := os.Stat(filepath.Join(state, "interrupt")); err != nil {
@@ -318,4 +318,38 @@ func TestWarmAgyRemainsPerTurn(t *testing.T) {
 		t.Fatal("AGY reused process")
 	}
 	<-second.Exited()
+}
+
+func TestOneShotIgnoresWarmLifetime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, _ := warmSpec(t, "pi")
+	s.OneShot = true
+	s.Prompt = "HANG"
+	s.Timeout = 1500 * time.Millisecond
+	p := harness.NewPool(harness.WarmConfig{MaxLifetimeSeconds: 1})
+	r, err := p.Start(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-r.Exited()
+	if got := r.Result(); got.Cause != harness.CauseTimeout {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestWarmRequiresLifetimeHeadroom(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, state := warmSpec(t, "pi")
+	p := harness.NewPool(harness.WarmConfig{MaxLifetimeSeconds: 10, RunTimeoutSeconds: 20})
+	first := pooledTurn(t, p, ctx, s)
+	s.Session = harness.Session{ID: first.Result().SessionID, Resume: true}
+	second := pooledTurn(t, p, ctx, s)
+	second.Cancel()
+	<-second.Exited()
+	data, _ := os.ReadFile(filepath.Join(state, "pids"))
+	if len(strings.Fields(string(data))) != 2 {
+		t.Fatal("reused worker without lifetime headroom")
+	}
 }
