@@ -96,6 +96,10 @@ the `heimdall-live` unit.
   sender's own running turn, a turn batches only that caller's messages, and
   anyone else's message queues. Only the turn's caller or an owner can
   `!stop` it.
+  Owner interactive turns may receive a pointer to the same caller's earlier
+  native transcript when starting fresh or resuming behind another harness.
+  No transcript is copied or summarized; reset removes these bindings.
+  Employees, scheduled jobs and MCP controls receive no pointer.
 - **Conversations.** Key = interface + chat + thread. Same key: one turn at a
   time. Different keys run in parallel up to `max_parallel` running turns. Idle warm processes use no turn slot.
 - **Telegram** (as the hub's connector). A private chat is always handled.
@@ -137,7 +141,10 @@ the `heimdall-live` unit.
   event before ack; verify callers and fetch history/files after ack. Only
   verified same-workspace humans enter the router. Message subtypes are
   allowlisted. Live history, stored ambient and recent assistant deliveries
-  share one bounded untrusted context budget. Inbound files default to
+  share one bounded untrusted context budget. Thread history uses cursor paging
+  (at most 25 pages of 200), retaining the newest 40 messages before the
+  inbound timestamp; incomplete paging reports live history unavailable.
+  Inbound files default to
   200000000 bytes each (`slack.max_file_bytes`), reserving 1 GiB free disk
   space across concurrent downloads; bearer tokens go only to allowlisted
   Slack file hosts. Progress includes hub-filtered public thinking summaries
@@ -260,6 +267,10 @@ thinking stream and live-session reply registration.
   completed, gets a final answer of its own (both checked live, 0.166.0),
   and both are kept. A steer Codex acknowledges only after the turn
   completed counts as unknown: the sender is told, nothing is replayed.
+- Unused or undecodable native protocol lines are skipped with metadata-only
+  diagnostics (length, allowlisted event type, error kind). Claude optional
+  system message fields do not invalidate answers. Native results remain
+  required; replay, subagent and session-switch checks remain enforced.
 - Heimdall keeps its own adapters. T3 Code is for coding only, never a
   route for chat turns (owner, 2026-10-30).
 - The turn's ready signal is the side-effect boundary used for fallback. A

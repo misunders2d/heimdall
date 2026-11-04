@@ -392,3 +392,33 @@ func TestPiSlackIDAdmission(t *testing.T) {
 		t.Fatal("Slack ID whitelist denied")
 	}
 }
+
+func TestThreadHistoryPagesKeepNewest(t *testing.T) {
+	f := newSlackFake(t)
+	s, _ := testSlack(t, f)
+	calls := 0
+	f.setHook(func(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
+		if r.URL.Path != "/conversations.replies" {
+			return false
+		}
+		calls++
+		if args["latest"] != "1000.000100" {
+			t.Error("missing fixed cutoff")
+		}
+		start, end := 1, 40
+		cursor := "next"
+		if args["cursor"] == "next" {
+			start, end, cursor = 41, 80, ""
+		}
+		var messages []eventMessage
+		for i := start; i <= end; i++ {
+			messages = append(messages, eventMessage{TS: fmt.Sprintf("1000.%06d", i), User: "Utest", Text: fmt.Sprintf("message-%03d", i)})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "messages": messages, "response_metadata": map[string]string{"next_cursor": cursor}})
+		return true
+	})
+	text, _ := s.context(context.Background(), eventMessage{Channel: "C1", TS: "1000.000100", ThreadTS: "1000.000001"}, core.ConvKey{Interface: "slack", Chat: "C1", Thread: "1000.000001"})
+	if calls != 2 || !strings.Contains(text, "message-080") || strings.Contains(text, "message-001") || len([]rune(text)) > 16000 {
+		t.Fatalf("calls=%d context=%s", calls, text)
+	}
+}

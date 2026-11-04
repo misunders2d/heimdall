@@ -1,3 +1,4 @@
+// Protocol decoding compared with AgentNet cabe5c3c81893a85f9e236c29b1cde37b3440035.
 // Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
 package harness
 
@@ -200,8 +201,8 @@ func (b *codexBridge) event(raw []byte) {
 		Result json.RawMessage `json:"result"`
 		Error  json.RawMessage `json:"error"`
 	}
-	if json.Unmarshal(raw, &m) != nil {
-		b.failLocked("Codex sent an unreadable protocol line")
+	if err := json.Unmarshal(raw, &m); err != nil {
+		skippedProtocolLine("codex", raw, err)
 		return
 	}
 	if ch, ok := b.steering[string(m.ID)]; ok && m.Method == "" {

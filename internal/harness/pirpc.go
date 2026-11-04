@@ -1,3 +1,4 @@
+// Protocol decoding compared with AgentNet cabe5c3c81893a85f9e236c29b1cde37b3440035.
 // Native MCP UI relay ported from misunderstood-pi-pack af9ffff,
 // extensions/.shared/external-pi-runner.ts respondToPiMcpUi.
 // Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
@@ -254,8 +255,8 @@ func (b *piRPCBridge) event(raw []byte) {
 		Status    string `json:"status"`
 		Settled   bool   `json:"sessionSettled"`
 	}
-	if json.Unmarshal(raw, &e) != nil {
-		b.fail(b.nativeName() + " sent an unreadable protocol line; no answer was used")
+	if err := json.Unmarshal(raw, &e); err != nil {
+		skippedProtocolLine(strings.ToLower(b.nativeName()), raw, err)
 		return
 	}
 	var notice string

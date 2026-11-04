@@ -1889,14 +1889,13 @@ func TestAnswerBeforeReadyNeverFallsBack(t *testing.T) {
 }
 
 // A fallback starts the next harness only once the failed one's process
-// exited, though its failure was known before (an unreadable protocol
-// line while the process kept running). A guard: Done closes before ready
+// exited after sending an unreadable protocol line. A guard: Done closes before ready
 // only when the process exited, so the router's own wait is not what
 // this test can fail on today.
 func TestFallbackWaitsForTheFailedProcessToExit(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
 	e.send(owner, "c1", "x BADLINE=omp")
-	want(t, e.reply(), "codex#1", "omp failed before starting: OMP sent an unreadable protocol line")
+	want(t, e.reply(), "codex#1", "omp failed before starting:")
 	if _, err := os.Stat(filepath.Join(e.state, "overlap")); err == nil {
 		t.Fatal("the fallback started while the failed harness process still ran")
 	}
@@ -2083,24 +2082,119 @@ func TestEmployeeGateSkipsAreSilentWhenAnotherHarnessAnswers(t *testing.T) {
 	}
 }
 
+func TestSessionPointerScopesAndUncleanPrevious(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"pi"}, "pi")
+	e.send(owner, "pointer", "hello")
+	e.reply()
+	k := core.ConvKey{Interface: "fake", Chat: "pointer"}
+	id, _, err := e.st.Session(k, owner, "pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := harness.Launch{Home: t.TempDir()}
+	dir := filepath.Join(l.Home, ".local", "state", "heimdall", "sessions", "pi", id)
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "native.jsonl"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := &conv{r: e.r, key: k}
+	tr := &turn{role: core.RoleOwner, who: owner}
+	// The newest binding is unclean and still available before BindTurn replaces it.
+	if err := e.st.BindTurn(0, k, owner, "pi", id); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.sessionPointer(tr, "pi", harness.Session{}, l, false); !strings.Contains(got, dir) {
+		t.Fatal(got)
+	}
+	if got := c.sessionPointer(tr, "claude", harness.Session{}, l, false); !strings.Contains(got, dir) {
+		t.Fatal(got)
+	}
+	if got := c.sessionPointer(tr, "pi", harness.Session{Resume: true}, l, false); got != "" {
+		t.Fatal(got)
+	}
+	// Another harness worked after the unclean Pi session.
+	time.Sleep(2 * time.Millisecond)                // session timestamps have millisecond resolution
+	newID := "11111111-2222-4333-8444-555555555555" // supplied by Codex, not preallocated
+	newPath := filepath.Join(l.Home, ".codex", "sessions", "2026", "01", "01", "rollout-"+newID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.BindTurn(0, k, owner, "codex", newID); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.sessionPointer(tr, "pi", harness.Session{}, l, false); !strings.Contains(got, newPath) || strings.Contains(got, dir) {
+		t.Fatalf("newer Codex binding: %s", got)
+	}
+	for _, kind := range []string{"employee", "job", "control", "other caller"} {
+		cp := turn{role: tr.role, who: tr.who}
+		control := false
+		switch kind {
+		case "employee":
+			cp.role = core.RoleEmployee
+		case "job":
+			cp.job = &scheduler.Turn{}
+		case "control":
+			control = true
+		case "other caller":
+			cp.who = "fake:other"
+		}
+		if got := c.sessionPointer(&cp, "claude", harness.Session{}, l, control); got != "" {
+			t.Fatalf("%s: %s", kind, got)
+		}
+	}
+	e.send(owner, "pointer", "!reset")
+	e.reply()
+	if got := c.sessionPointer(tr, "claude", harness.Session{}, l, false); got != "" {
+		t.Fatal(got)
+	}
+}
+
 func TestTimeoutCauseAndFreshSession(t *testing.T) {
-	for _, prompt := range []string{"HANGPRE=omp", "HANGTERM"} {
-		t.Run(prompt, func(t *testing.T) {
+	// TempDir includes the subtest name. Keep fake control words out of
+	// session paths, which OMP receives in the next turn's pointer note.
+	for _, tc := range []struct{ name, prompt string }{
+		{"pre_ready", "HANGPRE=omp"},
+		{"termination", "HANGTERM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
 			e.stop()
 			stopOnce.Delete(e.st)
 			e.opt.Harness.RunTimeoutSeconds = 1
+			home := os.Getenv("HOME")
 			e.start()
 			e.send(owner, "c1", "hi")
 			want(t, e.reply(), "resumed=false")
-			e.send(owner, "c1", prompt)
+			k := core.ConvKey{Interface: "fake", Chat: "c1"}
+			id, _, err := e.st.Session(k, owner, "omp")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(home, ".local", "state", "heimdall", "sessions", "omp", id, "native.jsonl")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			e.send(owner, "c1", tc.prompt)
 			out := e.reply()
 			want(t, out, "timeout limit", "was not re-run", "fresh session")
 			if strings.Contains(out.Text, "cancelled") || strings.Contains(out.Text, "codex#") {
 				t.Fatal(out.Text)
 			}
 			e.send(owner, "c1", "next")
-			want(t, e.reply(), "omp#1 resumed=false")
+			out = e.reply()
+			want(t, out, "omp#1 resumed=false")
+			inputs := fakeharness.Inputs(e.state)
+			if len(inputs) != 3 || !strings.Contains(inputs[2].Text, filepath.Dir(path)) {
+				t.Fatalf("next turn missing timed-out session pointer %q: %+v", filepath.Dir(path), inputs)
+			}
 		})
 	}
 }

@@ -526,6 +526,19 @@ func (s *Store) Session(conv core.ConvKey, who, harness string) (id string, clea
 	return id, clean, err
 }
 
+// EarlierSession finds the newest binding for this caller only. A resumed
+// session needs a pointer only when another harness was updated more recently.
+func (s *Store) EarlierSession(conv core.ConvKey, who, chosen string, resume bool) (name, id string, err error) {
+	err = s.db.QueryRow(`SELECT harness,native_id FROM sessions
+ WHERE iface=? AND chat=? AND thread=? AND principal=? AND native_id<>''
+ AND (?=0 OR (harness<>? AND updated_at>(SELECT updated_at FROM sessions WHERE iface=? AND chat=? AND thread=? AND principal=? AND harness=?)))
+ ORDER BY updated_at DESC,harness LIMIT 1`, conv.Interface, conv.Chat, conv.Thread, who, resume, chosen, conv.Interface, conv.Chat, conv.Thread, who, chosen).Scan(&name, &id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	return
+}
+
 // CommandEnd is how a ! command was answered.
 type CommandEnd struct {
 	Detail     string
