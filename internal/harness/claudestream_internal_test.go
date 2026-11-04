@@ -1,9 +1,11 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -89,6 +91,47 @@ func TestClaudeAssistantEvidenceBoundaries(t *testing.T) {
 					t.Fatal("untrusted event committed")
 				default:
 				}
+			}
+		})
+	}
+}
+
+func TestClaudeRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name, event, result, assistant, note string
+		human                                bool
+	}{
+		{"system", `{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_input":{"command":"PRIVATE_COMMAND"}}`, `{"type":"result","session_id":"s","result":"answer"}`, "", "(Bash)", false},
+		{"result", "", `{"type":"result","session_id":"s","result":"answer","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"PRIVATE_COMMAND"}}]}`, "", "(Bash)", false},
+		{"assistant fallback", `{"type":"system","subtype":"permission_denied"}`, `{"type":"result","session_id":"s","result":""}`, "answer", "refused", false},
+		{"unsafe name", `{"type":"system","subtype":"permission_denied","tool_name":"Bash PRIVATE_COMMAND"}`, `{"type":"result","session_id":"s","result":"answer"}`, "", "refused", false},
+		{"system empty", `{"type":"system","subtype":"permission_denied"}`, `{"type":"result","session_id":"s","result":""}`, "", "", true},
+		{"result empty", "", `{"type":"result","session_id":"s","result":"","permission_denials":[{"tool_name":"Bash"}]}`, "", "", true},
+		{"control", `{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"}}`, "", "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := claudeFixture()
+			var writes bytes.Buffer
+			b.input = discardClaudeInput{&writes}
+			if tc.event != "" {
+				b.event([]byte(tc.event))
+			}
+			if tc.assistant != "" {
+				claudeEvent(b, "assistant", "final", "", tc.assistant, false)
+			}
+			if tc.result != "" {
+				b.event([]byte(tc.result))
+			}
+			o := b.outcome()
+			if tc.human {
+				if o.human == "" || o.answer != "" {
+					t.Fatalf("outcome: %+v", o)
+				}
+			} else if o.answer != "answer" || o.human != "" || o.failure != "" || o.unclean || !strings.Contains(o.warning, tc.note) || strings.Contains(o.warning, "PRIVATE_COMMAND") {
+				t.Fatalf("outcome: %+v", o)
+			}
+			if writes.Len() != 0 {
+				t.Fatalf("unexpected permission response: %q", writes.String())
 			}
 		})
 	}

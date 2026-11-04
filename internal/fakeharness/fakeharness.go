@@ -553,7 +553,11 @@ func (f *fake) claude() {
 			f.emit(map[string]any{"type": "user", "session_id": id, "uuid": uuid, "isReplay": true, "parent_tool_use_id": nil, "message": map[string]any{"role": "user", "content": content}})
 		}
 		result := func(text string) {
-			f.emit(map[string]any{"type": "result", "subtype": "success", "session_id": id, "is_error": false, "result": text})
+			e := map[string]any{"type": "result", "subtype": "success", "session_id": id, "is_error": false, "result": text}
+			if f.has("DENIAL_RESULT") {
+				e["permission_denials"] = []any{map[string]any{"tool_name": "Bash", "tool_input": map[string]string{"command": "PRIVATE_COMMAND"}}}
+			}
+			f.emit(e)
 		}
 		f.emit(map[string]any{"type": "system", "subtype": "init", "session_id": id})
 		switch {
@@ -567,6 +571,13 @@ func (f *fake) claude() {
 		}
 		replay("u0", msg["content"])
 		f.failPost()
+		if f.has("DENIAL_SYSTEM") {
+			f.emit(map[string]any{"type": "system", "subtype": "permission_denied", "session_id": id, "tool_name": "Bash", "tool_input": map[string]string{"command": "PRIVATE_COMMAND"}})
+		}
+		if f.has("DENIAL_EMPTY") {
+			result("")
+			continue
+		}
 		if f.has("STEERLATE") {
 			s, ok := f.read()
 			if !ok {

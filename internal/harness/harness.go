@@ -192,7 +192,7 @@ type Result struct {
 	// harness's work after the answers it kept ended badly (Warning says
 	// how), so its session may hold a half-finished turn.
 	Unclean bool
-	Warning string
+	Warning string // safe delivery note; informational warnings alone do not make a session unclean
 }
 
 // Run is one started native turn.
