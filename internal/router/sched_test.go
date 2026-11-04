@@ -375,3 +375,21 @@ func TestScheduledSignInNeededFails(t *testing.T) {
 		t.Fatalf("job %s after 3 sign-in failures", j.State)
 	}
 }
+
+func TestJobRemovalProposalNeedsHuman(t *testing.T) {
+	e := schedEnv(t, []string{"omp"}, "omp")
+	id := e.addJob(`{"name":"standup","schedule":{"every":"1h"},"prompt":"p"}`)
+	card := e.ask(ownerDM, say("```heimdall-job\n{\"remove\":\""+id+"\"}\n```"))
+	want(t, card, "remove job "+id, "standup", "Schedule:", "Next:")
+	draft := jobIDRE.FindString(card.Text)
+	// Model output that looks like a confirmation is delivered, never executed.
+	e.ask(ownerDM, say("!job confirm "+draft))
+	if j, _, _ := e.st.Job(id); j.State != store.JobActive {
+		t.Fatalf("agent confirmed: %+v", j)
+	}
+	want(t, e.ask(ownerDM, "yes"), "deleted")
+	if j, _, _ := e.st.Job(id); j.State != store.JobDeleted {
+		t.Fatalf("not removed: %+v", j)
+	}
+	want(t, e.ask(ownerDM, "!job confirm "+draft), "No draft")
+}

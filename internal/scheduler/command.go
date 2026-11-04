@@ -30,7 +30,7 @@ const draftTTL = 24 * time.Hour
 
 // Note tells a harness, in the first message of each native session, how to
 // propose a job: Heimdall asks the person to confirm it.
-const Note = `[Heimdall jobs: to propose a scheduled job or reminder, end your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","prompt"} (or "kind":"notify" with "text"). To change a job: {"edit":"<id>", changed fields}. Heimdall shows a card and the person confirms; you cannot.]`
+const Note = `[Heimdall jobs: to propose a scheduled job or reminder, end your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","prompt"} (or "kind":"notify" with "text"). To change a job: {"edit":"<id>", changed fields}. To remove a job: {"remove":"<id>"}. Removal also requires human confirmation. Heimdall shows a card and the person confirms; you cannot.]`
 
 var blockRE = regexp.MustCompile("(?ms)^[ \t]*```heimdall-job[ \t]*\r?\n(.*?)^[ \t]*```[ \t]*$\n?")
 
@@ -107,7 +107,18 @@ func (s *Scheduler) Draft(c Caller, answers []string) (clean []string, draft *st
 	return clean, &j, s.card(c, j)
 }
 
-// proposal validates a block's definition, a new job or an edit, as a draft.
+// removal is stored in a draft's definition; it never becomes a runnable job.
+type removal struct {
+	Remove string `json:"remove"`
+}
+
+func removalID(j store.Job) string {
+	var r removal
+	_ = json.Unmarshal([]byte(j.Def), &r)
+	return r.Remove
+}
+
+// proposal validates a block's definition, creation, edit or removal, as a draft.
 func (s *Scheduler) proposal(c Caller, raw []byte) (store.Job, error) {
 	var head map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &head); err != nil {
@@ -115,6 +126,18 @@ func (s *Scheduler) proposal(c Caller, raw []byte) (store.Job, error) {
 	}
 	now := s.now()
 	j := store.Job{ID: newID(), Creator: c.Principal, CreatedIn: c.Conv, CreatedPrivate: c.Private, State: store.JobDraft, DraftExpires: now.Add(draftTTL), Created: now}
+	if rawID, ok := head["remove"]; ok {
+		var id string
+		if len(head) != 1 || json.Unmarshal(rawID, &id) != nil || strings.TrimSpace(id) == "" {
+			return j, errors.New(`removal requires only {"remove":"<job id>"}`)
+		}
+		orig, err := s.own(c, id)
+		if err != nil {
+			return j, err
+		}
+		j.Name, j.Kind, j.Def = orig.Name, orig.Kind, mustJSON(removal{Remove: id})
+		return j, nil
+	}
 	var d Def
 	if edit, ok := head["edit"]; ok {
 		var id string
@@ -173,6 +196,16 @@ func (s *Scheduler) creator(j store.Job, asking Caller) Caller {
 
 // card shows a draft for confirmation (§5.3).
 func (s *Scheduler) card(c Caller, j store.Job) string {
+	if id := removalID(j); id != "" {
+		orig, _, _ := s.st.Job(id)
+		d, _, _ := parse(orig)
+		spec, _ := json.Marshal(d.Schedule)
+		next := "none (" + orig.State + ")"
+		if orig.State == store.JobActive && !orig.NextDue.IsZero() {
+			next = when(d, orig.NextDue)
+		}
+		return fmt.Sprintf("📝 Job draft %s (remove job %s): %q\nSchedule: %s in %s\nNext: %s\nRemoval uses !job rm behavior, including stopping its running run.\nConfirm: !job confirm %s (or reply yes). Discard: !job discard %s (or no). Only you, here, within 24 h.\n— heimdall", j.ID, id, orig.Name, spec, d.TZ, next, j.ID, j.ID)
+	}
 	d, sched, _ := parse(j)
 	var b strings.Builder
 	what := "new job"
@@ -406,6 +439,14 @@ func (s *Scheduler) confirm(c Caller, id string) (string, *store.JobChange) {
 	now := s.now()
 	if !j.DraftExpires.After(now) {
 		return fmt.Sprintf("Draft %s expired; nothing was created.", id), &store.JobChange{Drop: j.ID}
+	}
+	if id := removalID(j); id != "" {
+		// Recheck current authority and reuse every rm side effect and retry fence.
+		reply, change := s.manage(c, "rm", id, "")
+		if change != nil {
+			change.Drop = j.ID
+		}
+		return reply, change
 	}
 	d, _, _ := parse(j)
 	who, version := c, 1

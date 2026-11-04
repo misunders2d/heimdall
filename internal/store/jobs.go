@@ -134,7 +134,14 @@ func (ch *JobChange) apply(tx *sql.Tx) error {
 	case ch.Add != nil:
 		return insertJob(tx, *ch.Add)
 	case ch.Update != "":
-		return updateJob(tx, ch.Update, ch.Set)
+		if err := updateJob(tx, ch.Update, ch.Set); err != nil {
+			return err
+		}
+		if ch.Drop != "" {
+			_, err := tx.Exec(`DELETE FROM jobs WHERE id=? AND state=?`, ch.Drop, JobDraft)
+			return err
+		}
+		return nil
 	case ch.Confirm != nil:
 		return confirmDraft(tx, *ch.Confirm, ch.Set)
 	case ch.Drop != "":

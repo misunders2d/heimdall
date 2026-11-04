@@ -1140,3 +1140,115 @@ func TestPauseResumeDoesNotReviveCurrentTimeoutRetry(t *testing.T) {
 		t.Fatalf("run left active: %+v", got)
 	}
 }
+
+func TestRemovalDrafts(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		creator, proposer Caller
+	}{
+		{"owner", asBoss, asBoss},
+		{"employee own job", asWork, asWork},
+		{"owner removes employee job", asWork, asBoss},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			id := r.add(tc.creator, `{"name":"standup","schedule":{"every":"1h"},"prompt":"p"}`)
+			stops := 0
+			r.s.stop = func(job string) bool {
+				if job != id {
+					t.Fatalf("stopped %s", job)
+				}
+				stops++
+				return true
+			}
+			propose := func() *store.Job {
+				clean, d, card := r.s.Draft(tc.proposer, []string{"Sure.\n```heimdall-job\n{\"remove\":\"" + id + "\"}\n```"})
+				if d == nil || clean[0] != "Sure." {
+					t.Fatalf("draft: %v %s", d, card)
+				}
+				for _, want := range []string{"remove job " + id, "standup", "Schedule:", "Next:", "Confirm: !job confirm " + d.ID, "Discard: !job discard " + d.ID} {
+					if !strings.Contains(card, want) {
+						t.Fatalf("missing %q: %s", want, card)
+					}
+				}
+				r.apply(&store.JobChange{Add: d})
+				if r.job(id).State != store.JobActive || stops != 0 {
+					t.Fatal("proposal changed target")
+				}
+				return d
+			}
+			d := propose()
+			other := tc.proposer
+			other.Principal = core.Principal{Platform: core.PlatformTelegram, ID: "999"}
+			if out := r.cmd(other, "job confirm "+d.ID); !strings.Contains(out, "No draft") {
+				t.Fatal(out)
+			}
+			elsewhere := tc.proposer
+			elsewhere.Conv = team
+			if out := r.cmd(elsewhere, "job confirm "+d.ID); !strings.Contains(out, "No draft") {
+				t.Fatal(out)
+			}
+			if out, ok := r.answer(tc.proposer, "no"); !ok || !strings.Contains(out, "discarded") {
+				t.Fatal(out)
+			}
+			if r.job(id).State != store.JobActive || stops != 0 {
+				t.Fatal("discard changed target")
+			}
+			d = propose()
+			if out, ok := r.answer(tc.proposer, "yes"); !ok || !strings.Contains(out, "deleted") || !strings.Contains(out, "being stopped") {
+				t.Fatal(out)
+			}
+			if r.job(id).State != store.JobDeleted || stops != 1 {
+				t.Fatal("confirm did not remove/stop target")
+			}
+			if _, ok, err := r.st.Job(d.ID); ok || err != nil {
+				t.Fatalf("draft retained: %v %v", ok, err)
+			}
+			if out := r.cmd(tc.proposer, "job confirm "+d.ID); !strings.Contains(out, "No draft") || stops != 1 {
+				t.Fatal(out)
+			}
+		})
+	}
+}
+
+func TestRemovalDraftRefusals(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"owner job","schedule":{"every":"1h"},"prompt":"p"}`)
+	for _, tc := range []struct {
+		caller Caller
+		raw    string
+	}{
+		{asWork, `{"remove":"` + id + `"}`},
+		{asBoss, `{"remove":"missing"}`},
+		{asBoss, `{"remove":true}`},
+		{asBoss, `{"remove":""}`},
+		{asBoss, `{"remove":"` + id + `","edit":"` + id + `"}`},
+		{asBoss, `{"remove":"` + id + `","paused":true}`},
+	} {
+		_, d, card := r.s.Draft(tc.caller, []string{"```heimdall-job\n" + tc.raw + "\n```"})
+		if d != nil || !strings.Contains(card, "not valid") || r.job(id).State != store.JobActive {
+			t.Fatalf("%s: %v %s", tc.raw, d, card)
+		}
+	}
+	_, d, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"remove\":\"" + id + "\"}\n```"})
+	r.apply(&store.JobChange{Add: d})
+	// Losing owner authority after proposal must be caught at confirmation.
+	demoted := asBoss
+	demoted.Role = core.RoleEmployee
+	// An owner proposes removing another caller's job, then loses owner role.
+	otherID := r.add(asWork, `{"name":"employee job","schedule":{"every":"1h"},"prompt":"p"}`)
+	_, other, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"remove\":\"" + otherID + "\"}\n```"})
+	r.apply(&store.JobChange{Add: other})
+	if out := r.cmd(demoted, "job confirm "+other.ID); !strings.Contains(out, "no job") || r.job(otherID).State != store.JobActive {
+		t.Fatal(out)
+	}
+	r.cmd(asBoss, "job rm "+id)
+	if out := r.cmd(asBoss, "job confirm "+d.ID); !strings.Contains(out, "no job") {
+		t.Fatal(out)
+	}
+	// Expired removal must leave its target alone.
+	r.now = r.now.Add(25 * time.Hour)
+	if out := r.cmd(asBoss, "job confirm "+other.ID); !strings.Contains(out, "expired") || r.job(otherID).State != store.JobActive {
+		t.Fatal(out)
+	}
+}

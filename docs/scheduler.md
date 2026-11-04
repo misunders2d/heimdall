@@ -252,9 +252,9 @@ States: `pending`, `running`, `ok`, `quiet`, `failed`, `unverified`, `skipped`, 
 People ask in plain language ("remind me every Monday at 9 to …"). The harness turns that into a draft; the person confirms it.
 
 1. **The block.** The model ends its answer with a fenced block:
-   ```` ```heimdall-job ```` then a job definition (§2.2), or `{"edit": "<job id>", …changed fields}`, then ```` ``` ````.
+   ```` ```heimdall-job ```` then a job definition (§2.2), or `{"edit": "<job id>", …changed fields}`, or `{"remove":"<job id>"}`, then ```` ``` ````.
    At most one block per answer. This is a directive with no file path, like the `[react: …]` lines, so the outbox rule that Heimdall never sends a path the model names still holds.
-2. **Strip and validate.** Heimdall removes the block from the delivered answer and validates it with the same validator as `!job add`, under the caller's role rules.
+2. **Strip and validate.** Heimdall removes the block from the delivered answer and validates it with the same validator as `!job add`, under the caller's role rules. Removal checks the same job authority as `!job rm`; unknown or unauthorized IDs produce an error and change nothing.
 3. **Draft and card.** Heimdall stores a `draft` that expires after 24 h, and posts a card showing:
    - the schedule in words, and the next 3 fires in local time and UTC;
    - the target, and the conversation the draft was made in;
@@ -263,10 +263,10 @@ People ask in plain language ("remind me every Monday at 9 to …"). The harness
    - for an edit, a field-by-field diff;
    - `!job confirm <id>` and `!job discard <id>`.
    The card ends `— heimdall`.
-4. **Confirm.** Only the same verified caller can confirm, in the same conversation, within 24 h; confirm from anyone or anywhere else is rejected. Confirming makes a new job `active`, or applies an edit.
+4. **Confirm.** Only the same verified caller can confirm, in the same conversation, within 24 h; confirm from anyone or anywhere else is rejected. Confirming makes a new job `active`, applies an edit, or removes the named job. Removal cards show the target job ID, name, schedule and next run. Confirmation rechecks current removal authority and uses the same running-run stop and retry fencing as `!job rm`. Discard leaves the target untouched. Removal drafts use the existing 24-hour expiry and caller/conversation binding.
    - A whole reply of `yes`, `ok`, `confirm`, `да` or `так` (trimmed, any case) from that caller in that conversation confirms when exactly one of their drafts waits there; `no`, `cancel`, `нет` or `ні` discards it. With two or more, Heimdall asks for the ID. Heimdall matches these words itself; the model never confirms. In shared chats the reply needs addressing like any message.
 5. **Invalid block.** A card names the error; nothing is stored.
-6. **Blocks from scheduled turns are ignored**, so jobs never create jobs. `[job: done]` still works.
+6. **Blocks from scheduled turns are ignored**, so scheduled jobs never propose creating, editing or removing jobs. `[job: done]` still works.
 7. **Telling the model.** A note of about 300 characters goes into the frame of the first message of each native session (not into scheduled turns). It describes the block format and says Heimdall will ask for confirmation.
 
 This replaces Pi's model-called `schedule_*` tools. With those tools, a prompt-injected model could schedule directly (`extensions/scheduler.ts:1128-1170`).
