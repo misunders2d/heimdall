@@ -409,7 +409,8 @@ func (s *Scheduler) refuse(j store.Job, d Def, r store.Run, why string) {
 }
 
 func (s *Scheduler) refusal(j store.Job, d Def, r store.Run, why string) (store.RunEnd, []core.Outbound) {
-	text := s.text(j, d, "was paused: its run was refused", r.Due, "identity: "+why, r.Attempt+1)
+	j.State = store.JobPaused
+	text := s.text(j, d, "was paused: its run was refused", r.Due, "identity: "+why, r.Attempt+1, "no")
 	outs := s.notices(j, d, false, text)
 	for _, key := range s.access.OwnerKeys() {
 		if p, err := core.ParsePrincipalKey(key); err == nil {
@@ -424,7 +425,7 @@ func (s *Scheduler) refusal(j store.Job, d Def, r store.Run, why string) (store.
 // retry is a run's next attempt after a failure before its turn was ready,
 // or its failure when no attempt or grace is left.
 func (s *Scheduler) retry(j store.Job, d Def, sched *schedule.Schedule, r store.Run, now time.Time, cause string) store.RunEnd {
-	if r.Replayed && (d.RerunOnTimeout || strings.Contains(r.Cause, "timeout retry")) {
+	if r.Replayed && (d.RerunOnTimeout || strings.Contains(causeLabel(r.Cause), "timeout retry")) {
 		return s.failed(j, r, cause)
 	}
 	if r.Attempt < len(backoff) {
@@ -469,15 +470,37 @@ func (s *Scheduler) endRun(j store.Job, d Def, end store.RunEnd, outs ...core.Ou
 // a sign-in; the services follow.
 const signInCause = "sign-in needed: "
 
-// endNotices are the notices a run's end needs beyond its own: a failure
-// notice, and a pause notice, both with the sign-in to send when the run
-// failed for one.
+// endNotices adds failure/retry and pause notices. Native error details go
+// only to existing private destinations; shared chats keep fixed causes.
 func (s *Scheduler) endNotices(j store.Job, d Def, end store.RunEnd) []core.Outbound {
 	var outs []core.Outbound
-	hint := signInHint(j.ID, d, end.Cause)
-	if end.State == store.RunFailed && end.Cause != "identity" {
+	cause, detail, _ := strings.Cut(end.Cause, " — ")
+	hint := signInHint(j.ID, d, cause)
+	if end.JobState != "" {
+		j.State = end.JobState // show the resulting state, not a stale next slot
+	}
+	if (end.State == store.RunFailed || !end.Retry.IsZero() && !end.Held) && end.Cause != "identity" {
 		run, _ := s.st.Run(end.ID)
-		outs = s.notices(j, d, true, s.text(j, d, "failed."+hint, run.Due, end.Cause, run.Attempt+1))
+		what, retry := "failed."+hint, "no"
+		if !end.Retry.IsZero() {
+			what = "will retry the same slot"
+			retry = fmt.Sprintf("automatically at %s (attempt %d)", when(d, end.Retry), run.Attempt+2)
+		}
+		body := s.text(j, d, what, run.Due, cause, run.Attempt+1, retry)
+		outs = s.notices(j, d, true, body)
+		if detail != "" {
+			private := map[core.ConvKey]bool{}
+			k, ok := s.noticeChat(j)
+			private[k] = ok
+			if tgt, err := s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate}); err == nil && tgt.AgentNet == "" && tgt.Private {
+				private[tgt.Conv] = true
+			}
+			for i := range outs {
+				if private[outs[i].Conv] {
+					outs[i].Text = strings.Replace(body, "\nCause: "+cause, "\nCause: "+cause+"\nError: "+detail, 1)
+				}
+			}
+		}
 	}
 	if end.JobState == store.JobPaused && end.Cause != "identity" {
 		outs = append(outs, s.notices(j, d, false, s.text(j, d, "was paused: "+end.JobReason+"."+hint, time.Time{}, "", 0))...)
@@ -544,7 +567,7 @@ func (s *Scheduler) Recover() error {
 	for _, r := range runs {
 		j, _, _ := s.st.Job(r.Job)
 		d, _, _ := parse(j)
-		if r.Replayed && (d.RerunOnTimeout || strings.Contains(r.Cause, "timeout retry")) {
+		if r.Replayed && (d.RerunOnTimeout || strings.Contains(causeLabel(r.Cause), "timeout retry")) {
 			discarded[r.ID] = true
 			s.endRun(j, d, store.RunEnd{ID: r.ID, Job: r.Job, State: store.RunInterrupted, Inbound: r.Inbound, Cause: "timeout retry discarded on restart"}, s.notices(j, d, true, s.text(j, d, "was interrupted by a restart and was not re-run", r.Due, "restart", r.Attempt+1))...)
 		}
@@ -728,7 +751,7 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "no harness could start"
 		cause := "harness did not start"
 		if len(o.Notes) > 0 {
-			cause += ": " + category(strings.Join(o.Notes, "; "))
+			cause += ": " + failureCause(strings.Join(o.Notes, "; "), t.Def.Prompt)
 		}
 		run = s.retry(j, t.Def, sched, r, s.now(), cause)
 	case res.NeedsHuman != "":
@@ -736,7 +759,7 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 	case res.Cancelled:
 		fail("cancelled")
 	case res.Failure != "":
-		fail(category(res.Failure))
+		fail(failureCause(res.Failure, t.Def.Prompt))
 	case len(o.SignIn) > 0:
 		// The model may explain it in a normal answer: the run still failed.
 		fail(signInCause + strings.Join(o.SignIn, ", "))
@@ -798,14 +821,13 @@ func expectFail(e Expect, text string, files int, tools []string) string {
 	return ""
 }
 
-// category is a failure's fixed cause label: native error text never
-// reaches a notice.
+// category is a failure's fixed cause label, safe for shared notices.
 func category(why string) string {
 	w := strings.ToLower(why)
 	for _, c := range [][2]string{
 		{`timeout|timed out|deadline`, "timeout"},
 		{`login|logged in|sign.?in|credential|unauthori|401|403|oauth`, "sign-in or credentials"},
-		{`overload|unavailable|rate limit|429`, "provider unavailable"},
+		{`capacity|overload|unavailable|rate limit|429`, "provider unavailable"},
 		{`server.error|5\d\d`, "provider server error"},
 		{`context window|context length|too many tokens|token limit`, "context too large"},
 		{`enoent|eacces|eperm|no such file|not found on the path|account|config`, "harness or runtime configuration"},
@@ -850,8 +872,9 @@ func (s *Scheduler) notices(j store.Job, d Def, toTarget bool, text string) []co
 	return outs
 }
 
-// text is a notice: fixed template, Heimdall's own words only.
-func (s *Scheduler) text(j store.Job, d Def, what string, slot time.Time, cause string, attempts int) string {
+// text is a fixed notice template. Sanitized native errors are added only
+// for private destinations by endNotices.
+func (s *Scheduler) text(j store.Job, d Def, what string, slot time.Time, cause string, attempts int, retry ...string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "⚠ Job %q (%s) %s", j.Name, j.ID, strings.TrimSuffix(what, "."))
 	if !slot.IsZero() {
@@ -863,8 +886,11 @@ func (s *Scheduler) text(j store.Job, d Def, what string, slot time.Time, cause 
 	if attempts > 0 {
 		fmt.Fprintf(&b, "\nAttempts: %d", attempts)
 	}
+	if len(retry) > 0 {
+		fmt.Fprintf(&b, "\nRetry: %s", retry[0])
+	}
 	if j.State == store.JobActive && !j.NextDue.IsZero() {
-		fmt.Fprintf(&b, "\nNext run: %s", when(d, j.NextDue))
+		fmt.Fprintf(&b, "\nNext scheduled run: %s", when(d, j.NextDue))
 	}
 	fmt.Fprintf(&b, "\n!job show %s\n— heimdall", j.ID)
 	return b.String()

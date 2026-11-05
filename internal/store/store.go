@@ -484,15 +484,21 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 			return 0, err
 		}
 	}
-	for _, f := range append(e.Files, e.Notices...) {
-		if _, err = enqueue(tx, f); err != nil {
-			return 0, err
-		}
-	}
 	if e.Run != nil {
 		if err = endRun(tx, *e.Run); err != nil {
 			return 0, err
 		}
+	}
+	if err = enqueueAll(tx, e.Files); err != nil {
+		return 0, err
+	}
+	if e.Run != nil {
+		err = enqueueRunNotices(tx, *e.Run, e.Notices)
+	} else {
+		err = enqueueAll(tx, e.Notices)
+	}
+	if err != nil {
+		return 0, err
 	}
 	if e.Draft != nil {
 		if err = insertJob(tx, *e.Draft); err != nil {

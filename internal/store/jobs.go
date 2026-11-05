@@ -512,7 +512,7 @@ func (s *Store) EndRun(e RunEnd, outs ...core.Outbound) error {
 		if err := endRun(tx, e); err != nil {
 			return err
 		}
-		return enqueueAll(tx, outs)
+		return enqueueRunNotices(tx, e, outs)
 	})
 }
 
@@ -533,9 +533,26 @@ func (s *Store) EndRunUnlessHeld(holdKey string, now time.Time, e RunEnd, outs .
 		if err := endRun(tx, e); err != nil {
 			return err
 		}
-		return enqueueAll(tx, outs)
+		return enqueueRunNotices(tx, e, outs)
 	})
 	return held, err
+}
+
+// enqueueRunNotices runs after endRun in the same transaction. A stop,
+// edit or restart fence may have vetoed the proposed retry; never announce
+// one unless that same-slot retry was actually queued. No retry rules change.
+func enqueueRunNotices(tx *sql.Tx, e RunEnd, outs []core.Outbound) error {
+	if !e.Retry.IsZero() && !e.Held {
+		var state string
+		var at int64
+		if err := tx.QueryRow(`SELECT state,not_before FROM job_runs WHERE id=?`, e.ID).Scan(&state, &at); err != nil {
+			return err
+		}
+		if state != RunPending || at != e.Retry.UnixMilli() {
+			return nil
+		}
+	}
+	return enqueueAll(tx, outs)
 }
 
 // HeldRun is a running run at startup, with its message's state and whether

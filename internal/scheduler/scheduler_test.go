@@ -416,7 +416,7 @@ func TestEndOutcomes(t *testing.T) {
 	if e := r.finish("  ", Outcome{Harness: "pi", Tools: []string{"web_search"}}); e.Run.State != store.RunFailed || e.Run.Cause != "empty answer" || e.Reply != nil {
 		t.Fatalf("empty: %+v", e.Run)
 	}
-	// Stopped by command; native failures get a fixed category only.
+	// Stopped by command; native failure details are sanitized.
 	r.run(ck)
 	if e := r.finish("", Outcome{Stopped: true}); e.Run.State != store.RunCancelled || e.Reply != nil {
 		t.Fatalf("stopped: %+v", e.Run)
@@ -1111,6 +1111,7 @@ func TestTimeoutRetryRunningRestartHasNotice(t *testing.T) {
 	r, _ := timeoutJob(t)
 	r.now = r.now.Add(time.Minute)
 	r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+	r.sent() // the retry notice preceded the restart
 	r.rows = nil
 	r.s.start(context.Background(), r.now)
 	row := r.rows[0]

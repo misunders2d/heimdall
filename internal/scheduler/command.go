@@ -714,7 +714,7 @@ func (s *Scheduler) show(c Caller, id string) string {
 		delete(opts, k)
 	}
 	fmt.Fprintf(&b, "Options: %s\n", mustJSON(opts))
-	b.WriteString(s.runs(j, d, 5))
+	b.WriteString(s.runs(j, d, 5, c.Private))
 	return strings.TrimSpace(b.String())
 }
 
@@ -724,10 +724,10 @@ func (s *Scheduler) history(c Caller, id string) string {
 		return err.Error()
 	}
 	d, _, _ := parse(j)
-	return strings.TrimSpace(fmt.Sprintf("Job %s %q\n%s", j.ID, j.Name, s.runs(j, d, 20)))
+	return strings.TrimSpace(fmt.Sprintf("Job %s %q\n%s", j.ID, j.Name, s.runs(j, d, 20, c.Private)))
 }
 
-func (s *Scheduler) runs(j store.Job, d Def, n int) string {
+func (s *Scheduler) runs(j store.Job, d Def, n int, private bool) string {
 	runs, _ := s.st.Runs(store.RunFilter{Job: j.ID, Limit: n})
 	if len(runs) == 0 {
 		return "Runs: none yet"
@@ -743,7 +743,16 @@ func (s *Scheduler) runs(j store.Job, d Def, n int) string {
 			fmt.Fprintf(&b, ", attempts %d", r.Attempt+1)
 		}
 		if r.Cause != "" {
-			fmt.Fprintf(&b, ", %s", r.Cause)
+			cause := r.Cause
+			if !private {
+				cause = causeLabel(cause)
+			}
+			fmt.Fprintf(&b, ", %s", cause)
+		}
+		if r.State == store.RunPending && r.Attempt > 0 && !r.NotBefore.IsZero() {
+			fmt.Fprintf(&b, ", retry automatically at %s (attempt %d)", when(d, r.NotBefore), r.Attempt+1)
+		} else if r.State == store.RunFailed {
+			b.WriteString(", retry: no")
 		}
 		b.WriteString("\n")
 	}

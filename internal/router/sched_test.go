@@ -207,8 +207,7 @@ func TestScheduledFailureAndUnverifiedNotices(t *testing.T) {
 	if !strings.Contains(got[ownerDM], "secret result") || !strings.Contains(got[ownerDM], "⚠ unverified") {
 		t.Fatalf("owner got %q", got[ownerDM])
 	}
-	// A harness failure after ready fails the run with the fixed notice
-	// only: native error text never reaches a chat.
+	// A harness failure after ready fails the run with a sanitized notice.
 	failing := e.addJob(`{"name":"failing","schedule":{"every":"1h"},"prompt":"FAILPOST=omp"}`)
 	e.ask(ownerDM, "!job run "+failing)
 	out := e.reply()
