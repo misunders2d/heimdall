@@ -187,7 +187,7 @@ Scheduled runs never capture memory (`MEMENTO_PROCESSING=1`). There is no per-jo
 ### 3.8 Retries and result checks
 
 - **Retries.** Only failures before the turn's ready signal are retried. That is the same no-side-effects boundary as harness fallback.
-  - Backoff 1 min, 5 min, 15 min (±20%), at most 3 attempts, all within `grace`.
+  - Backoff 1 min, 5 min, 15 min (±20%), at most 3 retries after the first attempt, all within `grace`.
   - Timeout and worker lifetime limits fail without retry, even before ready, unless the explicit repeat-safe timeout option below applies. A turn may have produced effects without acknowledging readiness.
   - Owner agent jobs may set `"rerun_on_timeout":true` together with `"idempotent":true`, explicit `timeout`, `session:"fresh"`, and a platform target (never AgentNet). This asserts that repeating the entire prompt and its effects is safe. It is a rerun, not checkpoint continuation or exactly-once execution.
   - At most one timeout rerun uses the existing run/slot and durable replay flag. The first execution keeps its configured timeout within ordinary grace, even if queued. A rerun must finish within twice `timeout` from the slot due time, also constrained by grace; native interruption/termination can add shutdown grace. The old native process exits before retry is persisted. No native interrupted session is resumed.
@@ -216,12 +216,15 @@ States: `pending`, `running`, `ok`, `quiet`, `failed`, `unverified`, `skipped`, 
   - job name and id;
   - slot, in local time and UTC;
   - phase and cause category;
+  - a sanitized, bounded native error in existing private destinations only;
   - attempts;
-  - next run;
+  - `Retry: no` for a terminal failure, or `Retry: automatically at <time> (attempt N)` when the same-slot retry actually queues;
+  - `Next scheduled run`, separately from any retry, while the resulting job remains active;
   - `!job show <id>`.
 - They end with `— heimdall`.
-- Model text never reaches a shared channel in a notice.
-- Failure, interrupted and missed notices go to the target and to the creator's notice chat. Pause and expiry notices go to the creator's notice chat.
+- Private failure notices and private `!job show`/`!job history` retain the actual native error after secret, URL, callback, ID and echoed-input redaction and clipping. Answers and transcripts are not error details. Shared notices/history retain fixed cause categories.
+- A same-slot retry notice is enqueued in the same transaction as that retry. Stop, edit or restart fences that veto it suppress the proposed retry notice. Existing retry eligibility and side-effect boundaries are unchanged.
+- Failure, retry, interrupted and missed notices go to the target and to the creator's notice chat. Pause and expiry notices go to the creator's notice chat.
 
 ## 4. Identity and privileges
 
@@ -603,7 +606,7 @@ All run with `go vet ./...` and `go test -race ./...`, using fake clocks and fak
 - `NO_UPDATE` sends nothing.
 - `out/` files are sent.
 - No progress messages.
-- Fixed failure text to the target and the notice chat; no model text in shared channels on failure.
+- Fixed failure/retry envelope to the target and the notice chat; sanitized, bounded native error details only in existing private destinations. Show explicit retry state and a separately labeled next scheduled run; no native details or model answers in shared failure notices.
 - Every notice ends `— heimdall`.
 
 **Result checks**
