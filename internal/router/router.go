@@ -1122,9 +1122,17 @@ func (c *conv) start(ctx context.Context) {
 	}
 	c.queue = c.queue[n:]
 	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, job: job}
-	switch sticky, _ := c.r.store.ChatHarness(c.key); {
+	// Scheduled sessions stay in sched:<job>, while their routing preference
+	// comes from the creator-bound source conversation at actual turn start.
+	route := c.key
+	if job != nil {
+		route = job.Source
+	}
+	switch sticky, _ := c.r.store.ChatHarness(route); {
 	case job != nil && job.Def.Harness != "":
 		t.candidates, t.explicit = []string{job.Def.Harness}, true
+	case job != nil && sticky != "":
+		t.candidates, t.explicit = []string{sticky}, true
 	case job != nil:
 		t.candidates = c.r.opt.Order
 	case first.harness != "":
@@ -1414,7 +1422,6 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		spec := harness.Spec{MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
 		if t.job != nil {
 			spec.OneShot, spec.Timeout = true, t.job.Timeout
-			spec.ReadOnlyMonitor = t.job.Def.NativeProfile == "owner_slack_read"
 			if t.job.Def.RerunOnTimeout {
 				// All candidates share this execution's limit. A rerun additionally
 				// shares the slot's absolute recovery deadline.

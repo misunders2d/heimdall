@@ -497,3 +497,52 @@ func TestMCPControlProposalNeverAutoApplies(t *testing.T) {
 		t.Fatalf("MCP job=%+v error=%v", jobs, err)
 	}
 }
+
+func TestScheduledWakeUsesCurrentSourceConversationHarness(t *testing.T) {
+	for _, tc := range []struct {
+		name, override, selection, want string
+	}{
+		{"follows_changed_selection", "", "pi", "pi"},
+		{"explicit_job_override", `,"harness":"omp"`, "pi", "omp"},
+		{"source_default_ignores_synthetic_preference", "", "default", "claude"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := schedEnv(t, []string{"claude", "codex", "pi", "omp"}, "claude", "codex", "pi", "omp")
+			want(t, e.ask(ownerDM, "!use omp"), "now uses omp")
+			id := e.addJob(`{"name":"routing","schedule":{"every":"1h"},"prompt":"routing wake"` + tc.override + `}`)
+			notice := "now uses " + tc.selection
+			if tc.selection == "default" {
+				notice = "default order"
+			}
+			want(t, e.ask(ownerDM, "!use "+tc.selection), notice)
+			// Same owner elsewhere, then another creator in their own conversation:
+			// neither may replace the bound source's routing preference.
+			want(t, e.ask(group, "!use codex"), "now uses codex")
+			e.sendIn(core.Principal{Platform: "fake", ID: "employee"}, core.ConvKey{Interface: "telegram", Chat: "2"}, "!use codex")
+			want(t, e.reply(), "now uses codex")
+			// Old synthetic-conversation state must never supply a preference.
+			if err := e.st.AnswerCommand(0, core.ConvKey{Interface: "telegram", Chat: core.SchedChat(id)}, store.CommandEnd{SetHarness: true, Harness: "codex"}); err != nil {
+				t.Fatal(err)
+			}
+			j, ok, err := e.st.Job(id)
+			if err != nil || !ok {
+				t.Fatal(j, err)
+			}
+			// The due loop consumes a normal scheduled slot after the selection
+			// change, rather than !job run's manual route. No harness is pinned.
+			created, err := e.st.CreateRun(store.Run{Job: id, Version: j.Version, Slot: "synthetic-due", Due: time.Now(), Trigger: "schedule", State: store.RunPending}, j.NextSlot, j.NextDue)
+			if err != nil || !created {
+				t.Fatal(created, err)
+			}
+			e.r.opt.Jobs.Wake()
+			out := e.reply()
+			want(t, out, tc.want+"#", "mem=1", "PI_EXTERNAL_USER_ID=fake_user_owner", "PI_EXTERNAL_MCP_PRIVATE=0")
+			if out.Conv != ownerDM {
+				t.Fatal("wakeup changed target", out.Conv)
+			}
+			if got := e.history(id); !strings.Contains(got, " ok") {
+				t.Fatal(got)
+			}
+		})
+	}
+}

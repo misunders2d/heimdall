@@ -32,7 +32,6 @@ const QuietToken = "NO_UPDATE"
 // Def is a job definition (docs/scheduler.md §2.2): what !job add, !job
 // edit and model drafts carry, checked by one validator.
 type Def struct {
-	NativeProfile  string               `json:"native_profile,omitempty"`
 	Checkpoint     bool                 `json:"checkpoint,omitempty"`
 	DeliveryWindow *core.DeliveryWindow `json:"delivery_window,omitempty"`
 	Name           string               `json:"name"`
@@ -209,9 +208,6 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	}
 	if d.Checkpoint && (!owner || d.Kind != KindAgent || !t.Private || t.AgentNet != "" || !d.Quiet || d.Session != "" && d.Session != "fresh") {
 		return fail("checkpoint: owner agent jobs only; quiet, fresh session and creator's private target required")
-	}
-	if d.NativeProfile != "" && (d.NativeProfile != "owner_slack_read" || !owner || !d.Checkpoint || d.Harness != "codex" || !t.Private || d.Session != "" && d.Session != "fresh") {
-		return fail("native_profile: owner_slack_read requires an owner Codex checkpoint job with fresh session and private target")
 	}
 	if !owner && (d.To != "here" && !t.Private || t.AgentNet != "") {
 		return fail("to: employee jobs deliver here or to your own private chat")

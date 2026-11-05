@@ -159,8 +159,8 @@ can retract a successful request already accepted before cutoff.
 ## Prepared owner Slack workflow
 
 [Paused monitor definition](examples/owner-slack-monitor.json) preserves the
-owner's request in context and keeps triage in the workflow. It uses existing
-Codex/native owner model settings; no provider fallback override, new login or
+owner's request in context and keeps triage in the workflow. It uses the
+selected agent's native owner settings; no provider fallback override, new login or
 owner_slack opt-in. Schedule union is exactly:
 
 ```json
@@ -175,38 +175,33 @@ coverage must be demonstrated with the actual connector; unsupported coverage is
 incomplete, never a quiet success. Bootstrap requires complete available backlog
 discovery, not an invented 24-hour cutoff. No raw DM archive or secrets in state.
 
-Both prepared definitions require `native_profile:"owner_slack_read"`. This is a
-per-launch owner Codex profile, leaving other owner turns/jobs in their existing
-automatic mode. It reads the public app ID from the existing native Slack plugin
-manifest, then verifies it with native `app/read` metadata (no model or business
-tool) and non-secret `config/read` app/tool names to discover exact Slack tool IDs.
-It does not scan `app/list`, which includes the entire public marketplace.
-Missing or conflicting installed manifests refuse launch. It
-explicitly disables other Apps
-including configured-but-unlisted apps and inherited raw-name/title per-tool
-overrides, defaults Slack tools off, and enables
-only recognized read/search/discovery tools. It rechecks native effective
-`isEnabled` metadata before allowing the turn. Unavailable/changed/ineffective
-metadata refuses launch. Runtime-generated allowlists default deny new tools;
-read-only metadata alone is not the prevention mechanism.
+Prepared definitions do not pin a harness. At turn start, the normal router
+reads the current `!use` preference of the creator-bound source conversation
+(interface + chat + thread). Later `!use` changes apply to future wakeups. A job's
+explicit `harness` override still wins; `!use default` uses the configured default
+order. The synthetic `sched:<job>` session conversation never supplies routing
+preference, and changes in other conversations do not affect this binding.
+Creator admission and live Slack identity are still checked at fire and turn
+start. No global last-agent registry, connector discovery or delegation layer
+is added.
 
-All configured MCP servers are disabled except existing Memento with exact
-`enabled_tools=["recall"]`; scheduler management and other write MCPs are absent.
-Shell, delegation, plugin installation and browser/computer tools are disabled.
-Shared native policy hooks, including the hub addendum, remain enabled;
-`MEMENTO_PROCESSING=1` suppresses memory hooks and automatic capture.
-Native read-only sandbox denies filesystem writes; no approvals or
-alternate environments are permitted. Native apply_patch may remain visible in
-0.166.0, but its filesystem effects are denied by this sandbox. No generic native
-tool replay or new proxy is added. `MEMENTO_PROCESSING=1` is set independently by
-the profile and stated in native launch context; the probe does not use a shell
-to inspect it. Capture-off environment is checked in the fake launch regression.
+The selected agent owns tool choice, deliberate recall and any delegation to an
+existing capable agent such as Codex. Missing capabilities produce its truthful
+outcome or blocker. Slack-specific instructions belong only to these job prompts
+or the agent's own configuration. Heimdall adds no native tool allowlist, plugin
+lookup, app catalog scan, special sandbox or approval mode for this workflow.
+Ordinary owner automatic modes, employee confinement and native policy hooks
+remain unchanged. Scheduled turns retain `MEMENTO_PROCESSING=1`, fresh sessions
+by default and nonprivate harness scope; the `owner_slack` MCP opt-in remains
+live-only. No native-profile contract is required.
 
-Configuration basis checked 2026-11-05: [official Codex config reference](https://learn.chatgpt.com/docs/config-file/config-reference),
-[pinned 0.166.0 app policy](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/connectors/src/app_tool_policy.rs),
-and installed generated v2 AppConfig/AppToolSummary/ThreadItem schemas. Native
-Apps metadata availability and actual Slack/recall reads remain activation checks;
-fakes and parser checks do not prove the live connector works.
+Generic fakes cover checkpoint/delivery behavior, successful-tool telemetry and
+routing after `!use` changes, including explicit overrides and unrelated
+conversation isolation. Prepared jobs do not require direct Slack/Memento tool
+names in the parent's telemetry: delegated work belongs to the agent. Optional
+generic `expect.tools` checks remain available for jobs that need direct tool
+completion evidence. Fakes do not prove actual Slack/recall access, edited-message
+coverage or delivery. Those remain the separately approved acceptance below.
 
 Only the captured owner private Bezos DM receives Heimdall bot output. The model
 never posts, reacts, edits or sends as the owner via Slack connector tools. Root
@@ -214,16 +209,16 @@ must verify the configured binding really is that owner's bot DM before staging.
 
 ## Bounded native hub probe — prepared, not executed
 
-Local fake tests prove launch preservation, not actual Apps/recall availability.
-`owner_slack` native MCP remains disabled on scheduled turns; Codex Apps is a
-different existing native path. `MEMENTO_PROCESSING=1` suppresses capture; it does
+Local fake tests prove routing and launch preservation, not actual Slack/recall availability.
+`owner_slack` native MCP remains disabled on scheduled turns. The selected agent
+uses its existing capabilities and owns any required delegation. `MEMENTO_PROCESSING=1` suppresses capture; it does
 not itself prove manual recall works. No harness policy was weakened.
 
 1. Root obtains the separate live-window/deployment approval, drains before the
    approved restart, installs the built binary and opt-in binding, then registers
    the one shared owner catalog entry. Preserve existing bot credentials, native
    owner configs and employee routes. Do not launch another bot consumer.
-2. Copy [probe definition](examples/scheduled-codex-probe.json) to private task
+2. Copy [probe definition](examples/scheduled-agent-probe.json) to private task
    storage. Replace `<THREAD_REFERENCE>` with one owner-authorized source thread
    and `<RELEVANT_PROFESSIONAL_QUERY>` with one narrow, relevant recall query.
    Verify owner/workspace and private bot DM through real connector/platform data.
@@ -231,16 +226,16 @@ not itself prove manual recall works. No harness policy was weakened.
    "definition":<private probe definition>}`. A real owner confirms its draft in
    the captured bot conversation. It remains paused. No fake Slack ingress.
 4. `{"action":"run","id":"<probe-id>","request_id":"<unique-run-id>"}` runs a
-   real **scheduled Codex profile**, fresh session, nonprivate harness scope,
-   capture off. Probe must actually read the selected Slack thread, call native
-   `mcp__memento__recall`, and use the enforced capture-off launch context without revealing private
+   real **scheduled wakeup of the currently selected agent**, fresh session, nonprivate harness scope,
+   capture off. Probe must actually read the selected Slack thread, perform deliberate owner/professional recall, and use the enforced capture-off launch context without revealing private
    source content. Independently inspect the launch receipt for capture-off env. Tool visibility alone is not acceptance. Any native approval,
    auth failure or missing capability ends proof; do not log in or bypass it.
 5. `{"action":"history","id":"<probe-id>"}` must report success, and
    `{"action":"checkpoint","id":"<probe-id>"}` must show advanced watermark,
    minimal capability flags and exactly one **sent** receipt. Independently inspect
    the owner's private bot DM via its authorized read interface for that one alert
-   and inspect minimal native tool/result metadata for successful reads. No private
+   and inspect minimal tool/result evidence from the executing agent for successful
+   reads. A parent's delegation tool alone is not proof. No private
    transcript dumps. Rerun once with another run request ID: checkpoint version
    advances while the same capability alert outbound ID remains, no new alert.
 6. Stage the monitor definition by the same supported create path, confirm paused,

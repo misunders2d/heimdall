@@ -160,7 +160,7 @@ func (w *worker) next(spec Spec) (*Run, error) {
 	case "claude":
 		r.bridge, err = newClaudeStreamBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
 	case "codex":
-		r.bridge, err = newCodexBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session, spec.ReadOnlyMonitor, spec.Instructions, spec.Context)
+		r.bridge, err = newCodexBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session, spec.Instructions, spec.Context)
 	}
 	if err != nil {
 		cancel()

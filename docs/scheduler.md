@@ -65,7 +65,7 @@ One JSON object, used by `!job add`, `!job edit` and model drafts (§5). The sam
 | `schedule` | `{"cron": [...]}`: one or more 5-field specs, unioned. `{"every": "15m"}`: fixed duration from creation, UTC arithmetic; minimum 1 min owner, 1 h employee. `{"every": "2w", "at": "12:15", "from": "2026-11-14"}`: N days or weeks, wall-clock stable in `tz`. `{"at": "2026-12-05T08:00"}`: one-off, local time in `tz`. |
 | `tz` | IANA zone name. Default `scheduler.default_tz`. |
 | `to` | Delivery target (§2.3). Default `here`. |
-| `harness` | Empty: the default order, falling back only before the ready signal. A name: that harness only, no fallback (AGENTS.md "Harness choice"). |
+| `harness` | Empty: the creator-bound source conversation's current `!use` selection at turn start, or the default order when unset; fallback only before the ready signal. A name: that harness only, no fallback (AGENTS.md "Harness choice"). |
 | `quiet` | If the answer is exactly `NO_UPDATE`, nothing is sent and the run is `quiet`. |
 | `grace` | How late a slot may start. Defaults: 2 h recurring, 24 h one-off. |
 | `until` | Expiry date or duration. Optional for jobs, required for watches. |

@@ -124,12 +124,11 @@ type Session struct {
 
 // Spec is one turn.
 type Spec struct {
-	ReadOnlyMonitor bool // explicit scheduled owner Slack Apps profile only
-	Google          *googleoauth.Broker
-	warm            bool
-	MCPNotify       func(string)
-	OwnerSlack      *OwnerSlack
-	Progress        func(Progress)
+	Google     *googleoauth.Broker
+	warm       bool
+	MCPNotify  func(string)
+	OwnerSlack *OwnerSlack
+	Progress   func(Progress)
 
 	Harness      string
 	Prompt       string
@@ -300,17 +299,6 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		}
 	}
 	extra = append(extra, slackArgs...)
-	if spec.ReadOnlyMonitor {
-		if spec.Harness != "codex" || spec.Caller.Role != core.RoleOwner || !spec.OneShot || spec.Caller.Private || spec.Caller.SlackRead || spec.Session.Resume {
-			return nil, errors.New("read-only monitor requires a fresh scheduled owner Codex launch")
-		}
-		spec.Launch.Env = setEnv(spec.Launch.Env, "MEMENTO_PROCESSING", "1")
-		policy, e := monitorArgs(ctx, spec.Launch)
-		if e != nil {
-			return nil, e
-		}
-		extra = append(extra, policy...)
-	}
 	env, err := WithIdentity(spec.Launch.Env, spec.Caller)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", spec.Harness, err)
@@ -439,7 +427,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	case sessionID:
 		r.bridge, err = newClaudeStreamBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
 	case sessionThread:
-		r.bridge, err = newCodexBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session, spec.ReadOnlyMonitor, spec.Instructions, spec.Context)
+		r.bridge, err = newCodexBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session, spec.Instructions, spec.Context)
 	case sessionConversation:
 		r.bridge = newAgyBridge(runCtx, cmd, spec.Prompt, expected)
 	}

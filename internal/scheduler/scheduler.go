@@ -610,6 +610,7 @@ func (s *Scheduler) Recover() error {
 
 // Turn is a scheduled turn's job, as the router runs it.
 type Turn struct {
+	Source      core.ConvKey // creator-bound conversation for current routing preference
 	Checkpoint  store.Checkpoint
 	ScanThrough string
 	Job, Name   string
@@ -650,7 +651,7 @@ func (s *Scheduler) Begin(row store.InboundRow) (*Turn, bool) {
 	case s.held(now):
 		end.Retry, end.Held, end.Cause = now, true, "held by heimdall drain"
 	default:
-		t := &Turn{Job: j.ID, Name: j.Name, Run: r.ID, Attempt: r.Attempt, Replayed: r.Replayed, Due: r.Due, Def: d}
+		t := &Turn{Source: j.CreatedIn, Job: j.ID, Name: j.Name, Run: r.ID, Attempt: r.Attempt, Replayed: r.Replayed, Due: r.Due, Def: d}
 		t.Target, _ = s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate})
 		t.Target.Conv = ref.Target
 		t.Timeout, _ = span(d.Timeout)
@@ -666,9 +667,6 @@ func (s *Scheduler) Begin(row store.InboundRow) (*Turn, bool) {
 		}
 		if d.Quiet && !d.Checkpoint {
 			t.Notes = append(t.Notes, "[Scheduled job: if there is nothing new to report, answer exactly "+QuietToken+" and nothing else.]")
-		}
-		if d.NativeProfile == "owner_slack_read" {
-			t.Notes = append(t.Notes, "[Native launch profile: owner Slack read/search and Memento recall only. MEMENTO_PROCESSING=1; capture hooks disabled; shell, write connectors and scheduler controls unavailable. Draft replies only.]")
 		}
 		if d.Checkpoint {
 			cp, err := s.st.Checkpoint(j.ID, j.Creator.Key())
