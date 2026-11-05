@@ -1,6 +1,6 @@
 package harness
 
-// Native Codex 0.166.0 app/read, app/list and AppConfig, checked against
+// Native Codex 0.166.0 app/read and AppConfig, checked against
 // installed generated schemas and openai/codex rust-v0.166.0. This profile
 // changes one launch only; ordinary owner automatic mode is untouched.
 import (
@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,10 +34,49 @@ type monitorApp struct {
 func monitorSlackTool(name string) bool {
 	name = strings.TrimPrefix(strings.TrimPrefix(name, "slack_"), "slack_")
 	switch name {
-	case "read_thread", "read_channel", "read_user_profile", "search", "search_messages", "search_public", "search_public_and_private", "search_channels", "search_users", "get_profile":
+	case "read_thread", "read_channel", "read_user_profile", "search", "search_messages", "search_public", "search_public_and_private", "search_channels", "search_users", "get_profile", "list_user_channels", "list_user_conversations", "list_workspaces":
 		return true
 	}
 	return false
+}
+
+// Resolve the existing native Slack plugin's public app ID from its one
+// installed manifest. app/list includes the entire public marketplace, so it is
+// neither a bounded installed-app lookup nor proof that a connector is linked.
+// Native app/read below still verifies the identity and effective tool policy;
+// the manifest alone grants no caller authority or business-data access.
+func monitorSlackAppID(l Launch) (string, error) {
+	home := envValue(l.Env, "CODEX_HOME")
+	if home == "" {
+		home = filepath.Join(l.Home, ".codex")
+	}
+	paths, err := filepath.Glob(filepath.Join(home, "plugins", "cache", "*", "slack", "*", ".app.json"))
+	if err != nil || len(paths) == 0 || len(paths) > 32 {
+		return "", errors.New("monitor installed Slack plugin metadata unavailable")
+	}
+	ids := map[string]bool{}
+	for _, path := range paths {
+		f, err := os.Open(path)
+		if err != nil {
+			return "", errors.New("monitor Slack plugin manifest unreadable")
+		}
+		raw, err := io.ReadAll(io.LimitReader(f, 65537))
+		f.Close()
+		var manifest struct {
+			Apps map[string]struct{ ID string }
+		}
+		if err != nil || len(raw) > 65536 || json.Unmarshal(raw, &manifest) != nil || manifest.Apps["slack"].ID == "" {
+			return "", errors.New("invalid monitor Slack plugin manifest")
+		}
+		ids[manifest.Apps["slack"].ID] = true
+	}
+	if len(ids) != 1 {
+		return "", errors.New("monitor Slack plugin manifests disagree on app ID")
+	}
+	for id := range ids {
+		return id, nil
+	}
+	return "", errors.New("monitor Slack app ID unavailable")
 }
 
 // Metadata only: no thread/start, model, business tool, auth or config write.
@@ -110,56 +151,21 @@ func monitorApps(ctx context.Context, l Launch, args []string) ([]monitorApp, er
 	if err = rpc("config/read", map[string]any{"includeLayers": false, "cwd": l.Dir}, &config); err != nil {
 		return nil, err
 	}
-	var apps []monitorApp
-	cursor := ""
-	for page := 0; page < 25; page++ {
-		var list struct {
-			Data       []monitorApp
-			NextCursor string
-		}
-		params := map[string]any{"limit": 100}
-		if cursor != "" {
-			params["cursor"] = cursor
-		}
-		if err = rpc("app/list", params, &list); err != nil {
-			return nil, err
-		}
-		apps = append(apps, list.Data...)
-		if list.NextCursor == "" {
-			break
-		}
-		if list.NextCursor == cursor || page == 24 {
-			return nil, errors.New("monitor app discovery incomplete")
-		}
-		cursor = list.NextCursor
-	}
-	var slackIDs []string
-	for _, a := range apps {
-		if a.ID == "" {
-			return nil, errors.New("monitor app metadata has no ID")
-		}
-		if a.Name == "Slack" {
-			slackIDs = append(slackIDs, a.ID)
-		}
-	}
-	if len(slackIDs) != 1 {
-		return nil, errors.New("monitor requires exactly one installed Slack Apps connector")
+	slackID, err := monitorSlackAppID(l)
+	if err != nil {
+		return nil, err
 	}
 	var read struct {
 		Apps          []monitorApp
 		MissingAppIDs []string
 	}
-	if err = rpc("app/read", map[string]any{"appIds": slackIDs, "includeTools": true}, &read); err != nil {
+	if err = rpc("app/read", map[string]any{"appIds": []string{slackID}, "includeTools": true}, &read); err != nil {
 		return nil, err
 	}
-	if len(read.MissingAppIDs) != 0 || len(read.Apps) != 1 || read.Apps[0].ID != slackIDs[0] || len(read.Apps[0].ToolSummaries) == 0 {
+	if len(read.MissingAppIDs) != 0 || len(read.Apps) != 1 || read.Apps[0].ID != slackID || read.Apps[0].Name != "Slack" || len(read.Apps[0].ToolSummaries) == 0 {
 		return nil, errors.New("monitor Slack tool metadata unavailable")
 	}
-	for i := range apps {
-		if apps[i].ID == slackIDs[0] {
-			apps[i].ToolSummaries = read.Apps[0].ToolSummaries
-		}
-	}
+	apps := read.Apps
 	for id, cfg := range config.Config.Apps {
 		if id == "_default" {
 			continue
@@ -175,10 +181,15 @@ func monitorApps(ctx context.Context, l Launch, args []string) ([]monitorApp, er
 			apps = append(apps, monitorApp{ID: id, IsEnabled: cfg.Enabled})
 			index = len(apps) - 1
 		}
+		apps[index].IsEnabled = cfg.Enabled
 		for key := range cfg.Tools {
 			apps[index].ConfiguredTools = append(apps[index].ConfiguredTools, key)
 		}
 		sort.Strings(apps[index].ConfiguredTools)
+	}
+	defaults, hasDefaults := config.Config.Apps["_default"]
+	if len(args) > 0 && (!hasDefaults || defaults.Enabled) {
+		return nil, errors.New("monitor native default app disabling not effective")
 	}
 	sort.Slice(apps, func(i, j int) bool { return apps[i].ID < apps[j].ID })
 	return apps, nil

@@ -20,8 +20,15 @@ func TestMonitorNativeProfileFiltersExactCatalogAndLeavesOwnerMode(t *testing.T)
 	// Install returns launch scripts; native metadata and final turn run as
 	// the same owner with fake native protocols, never a business connector.
 	home := t.TempDir()
+	manifest := filepath.Join(home, ".codex", "plugins", "cache", "test", "slack", "1", ".app.json")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte(`{"apps":{"slack":{"id":"app-slack"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	capture := filepath.Join(home, "launch.json")
-	l := Launch{Path: path, Home: home, Dir: home, Env: append(os.Environ(), "HOME="+home, "FAKE_MONITOR_METADATA=1", "FAKE_CAPTURE_LAUNCH="+capture)}
+	l := Launch{Path: path, Home: home, Dir: home, Env: append(os.Environ(), "HOME="+home, "CODEX_HOME="+filepath.Join(home, ".codex"), "FAKE_MONITOR_METADATA=1", "FAKE_CAPTURE_LAUNCH="+capture)}
 	caller := Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "telegram", Chat: "42"}}
 	run, err := Start(context.Background(), Spec{Harness: "codex", Caller: caller, Launch: l, Prompt: "synthetic", OneShot: true, ReadOnlyMonitor: true})
 	if err != nil {
@@ -79,6 +86,37 @@ func TestMonitorProfileRefusesWrongLaunchAndUnknownReadTool(t *testing.T) {
 	}
 	if _, err := Start(context.Background(), Spec{Harness: "codex", Launch: Launch{Path: "/bin/false"}, ReadOnlyMonitor: true}); err == nil {
 		t.Fatal("unscoped monitor allowed")
+	}
+}
+
+func TestMonitorResolvesInstalledSlackAppWithoutMarketplaceScan(t *testing.T) {
+	home := t.TempDir()
+	l := Launch{Home: home}
+	if _, err := monitorSlackAppID(l); err == nil {
+		t.Fatal("missing installed manifest accepted")
+	}
+	write := func(version, id string) {
+		p := filepath.Join(home, ".codex", "plugins", "cache", "market", "slack", version, ".app.json")
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(`{"apps":{"slack":{"id":"`+id+`"}}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("1", "app-slack")
+	write("2", "app-slack")
+	if id, err := monitorSlackAppID(l); err != nil || id != "app-slack" {
+		t.Fatal(id, err)
+	}
+	write("3", "other-app")
+	if _, err := monitorSlackAppID(l); err == nil {
+		t.Fatal("conflicting installed manifest accepted")
+	}
+	for _, tool := range []string{"slack_list_user_conversations", "slack_list_user_channels", "slack_list_workspaces"} {
+		if !monitorSlackTool(tool) {
+			t.Fatal("required read-only discovery unavailable", tool)
+		}
 	}
 }
 

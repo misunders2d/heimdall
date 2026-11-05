@@ -682,9 +682,10 @@ func (f *fake) codex() {
 	for os.Getenv("FAKE_MONITOR_METADATA") == "1" && (start["method"] == "app/list" || start["method"] == "app/read" || start["method"] == "config/read") {
 		filtered := strings.Contains(strings.Join(os.Args, " "), "default_tools_enabled=false")
 		if start["method"] == "config/read" {
-			reply(start["id"], map[string]any{"config": map[string]any{"apps": map[string]any{"app-hidden": map[string]any{"enabled": !filtered, "tools": map[string]any{"inherited_write": map[string]bool{"enabled": true}}}, "app-slack": map[string]any{"enabled": true, "tools": map[string]any{"slack_new_write": map[string]bool{"enabled": !filtered}}}}}, "origins": map[string]any{}})
+			reply(start["id"], map[string]any{"config": map[string]any{"apps": map[string]any{"_default": map[string]bool{"enabled": !filtered}, "app-github": map[string]bool{"enabled": !filtered}, "app-hidden": map[string]any{"enabled": !filtered, "tools": map[string]any{"inherited_write": map[string]bool{"enabled": true}}}, "app-slack": map[string]any{"enabled": true, "tools": map[string]any{"slack_new_write": map[string]bool{"enabled": !filtered}}}}}, "origins": map[string]any{}})
 		} else if start["method"] == "app/list" {
-			reply(start["id"], map[string]any{"data": []any{map[string]any{"id": "app-slack", "name": "Slack", "isEnabled": true}, map[string]any{"id": "app-github", "name": "GitHub", "isEnabled": !filtered}}, "nextCursor": nil})
+			f.emit(map[string]any{"id": start["id"], "error": map[string]any{"code": -32600, "message": "monitor must use installed plugin metadata, not the public marketplace"}})
+			return
 		} else {
 			reply(start["id"], map[string]any{"apps": []any{map[string]any{"id": "app-slack", "name": "Slack", "toolSummaries": []any{map[string]any{"name": "slack_slack_read_thread", "isReadOnly": true, "isEnabled": true}, map[string]any{"name": "slack_slack_search", "isReadOnly": true, "isEnabled": true}, map[string]any{"name": "slack_slack_post_message", "isReadOnly": false, "isEnabled": !filtered}}}}, "missingAppIds": []any{}})
 		}

@@ -177,8 +177,11 @@ discovery, not an invented 24-hour cutoff. No raw DM archive or secrets in state
 
 Both prepared definitions require `native_profile:"owner_slack_read"`. This is a
 per-launch owner Codex profile, leaving other owner turns/jobs in their existing
-automatic mode. It uses native `app/list` and `app/read` metadata (no model or
-business tool) and non-secret `config/read` app/tool names to discover exact Slack tool IDs,
+automatic mode. It reads the public app ID from the existing native Slack plugin
+manifest, then verifies it with native `app/read` metadata (no model or business
+tool) and non-secret `config/read` app/tool names to discover exact Slack tool IDs.
+It does not scan `app/list`, which includes the entire public marketplace.
+Missing or conflicting installed manifests refuse launch. It
 explicitly disables other Apps
 including configured-but-unlisted apps and inherited raw-name/title per-tool
 overrides, defaults Slack tools off, and enables
