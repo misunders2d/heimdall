@@ -1319,6 +1319,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			}
 		}
 		sessionNote := c.sessionPointer(t, h, sess, launch, batch[0].row.MCPControl)
+		ownerInputs := c.ownerRequestContext(t, h, sess, prev, clean, batch[0].row.Inbound)
 		// Recorded before the harness gets any input: a crash from here on
 		// leaves this session not resumable.
 		if err := c.r.store.BindTurn(t.id, c.key, t.who, h, sess.ID); err != nil {
@@ -1377,6 +1378,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			} else {
 				nativePrompt = sessionNote + "\n\n" + nativePrompt
 			}
+		}
+		if ownerInputs != "" {
+			turnContext = strings.TrimSpace(ownerInputs + "\n\n" + turnContext)
 		}
 		var notify func(string)
 		if t.job == nil {
