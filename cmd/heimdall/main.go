@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"os/user"
@@ -180,19 +181,22 @@ func run(args []string) error {
 	}
 	r := router.New(router.Options{Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
 	if cfg.Scheduler.On() && cfg.Scheduler.Control != nil {
-		u, err := user.Lookup(cfg.RunAs[core.RoleOwner].User)
+		listener, err := func() (*net.UnixListener, error) {
+			u, err := user.Lookup(cfg.RunAs[core.RoleOwner].User)
+			if err != nil {
+				return nil, err
+			}
+			uid, err := strconv.ParseUint(u.Uid, 10, 32)
+			if err != nil {
+				return nil, err
+			}
+			return jobs.ListenControl(ctx, cfg.Scheduler.Control.Owner, uint32(uid), filepath.Join(cfg.DataDir, "scheduler-control"))
+		}()
 		if err != nil {
-			return err
+			logger.Printf("scheduler control unavailable (router continues): %v", err)
+		} else {
+			defer listener.Close()
 		}
-		uid, err := strconv.ParseUint(u.Uid, 10, 32)
-		if err != nil {
-			return err
-		}
-		listener, err := jobs.ListenControl(ctx, cfg.Scheduler.Control.Owner, uint32(uid), filepath.Join(cfg.DataDir, "scheduler-control"))
-		if err != nil {
-			return err
-		}
-		defer listener.Close()
 	}
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)

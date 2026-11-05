@@ -26,6 +26,7 @@ const clientVersion = "0.1.0"
 
 type codexBridge struct {
 	employee  bool
+	monitor   bool
 	warm      bool
 	progress  func(Progress)
 	telemetry progressTracker
@@ -54,7 +55,7 @@ type codexBridge struct {
 	failure, human            string
 }
 
-func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, s Session, notes ...string) (*codexBridge, error) {
+func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []Image, s Session, monitor bool, notes ...string) (*codexBridge, error) {
 	// A real OS stdin pipe lets Cmd.Wait finish on process EOF.
 	out, err := turnInput(cmd)
 	if err != nil {
@@ -62,6 +63,7 @@ func newCodexBridge(ctx context.Context, cmd *exec.Cmd, prompt string, images []
 	}
 	b := &codexBridge{employee: envValue(cmd.Env, "PI_RESTRICTED_EXTERNAL_USER") == "1", warm: isWarmInput(out), prompt: prompt, images: images, cwd: cmd.Dir, ctx: ctx, input: out, ready: make(chan struct{}), answered: make(chan struct{}), steering: map[string]chan SteerOutcome{}}
 	b.contextRequests = map[string]map[string]any{}
+	b.monitor = monitor
 	if len(notes) > 0 {
 		b.instructions = notes[0]
 	}
@@ -262,9 +264,13 @@ func (b *codexBridge) event(raw []byte) {
 			}
 			params["approvalPolicy"] = "on-request"
 			params["approvalsReviewer"] = "auto_review"
-			if b.employee {
+			if b.employee || b.monitor {
 				params["approvalPolicy"] = "never"
 				delete(params, "approvalsReviewer")
+			}
+			if b.monitor {
+				params["sandbox"] = "read-only"
+				params["environments"] = []any{}
 			}
 			b.send(map[string]any{"id": 2, "method": method, "params": params})
 		case "2":

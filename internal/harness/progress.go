@@ -11,6 +11,7 @@ type Progress struct {
 	Phase, Text, Tool string
 	Reset             bool
 	Error             bool
+	Completed         bool // terminal native tool event; starts never prove success
 	// SignIn names the service a tool's result said needs a sign-in: a
 	// structured auth_needed result (details.status), which Pi reports as an
 	// ordinary tool result, not an error. Scheduled runs fail on it.
@@ -21,11 +22,12 @@ type Progress struct {
 // internal/client/{pirpc,claudestream,codexroom}.go. Only public summary
 // fields are used for Codex; raw reasoning text is never consumed.
 type progressTracker struct {
-	open    bool
-	started bool
-	key     string
-	index   int
-	text    string
+	open        bool
+	started     bool
+	key         string
+	index       int
+	text        string
+	claudeTools map[string]string
 }
 
 func (t *progressTracker) start(key string, index int, emit func(Progress)) {
@@ -84,7 +86,11 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		Params                 json.RawMessage
 		Message                struct {
 			Role    string
-			Content []struct{ Type, Name, Thinking string }
+			Content []struct {
+				Type, ID, Name, Thinking string
+				ToolUseID                string `json:"tool_use_id"`
+				IsError                  bool   `json:"is_error"`
+			}
 		}
 	}
 	if json.Unmarshal(raw, &e) != nil {
@@ -103,7 +109,7 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		case "tool_execution_start":
 			emit(Progress{Phase: "tools", Tool: e.ToolName})
 		case "tool_execution_end":
-			emit(Progress{Phase: "tools", Tool: e.ToolName, Error: e.IsError, SignIn: signIn(e.ToolName, e.Result)})
+			emit(Progress{Phase: "tools", Tool: e.ToolName, Completed: true, Error: e.IsError, SignIn: signIn(e.ToolName, e.Result)})
 		case "message_update":
 			var u struct {
 				Type, Delta, Content string
@@ -129,8 +135,22 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 			}
 		}
 	case "claude":
+		if e.Type == "user" {
+			for _, b := range e.Message.Content {
+				if name := t.claudeTools[b.ToolUseID]; b.Type == "tool_result" && name != "" {
+					emit(Progress{Phase: "tools", Tool: name, Completed: true, Error: b.IsError})
+					delete(t.claudeTools, b.ToolUseID)
+				}
+			}
+		}
 		if e.Type == "assistant" {
 			for _, b := range e.Message.Content {
+				if b.Type == "tool_use" && b.ID != "" {
+					if t.claudeTools == nil {
+						t.claudeTools = map[string]string{}
+					}
+					t.claudeTools[b.ID] = b.Name
+				}
 				if b.Type == "thinking" && b.Thinking != "" {
 					emit(Progress{Phase: "thinking", Text: tailProgress(b.Thinking, 2000), Reset: true})
 				}
@@ -178,8 +198,11 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 	case "codex":
 		var p struct {
 			Item struct {
-				ID, Type, Name, Tool string
-				Summary              json.RawMessage
+				ID, Type, Name, Tool, Server, Status string
+				Summary                              json.RawMessage
+				Error                                json.RawMessage
+				Result                               json.RawMessage
+				ExitCode                             *int
 			}
 			ItemID       string
 			SummaryIndex *int
@@ -187,6 +210,20 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		}
 		if json.Unmarshal(e.Params, &p) != nil {
 			return
+		}
+		// Installed Codex 0.166.0 v2.ThreadItem (generated schema): MCP
+		// calls carry server/tool/status, not a synthesized name field.
+		tool := p.Item.Name
+		if p.Item.Type == "mcpToolCall" {
+			tool = ""
+			if p.Item.Server != "" && p.Item.Tool != "" {
+				tool = "mcp__" + p.Item.Server + "__" + p.Item.Tool
+			}
+		} else if tool == "" {
+			tool = p.Item.Tool
+			if tool == "" {
+				tool = p.Item.Type
+			}
 		}
 		switch e.Method {
 		case "item/started":
@@ -196,13 +233,6 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 			} else if p.Item.Type == "agentMessage" {
 				emit(Progress{Phase: "finalizing"})
 			} else {
-				tool := p.Item.Name
-				if tool == "" {
-					tool = p.Item.Tool
-				}
-				if tool == "" {
-					tool = p.Item.Type
-				}
 				emit(Progress{Phase: "tools", Tool: tool})
 			}
 		case "item/reasoning/summaryPartAdded":
@@ -233,7 +263,12 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 			} else if p.Item.Type == "agentMessage" {
 				emit(Progress{Phase: "finalizing"})
 			} else {
-				emit(Progress{Phase: "tools", Tool: p.Item.Type})
+				var result struct {
+					IsError bool `json:"isError"`
+				}
+				_ = json.Unmarshal(p.Item.Result, &result)
+				failed := p.Item.Status != "completed" || len(p.Item.Error) > 0 && string(p.Item.Error) != "null" || result.IsError || p.Item.ExitCode != nil && *p.Item.ExitCode != 0
+				emit(Progress{Phase: "tools", Tool: tool, Completed: true, Error: failed})
 			}
 		}
 	}

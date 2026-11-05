@@ -12,14 +12,17 @@ import (
 // every operation independently of the catalog or model.
 var ControlTool = map[string]any{
 	"name":        "heimdall_scheduler",
-	"description": "Manage the existing Heimdall scheduler as the deployment-bound owner. Discover/list/show/history/checkpoint; propose create/edit/remove for real human confirmation in the bound private chat; run/pause/resume/stop existing jobs. No identity or confirmation arguments. For a mutation generate one stable request_id; reuse it after an uncertain response, never create another retry id.",
+	"description": "Manage the existing Heimdall scheduler as the deployment-bound owner. Discover/list/show/history/checkpoint; propose create/edit/remove for real human confirmation in the bound private chat; run/pause/resume/stop existing jobs. Acknowledge an exact failed receipt after destination reconciliation, without replaying or hiding history. No identity or confirmation arguments. For a mutation generate one stable request_id; reuse it after an uncertain response, never create another retry id.",
 	"inputSchema": map[string]any{
 		"type": "object", "additionalProperties": false, "required": []string{"action"},
 		"properties": map[string]any{
-			"action":     map[string]any{"type": "string", "enum": []string{"discover", "list", "show", "history", "checkpoint", "create", "edit", "remove", "run", "pause", "resume", "stop"}},
-			"id":         map[string]any{"type": "string", "maxLength": 64},
-			"definition": map[string]any{"type": "object", "description": "Existing canonical job definition, or changed fields for edit. Never a creator/role; unknown fields rejected by scheduler."},
-			"request_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
+			"action":      map[string]any{"type": "string", "enum": []string{"discover", "list", "show", "history", "checkpoint", "create", "edit", "remove", "run", "pause", "resume", "stop", "acknowledge"}},
+			"key":         map[string]any{"type": "string", "maxLength": 128},
+			"revision":    map[string]any{"type": "string", "maxLength": 128},
+			"outbound_id": map[string]any{"type": "integer", "minimum": 1},
+			"id":          map[string]any{"type": "string", "maxLength": 64},
+			"definition":  map[string]any{"type": "object", "description": "Existing canonical job definition, or changed fields for edit. Never a creator/role; unknown fields rejected by scheduler."},
+			"request_id":  map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
 		},
 	},
 	"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},

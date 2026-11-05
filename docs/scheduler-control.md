@@ -22,9 +22,11 @@ authority (`ADMIN_USER_IDS` on hub) on **every call**, including replayed calls.
 Unknown/employee/revoked/unbound callers fail closed. No new admission list.
 
 Endpoint: `<data_dir>/scheduler-control/control.sock`, private directory 0700,
-socket 0600. Only the existing Heimdall process hosts it. An existing socket is
-never silently removed. After a crash, an operator must verify no process owns
-the endpoint before removing a stale socket during the approved recovery window.
+socket 0600. Only the existing Heimdall process hosts it. Startup refuses non-sockets, symlinks and foreign owners. Under the validated
+private directory, it recovers an owned socket only after a bounded dial proves
+ECONNREFUSED and a second Lstat verifies the same inode. A live listener, timeout
+or other error never permits removal. Control errors are logged as unavailable;
+the otherwise-functional router continues.
 Keep parent data/config directories protected too; no employee traversal rights.
 
 The control binding selects one owner and that owner's latest recorded private
@@ -44,7 +46,7 @@ CLI accepts exactly one JSON object. MCP exposes one tool, `heimdall_scheduler`,
 with the same arguments:
 
 ```json
-{"action":"discover|list|show|history|checkpoint|create|edit|run|pause|resume|stop|remove","id":"optional job id","definition":{},"request_id":"stable unique mutation id"}
+{"action":"discover|list|show|history|checkpoint|create|edit|run|pause|resume|stop|remove|acknowledge","id":"optional job id","definition":{},"request_id":"stable unique mutation id"}
 ```
 
 Use `definition` only for create or edit. Create uses the existing full job
@@ -59,7 +61,7 @@ Create/edit/remove prepare ordinary 24-hour drafts and queue the normal private
 confirmation card atomically. Only the same real person in the same platform
 conversation can confirm. The adapter cannot confirm, synthesize a yes, or assert
 a repeat-safe rerun. Pause/resume/run/stop use existing canonical command changes;
-stop callbacks run after commit. No direct SQLite control from tools or CLI.
+stop callbacks run once after the original commit; a cached reply never stops a newer run. No direct SQLite control from tools or CLI.
 Normal chat owner creation/edit behavior is preserved.
 
 [Catalog entry](examples/scheduler-catalog.json) uses the standard stdio MCP
@@ -93,13 +95,25 @@ NO_UPDATE
 The outer example is illustrative: actual output has optional `NO_UPDATE` line
 followed by one `heimdall-checkpoint` fenced block. With alerts, omit NO_UPDATE.
 No other final text or files. A bare NO_UPDATE cannot prove scan completion and
-fails rather than advancing state. `complete:false`, invalid/stale/future/backward
-watermarks, missing required native tools, approvals, unclean results and failed
-scans do not commit checkpoint progress or silently claim quiet success.
+fails rather than advancing state. Valid partial coverage uses `complete:false`,
+`through` equal to the prior successful watermark (empty initially), and `cause`
+one of `pagination`, `budget`, `coverage`, `overflow`. State/cursors and findings
+commit atomically; the global successful watermark stays unchanged. The stored
+scan upper bound stays fixed across subsequent partial runs/restarts. Partial
+runs have explicit `partial` status/cause and never claim quiet/full success.
+Only an actual state/cursor or new finding change resets consecutive failures;
+unchanged partials emit a fixed stall notice and reach normal `pause_after`.
+Invalid/stale/future/backward watermarks, missing successful required native tools,
+any native tool failure, approvals, auth denial and unclean results do not commit.
+Tool starts are telemetry only; `expect.tools` uses completed successful calls.
+Codex MCP names use native `server`/`tool`, as `mcp__<server>__<tool>`.
 
 `state` is workflow-owned JSON, at most 24 KiB; Heimdall does not interpret Slack
-triage rules. Maximum 20 alerts per scan, 4000 bytes per text, stable key/revision
-at most 128 bytes each, 512 current alert keys. Exceeding limits fails without
+triage rules. At most 512 active receipt revisions/findings, 4000 bytes per text,
+stable key/revision at most 128 bytes each; the result block is bounded at 2.2 MB.
+All findings receive durable outbox IDs in the same transaction. At most twenty
+new/held rows become pending per clean scan; overflow stays `held` across restart
+until later scans release it, retaining original text and IDs. Exceeding limits fails without
 advancing the watermark. `retire` may name up to 20 resolved keys with confirmed
 sent receipts; pending/failed/ambiguous receipts cannot retire. Workflow must keep
 enough minimal resolved fingerprints for safe overlapping source reads.
@@ -107,25 +121,39 @@ enough minimal resolved fingerprints for safe overlapping source reads.
 Checkpoint state, successful run and new alert outbox rows commit in **one existing
 turn transaction**. The store independently checks job/creator/run/turn binding,
 running state, version and watermark. A stop fence discards a late checkpoint.
-One current receipt per job+creator+alert key refers to the existing outbox row.
-Same key/revision/text reuses it regardless of pending/sending/sent/failed status;
-changing text without a material revision fails. A material revision can enqueue
-a new alert. Retired outbox rows remain normal delivery records.
+Receipts are keyed by job+creator+key+revision. Same key/revision always reuses
+the original stored text and outbox ID, even when a later model paraphrases it.
+A material revision can enqueue a new alert while older unresolved receipts
+remain visible. Retired sent fingerprints remain stored for deduplication;
+retired outbox rows remain normal delivery records.
 
 Reader progress may advance after a complete scan while delivery is pending:
 findings remain in workflow state and durable outbox/receipts. This prevents a
 failed send from losing the scan. Receipts distinguish pending, sending, sent and
-failed; only the router's successful whole-row delivery marks sent. Slack's existing
+failed (plus held overflow); only the router's successful whole-row delivery marks sent. Slack's existing
 stable row/chunk IDs and ambiguous-send reconciliation remain delivery owner.
 Partial chunk delivery never becomes a confirmed receipt. Do not create a new
-alert key/revision to replay an uncertain or permanently failed delivery; root
-must reconcile the actual destination first. Transport remains at-least-once;
+alert key/revision to replay an uncertain or permanently failed delivery. A
+terminal alert failure atomically queues one fixed notice to the creator's private
+bot chat with the same delivery window. Failure of that notice cannot recurse.
+Root must reconcile the actual destination first. Then this authenticated control
+action acknowledges exactly one failed receipt without changing/replaying its
+outbox row; failed history remains visible and the operator action is audited:
+
+```json
+{"action":"acknowledge","id":"JOB_ID","key":"ITEM_KEY","revision":"REVISION","outbound_id":123,"request_id":"STABLE_ACK_ID"}
+```
+
+Pending, held and sending receipts cannot be acknowledged or retired. A new
+revision cannot hide an older failed receipt. Transport remains at-least-once;
 an unresolvable crash/ack gap can still duplicate a platform message.
 
 Optional `delivery_window` gates run starts and outbox attempts, including retries
 and each Slack text chunk. End time is exclusive. Closed windows defer pending
 rows to next opening, including weekends/DST; live chat replies can bypass deferred
-windowed rows. An in-flight platform request may complete after cutoff; no transport
+windowed rows. Drain excludes only pending rows whose window is currently closed;
+in-window backoff, ordinary future retries and every sending row still count.
+Deferred rows survive restart. An in-flight platform request may complete after cutoff; no transport
 can retract a successful request already accepted before cutoff.
 
 ## Prepared owner Slack workflow
@@ -139,12 +167,41 @@ owner_slack opt-in. Schedule union is exactly:
 {"cron":["0,30 12-20 * * MON-FRI","45 20 * * MON-FRI"]}
 ```
 
+Monitor timeout is 10 minutes, below the 15-minute gap before closing.
 Zone Europe/Kyiv: opening 12:00, every half-hour through 20:30, closing 20:45.
 Alert attempts only Monday–Friday 12:00–21:00. Opening catches up since last
 successful scan, including overnight/weekend. Genuine discovery and edited-message
 coverage must be demonstrated with the actual connector; unsupported coverage is
 incomplete, never a quiet success. Bootstrap requires complete available backlog
 discovery, not an invented 24-hour cutoff. No raw DM archive or secrets in state.
+
+Both prepared definitions require `native_profile:"owner_slack_read"`. This is a
+per-launch owner Codex profile, leaving other owner turns/jobs in their existing
+automatic mode. It uses native `app/list` and `app/read` metadata (no model or
+business tool) and non-secret `config/read` app/tool names to discover exact Slack tool IDs,
+explicitly disables other Apps
+including configured-but-unlisted apps and inherited raw-name/title per-tool
+overrides, defaults Slack tools off, and enables
+only recognized read/search/discovery tools. It rechecks native effective
+`isEnabled` metadata before allowing the turn. Unavailable/changed/ineffective
+metadata refuses launch. Runtime-generated allowlists default deny new tools;
+read-only metadata alone is not the prevention mechanism.
+
+All configured MCP servers are disabled except existing Memento with exact
+`enabled_tools=["recall"]`; scheduler management and other write MCPs are absent.
+Shell, delegation, plugin installation, browser/computer and capture hooks are
+disabled. Native read-only sandbox denies filesystem writes; no approvals or
+alternate environments are permitted. Native apply_patch may remain visible in
+0.166.0, but its filesystem effects are denied by this sandbox. No generic native
+tool replay or new proxy is added. `MEMENTO_PROCESSING=1` is set independently by
+the profile and stated in native launch context; the probe does not use a shell
+to inspect it. Capture-off environment is checked in the fake launch regression.
+
+Configuration basis checked 2026-11-05: [official Codex config reference](https://learn.chatgpt.com/docs/config-file/config-reference),
+[pinned 0.166.0 app policy](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/connectors/src/app_tool_policy.rs),
+and installed generated v2 AppConfig/AppToolSummary/ThreadItem schemas. Native
+Apps metadata availability and actual Slack/recall reads remain activation checks;
+fakes and parser checks do not prove the live connector works.
 
 Only the captured owner private Bezos DM receives Heimdall bot output. The model
 never posts, reacts, edits or sends as the owner via Slack connector tools. Root
@@ -171,8 +228,8 @@ not itself prove manual recall works. No harness policy was weakened.
 4. `{"action":"run","id":"<probe-id>","request_id":"<unique-run-id>"}` runs a
    real **scheduled Codex profile**, fresh session, nonprivate harness scope,
    capture off. Probe must actually read the selected Slack thread, call native
-   `mcp__memento__recall`, and verify capture sentinel without revealing private
-   source content. Tool visibility alone is not acceptance. Any native approval,
+   `mcp__memento__recall`, and use the enforced capture-off launch context without revealing private
+   source content. Independently inspect the launch receipt for capture-off env. Tool visibility alone is not acceptance. Any native approval,
    auth failure or missing capability ends proof; do not log in or bypass it.
 5. `{"action":"history","id":"<probe-id>"}` must report success, and
    `{"action":"checkpoint","id":"<probe-id>"}` must show advanced watermark,
@@ -194,7 +251,8 @@ GOMAXPROCS=2 go vet -p 2 ./...
 GOMAXPROCS=2 go test -race -p 2 ./...
 ```
 
-Schema migration adds checkpoint/receipt/control tables only, through normal
+Schema migration adds/resumes checkpoint range/status and retains per-revision
+receipt/acknowledgement/notice fields in the existing store, through normal
 store open. No production DB edited by this implementation task. Before an approved
 deployment, use the existing operational backup procedure for a consistent store
 backup. To disable the extension, pause the monitor, remove the catalog entry and
@@ -203,3 +261,29 @@ binaries reject a newer schema version: full binary rollback requires the matchi
 consistent pre-upgrade store backup; restoring it loses subsequent writes. Never
 edit SQLite/version metadata to force rollback. No deployment or rollback executed
 here.
+
+
+## Narrow Pi Durable reliability adoption
+
+Inspected pinned public Pi Durable 1.5 source only; no package installed or runtime
+ported: [effect sandwich and unknown commit](https://github.com/earendil-works/pi/blob/5a31a6d5f418ae6591d219bbaf2f45fe37ff4ee2/packages/durable/docs/spec.md),
+[stored/current safe-replay checks](https://github.com/earendil-works/pi/blob/5a31a6d5f418ae6591d219bbaf2f45fe37ff4ee2/packages/durable/src/harness/tool.ts#L175),
+[stable schedule submission ID](https://github.com/earendil-works/pi-durable-cloudflare/blob/fc596b2422ac9fe303bd17d7b538f78c0d958810/src/schedule.ts#L235).
+
+Heimdall reuses its existing job/outbox transactions for durable intent, external
+send and durable receipt; stable control request IDs survive lost replies/reopen.
+Partial cursors are now distinct from the completed watermark. Unknown sends are
+never promoted to success or re-created as fresh alerts. Existing persisted
+`next_at`/`not_before` retry deadlines and retry eligibility stay unchanged; no
+model-driven successor scheduling, stream batching or generic tool replay added.
+Repeated no-progress partials visibly stall and pause, matching the current
+Durable principle of ending repeated crash loops rather than old parked-task
+behavior. Job-specific errors do not shut down the hub.
+
+Adoption evidence: `TestLostControlReplyReopenAndCachedStopCannotKillNewRun`,
+`TestCheckpointOverflowParaphraseAndCrashBoundary`,
+`TestCheckpointOutboxPrecommitFailureRollsBackAndReopenKeepsReceipt`,
+`TestPartialBootstrapResumesAcrossReopenAndStalls`, and
+`TestDrainCountsOnlyEligibleWindowedPendingAndAllInFlight`; existing outbox
+stable row/chunk reconciliation remains the delivery mechanism. These are fake
+and local transaction regressions, not live platform delivery claims.

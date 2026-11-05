@@ -66,19 +66,19 @@ func TestCheckpointDurableReceiptsAndDuplicateSuppression(t *testing.T) {
 	if cp.Receipts[0].Status != store.OutFailed || cp.Receipts[0].Outbound != idOut {
 		t.Fatal("failed send replayed or hidden", cp)
 	}
-	if out, ok, _ := r.st.NextOutbound("telegram"); ok {
-		t.Fatal("duplicate notification queued", out)
+	if notices := r.sent(); len(notices) != 1 || !strings.Contains(notices[0].Text, "delivery failed") {
+		t.Fatal("missing single terminal failure notice", notices)
 	}
 	alerts[0].Revision = "deadline_changed"
 	alerts[0].Text = "Action: reply; deadline changed (synthetic)."
 	finish(alerts)
 	cp, _ = r.st.Checkpoint(id, boss.Key())
-	if cp.Receipts[0].Outbound == idOut || cp.Receipts[0].Status != store.OutPending {
+	if len(cp.Receipts) != 2 || cp.Receipts[0].Outbound != idOut || cp.Receipts[0].Status != store.OutFailed || cp.Receipts[1].Outbound == idOut || cp.Receipts[1].Status != store.OutPending {
 		t.Fatal("material change suppressed", cp)
 	}
-	_ = r.st.Sent(cp.Receipts[0].Outbound)
+	_ = r.st.Sent(cp.Receipts[1].Outbound)
 	cp, _ = r.st.Checkpoint(id, boss.Key())
-	if cp.Receipts[0].Status != store.OutSent {
+	if cp.Receipts[1].Status != store.OutSent {
 		t.Fatal(cp)
 	}
 	quiet := finish(nil)
@@ -230,5 +230,24 @@ func TestRetirementRequiresConfirmedReceipt(t *testing.T) {
 	cp, _ = r.st.Checkpoint(id, boss.Key())
 	if cp.Version != 2 || len(cp.Receipts) != 0 {
 		t.Fatal("resolved confirmed receipt retained", cp)
+	}
+}
+
+func TestRetiredRevisionCannotFakePartialProgress(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"scan","schedule":{"every":"1h"},"harness":"codex","prompt":"synthetic","quiet":true,"checkpoint":true}`)
+	r.run(id)
+	r.finish(checkpointAnswer(0, true, r.now.Format(time.RFC3339Nano), []store.Alert{{Key: "item", Revision: "v1", Text: "original"}}), Outcome{Harness: "codex"})
+	r.sent()
+	cp, _ := r.st.Checkpoint(id, boss.Key())
+	state := json.RawMessage(`{"resolved":["item"]}`)
+	r.run(id)
+	r.finish(resultBlock(store.CheckpointUpdate{Version: cp.Version, Complete: true, Through: cp.Through, State: state, Retire: []string{"item"}}), Outcome{Harness: "codex"})
+	cp, _ = r.st.Checkpoint(id, boss.Key())
+	r.run(id)
+	e := r.finish(resultBlock(store.CheckpointUpdate{Version: cp.Version, Through: cp.Through, Cause: "coverage", State: state, Alerts: []store.Alert{{Key: "item", Revision: "v1", Text: "paraphrase"}}}), Outcome{Harness: "codex"})
+	cp, _ = r.st.Checkpoint(id, boss.Key())
+	if e.Run.Progress || len(cp.Receipts) != 0 || e.Run.State != store.RunPartial {
+		t.Fatal(e.Run, cp)
 	}
 }

@@ -46,6 +46,7 @@ const (
 // Outbound states.
 const (
 	OutPending = "pending"
+	OutHeld    = "held"
 	OutSending = "sending"
 	OutSent    = "sent"
 	OutFailed  = "failed"
@@ -155,6 +156,13 @@ ALTER TABLE turns ADD COLUMN ready INTEGER NOT NULL DEFAULT 0;`,
 	`CREATE TABLE job_checkpoints(job_id TEXT PRIMARY KEY,creator TEXT NOT NULL,version INTEGER NOT NULL,through_at TEXT NOT NULL,state TEXT NOT NULL,run_id INTEGER NOT NULL);
 CREATE TABLE job_alerts(job_id TEXT NOT NULL,creator TEXT NOT NULL,key TEXT NOT NULL,revision TEXT NOT NULL,outbound_id INTEGER NOT NULL,PRIMARY KEY(job_id,creator,key));
 CREATE TABLE scheduler_controls(creator TEXT NOT NULL,request_id TEXT NOT NULL,digest TEXT NOT NULL,operator_uid INTEGER NOT NULL,action TEXT NOT NULL,job_id TEXT NOT NULL,response TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(creator,request_id));`,
+	`ALTER TABLE job_checkpoints ADD COLUMN scan_through TEXT NOT NULL DEFAULT '';
+ALTER TABLE job_checkpoints ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE job_checkpoints ADD COLUMN cause TEXT NOT NULL DEFAULT '';
+ALTER TABLE job_alerts RENAME TO job_alerts_old;
+CREATE TABLE job_alerts(job_id TEXT NOT NULL,creator TEXT NOT NULL,key TEXT NOT NULL,revision TEXT NOT NULL,outbound_id INTEGER NOT NULL,retired INTEGER NOT NULL DEFAULT 0,acknowledged_at INTEGER NOT NULL DEFAULT 0,failure_notice INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(job_id,creator,key,revision));
+INSERT INTO job_alerts(job_id,creator,key,revision,outbound_id) SELECT job_id,creator,key,revision,outbound_id FROM job_alerts_old;
+DROP TABLE job_alerts_old;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -460,8 +468,15 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 	defer tx.Rollback()
 	if e.Run != nil {
 		var state string
-		if err = tx.QueryRow(`SELECT state FROM job_runs WHERE id=?`, e.Run.ID).Scan(&state); err != nil {
+		var current bool
+		if err = tx.QueryRow(`SELECT r.state,j.version=r.version FROM job_runs r JOIN jobs j ON j.id=r.job_id WHERE r.id=?`, e.Run.ID).Scan(&state, &current); err != nil {
 			return 0, err
+		}
+		if e.Checkpoint != nil && !current && state != RunCancelled {
+			e.Checkpoint = nil
+			e.State, e.ItemState, e.Clean = TurnFailed, InFailed, false
+			e.Reply, e.Files, e.Notices = nil, nil, nil
+			e.Run = &RunEnd{ID: e.Run.ID, Job: e.Run.Job, State: RunFailed, Cause: "workflow checkpoint: job version changed"}
 		}
 		if state == RunCancelled {
 			e.Checkpoint = nil
@@ -756,8 +771,36 @@ func (s *Store) Retry(id int64, next time.Time, why string) error {
 
 // Failed records a permanent delivery failure.
 func (s *Store) Failed(id int64, why string) error {
-	_, err := s.db.Exec(`UPDATE outbound SET state=?,error=? WHERE id=?`, OutFailed, clip(why), id)
-	return err
+	return s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE outbound SET state=?,error=? WHERE id=?`, OutFailed, clip(why), id); err != nil {
+			return err
+		}
+		var job, creator, extra string
+		var k core.ConvKey
+		var notice int64
+		err := tx.QueryRow(`SELECT a.job_id,a.creator,a.failure_notice,j.created_iface,j.created_chat,j.created_thread,o.extra FROM job_alerts a JOIN jobs j ON j.id=a.job_id AND j.creator=a.creator JOIN outbound o ON o.id=a.outbound_id WHERE a.outbound_id=? AND j.created_private=1`, id).Scan(&job, &creator, &notice, &k.Interface, &k.Chat, &k.Thread, &extra)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && notice != 0 {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var x outExtra
+		if extra != "" {
+			if err := json.Unmarshal([]byte(extra), &x); err != nil {
+				return err
+			}
+		}
+		// Fixed, private, windowed, once per receipt. This row is not an alert,
+		// so its own terminal failure cannot recursively create a notice.
+		body := fmt.Sprintf("Workflow alert delivery failed. Job %s, outbound %d. Inspect checkpoint receipts; explicitly acknowledge this failed receipt after reconciliation. No automatic replay. — heimdall", job, id)
+		n, err := enqueue(tx, core.Outbound{Conv: k, Text: body, Window: x.Window})
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE job_alerts SET failure_notice=? WHERE job_id=? AND creator=? AND outbound_id=?`, n, job, creator, id)
+		return err
+	})
 }
 
 // Undelivered counts replies not yet delivered or failed.
@@ -765,6 +808,29 @@ func (s *Store) Undelivered() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT count(*) FROM outbound WHERE state IN (?,?)`, OutPending, OutSending).Scan(&n)
 	return n, err
+}
+
+// Closed-window pending deliveries are durable deferred work, not in-flight.
+// In-window backoff and all sending rows still block drain.
+func (s *Store) drainReplies(at time.Time) (int, error) {
+	rows, err := s.db.Query(`SELECT state,extra FROM outbound WHERE state IN (?,?)`, OutPending, OutSending)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var state, extra string
+		if err := rows.Scan(&state, &extra); err != nil {
+			return 0, err
+		}
+		var x outExtra
+		if state == OutPending && json.Unmarshal([]byte(extra), &x) == nil && x.Window != nil && x.Window.Validate() == nil && x.Window.Next(at).After(at) {
+			continue
+		}
+		n++
+	}
+	return n, rows.Err()
 }
 
 // Interrupted is a turn a restart cut off.

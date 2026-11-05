@@ -106,6 +106,33 @@ func TestScheduledRunDeliversToItsTarget(t *testing.T) {
 	}
 }
 
+func TestScheduledCodexRequiresSuccessfulRealShapedMCPCompletion(t *testing.T) {
+	for _, mode := range []string{"MCP_SCAN_OK", "MCP_SCAN_START_ONLY", "MCP_SCAN_ERROR", "MCP_SCAN_ISERROR"} {
+		t.Run(mode, func(t *testing.T) {
+			e := schedEnv(t, []string{"codex"}, "codex")
+			u := store.CheckpointUpdate{Complete: true, Through: time.Now().UTC().Format(time.RFC3339Nano), State: json.RawMessage(`{"checked":true}`), Alerts: []store.Alert{{Key: "request", Revision: "v1", Text: "synthetic alert"}}}
+			raw, _ := json.Marshal(u)
+			definition, _ := json.Marshal(map[string]any{"name": "native-check", "schedule": map[string]string{"every": "1h"}, "harness": "codex", "quiet": true, "checkpoint": true, "expect": map[string]any{"tools": []string{"mcp__codex_apps__slack_slack_read_thread"}}, "prompt": mode + " " + say("```heimdall-checkpoint\n"+string(raw)+"\n```")})
+			id := e.addJob(string(definition))
+			want(t, e.ask(ownerDM, "!job run "+id), "runs now")
+			out := e.reply()
+			cp, err := e.st.Checkpoint(id, tgOwner.Key())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "MCP_SCAN_OK" {
+				if cp.Version != 1 || len(cp.Receipts) != 1 || out.Text != "synthetic alert" {
+					t.Fatal(cp, out)
+				}
+			} else {
+				if cp.Version != 0 || len(cp.Receipts) != 0 || !strings.Contains(out.Text, "failed") {
+					t.Fatal("start/error satisfied success", cp, out)
+				}
+			}
+		})
+	}
+}
+
 func TestScheduledCheckpointDeliveryAndRedaction(t *testing.T) {
 	t.Setenv("HEIMDALL_TEST_TOKEN", "synthetic-checkpoint-secret")
 	e := schedEnv(t, []string{"codex"}, "codex")

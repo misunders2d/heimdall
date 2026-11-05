@@ -24,8 +24,11 @@ func TestMonitorTemplateScheduleAndCatchUpContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Harness != "codex" || !d.Checkpoint || !d.Quiet || !d.Paused || d.To != "here" {
+	if d.Harness != "codex" || !d.Checkpoint || !d.Quiet || !d.Paused || d.To != "here" || d.NativeProfile != "owner_slack_read" {
 		t.Fatal(d)
+	}
+	if timeout, err := time.ParseDuration(d.Timeout); err != nil || timeout >= 15*time.Minute {
+		t.Fatal("20:30 scan can consume closing slot", d.Timeout)
 	}
 	s, err := schedule.Compile(d.Schedule, d.TZ, r.now)
 	if err != nil {
@@ -72,7 +75,7 @@ func TestPreparedProbeAndCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, _, _ := parse(j)
-	if !d.Paused || !d.Checkpoint || d.Harness != "codex" || len(d.Expect.Tools) != 2 || !strings.Contains(d.Prompt, "<THREAD_REFERENCE>") {
+	if !d.Paused || !d.Checkpoint || d.Harness != "codex" || d.NativeProfile != "owner_slack_read" || len(d.Expect.Tools) != 2 || !strings.Contains(d.Prompt, "<THREAD_REFERENCE>") {
 		t.Fatal("unsafe or incomplete probe", d)
 	}
 	raw, err = os.ReadFile("../../docs/examples/scheduler-catalog.json")

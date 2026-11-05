@@ -527,23 +527,25 @@ type turn struct {
 
 	nativeText, nativeContext, instructions string
 
-	ready    bool
-	steerQ   []item
-	steering bool
-	steered  int
-	done     *doneEvent
-	stopped  atomic.Bool
-	mu       sync.Mutex
-	run      *harness.Run
-	typing   chan struct{}     // closed when the turn ends: stops the typing indicator
-	reset    bool              // the caller reset their sessions: keep none from this turn
-	launch   harness.Launch    // how the harness was launched (t.mu)
-	dir      *harness.TurnDir  // the turn's directory, once created (t.mu)
-	refs     map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
-	batch    []item            // the messages the turn started with
-	job      *scheduler.Turn   // a scheduled run's job; nil for a chat turn
-	tools    []string          // native tool names seen, for the job's expect checks (t.mu)
-	signIn   []string          // services a tool result said need a sign-in, for the job's outcome (t.mu)
+	ready        bool
+	steerQ       []item
+	steering     bool
+	steered      int
+	done         *doneEvent
+	stopped      atomic.Bool
+	mu           sync.Mutex
+	run          *harness.Run
+	typing       chan struct{}     // closed when the turn ends: stops the typing indicator
+	reset        bool              // the caller reset their sessions: keep none from this turn
+	launch       harness.Launch    // how the harness was launched (t.mu)
+	dir          *harness.TurnDir  // the turn's directory, once created (t.mu)
+	refs         map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
+	batch        []item            // the messages the turn started with
+	job          *scheduler.Turn   // a scheduled run's job; nil for a chat turn
+	tools        []string          // successful completed native tools, for expect (t.mu)
+	toolsStarted []string          // starts are progress only, never proof of success
+	toolErrors   []string
+	signIn       []string // services a tool result said need a sign-in, for the job's outcome (t.mu)
 }
 
 type readyEvent struct {
@@ -1349,8 +1351,16 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			// nothing is shown.
 			progress = func(p harness.Progress) {
 				t.mu.Lock()
-				if p.Tool != "" && len(t.job.Def.Expect.Tools) > 0 {
-					t.tools = append(t.tools, p.Tool)
+				if p.Tool != "" {
+					if !p.Completed {
+						t.toolsStarted = append(t.toolsStarted, p.Tool)
+					}
+					if p.Completed && !p.Error && p.SignIn == "" {
+						t.tools = append(t.tools, p.Tool)
+					}
+					if p.Completed && p.Error {
+						t.toolErrors = append(t.toolErrors, p.Tool)
+					}
 				}
 				if p.SignIn != "" && !slices.Contains(t.signIn, p.SignIn) {
 					t.signIn = append(t.signIn, p.SignIn)
@@ -1404,6 +1414,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		spec := harness.Spec{MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
 		if t.job != nil {
 			spec.OneShot, spec.Timeout = true, t.job.Timeout
+			spec.ReadOnlyMonitor = t.job.Def.NativeProfile == "owner_slack_read"
 			if t.job.Def.RerunOnTimeout {
 				// All candidates share this execution's limit. A rerun additionally
 				// shares the slot's absolute recovery deadline.
@@ -1838,7 +1849,7 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 // files go to the job's target, not to the run's own conversation.
 func (c *conv) jobEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEnd {
 	t.mu.Lock()
-	tools, signIn := t.tools, t.signIn
+	tools, signIn, toolErrors := t.tools, t.signIn, t.toolErrors
 	t.mu.Unlock()
 	files := make([]core.File, len(d.files))
 	for i, f := range d.files {
@@ -1847,7 +1858,7 @@ func (c *conv) jobEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEnd {
 	// Structured checkpoint state is persisted too; apply the same existing
 	// secret/callback redaction before the scheduler parses any result fields.
 	res.Answer = c.r.scrub(stripHarnessTag(res.Answer, d.harness))
-	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Identity: d.identity, Notes: d.notes, Files: files, Tools: tools, SignIn: signIn})
+	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Identity: d.identity, Notes: d.notes, Files: files, Tools: tools, ToolErrors: toolErrors, SignIn: signIn})
 	e.Harness, e.Session, e.Clean = d.harness, res.SessionID, e.State == store.TurnDone && !res.Unclean
 	if e.Reply != nil {
 		e.Reply.Text = c.r.scrub(e.Reply.Text)

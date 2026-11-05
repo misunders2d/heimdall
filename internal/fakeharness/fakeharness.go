@@ -79,6 +79,10 @@ func Main() {
 		return
 	}
 	if len(os.Args) > 3 && os.Args[1] == "mcp" && os.Args[2] == "list" {
+		if os.Getenv("FAKE_MONITOR_METADATA") == "1" {
+			fmt.Println(`[{"name":"memento"},{"name":"heimdall-scheduler"},{"name":"unexpected-owner-server"}]`)
+			os.Exit(0)
+		}
 		fmt.Println(`[{"name":"unexpected-owner-server"}]`)
 		os.Exit(0)
 	}
@@ -675,6 +679,20 @@ func (f *fake) codex() {
 	if !ok {
 		os.Exit(5)
 	}
+	for os.Getenv("FAKE_MONITOR_METADATA") == "1" && (start["method"] == "app/list" || start["method"] == "app/read" || start["method"] == "config/read") {
+		filtered := strings.Contains(strings.Join(os.Args, " "), "default_tools_enabled=false")
+		if start["method"] == "config/read" {
+			reply(start["id"], map[string]any{"config": map[string]any{"apps": map[string]any{"app-hidden": map[string]any{"enabled": !filtered, "tools": map[string]any{"inherited_write": map[string]bool{"enabled": true}}}, "app-slack": map[string]any{"enabled": true, "tools": map[string]any{"slack_new_write": map[string]bool{"enabled": !filtered}}}}}, "origins": map[string]any{}})
+		} else if start["method"] == "app/list" {
+			reply(start["id"], map[string]any{"data": []any{map[string]any{"id": "app-slack", "name": "Slack", "isEnabled": true}, map[string]any{"id": "app-github", "name": "GitHub", "isEnabled": !filtered}}, "nextCursor": nil})
+		} else {
+			reply(start["id"], map[string]any{"apps": []any{map[string]any{"id": "app-slack", "name": "Slack", "toolSummaries": []any{map[string]any{"name": "slack_slack_read_thread", "isReadOnly": true, "isEnabled": true}, map[string]any{"name": "slack_slack_search", "isReadOnly": true, "isEnabled": true}, map[string]any{"name": "slack_slack_post_message", "isReadOnly": false, "isEnabled": !filtered}}}}, "missingAppIds": []any{}})
+		}
+		start, ok = f.read()
+		if !ok {
+			return
+		}
+	}
 	params, _ := start["params"].(map[string]any)
 	thread := ""
 	switch start["method"] {
@@ -718,6 +736,22 @@ func (f *fake) codex() {
 		reply(turnReq["id"], map[string]any{"turn": map[string]any{"id": turnID}})
 		f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": turnID}}})
 		f.failPost()
+		if f.has("MCP_SCAN_") {
+			item := map[string]any{"id": "mcp-read", "type": "mcpToolCall", "server": "codex_apps", "tool": "slack_slack_read_thread", "status": "inProgress", "arguments": map[string]any{}}
+			f.emit(map[string]any{"method": "item/started", "params": map[string]any{"threadId": thread, "turnId": turnID, "item": item}})
+			if !f.has("MCP_SCAN_START_ONLY") {
+				item["status"] = "completed"
+				item["result"] = map[string]any{"content": []any{}}
+				if f.has("MCP_SCAN_ERROR") {
+					item["status"] = "failed"
+					item["error"] = map[string]any{"message": "synthetic failure"}
+				}
+				if f.has("MCP_SCAN_ISERROR") {
+					item["result"] = map[string]any{"content": []any{}, "isError": true}
+				}
+				f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": turnID, "item": item}})
+			}
+		}
 		if f.has("FINALFIRST") {
 			f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": turnID, "item": map[string]any{"id": "i0", "type": "agentMessage", "text": "early answer: " + lastLine(f.prompt), "phase": "final_answer"}}})
 		}

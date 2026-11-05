@@ -27,6 +27,9 @@ const ControlMaxBytes = 65536
 // ControlRequest deliberately has no identity, role, conversation, shell or
 // confirmation fields. These cannot be granted by tool arguments.
 type ControlRequest struct {
+	Key        string          `json:"key,omitempty"`
+	Revision   string          `json:"revision,omitempty"`
+	Outbound   int64           `json:"outbound_id,omitempty"`
 	Action     string          `json:"action"`
 	ID         string          `json:"id,omitempty"`
 	Definition json.RawMessage `json:"definition,omitempty"`
@@ -69,7 +72,11 @@ func (s *Scheduler) ListenControl(ctx context.Context, owner string, uid uint32,
 			return nil, err
 		}
 	}
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, "control.sock"), Net: "unix"})
+	path := filepath.Join(dir, "control.sock")
+	if err := recoverControlSocket(ctx, path, uid); err != nil {
+		return nil, err
+	}
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		return nil, err
 	} // never unlink a potentially live endpoint
@@ -92,6 +99,37 @@ func (s *Scheduler) ListenControl(ctx context.Context, owner string, uid uint32,
 		}
 	}()
 	return l, nil
+}
+
+// Only ECONNREFUSED proves an owned socket is stale. A timeout, permission
+// failure or a live listener never licenses unlinking somebody's endpoint.
+func recoverControlSocket(ctx context.Context, path string, uid uint32) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || info.Mode()&os.ModeSocket == 0 || (stat.Uid != uint32(os.Geteuid()) && stat.Uid != uid) {
+		return errors.New("scheduler control endpoint is not an owned Unix socket")
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", path)
+	if err == nil {
+		conn.Close()
+		return errors.New("scheduler control endpoint already has a live listener")
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("scheduler control endpoint not proven stale: %w", err)
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(info, current) {
+		return errors.New("scheduler control endpoint changed during stale check")
+	}
+	return os.Remove(path)
 }
 
 func peerUID(c *net.UnixConn) (uint32, error) {
@@ -186,7 +224,7 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) C
 	if len(req.Definition) > 16000 || len(req.ID) > 64 {
 		return fail(errors.New("control request too large"))
 	}
-	needsID := req.Action == "show" || req.Action == "history" || req.Action == "checkpoint" || req.Action == "edit" || req.Action == "remove" || req.Action == "run" || req.Action == "pause" || req.Action == "resume" || req.Action == "stop"
+	needsID := req.Action == "show" || req.Action == "history" || req.Action == "checkpoint" || req.Action == "edit" || req.Action == "remove" || req.Action == "run" || req.Action == "pause" || req.Action == "resume" || req.Action == "stop" || req.Action == "acknowledge"
 	if needsID && req.ID == "" {
 		return fail(errors.New("job id required"))
 	}
@@ -196,8 +234,15 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) C
 	if req.Action != "create" && req.Action != "edit" && len(req.Definition) > 0 {
 		return fail(errors.New("definition is only valid for create/edit"))
 	}
+	if req.Action == "acknowledge" {
+		if req.Key == "" || len(req.Key) > 128 || req.Revision == "" || len(req.Revision) > 128 || req.Outbound <= 0 {
+			return fail(errors.New("acknowledge requires exact key, revision and outbound_id"))
+		}
+	} else if req.Key != "" || req.Revision != "" || req.Outbound != 0 {
+		return fail(errors.New("receipt fields require acknowledge"))
+	}
 	if req.Action == "discover" {
-		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove. create/edit/remove prepare a draft in the bound private chat; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and deployment configuration."}
+		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge. acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the bound private chat; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and deployment configuration."}
 	}
 	if req.ID != "" {
 		j, ok, err := c.s.st.Job(req.ID)
@@ -231,9 +276,6 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) C
 	} else if ok {
 		var result ControlResult
 		_ = json.Unmarshal([]byte(saved), &result)
-		if req.Action == "stop" {
-			c.s.stopRun(req.ID)
-		}
 		return result
 	}
 	var change *store.JobChange
@@ -278,6 +320,9 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) C
 		result = ControlResult{Reply: c.s.card(who, j), DraftID: j.ID, Changed: true}
 		change = &store.JobChange{Add: &j}
 		outs = []core.Outbound{{Conv: who.Conv, Text: result.Reply}}
+	case "acknowledge":
+		change = &store.JobChange{Acknowledge: &store.AlertAcknowledgement{Job: req.ID, Creator: who.Principal.Key(), Key: req.Key, Revision: req.Revision, Outbound: req.Outbound}}
+		result = ControlResult{Reply: "Failed receipt acknowledged; history retained, nothing replayed. — heimdall", Changed: true}
 	case "run", "pause", "resume", "stop":
 		if req.ID == "" {
 			return fail(errors.New("job id required"))

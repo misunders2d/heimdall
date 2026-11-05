@@ -84,6 +84,47 @@ func TestProgressWiredIntoNativeAdapters(t *testing.T) {
 	}
 }
 
+func TestCodexNativeMCPCompletionEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, result, err string
+		failed                    bool
+	}{
+		{"success", "completed", `{"content":[]}`, `null`, false},
+		{"failure", "failed", `null`, `{"message":"synthetic"}`, true},
+		{"mcp_error", "completed", `{"content":[],"isError":true}`, `null`, true},
+		{"no_status", "", `{"content":[]}`, `null`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := codexTestBridge()
+			var got []Progress
+			b.progress = func(p Progress) { got = append(got, p) }
+			b.event([]byte(`{"method":"item/started","params":{"threadId":"t1","turnId":"turn-1","item":{"id":"m1","type":"mcpToolCall","server":"codex_apps","tool":"slack_slack_read_thread","status":"inProgress","arguments":{}}}}`))
+			if len(got) != 1 || got[0].Completed || got[0].Tool != "mcp__codex_apps__slack_slack_read_thread" {
+				t.Fatal("start counted/named incorrectly", got)
+			}
+			line := `{"method":"item/completed","params":{"threadId":"t1","turnId":"turn-1","item":{"id":"m1","type":"mcpToolCall","server":"codex_apps","tool":"slack_slack_read_thread","status":"` + tc.status + `","result":` + tc.result + `,"error":` + tc.err + `}}}`
+			b.event([]byte(line))
+			if len(got) != 2 || !got[1].Completed || got[1].Error != tc.failed || got[1].Tool != got[0].Tool {
+				t.Fatal(got)
+			}
+		})
+	}
+}
+
+func TestClaudeAndPiToolSuccessRequiresTerminalEvidence(t *testing.T) {
+	var tracker progressTracker
+	var got []Progress
+	emit := func(p Progress) { got = append(got, p) }
+	for _, raw := range []string{`{"type":"assistant","message":{"content":[{"id":"t1","type":"tool_use","name":"mcp__slack__read_thread"}]}}`, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false}]}}`} {
+		tracker.event("claude", []byte(raw), emit)
+	}
+	tracker.event("pi", []byte(`{"type":"tool_execution_start","toolName":"read"}`), emit)
+	tracker.event("pi", []byte(`{"type":"tool_execution_end","toolName":"read","isError":true}`), emit)
+	if len(got) != 4 || got[0].Completed || !got[1].Completed || got[1].Error || got[2].Completed || !got[3].Completed || !got[3].Error {
+		t.Fatal(got)
+	}
+}
+
 // A Pi tool result whose details say auth_needed (the employee Google
 // runtime's, an ordinary result) names the service needing a sign-in;
 // other results, and other harnesses' result fields, name none.
