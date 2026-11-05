@@ -289,7 +289,9 @@ func monitorArgs(ctx context.Context, l Launch) ([]string, error) {
 
 func monitorBaseArgs() []string {
 	args := []string{"--strict-config", "-c", `sandbox_mode="read-only"`, "-c", `approval_policy="never"`, "-c", `web_search="disabled"`, "-c", `agents.enabled=false`}
-	for _, f := range []string{"shell_tool", "multi_agent", "multi_agent_v2", "plugins", "hooks", "memories", "computer_use", "browser_use", "skill_mcp_dependency_install", "tool_suggest", "image_generation", "view_image", "js_repl", "code_mode", "code_mode_host", "executor_capability_discovery", "stable_environment_tools"} {
+	// Keep native policy hooks (including the shared APPEND_SYSTEM addendum).
+	// MEMENTO_PROCESSING=1 independently suppresses memory hooks/capture.
+	for _, f := range []string{"shell_tool", "multi_agent", "multi_agent_v2", "plugins", "memories", "computer_use", "browser_use", "skill_mcp_dependency_install", "tool_suggest", "image_generation", "view_image", "js_repl", "code_mode", "code_mode_host", "executor_capability_discovery", "stable_environment_tools"} {
 		args = append(args, "--disable", f)
 	}
 	return args

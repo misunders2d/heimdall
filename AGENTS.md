@@ -212,7 +212,10 @@ the `heimdall-live` unit.
     transaction that creates the run. Delivery is at-least-once.
   - Scheduled turns: their own conversation `sched:<job_id>`, delivering to
     the captured target; `Private=false`; no `owner_slack`;
-    `MEMENTO_PROCESSING=1` (never memory, no opt-in); a fresh session by
+    `MEMENTO_PROCESSING=1` (never automatic capture); explicit owner read-only
+    profiles may use native Memento recall and existing Codex Apps Slack reads.
+    Shared native policy hooks remain enabled; `owner_slack` stays live-only.
+    A fresh session by
     default; no progress messages; never a warm worker.
   - Retry only before the ready signal, except explicit owner-only
     `rerun_on_timeout` jobs: declared idempotent, fresh session, explicit

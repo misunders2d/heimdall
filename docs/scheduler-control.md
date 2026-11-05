@@ -189,8 +189,10 @@ read-only metadata alone is not the prevention mechanism.
 
 All configured MCP servers are disabled except existing Memento with exact
 `enabled_tools=["recall"]`; scheduler management and other write MCPs are absent.
-Shell, delegation, plugin installation, browser/computer and capture hooks are
-disabled. Native read-only sandbox denies filesystem writes; no approvals or
+Shell, delegation, plugin installation and browser/computer tools are disabled.
+Shared native policy hooks, including the hub addendum, remain enabled;
+`MEMENTO_PROCESSING=1` suppresses memory hooks and automatic capture.
+Native read-only sandbox denies filesystem writes; no approvals or
 alternate environments are permitted. Native apply_patch may remain visible in
 0.166.0, but its filesystem effects are denied by this sandbox. No generic native
 tool replay or new proxy is added. `MEMENTO_PROCESSING=1` is set independently by

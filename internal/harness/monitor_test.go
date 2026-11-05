@@ -52,6 +52,11 @@ func TestMonitorNativeProfileFiltersExactCatalogAndLeavesOwnerMode(t *testing.T)
 	if got.Memory != "1" {
 		t.Fatal("capture not disabled", got.Memory)
 	}
+	for i, arg := range got.Args {
+		if arg == "--disable" && i+1 < len(got.Args) && got.Args[i+1] == "hooks" {
+			t.Fatal("monitor disabled shared native policy hooks")
+		}
+	}
 	var out strings.Builder
 	b := codexTestBridge()
 	b.monitor = true
