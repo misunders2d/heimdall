@@ -152,6 +152,9 @@ ALTER TABLE turns ADD COLUMN ready INTEGER NOT NULL DEFAULT 0;`,
 	// An idempotent run's one re-run after a restart, recorded apart from
 	// its cause (docs/scheduler.md §7.2).
 	`ALTER TABLE job_runs ADD COLUMN replayed INTEGER NOT NULL DEFAULT 0;`,
+	`CREATE TABLE job_checkpoints(job_id TEXT PRIMARY KEY,creator TEXT NOT NULL,version INTEGER NOT NULL,through_at TEXT NOT NULL,state TEXT NOT NULL,run_id INTEGER NOT NULL);
+CREATE TABLE job_alerts(job_id TEXT NOT NULL,creator TEXT NOT NULL,key TEXT NOT NULL,revision TEXT NOT NULL,outbound_id INTEGER NOT NULL,PRIMARY KEY(job_id,creator,key));
+CREATE TABLE scheduler_controls(creator TEXT NOT NULL,request_id TEXT NOT NULL,digest TEXT NOT NULL,operator_uid INTEGER NOT NULL,action TEXT NOT NULL,job_id TEXT NOT NULL,response TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(creator,request_id));`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -188,15 +191,16 @@ func (x inExtra) apply(in *core.Inbound) {
 
 // outExtra is the outbound extra column: delivery details beyond the text.
 type outExtra struct {
-	TurnID    int64           `json:"turn_id,omitempty"`
-	Formatted bool            `json:"formatted,omitempty"`
-	Reactions []core.Reaction `json:"reactions,omitempty"`
-	File      *core.File      `json:"file,omitempty"`
+	Window    *core.DeliveryWindow `json:"delivery_window,omitempty"`
+	TurnID    int64                `json:"turn_id,omitempty"`
+	Formatted bool                 `json:"formatted,omitempty"`
+	Reactions []core.Reaction      `json:"reactions,omitempty"`
+	File      *core.File           `json:"file,omitempty"`
 }
 
 func outExtraOf(out core.Outbound) (string, error) {
-	x := outExtra{TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File}
-	if x.TurnID == 0 && !x.Formatted && len(x.Reactions) == 0 && x.File == nil {
+	x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File}
+	if x.Window == nil && x.TurnID == 0 && !x.Formatted && len(x.Reactions) == 0 && x.File == nil {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -204,6 +208,7 @@ func outExtraOf(out core.Outbound) (string, error) {
 }
 
 func (x outExtra) apply(out *core.Outbound) {
+	out.Window = x.Window
 	out.Formatted, out.Reactions, out.File, out.TurnID = x.Formatted, x.Reactions, x.File, x.TurnID
 }
 
@@ -429,19 +434,20 @@ func (s *Store) Unsteer(item int64) error {
 
 // TurnEnd is how a turn ended.
 type TurnEnd struct {
-	State     string // a Turn* state
-	Detail    string
-	ItemState string // state for the turn's running and steered messages
-	Harness   string // harness that ran it ("" if none became ready)
-	Session   string // native session to keep for Harness, if known
-	Clean     bool   // the session may be resumed
-	Forget    bool   // the caller reset their sessions: keep none for this conversation
-	Reply     *core.Outbound
-	Files     []core.Outbound // sent after Reply
-	Notices   []core.Outbound // Heimdall's own messages (job notices, draft cards), after Files
-	Run       *RunEnd         // a scheduled turn's run
-	Draft     *Job            // a job draft the answer proposed
-	Job       *JobChange      // activation of that draft, in this same transaction
+	Checkpoint *CheckpointUpdate // scheduled workflow state and its alerts, committed with the run
+	State      string            // a Turn* state
+	Detail     string
+	ItemState  string // state for the turn's running and steered messages
+	Harness    string // harness that ran it ("" if none became ready)
+	Session    string // native session to keep for Harness, if known
+	Clean      bool   // the session may be resumed
+	Forget     bool   // the caller reset their sessions: keep none for this conversation
+	Reply      *core.Outbound
+	Files      []core.Outbound // sent after Reply
+	Notices    []core.Outbound // Heimdall's own messages (job notices, draft cards), after Files
+	Run        *RunEnd         // a scheduled turn's run
+	Draft      *Job            // a job draft the answer proposed
+	Job        *JobChange      // activation of that draft, in this same transaction
 }
 
 // EndTurn settles a turn, its messages, its session binding and its reply
@@ -458,6 +464,7 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 			return 0, err
 		}
 		if state == RunCancelled {
+			e.Checkpoint = nil
 			e.State, e.ItemState, e.Clean = TurnCancelled, InCancelled, false
 			e.Reply, e.Files, e.Notices = nil, nil, nil
 			e.Run = &RunEnd{ID: e.Run.ID, Job: e.Run.Job, State: RunCancelled, Cause: "stopped by command"}
@@ -481,6 +488,11 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 	}
 	if e.Reply != nil {
 		if replyID, err = enqueue(tx, *e.Reply); err != nil {
+			return 0, err
+		}
+	}
+	if e.Checkpoint != nil {
+		if err = saveCheckpoint(tx, turn, who, e.Run, *e.Checkpoint); err != nil {
 			return 0, err
 		}
 	}
@@ -639,6 +651,9 @@ func (s *Store) Enqueue(out core.Outbound) (int64, error) {
 }
 
 func enqueue(tx *sql.Tx, out core.Outbound) (int64, error) {
+	if err := out.Window.Validate(); err != nil {
+		return 0, err
+	}
 	extra, err := outExtraOf(out)
 	if err != nil {
 		return 0, err
@@ -662,30 +677,48 @@ type OutboundRow struct {
 // undelivered reply, so each chat receives replies in order while other
 // chats proceed.
 func (s *Store) NextOutbound(iface string) (OutboundRow, bool, error) {
-	var r OutboundRow
-	var extra string
-	var created int64
-	err := s.db.QueryRow(`SELECT o.id,o.chat,o.thread,o.reply_to,o.text,o.extra,o.attempts,o.created_at FROM outbound o
+	return s.nextOutbound(iface, time.Now())
+}
+
+func (s *Store) nextOutbound(iface string, at time.Time) (OutboundRow, bool, error) {
+	for {
+		var r OutboundRow
+		var extra string
+		var created int64
+		err := s.db.QueryRow(`SELECT o.id,o.chat,o.thread,o.reply_to,o.text,o.extra,o.attempts,o.created_at FROM outbound o
 WHERE o.iface=? AND o.state=? AND o.next_at<=?
-AND NOT EXISTS(SELECT 1 FROM outbound p WHERE p.iface=o.iface AND p.chat=o.chat AND p.id<o.id AND p.state IN (?,?))
-ORDER BY o.id LIMIT 1`, iface, OutPending, now(), OutPending, OutSending).
-		Scan(&r.ID, &r.Conv.Chat, &r.Conv.Thread, &r.ReplyTo, &r.Text, &extra, &r.Attempts, &created)
-	if errors.Is(err, sql.ErrNoRows) {
-		return r, false, nil
-	}
-	if err != nil {
-		return r, false, err
-	}
-	r.Conv.Interface = iface
-	r.CreatedAt = time.UnixMilli(created)
-	if extra != "" {
-		var x outExtra
-		if err := json.Unmarshal([]byte(extra), &x); err != nil {
-			return r, false, fmt.Errorf("outbound %d: unreadable delivery details: %w", r.ID, err)
+AND NOT EXISTS(SELECT 1 FROM outbound p WHERE p.iface=o.iface AND p.chat=o.chat AND p.id<o.id AND p.state IN (?,?)
+ AND (p.state=? OR p.next_at<=? OR json_extract(nullif(p.extra,''),'$.delivery_window') IS NULL OR json_extract(nullif(o.extra,''),'$.delivery_window') IS NOT NULL))
+ORDER BY o.id LIMIT 1`, iface, OutPending, at.UnixMilli(), OutPending, OutSending, OutSending, at.UnixMilli()).
+			Scan(&r.ID, &r.Conv.Chat, &r.Conv.Thread, &r.ReplyTo, &r.Text, &extra, &r.Attempts, &created)
+		if errors.Is(err, sql.ErrNoRows) {
+			return r, false, nil
 		}
-		x.apply(&r.Outbound)
+		if err != nil {
+			return r, false, err
+		}
+		r.Conv.Interface = iface
+		r.CreatedAt = time.UnixMilli(created)
+		if extra != "" {
+			var x outExtra
+			if err := json.Unmarshal([]byte(extra), &x); err != nil {
+				return r, false, fmt.Errorf("outbound %d: unreadable delivery details: %w", r.ID, err)
+			}
+			x.apply(&r.Outbound)
+		}
+		if r.Window != nil {
+			if err := r.Window.Validate(); err != nil {
+				return r, false, err
+			}
+			if next := r.Window.Next(at); next.After(at) {
+				if _, err := s.db.Exec(`UPDATE outbound SET next_at=? WHERE id=? AND state=?`, next.UnixMilli(), r.ID, OutPending); err != nil {
+					return r, false, err
+				}
+				continue
+			}
+		}
+		return r, true, nil
 	}
-	return r, true, nil
 }
 
 // NextDue is when the earliest reply NextOutbound could offer for iface
@@ -695,7 +728,8 @@ func (s *Store) NextDue(iface string) (time.Time, bool, error) {
 	var at sql.NullInt64
 	err := s.db.QueryRow(`SELECT min(o.next_at) FROM outbound o
 WHERE o.iface=? AND o.state=?
-AND NOT EXISTS(SELECT 1 FROM outbound p WHERE p.iface=o.iface AND p.chat=o.chat AND p.id<o.id AND p.state IN (?,?))`, iface, OutPending, OutPending, OutSending).Scan(&at)
+AND NOT EXISTS(SELECT 1 FROM outbound p WHERE p.iface=o.iface AND p.chat=o.chat AND p.id<o.id AND p.state IN (?,?)
+ AND (p.state=? OR p.next_at<=? OR json_extract(nullif(p.extra,''),'$.delivery_window') IS NULL OR json_extract(nullif(o.extra,''),'$.delivery_window') IS NOT NULL))`, iface, OutPending, OutPending, OutSending, OutSending, now()).Scan(&at)
 	if err != nil || !at.Valid {
 		return time.Time{}, false, err
 	}

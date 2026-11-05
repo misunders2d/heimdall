@@ -823,3 +823,11 @@ Unverified, to confirm during the build:
 - Tool-name telemetry on scheduled turns for each harness.
 - The T3 CLI on the hub.
 - The ChatGPT Tasks page (fetch returned 403).
+
+## Owner control and checkpoint workflows
+
+The optional local control socket, shared stdio tool adapter, atomic workflow
+checkpoints, delivery windows and prepared owner Slack monitor are documented in
+[scheduler-control.md](scheduler-control.md). They extend the existing scheduler;
+native connector capability and production activation require the bounded live
+probe described there.

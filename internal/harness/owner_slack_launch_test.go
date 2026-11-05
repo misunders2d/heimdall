@@ -97,6 +97,45 @@ func TestOwnerSlackLaunchIsolationAcrossResumedTurns(t *testing.T) {
 	}
 }
 
+// This checks launch preservation only, not availability or successful use of
+// native Codex Apps or Memento. Those require the bounded hub probe.
+func TestScheduledCodexPreservesNativeAppsAndManualMemorySetup(t *testing.T) {
+	bin, _ := fakeharness.Install(t, "codex")
+	l := launch(t, bin, "codex", false)
+	capture := filepath.Join(t.TempDir(), "capture.json")
+	l.Env = append(l.Env, "FAKE_CAPTURE_LAUNCH="+capture)
+	c := harness.Caller{Principal: core.Principal{Platform: "telegram", ID: "42"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Private: false, SlackRead: false}
+	run, err := harness.Start(context.Background(), harness.Spec{Harness: "codex", Prompt: "synthetic", Launch: l, Caller: c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := run.Result()
+	<-run.Exited()
+	if result.Failure != "" {
+		t.Fatal(result)
+	}
+	raw, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Args   []string `json:"args"`
+		Memory string   `json:"memory"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(got.Args, " ")
+	if got.Memory != "1" || !strings.Contains(args, "slack={enabled=false") {
+		t.Fatal("scheduled capture or owner_slack gate changed", got)
+	}
+	for _, disabled := range []string{"apps", "memento", "memory", "model="} {
+		if strings.Contains(args, disabled) {
+			t.Fatal("native owner configuration overridden", args)
+		}
+	}
+}
+
 func TestMCPStartNotifyOwnerPrivateGate(t *testing.T) {
 	bin, _ := fakeharness.Install(t, "pi")
 	for _, tc := range []struct {

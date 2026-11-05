@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "heimdall-scheduler": {
+      "command": "/path/to/heimdall",
+      "args": [
+        "sched",
+        "mcp",
+        "-socket",
+        "/path/to/private-data/scheduler-control/control.sock"
+      ]
+    }
+  }
+}

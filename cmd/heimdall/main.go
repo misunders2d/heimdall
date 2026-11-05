@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -46,6 +47,10 @@ const usage = `usage:
       offline validation; missing employee account is a warning
   heimdall sched list|show ID|health|export -config FILE
       scheduled jobs: list, one job, health JSON (exit 1 on any issue), definitions as JSON
+  heimdall sched control -socket PATH
+      one owner-authenticated JSON operation from stdin; no direct store access
+  heimdall sched mcp -socket PATH
+      stdio MCP adapter for the shared owner tool catalog
   heimdall drain -config FILE [-timeout 30m]
       hold new scheduled runs and wait until no turn runs and every reply is
       delivered: exit 0 when idle, 75 on timeout (run before a restart)
@@ -174,6 +179,21 @@ func run(args []string) error {
 		google = nil
 	}
 	r := router.New(router.Options{Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
+	if cfg.Scheduler.On() && cfg.Scheduler.Control != nil {
+		u, err := user.Lookup(cfg.RunAs[core.RoleOwner].User)
+		if err != nil {
+			return err
+		}
+		uid, err := strconv.ParseUint(u.Uid, 10, 32)
+		if err != nil {
+			return err
+		}
+		listener, err := jobs.ListenControl(ctx, cfg.Scheduler.Control.Owner, uint32(uid), filepath.Join(cfg.DataDir, "scheduler-control"))
+		if err != nil {
+			return err
+		}
+		defer listener.Close()
+	}
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")
@@ -272,6 +292,9 @@ func schedulerConfig(cfg *config.Config, interfaces []string) scheduler.Config {
 // sched is the operator's view of scheduled jobs. It works whether the
 // scheduler is enabled or not: jobs are kept either way.
 func sched(args []string) error {
+	if len(args) > 0 && (args[0] == "control" || args[0] == "mcp") {
+		return schedControl(args)
+	}
 	if len(args) == 0 {
 		return errors.New("usage: heimdall sched list|show ID|health|export -config FILE")
 	}

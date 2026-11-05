@@ -33,21 +33,23 @@ var (
 )
 
 type rig struct {
-	t    *testing.T
-	s    *Scheduler
-	st   *store.Store
-	now  time.Time
-	rows []store.InboundRow // dispatched run messages
+	dbPath string
+	t      *testing.T
+	s      *Scheduler
+	st     *store.Store
+	now    time.Time
+	rows   []store.InboundRow // dispatched run messages
 }
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "h.db"))
+	dbPath := filepath.Join(t.TempDir(), "h.db")
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	r := &rig{t: t, st: st, now: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
+	r := &rig{t: t, st: st, dbPath: dbPath, now: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
 	access := core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{boss.Key(): true}}
 	r.s = New(Config{DefaultTZ: "Europe/Kyiv", MaxConcurrent: 2, PerCreator: 1, GraceRecurring: 2 * time.Hour, GraceOneOff: 24 * time.Hour, PauseAfter: 3,
 		EmployeeHarnesses: []string{"pi"}, Interfaces: []string{core.PlatformTelegram}}, st, access, log.New(io.Discard, "", 0))
@@ -77,6 +79,9 @@ func (r *rig) apply(change *store.JobChange) {
 	r.t.Helper()
 	if err := r.st.AnswerCommand(0, core.ConvKey{}, store.CommandEnd{Detail: "job", Job: change}); err != nil {
 		r.t.Fatal(err)
+	}
+	if change != nil && change.StopJob != "" {
+		r.s.stopRun(change.StopJob)
 	}
 }
 
@@ -1208,7 +1213,7 @@ func TestRemovalDrafts(t *testing.T) {
 				t.Fatal("discard changed target")
 			}
 			d = propose()
-			if out, ok := r.answer(tc.proposer, "yes"); !ok || !strings.Contains(out, "deleted") || !strings.Contains(out, "being stopped") {
+			if out, ok := r.answer(tc.proposer, "yes"); !ok || !strings.Contains(out, "deleted") {
 				t.Fatal(out)
 			}
 			if r.job(id).State != store.JobDeleted || stops != 1 {

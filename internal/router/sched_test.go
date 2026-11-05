@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,6 +104,29 @@ func TestScheduledRunDeliversToItsTarget(t *testing.T) {
 	if out := e.reply(); !strings.Contains(out.Text, "resumed=false") || out.Conv != group {
 		t.Fatalf("second run %q", out.Text)
 	}
+}
+
+func TestScheduledCheckpointDeliveryAndRedaction(t *testing.T) {
+	t.Setenv("HEIMDALL_TEST_TOKEN", "synthetic-checkpoint-secret")
+	e := schedEnv(t, []string{"codex"}, "codex")
+	through := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	u := store.CheckpointUpdate{Version: 0, Complete: true, Through: through, State: json.RawMessage(`{"reference":"synthetic-checkpoint-secret"}`), Alerts: []store.Alert{{Key: "request-1", Revision: "v1", Text: "Action: synthetic-checkpoint-secret"}}}
+	raw, _ := json.Marshal(u)
+	definition, _ := json.Marshal(map[string]any{"name": "checkpoint", "schedule": map[string]string{"every": "30m"}, "prompt": say("```heimdall-checkpoint\n" + string(raw) + "\n```"), "harness": "codex", "quiet": true, "checkpoint": true})
+	id := e.addJob(string(definition))
+	want(t, e.ask(ownerDM, "!job run "+id), "runs now")
+	out := e.reply()
+	if out.Conv != ownerDM || out.Text != "Action: [REDACTED]" {
+		t.Fatal("structured result escaped output redaction or routing", out)
+	}
+	if history := e.history(id); !strings.Contains(history, " ok") {
+		t.Fatal(history)
+	}
+	cp, err := e.st.Checkpoint(id, tgOwner.Key())
+	if err != nil || cp.Version != 1 || cp.Through != through || len(cp.Receipts) != 1 || cp.Receipts[0].Status != store.OutSent || cp.Receipts[0].Outbound != out.ID || strings.Contains(string(cp.State), "synthetic-checkpoint-secret") {
+		t.Fatal("checkpoint/outbox transaction or stored redaction failed", cp, err)
+	}
+	e.noReply(100 * time.Millisecond)
 }
 
 func TestScheduledQuietNotifyAndFiles(t *testing.T) {

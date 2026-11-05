@@ -1,0 +1,22 @@
+{
+  "name": "Scheduled Codex capability probe",
+  "schedule": {
+    "every": "30m"
+  },
+  "tz": "Europe/Kyiv",
+  "to": "here",
+  "harness": "codex",
+  "quiet": true,
+  "checkpoint": true,
+  "session": "fresh",
+  "overlap": "skip",
+  "timeout": "5m",
+  "paused": true,
+  "expect": {
+    "tools": [
+      "*slack*read_thread",
+      "*memento*recall"
+    ]
+  },
+  "prompt": "Owner-approved native capability probe. Read only the owner-authorized Slack thread <THREAD_REFERENCE> using the EXISTING Codex Apps Slack read_thread tool. Verify authenticated owner/workspace from connector/platform data; never assume identity from this prompt. Deliberately call installed native mcp__memento__recall with query <RELEVANT_PROFESSIONAL_QUERY>; use at most one relevant result, no memory writes. Verify only the non-secret environment sentinel MEMENTO_PROCESSING equals 1 via a native tool. Use current owner's native model/approval settings. Do not inspect credentials, sign in, change configs, install anything or use another identity/connector/provider. Any missing tool, failed read, denial or ambiguous identity: return complete=false; do not claim success. Do not post via Slack tools or reveal private thread/memory contents. On successful reads and capture-off verification, return the heimdall-checkpoint block from the native job note with its current version, complete=true, through=the supplied scan upper bound, minimal state {slack_read:true,memory_recall:true,capture_off:true}, alerts=[{key:'capability-probe',revision:'v1',text:'Scheduler capability probe passed: Slack read and owner recall succeeded; automatic memory capture off.'}]. Use valid JSON with double quotes. Same alert text/key/revision on a second run. Heimdall alone delivers once to the captured owner private bot DM. Tools listed or visible without successful reads do not count as success."
+}

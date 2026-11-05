@@ -2,6 +2,7 @@ package router
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -41,27 +42,34 @@ func TestOwnerRequestContextNativeRecovery(t *testing.T) {
 }
 
 func TestOwnerRequestContextGatesAndWholeMessages(t *testing.T) {
-	e := setup(t, core.ModeCorporate, []string{"codex"}, "codex")
+	// This unit test owns its persisted transitions. Startup recovery must
+	// not race the synthetic pending rows it deliberately settles itself.
+	st, err := store.Open(filepath.Join(t.TempDir(), "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	r := New(Options{}, st)
 	k := core.ConvKey{Interface: "fake", Chat: "limits"}
 	var last int64
 	texts := []string{"older whole", strings.Repeat("z", store.OwnerInputBytes-300) + " Do not publish.", "!codex command text", "!next queued command", "!job add {}", "reset", "latest\nDo not write.  "}
 	for i, text := range texts {
 		in := core.Inbound{Conv: k, MsgID: string(rune('a' + i)), From: core.Principal{Platform: "fake", ID: "owner"}, Origin: core.OriginLive, Text: text, Context: "NEVER_COPY_ASSISTANT"}
-		row, _, err := e.st.AddInbound(in)
+		row, _, err := st.AddInbound(in)
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, err := e.st.StartTurn(k, core.RoleOwner, owner, in.MsgID, []int64{row.ID})
+		id, err := st.StartTurn(k, core.RoleOwner, owner, in.MsgID, []int64{row.ID})
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = e.st.EndTurn(id, k, owner, store.TurnEnd{State: store.TurnFailed, ItemState: store.InFailed})
+		_, err = st.EndTurn(id, k, owner, store.TurnEnd{State: store.TurnFailed, ItemState: store.InFailed})
 		if err != nil {
 			t.Fatal(err)
 		}
 		last = id
 	}
-	c := &conv{r: e.r, key: k}
+	c := &conv{r: r, key: k}
 	tr := &turn{id: last + 1, role: core.RoleOwner, who: owner}
 	in := core.Inbound{Origin: core.OriginLive}
 	packet := c.ownerRequestContext(tr, "codex", harness.Session{}, "previous", false, in)

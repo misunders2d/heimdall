@@ -141,6 +141,14 @@ func (s *Slack) Send(ctx context.Context, out core.Outbound) error {
 	return nil
 }
 func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
+	if out.Window != nil {
+		if err := out.Window.Validate(); err != nil {
+			return err
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, out.Window.EndAt(time.Now()))
+		defer cancel() // includes pacer waits and API-internal 429 retries
+	}
 	text := router.Scrub(out.Text)
 	if out.Formatted {
 		text = mrkdwn(text)
@@ -176,6 +184,17 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		if index > 0 {
 			if err := s.bot.pause(ctx, s.partEvery); err != nil {
 				return err
+			}
+		}
+		// A delayed/partial logical reply retains its row/chunk IDs. Check the
+		// generic delivery window before each post, including later chunks.
+		if out.Window != nil {
+			if err := out.Window.Validate(); err != nil {
+				return err
+			}
+			at := time.Now()
+			if out.Window.Next(at).After(at) {
+				return errors.New("delivery window closed; remaining parts stay pending")
 			}
 		}
 		args := map[string]any{"channel": out.Conv.Chat, "thread_ts": out.Conv.Thread, "text": part, "unfurl_links": false, "unfurl_media": false, "metadata": metadata(id, "heimdall_reply")}

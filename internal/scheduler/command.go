@@ -628,15 +628,18 @@ func (s *Scheduler) manage(c Caller, sub, id, arg string) (string, *store.JobCha
 		if d.RerunOnTimeout {
 			return fmt.Sprintf("Stopping job %s's current run and pending timeout retry.", id), &store.JobChange{CancelRetries: id, StopJob: id}
 		}
-		if s.stopRun(j.ID) {
-			return fmt.Sprintf("Stopping job %s's running run.", id), nil
+		running, err := s.st.Runs(store.RunFilter{Job: id, States: []string{store.RunRunning}})
+		if err != nil {
+			return "Could not check running job.", nil
 		}
-		return fmt.Sprintf("Job %s has no running run.", id), nil
+		if len(running) == 0 {
+			return fmt.Sprintf("Job %s has no running run.", id), nil
+		}
+		return fmt.Sprintf("Stopping job %s's current run, if running.", id), &store.JobChange{StopJob: id, CancelRetries: id}
 	case "rm":
 		msg, change := set(store.Set{"state": store.JobDeleted, "reason": "removed by " + c.Principal.Key()}, "deleted")
-		if s.stopRun(j.ID) {
-			msg += " Its running run is being stopped."
-		}
+		change.StopJob = j.ID
+		change.CancelRetries = j.ID
 		return msg, change
 	case "renew":
 		dur, err := span(or(arg, "7d"))

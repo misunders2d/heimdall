@@ -1098,12 +1098,23 @@ func (c *conv) start(ctx context.Context) {
 	id, err := c.r.store.StartTurn(c.key, first.role, who, first.row.MsgID, ids)
 	if err != nil {
 		c.r.log.Printf("turn in %s not started: %v", c.key, err)
+		// A committed job stop can cancel the inbound between Begin and
+		// StartTurn. Keep that cancellation; its command already answered.
+		cancelled := false
+		if job != nil {
+			run, readErr := c.r.store.Run(job.Run)
+			cancelled = readErr == nil && run.State == store.RunCancelled
+		}
 		<-c.r.sem
 		c.queue = c.queue[n:]
 		for _, it := range batch {
-			_ = c.r.store.SetInbound(it.row.ID, store.InFailed, "turn could not be recorded")
+			if !cancelled {
+				_ = c.r.store.SetInbound(it.row.ID, store.InFailed, "turn could not be recorded")
+			}
 			c.r.release(it.row.Inbound)
-			c.reply(it.row, "Heimdall could not record this turn, so it did not run: "+err.Error()+"\n— heimdall")
+			if !cancelled {
+				c.reply(it.row, "Heimdall could not record this turn, so it did not run: "+err.Error()+"\n— heimdall")
+			}
 		}
 		return
 	}
@@ -1833,7 +1844,9 @@ func (c *conv) jobEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEnd {
 	for i, f := range d.files {
 		files[i] = core.File{Path: f.Path, Name: f.Name, MIME: mimeOf(f.Name)}
 	}
-	res.Answer = stripHarnessTag(res.Answer, d.harness)
+	// Structured checkpoint state is persisted too; apply the same existing
+	// secret/callback redaction before the scheduler parses any result fields.
+	res.Answer = c.r.scrub(stripHarnessTag(res.Answer, d.harness))
 	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Identity: d.identity, Notes: d.notes, Files: files, Tools: tools, SignIn: signIn})
 	e.Harness, e.Session, e.Clean = d.harness, res.SessionID, e.State == store.TurnDone && !res.Unclean
 	if e.Reply != nil {
