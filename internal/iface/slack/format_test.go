@@ -4,6 +4,9 @@ import "testing"
 
 func TestMrkdwnEscapesMentionsAndPreservesCode(t *testing.T) {
 	cases := map[string]string{
+		`**Path C:\temp**`: "*Path C:\\temp*",
+		`trailing\`:        "trailing\\",
+		`unknown\q`:        "unknown\\q",
 		`\*literal\* \_u\_ \` + "`code\\`" + ` \[click\](https://example.test) \<https://example.test|label\>`: "∗literal∗ ＿u＿ ˋcodeˋ [click](https://example.test) &lt;https://example.test|label&gt;",
 		"<!channel> & <@U123>":                  "&lt;!channel&gt; &amp; &lt;@U123&gt;",
 		"**bold** __bold__ *italic* _native_":   "*bold* *bold* _italic_ _native_",

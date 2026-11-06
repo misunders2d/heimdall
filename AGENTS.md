@@ -212,8 +212,10 @@ the `heimdall-live` unit.
     transaction that creates the run. Delivery is at-least-once.
   - Scheduled turns: their own conversation `sched:<job_id>`, delivering to
     the captured target; `Private=false`; no `owner_slack`;
-    `MEMENTO_PROCESSING=1` (never automatic capture); explicit owner read-only
-    profiles may use native Memento recall and existing Codex Apps Slack reads.
+    `MEMENTO_PROCESSING=1` (never automatic capture); owner-approved read-only
+    workflows may deliberately recall native Memento memory and use existing
+    authorized connector tools. The selected agent owns tools and delegation;
+    the scheduler adds no special harness profile.
     Shared native policy hooks remain enabled; `owner_slack` stays live-only.
     A fresh session by
     default; no progress messages; never a warm worker.
@@ -230,11 +232,12 @@ the `heimdall-live` unit.
     the same conversation within 24 h (`!job confirm`, or a bare yes/no that
     Heimdall matches itself, ignoring surrounding whitespace and trailing
     punctuation, whole replies only). Exactly one waiting draft, the same
-    caller and conversation are required for word replies. Cards preview at
-    most 200 prompt/text characters everywhere, link to `!job show <id>`
-    for the full prompt in private, show a plain schedule with timezone and
-    only the next run, and fit one Slack message; removal cards keep the
-    same schedule format. Shared-chat privacy stays unchanged. Blocks from
+    caller and conversation are required for word replies. Cards use native
+    Slack/Telegram Markdown, a short purpose, exact human-readable schedule,
+    destination, truthful state/effects and Yes/No actions. Raw IDs, cron,
+    harness fields and prompts stay in opt-in Details/operator views; private
+    prompt visibility remains caller-scoped. Paused cards never imply an active
+    next run. Shared-chat privacy stays unchanged. Blocks from
     scheduled turns are ignored; MCP controls never auto-apply.
   - Notices are fixed templates ending `— heimdall`; no model text in
     shared channels.

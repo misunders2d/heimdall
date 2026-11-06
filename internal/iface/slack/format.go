@@ -47,9 +47,15 @@ func mrkdwn(s string) string {
 			}
 		}
 		// Process only text outside code, preserving delimiter state locally.
-		end := strings.IndexAny(s, "`\\")
-		if end < 0 {
-			end = len(s)
+		// Escapes belong to the same text chunk: splitting at a backslash
+		// breaks formatting around paths. Only unescaped backticks end it.
+		end := 0
+		for end < len(s) && s[end] != '`' {
+			if s[end] == '\\' && end+1 < len(s) && strings.ContainsRune("\\*_`[]<>~#", rune(s[end+1])) {
+				end += 2
+			} else {
+				end++
+			}
 		}
 		if end == 0 {
 			end = 1
