@@ -190,7 +190,7 @@ func run(args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			return jobs.ListenControl(ctx, cfg.Scheduler.Control.Owner, uint32(uid), filepath.Join(cfg.DataDir, "scheduler-control"))
+			return jobs.ListenControl(ctx, cfg.Scheduler.Control.Owner, uint32(uid), filepath.Join(cfg.DataDir, "scheduler-control"), cfg.Scheduler.Control.Source)
 		}()
 		if err != nil {
 			logger.Printf("scheduler control unavailable (router continues): %v", err)

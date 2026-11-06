@@ -61,7 +61,7 @@ func TestControlAuthorityAndCanonicalDrafts(t *testing.T) {
 	if out, ok := r.answer(asBoss, "yes?"); ok {
 		t.Fatal("question confirmed", out)
 	}
-	if out, ok := r.answer(asBoss, "yes"); !ok || !strings.Contains(out, "paused") {
+	if out, ok := r.answer(asBoss, "yes"); !ok || !strings.Contains(out, "Paused") {
 		t.Fatal("real human path failed", out)
 	}
 	if r.job(j.ID).State != store.JobPaused {

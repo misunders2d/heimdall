@@ -189,7 +189,7 @@ func TestStopDoesNotClaimPendingRunWasStopped(t *testing.T) {
 	r := newRig(t)
 	id := r.add(asBoss, `{"name":"ordinary","schedule":{"every":"1h"},"prompt":"synthetic"}`)
 	r.cmd(asBoss, "job run "+id) // pending, not yet dispatched
-	if out := r.cmd(asBoss, "job stop "+id); !strings.Contains(out, "no running run") {
+	if out := r.cmd(asBoss, "job stop "+id); !strings.Contains(out, "No check is running") {
 		t.Fatal("false stop acknowledgement", out)
 	}
 	if runs := r.runs(id); len(runs) != 1 || runs[0].State != store.RunPending {

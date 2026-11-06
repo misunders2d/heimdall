@@ -32,6 +32,7 @@ const QuietToken = "NO_UPDATE"
 // Def is a job definition (docs/scheduler.md §2.2): what !job add, !job
 // edit and model drafts carry, checked by one validator.
 type Def struct {
+	Summary        string               `json:"summary,omitempty"` // bounded presentation only; never execution authority
 	Checkpoint     bool                 `json:"checkpoint,omitempty"`
 	DeliveryWindow *core.DeliveryWindow `json:"delivery_window,omitempty"`
 	Name           string               `json:"name"`
@@ -166,6 +167,10 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	}
 	if d.Name = strings.TrimSpace(d.Name); d.Name == "" || utf8.RuneCountInString(d.Name) > 80 || strings.ContainsFunc(d.Name, unicode.IsControl) {
 		return fail("name: 1-80 characters on one line")
+	}
+	d.Summary = strings.TrimSpace(d.Summary)
+	if utf8.RuneCountInString(d.Summary) > 160 || strings.ContainsFunc(d.Summary, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) {
+		return fail("summary: at most 160 characters on one line")
 	}
 	switch d.Kind {
 	case "", KindAgent:

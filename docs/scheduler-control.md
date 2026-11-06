@@ -10,7 +10,7 @@ separate owner-approved live window.
 Opt in in the existing private config:
 
 ```json
-{"scheduler":{"enabled":true,"default_tz":"Europe/Kyiv","control":{"owner":"slack:OWNER_EMAIL"}}}
+{"scheduler":{"enabled":true,"default_tz":"Europe/Kyiv","control":{"owner":"slack:OWNER_EMAIL","source":{"interface":"slack","chat":"PRIVATE_DM_ID","thread":"ROOT_THREAD_TS"}}}}
 ```
 
 Merge this fragment with the existing scheduler section; preserve its other
@@ -29,8 +29,22 @@ or other error never permits removal. Control errors are logged as unavailable;
 the otherwise-functional router continues.
 Keep parent data/config directories protected too; no employee traversal rights.
 
-The control binding selects one owner and that owner's latest recorded private
-conversation. It cannot list/read/manage another creator's jobs, even though
+The optional protected `source` pins the exact source conversation (interface,
+chat, thread). Heimdall requires a recorded real private message from the selected
+owner in that exact conversation. Missing/mismatched bindings fail closed, without
+falling back to a newer conversation. Omit `thread` for an unthreaded source.
+The source is not a tool argument and grants no caller or destination authority.
+The pending request and new job keep this source for confirmation and harness
+selection. Direct platform requests keep their originating conversation.
+
+For backwards compatibility, omitting `source` retains the owner's latest
+recorded private conversation, which can be an unrelated topic. Operators must
+set `scheduler.control.source` in the protected deployment config to prevent that
+selection, then arrange the separately approved drain/restart. This source change
+does not edit live config, redirect already confirmed jobs, or claim the binding
+has been deployed. Existing jobs with a wrong source need operator review and a separately approved
+replacement; editing their definition does not change their stored source. The
+control endpoint cannot list/read/manage another creator's jobs, even though
 the bound owner has owner role. There are no caller, email, role, conversation,
 shell, token, confirmation or approval arguments. Rebinding is private deployment
 configuration, followed by an approved restart.

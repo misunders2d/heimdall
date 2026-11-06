@@ -41,7 +41,7 @@ func TestFailureNoticeCapacityAndTerminalState(t *testing.T) {
 				t.Fatalf("terminal failure: %+v, notices %+v", e, outs)
 			}
 			body := outs[0].Text
-			for _, want := range []string{"Cause: provider unavailable", "Error: " + capacityError, "Attempts: 1", "Retry: no", "— heimdall"} {
+			for _, want := range []string{"Cause: provider unavailable", "Error: " + capacityError, "Attempts: 1", "Automatic retry: no", "— heimdall"} {
 				if !strings.Contains(body, want) {
 					t.Errorf("notice missing %q: %s", want, body)
 				}
@@ -79,7 +79,7 @@ func TestRetryNoticeMatchesQueuedSameSlot(t *testing.T) {
 	if len(outs) != 1 || outs[0].Conv != bossDM {
 		t.Fatalf("retry not persisted to creator: %+v", outs)
 	}
-	for _, want := range []string{"will retry the same slot", capacityError, "Attempts: 1", "Retry: automatically at " + when(Def{TZ: "UTC"}, after.NotBefore) + " (attempt 2)", "Next scheduled run: 2026-11-03 12:00 UTC"} {
+	for _, want := range []string{"will retry the same slot", capacityError, "Attempts: 1", "Automatic retry: queued for " + when(Def{TZ: "UTC"}, after.NotBefore) + " (attempt 2)", "Next scheduled run: 2026-11-03 12:00 UTC"} {
 		if !strings.Contains(outs[0].Text, want) {
 			t.Errorf("retry notice missing %q: %s", want, outs[0].Text)
 		}
@@ -112,7 +112,7 @@ func TestFailureDetailsStayPrivateInNoticesAndHistory(t *testing.T) {
 				t.Fatalf("audience changed: %+v", e.Notices)
 			}
 			for _, o := range e.Notices {
-				if o.Conv != bossDM && o.Conv != team || strings.Contains(o.Text, capacityError) != (o.Conv == bossDM) || !strings.Contains(o.Text, "Cause: provider unavailable") || !strings.Contains(o.Text, "Retry: no") {
+				if o.Conv != bossDM && o.Conv != team || strings.Contains(o.Text, capacityError) != (o.Conv == bossDM) || !strings.Contains(o.Text, "Cause: provider unavailable") || !strings.Contains(o.Text, "Automatic retry: no") {
 					t.Fatalf("wrong disclosure: %+v", o)
 				}
 			}
@@ -246,7 +246,7 @@ func TestRetryNoticesForIdentityTimeoutAndDrain(t *testing.T) {
 		r.run(id)
 		r.sent()
 		e := r.finish("", Outcome{Identity: ErrTemporary})
-		if e.Run.Retry.IsZero() || !strings.Contains(texts(r.sent()), "Retry: automatically at ") {
+		if e.Run.Retry.IsZero() || !strings.Contains(texts(r.sent()), "Automatic retry: queued for ") {
 			t.Fatalf("silent identity retry: %+v", e)
 		}
 	})
@@ -255,7 +255,7 @@ func TestRetryNoticesForIdentityTimeoutAndDrain(t *testing.T) {
 		r.now = r.now.Add(time.Minute)
 		r.sent()
 		e := r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
-		if e.Run.Retry.IsZero() || !strings.Contains(texts(r.sent()), "Cause: repeat-safe timeout retry\nAttempts: 1\nRetry: automatically at ") {
+		if e.Run.Retry.IsZero() || !strings.Contains(texts(r.sent()), "Cause: repeat-safe timeout retry\nAttempts: 1\nAutomatic retry: queued for ") {
 			t.Fatalf("silent timeout retry: %+v", e)
 		}
 	})
@@ -272,7 +272,7 @@ func TestRetryNoticesForIdentityTimeoutAndDrain(t *testing.T) {
 		r.now = r.now.Add(time.Hour)
 		r.tick()
 		out, ok, err := r.st.NextOutbound(core.PlatformSlack)
-		if err != nil || !ok || out.Conv != c.Conv || !strings.Contains(out.Text, "Retry: automatically at ") || r.runs(id)[0].State != store.RunPending || len(r.rows) != 0 {
+		if err != nil || !ok || out.Conv != c.Conv || !strings.Contains(out.Text, "Automatic retry: queued for ") || r.runs(id)[0].State != store.RunPending || len(r.rows) != 0 {
 			t.Fatalf("pre-dispatch retry: %+v %v", out, err)
 		}
 	})

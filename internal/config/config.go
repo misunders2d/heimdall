@@ -62,7 +62,8 @@ type Scheduler struct {
 // SchedulerControl binds local owner tools to one existing platform identity.
 // OS authorization always derives from run_as.owner, never from this selector.
 type SchedulerControl struct {
-	Owner string `json:"owner"`
+	Owner  string        `json:"owner"`
+	Source *core.ConvKey `json:"source,omitempty"` // protected source conversation, never tool arguments
 }
 
 // On reports whether the scheduler runs.
@@ -295,6 +296,9 @@ func (c *Config) fill(staged bool) error {
 			p, err := core.ParsePrincipalKey(s.Control.Owner)
 			if !s.Enabled || err != nil || (p.Platform != core.PlatformTelegram && p.Platform != core.PlatformSlack) {
 				return errors.New("scheduler.control requires enabled scheduler and a platform owner binding")
+			}
+			if k := s.Control.Source; k != nil && (k.Interface != p.Platform || k.Chat == "" || strings.ContainsAny(k.Chat+k.Thread, "\r\n")) {
+				return errors.New("scheduler.control.source must name an owner platform conversation")
 			}
 		}
 		for _, d := range []struct {

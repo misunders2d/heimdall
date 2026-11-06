@@ -44,15 +44,16 @@ type ControlResult struct {
 }
 
 type Control struct {
-	s     *Scheduler
-	owner string // trusted deployment binding selector, never a request argument
-	uid   uint32 // derived from existing run_as.owner OS account
-	mu    sync.Mutex
+	s      *Scheduler
+	source *core.ConvKey // optional trusted deployment source, verified against real ingress
+	owner  string        // trusted deployment binding selector, never a request argument
+	uid    uint32        // derived from existing run_as.owner OS account
+	mu     sync.Mutex
 }
 
 // ListenControl adds a private local management endpoint to the existing process.
 // No independent scheduler, network listener, token or admission list is created.
-func (s *Scheduler) ListenControl(ctx context.Context, owner string, uid uint32, dir string) (*net.UnixListener, error) {
+func (s *Scheduler) ListenControl(ctx context.Context, owner string, uid uint32, dir string, source ...*core.ConvKey) (*net.UnixListener, error) {
 	if _, err := core.ParsePrincipalKey(owner); err != nil {
 		return nil, err
 	}
@@ -88,6 +89,9 @@ func (s *Scheduler) ListenControl(ctx context.Context, owner string, uid uint32,
 		return nil, err
 	}
 	c := &Control{s: s, owner: owner, uid: uid}
+	if len(source) > 0 {
+		c.source = source[0]
+	}
 	go func() { <-ctx.Done(); l.Close() }()
 	go func() {
 		for {
@@ -185,7 +189,7 @@ func strictJSON(raw []byte, out any) error {
 }
 
 func (c *Control) caller(ctx context.Context) (Caller, error) {
-	p, k, err := c.s.st.ControlBinding(c.owner)
+	p, k, err := c.s.st.ControlBinding(c.owner, c.source)
 	if err != nil {
 		return Caller{}, err
 	}
@@ -319,7 +323,7 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) C
 		}
 		result = ControlResult{Reply: c.s.card(who, j), DraftID: j.ID, Changed: true}
 		change = &store.JobChange{Add: &j}
-		outs = []core.Outbound{{Conv: who.Conv, Text: result.Reply}}
+		outs = []core.Outbound{{Conv: who.Conv, Text: result.Reply, Formatted: true}}
 	case "acknowledge":
 		change = &store.JobChange{Acknowledge: &store.AlertAcknowledgement{Job: req.ID, Creator: who.Principal.Key(), Key: req.Key, Revision: req.Revision, Outbound: req.Outbound}}
 		result = ControlResult{Reply: "Failed receipt acknowledged; history retained, nothing replayed. — heimdall", Changed: true}

@@ -18,7 +18,7 @@ import (
 
 // HelpLines are the job commands, for !help.
 var HelpLines = []string{
-	"!jobs [all] — your jobs (owner: all jobs)",
+	"!jobs [all|details] — status; operator list; pending request controls",
 	"!job show|history <id> — a job's schedule, next runs and options; its last runs",
 	"!job add <json> / !job edit <id> <json> — create (active, or paused with \"paused\":true) or change a job (docs/scheduler.md)",
 	"!job confirm|discard <id> — accept or drop a draft (or reply yes / no)",
@@ -30,10 +30,10 @@ const draftTTL = 24 * time.Hour
 
 // Note tells a harness, in the first message of each native session, how to
 // propose a job: Heimdall asks the person to confirm it.
-const Note = `[Heimdall jobs: to propose a scheduled job or reminder, end your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","prompt"} (or "kind":"notify" with "text"). To change a job: {"edit":"<id>", changed fields}. To remove a job: {"remove":"<id>"}. Removal also requires human confirmation. Heimdall shows a card and the person confirms; you cannot.]`
+const Note = `[Heimdall jobs: to propose a scheduled job or reminder, end your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","summary":"short purpose, no backstory","prompt"} (or "kind":"notify" with "text"). To change a job: {"edit":"<id>", changed fields}. To remove a job: {"remove":"<id>"}. Removal also requires human confirmation. Heimdall shows a card and the person confirms; you cannot.]`
 
 // OwnerNote describes the direct owner request path; risky changes still ask.
-const OwnerNote = `[Heimdall jobs: propose only when the person asked for a job or reminder. End your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","prompt"} (or "kind":"notify" with "text"). To edit: {"edit":"<id>", changed fields}. Heimdall applies new jobs and edits at once. Removal ({"remove":"<id>"}) and any job with rerun_on_timeout enabled still ask for human confirmation.]`
+const OwnerNote = `[Heimdall jobs: propose only when the person asked for a job or reminder. End your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","summary":"short purpose, no backstory","prompt"} (or "kind":"notify" with "text"). To edit: {"edit":"<id>", changed fields}. Heimdall applies new jobs and edits at once. Removal ({"remove":"<id>"}) and any job with rerun_on_timeout enabled still ask for human confirmation.]`
 
 var blockRE = regexp.MustCompile("(?ms)^[ \t]*```heimdall-job[ \t]*\r?\n(.*?)^[ \t]*```[ \t]*$\n?")
 
@@ -65,7 +65,8 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 		return unicode.IsPunct(r) || unicode.IsSpace(r)
 	}))
 	confirm, discard := slices.Contains(yes, w), slices.Contains(no, w)
-	if !confirm && !discard {
+	details := strings.EqualFold(strings.TrimSpace(text), "details")
+	if !confirm && !discard && !details {
 		return "", nil, false
 	}
 	drafts := s.drafts(c)
@@ -73,11 +74,13 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 	case len(drafts) == 0:
 		return "", nil, false
 	case len(drafts) > 1:
-		var ids []string
-		for _, d := range drafts {
-			ids = append(ids, d.ID)
+		return "Several requests wait here. Open !jobs details to choose one; no request was changed.", nil, true
+	case details:
+		j := drafts[0]
+		if id := removalID(j); id != "" {
+			return s.show(c, id), nil, true
 		}
-		return "Several job drafts wait here (" + strings.Join(ids, ", ") + "): send !job confirm <id> or !job discard <id>.", nil, true
+		return s.show(c, j.ID), nil, true
 	case confirm:
 		reply, change = s.confirm(c, drafts[0].ID)
 	default:
@@ -139,41 +142,7 @@ func (s *Scheduler) Prepare(c Caller, answers []string, direct bool) ([]string, 
 	if change == nil {
 		return clean, nil, nil, "⚠ " + strings.ReplaceAll(msg, "\n", " ") + " — heimdall"
 	}
-	id, state, edits := j.ID, "active", ""
-	if j.EditOf != "" {
-		id = j.EditOf
-		orig, _, _ := s.st.Job(id)
-		var before, after map[string]json.RawMessage
-		_ = json.Unmarshal([]byte(orig.Def), &before)
-		_ = json.Unmarshal([]byte(j.Def), &after)
-		var fields []string
-		for k, v := range after {
-			if string(before[k]) != string(v) {
-				fields = append(fields, k)
-			}
-		}
-		for k := range before {
-			if _, ok := after[k]; !ok {
-				fields = append(fields, k)
-			}
-		}
-		slices.Sort(fields)
-		edits = " Changed: " + or(strings.Join(fields, ", "), "none") + "."
-		state = orig.State
-	}
-	if st, ok := change.Set["state"].(string); ok {
-		state = st
-	}
-	target := ""
-	if d.To != "here" {
-		target = ", to " + d.To
-	}
-	next := "none"
-	if due, ok := change.Set["next_due"].(time.Time); ok {
-		next = when(d, due)
-	}
-	notice = fmt.Sprintf("✅ Job %s %s: %q. %s in %s%s.%s Next: %s. Stop: !job rm %s — heimdall", id, state, d.Name, scheduleWords(d.Schedule), d.TZ, target, edits, next, id)
-	return clean, j, change, strings.ReplaceAll(notice, "\n", " ")
+	return clean, j, change, msg + "\n— heimdall"
 }
 
 // removal is stored in a draft's definition; it never becomes a runnable job.
@@ -263,35 +232,9 @@ func (s *Scheduler) creator(j store.Job, asking Caller) Caller {
 	return c
 }
 
-// card shows a draft for confirmation (§5.3).
+// card uses fixed templates; full operator settings stay behind Details.
 func (s *Scheduler) card(c Caller, j store.Job) string {
-	if id := removalID(j); id != "" {
-		orig, _, _ := s.st.Job(id)
-		d, _, _ := parse(orig)
-		next := "none (" + orig.State + ")"
-		if orig.State == store.JobActive && !orig.NextDue.IsZero() {
-			next = when(d, orig.NextDue)
-		}
-		return fmt.Sprintf("📝 Job draft %s (remove job %s): %q\nSchedule: %s in %s\nNext: %s\nRemoval uses !job rm behavior, including stopping its running run.\nConfirm: !job confirm %s (or reply yes). Discard: !job discard %s (or no). Only you, here, within 24 h.\n— heimdall", j.ID, id, orig.Name, scheduleWords(d.Schedule), d.TZ, next, j.ID, j.ID)
-	}
-	d, sched, _ := parse(j)
-	var b strings.Builder
-	what := "new job"
-	if j.EditOf != "" {
-		what = "change to job " + j.EditOf
-	}
-	fmt.Fprintf(&b, "📝 Job draft %s (%s): %q\n", j.ID, what, d.Name)
-	s.describe(&b, c, j, d, sched, true)
-	if j.EditOf != "" {
-		if orig, ok, _ := s.st.Job(j.EditOf); ok {
-			b.WriteString("Changes:\n" + diff(orig.Def, j.Def, false))
-		}
-	}
-	if d.Paused {
-		b.WriteString("Starts paused: !job resume once confirmed.\n")
-	}
-	fmt.Fprintf(&b, "Confirm: !job confirm %s (or reply yes). Discard: !job discard %s (or no). Only you, here, within 24 h.\n— heimdall", j.ID, j.ID)
-	return b.String()
+	return s.request(c, j) + "\n— heimdall"
 }
 
 // describe writes a job's schedule, next fires, target and content. Cards
@@ -303,7 +246,10 @@ func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, s
 		fmt.Fprintf(b, "Repeat-safe timeout rerun: ENABLED. Confirming asserts the whole prompt and its effects are safe to repeat (idempotent). One rerun, fresh session; timeout %s; rerun deadline twice timeout from due time.\n", d.Timeout)
 	}
 	fmt.Fprintf(b, "Schedule: %s in %s\n", scheduleWords(d.Schedule), d.TZ)
-	if sched != nil {
+	if len(d.Schedule.Cron) > 0 {
+		fmt.Fprintf(b, "Cron: %s\n", strings.Join(d.Schedule.Cron, "; "))
+	}
+	if sched != nil && j.State != store.JobPaused && !d.Paused {
 		var fires []string
 		n := 3
 		if card {
@@ -334,23 +280,7 @@ func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, s
 	}
 }
 
-// scheduleWords keeps cron expressions and renders intervals and one-offs plainly.
-func scheduleWords(sp schedule.Spec) string {
-	if len(sp.Cron) > 0 {
-		return "cron " + strings.Join(sp.Cron, "; ")
-	}
-	if sp.Every == "" {
-		return "at " + strings.ReplaceAll(sp.At, "T", " ")
-	}
-	text := "every " + sp.Every
-	if sp.At != "" {
-		text += " at " + sp.At
-	}
-	if sp.From != "" {
-		text += " from " + sp.From
-	}
-	return text
-}
+func scheduleWords(sp schedule.Spec) string { return schedule.Describe(sp) }
 
 // diff lists the fields an edit changes; hide leaves out the prompt's and
 // text's values (a shared chat).
@@ -405,6 +335,14 @@ func newID() string {
 func (s *Scheduler) Command(c Caller, text string) (reply string, change *store.JobChange) {
 	word, rest := cut(text)
 	if strings.ToLower(word) == "jobs" {
+		if strings.EqualFold(rest, "details") {
+			var b strings.Builder
+			b.WriteString("Pending requests:\n")
+			for _, j := range s.drafts(c) {
+				fmt.Fprintf(&b, "%s %s: !job show %s; !job confirm %s; !job discard %s\n", j.ID, j.Name, j.ID, j.ID, j.ID)
+			}
+			return strings.TrimSpace(b.String()), nil
+		}
 		return s.list(c, strings.EqualFold(rest, "all")), nil
 	}
 	sub, rest := cut(rest)
@@ -464,16 +402,12 @@ func (s *Scheduler) add(c Caller, raw string) (string, *store.JobChange) {
 	}
 	next, _ := sched.Next(now)
 	j := store.Job{ID: newID(), Name: d.Name, Kind: d.Kind, Creator: c.Principal, CreatedIn: c.Conv, CreatedPrivate: c.Private, State: store.JobActive, NextSlot: next.Key, NextDue: next.At, Created: now}
-	what := "created"
 	if d.Paused {
-		j.State, j.Reason, what = store.JobPaused, pausedAtCreation(c), "created paused (!job resume "+j.ID+" to start it)"
+		j.State, j.Reason = store.JobPaused, pausedAtCreation(c)
 		d.Paused = false
 	}
 	j.Def = mustJSON(d)
-	var b strings.Builder
-	fmt.Fprintf(&b, "Job %s %s: %q\n", j.ID, what, d.Name)
-	s.describe(&b, c, j, d, sched, false)
-	return strings.TrimSpace(b.String()), &store.JobChange{Add: &j}
+	return s.result(c, j, d, "Created", nil), &store.JobChange{Add: &j}
 }
 
 // pausedAtCreation is the reason of a job created paused: the creator's own
@@ -486,7 +420,7 @@ func (s *Scheduler) capped(c Caller) string {
 		return ""
 	}
 	if jobs, _ := s.st.Jobs(store.JobFilter{Creator: c.Principal.Key(), States: []string{store.JobActive, store.JobPaused}}); len(jobs) >= 10 {
-		return "Job not created: at most 10 jobs per employee. Remove one with !job rm <id>."
+		return "Task not created: at most 10 scheduled tasks per employee. Remove one first."
 	}
 	return ""
 }
@@ -510,7 +444,12 @@ func (s *Scheduler) edit(c Caller, id, raw string) (string, *store.JobChange) {
 	if err != nil {
 		return "Job not changed: " + err.Error(), nil
 	}
-	return fmt.Sprintf("Job %s changed (from its next run):\n%s", j.ID, diff(j.Def, mustJSON(d), !c.Private)), &store.JobChange{Update: j.ID, Set: s.applied(d, sched, j.Version+1)}
+	before := od
+	j.NextDue = time.Time{}
+	if next, ok := sched.Next(now); ok {
+		j.NextDue = next.At
+	}
+	return s.result(c, j, d, "Updated", &before), &store.JobChange{Update: j.ID, Set: s.applied(d, sched, j.Version+1)}
 }
 
 // applied are the columns a job gets from definition d: its next slot from
@@ -529,7 +468,7 @@ func (s *Scheduler) confirm(c Caller, id string) (string, *store.JobChange) {
 	}
 	now := s.now()
 	if !j.DraftExpires.After(now) {
-		return fmt.Sprintf("Draft %s expired; nothing was created.", id), &store.JobChange{Drop: j.ID}
+		return "Request expired; nothing was changed.", &store.JobChange{Drop: j.ID}
 	}
 	if id := removalID(j); id != "" {
 		// Recheck current authority and reuse every rm side effect and retry fence.
@@ -559,7 +498,7 @@ func (s *Scheduler) confirmJob(c Caller, j store.Job) (string, *store.JobChange)
 	}
 	sched, err := s.validate(&d, who, j.Created, now)
 	if err != nil {
-		return "Draft not confirmed: " + err.Error(), nil
+		return "Request not approved: " + err.Error(), nil
 	}
 	paused := d.Paused
 	d.Paused = false
@@ -567,14 +506,19 @@ func (s *Scheduler) confirmJob(c Caller, j store.Job) (string, *store.JobChange)
 	delete(set, "version") // confirming counts an edit's version
 	next, _ := sched.Next(now)
 	change := &store.JobChange{Confirm: &j, Set: set}
-	switch {
-	case j.EditOf != "":
-		return fmt.Sprintf("Job %s changed from draft %s. Next run: %s.", j.EditOf, j.ID, when(d, next.At)), change
-	case paused:
-		set["state"], set["reason"] = store.JobPaused, pausedAtCreation(c)
-		return fmt.Sprintf("Job %s is paused: %q. Start it with !job resume %s (next run would be %s).", j.ID, d.Name, j.ID, when(d, next.At)), change
+	j.NextDue = next.At
+	if j.EditOf != "" {
+		orig, _, _ := s.st.Job(j.EditOf)
+		before, _, _ := parse(orig)
+		orig.NextDue = j.NextDue
+		return s.result(c, orig, d, "Updated", &before), change
 	}
-	return fmt.Sprintf("Job %s is active: %q. Next run: %s.", j.ID, d.Name, when(d, next.At)), change
+	j.State = store.JobActive
+	if paused {
+		set["state"], set["reason"] = store.JobPaused, pausedAtCreation(c)
+		j.State = store.JobPaused
+	}
+	return s.result(c, j, d, "Created", nil), change
 }
 
 func (s *Scheduler) discard(c Caller, id string) (string, *store.JobChange) {
@@ -582,7 +526,7 @@ func (s *Scheduler) discard(c Caller, id string) (string, *store.JobChange) {
 	if err != nil || !ok || j.State != store.JobDraft || j.Creator.Key() != c.Principal.Key() || j.CreatedIn != c.Conv {
 		return fmt.Sprintf("No draft %q of yours in this conversation.", id), nil
 	}
-	return fmt.Sprintf("Draft %s discarded.", id), &store.JobChange{Drop: id}
+	return "Request cancelled; nothing was changed.", &store.JobChange{Drop: id}
 }
 
 func (s *Scheduler) manage(c Caller, sub, id, arg string) (string, *store.JobChange) {
@@ -601,41 +545,59 @@ func (s *Scheduler) manage(c Caller, sub, id, arg string) (string, *store.JobCha
 				change.CancelRetries = id
 			}
 		}
-		return fmt.Sprintf("Job %s %s.", id, what), change
+		if state, ok := set["state"].(string); ok {
+			j.State = state
+		}
+		if next, ok := set["next_due"].(time.Time); ok {
+			j.NextDue = next
+		}
+		title := "Updated"
+		switch {
+		case what == "paused":
+			title = "Paused"
+		case strings.HasPrefix(what, "resumed"):
+			title = "Resumed"
+		case strings.HasPrefix(what, "renewed"):
+			title = "Renewed"
+		}
+		if j.State == store.JobDeleted {
+			title = "Removed"
+		}
+		return s.result(c, j, d, title, nil), change
 	}
 	switch sub {
 	case "pause":
 		if j.State != store.JobActive {
-			return fmt.Sprintf("Job %s is %s.", id, j.State), nil
+			return s.result(c, j, d, "Status", nil), nil
 		}
 		return set(store.Set{"state": store.JobPaused, "reason": "paused by " + c.Principal.Key()}, "paused")
 	case "resume":
 		if j.State != store.JobPaused || sched == nil {
-			return fmt.Sprintf("Job %s is %s.", id, j.State), nil
+			return s.result(c, j, d, "Status", nil), nil
 		}
 		next, ok := sched.Next(now)
 		if !ok {
-			return fmt.Sprintf("Job %s has no future run; edit its schedule.", id), nil
+			return "No future check is scheduled; edit its schedule.", nil
 		}
 		return set(store.Set{"state": store.JobActive, "reason": "", "fails": 0, "skips": 0, "next_slot": next.Key, "next_due": next.At}, "resumed; next run "+when(d, next.At))
 	case "run":
 		if j.State != store.JobActive && j.State != store.JobPaused {
-			return fmt.Sprintf("Job %s is %s.", id, j.State), nil
+			return s.result(c, j, d, "Status", nil), nil
 		}
 		r := store.Run{Job: j.ID, Version: j.Version, Slot: fmt.Sprintf("manual:%d", now.UnixMilli()), Due: now, Trigger: "manual", State: store.RunPending}
-		return fmt.Sprintf("Job %s runs now.", id), &store.JobChange{Run: &r}
+		return s.heading(c, "Check queued") + "\nOne manual check is queued; completion is not yet known.\n" + s.status(c, j, d), &store.JobChange{Run: &r}
 	case "stop":
 		if d.RerunOnTimeout {
-			return fmt.Sprintf("Stopping job %s's current run and pending timeout retry.", id), &store.JobChange{CancelRetries: id, StopJob: id}
+			return s.heading(c, "Stopping current check") + "\nStopping any current check; pending timeout retry cancelled. Future schedule stays unchanged.", &store.JobChange{CancelRetries: id, StopJob: id}
 		}
 		running, err := s.st.Runs(store.RunFilter{Job: id, States: []string{store.RunRunning}})
 		if err != nil {
 			return "Could not check running job.", nil
 		}
 		if len(running) == 0 {
-			return fmt.Sprintf("Job %s has no running run.", id), nil
+			return "No check is running.", nil
 		}
-		return fmt.Sprintf("Stopping job %s's current run, if running.", id), &store.JobChange{StopJob: id, CancelRetries: id}
+		return s.heading(c, "Stopping current check") + "\nCurrent work is being stopped. Future schedule stays unchanged.", &store.JobChange{StopJob: id, CancelRetries: id}
 	case "rm":
 		msg, change := set(store.Set{"state": store.JobDeleted, "reason": "removed by " + c.Principal.Key()}, "deleted")
 		change.StopJob = j.ID
@@ -677,6 +639,11 @@ func (s *Scheduler) list(c Caller, all bool) string {
 	}
 	var b strings.Builder
 	for _, j := range jobs {
+		if !all {
+			d, _, _ := parse(j)
+			b.WriteString(s.result(c, j, d, "Status", nil) + "\n\n")
+			continue
+		}
 		fmt.Fprintf(&b, "• %s %q — %s", j.ID, j.Name, j.State)
 		if c.Private {
 			d, _, _ := parse(j)
@@ -696,11 +663,14 @@ func (s *Scheduler) show(c Caller, id string) string {
 	j, err := s.own(c, id)
 	if err != nil {
 		drafts := s.drafts(c)
-		i := slices.IndexFunc(drafts, func(d store.Job) bool { return d.ID == id && removalID(d) == "" })
+		i := slices.IndexFunc(drafts, func(d store.Job) bool { return d.ID == id })
 		if i < 0 {
 			return err.Error()
 		}
 		j = drafts[i]
+		if target := removalID(j); target != "" {
+			return "Removal request (only genuine human confirmation applies):\n" + s.show(c, target)
+		}
 	}
 	d, sched, _ := parse(j)
 	var b strings.Builder

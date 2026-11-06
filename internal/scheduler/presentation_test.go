@@ -1,0 +1,190 @@
+package scheduler
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/store"
+)
+
+func TestConciseRequestDetailsAndState(t *testing.T) {
+	r := newRig(t)
+	if _, _, ok := r.s.Answer(asBoss, "Details"); ok {
+		t.Fatal("unrelated Details intercepted")
+	}
+	raw := `{"name":"Monitor *x* _y_ [click](https://example.test) <@U1>","summary":"Find requests needing attention.","schedule":{"cron":["0,30 12-20 * * MON-FRI","45 20 * * MON-FRI"]},"prompt":"PRIVATE PROMPT","paused":true}`
+	j, err := r.s.proposal(asBoss, []byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := r.s.card(asBoss, j)
+	for _, want := range []string{"*Set up scheduled task?*", "Find requests needing attention.", "12:00–20:30, plus 20:45", "Europe/Kyiv", "This private conversation", "created paused", "*Yes*", "*No*", "*Details*", `\*x\*`, `\[click\]`} {
+		if !strings.Contains(card, want) {
+			t.Fatalf("missing %q: %s", want, card)
+		}
+	}
+	for _, bad := range []string{j.ID, "PRIVATE PROMPT", "Next", "!job", "harness", "0,30", "job draft"} {
+		if strings.Contains(card, bad) {
+			t.Fatalf("leak %q: %s", bad, card)
+		}
+	}
+	r.apply(&store.JobChange{Add: &j})
+	if text, _, ok := r.s.Answer(asBoss, "Details"); !ok || !strings.Contains(text, "PRIVATE PROMPT") || !strings.Contains(text, "Cron:") {
+		t.Fatal(text, ok)
+	}
+	for _, c := range []Caller{asWork, inGroup} {
+		if _, _, ok := r.s.Answer(c, "Details"); ok {
+			t.Fatal("foreign Details accepted")
+		}
+	}
+	if _, _, ok := r.s.Answer(asBoss, "Yes?"); ok {
+		t.Fatal("question confirmed")
+	}
+	out, ok := r.answer(asBoss, "Yes")
+	if !ok || r.job(j.ID).State != store.JobPaused || strings.Contains(out, "Next") || !strings.Contains(out, "Paused;") {
+		t.Fatal(out)
+	}
+	show := r.cmd(asBoss, "job show "+j.ID)
+	if strings.Contains(show, "Next:") {
+		t.Fatal("paused projection", show)
+	}
+	out = r.cmd(asBoss, "job resume "+j.ID)
+	if !Formatted(out) || !strings.Contains(out, "Next scheduled check:") {
+		t.Fatal(out)
+	}
+	if text, _, ok := r.s.Answer(asBoss, "Details"); ok {
+		t.Fatal("consumed request still bound", text)
+	}
+}
+
+func TestConciseEditRemovalSharedAndAmbiguity(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"Private name","summary":"Private purpose","schedule":{"every":"1h"},"prompt":"PRIVATE"}`)
+	j, err := r.s.proposal(asBoss, []byte(`{"edit":"`+id+`","schedule":{"every":"2h"},"prompt":"PRIVATE CHANGED"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := r.s.card(asBoss, j)
+	if !strings.Contains(card, "Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv") || strings.Contains(card, "PRIVATE CHANGED") {
+		t.Fatal(card)
+	}
+	group := r.s.card(inGroup, j)
+	if strings.Contains(group, "Private name") || strings.Contains(group, "Private purpose") || strings.Contains(group, "PRIVATE") {
+		t.Fatal(group)
+	}
+	r.apply(&store.JobChange{Add: &j})
+	removal, err := r.s.proposal(asBoss, []byte(`{"remove":"`+id+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.apply(&store.JobChange{Add: &removal})
+	for _, w := range []string{"Yes", "No", "Details"} {
+		text, change, ok := r.s.Answer(asBoss, w)
+		if !ok || change != nil || !strings.Contains(text, "Several requests") || strings.Contains(text, id) {
+			t.Fatal(w, text)
+		}
+	}
+	r.cmd(asBoss, "job discard "+j.ID)
+	card = r.s.card(asBoss, removal)
+	if !strings.Contains(card, "Future checks and pending retries will stop") || strings.Contains(card, id) {
+		t.Fatal(card)
+	}
+	if details, _, ok := r.s.Answer(asBoss, "Details"); !ok || !strings.Contains(details, "PRIVATE") {
+		t.Fatal(details)
+	}
+	out, ok := r.answer(asBoss, "Yes")
+	if !ok || !strings.Contains(out, "Already delivered messages remain") || r.job(id).State != store.JobDeleted {
+		t.Fatal(out)
+	}
+}
+
+func TestControlSourceIsProtectedRealIngressBinding(t *testing.T) {
+	r, c := controlRig(t)
+	source := bossDM
+	source.Thread = "10"
+	_, _, err := r.st.AddInbound(core.Inbound{Conv: source, From: boss, Origin: core.OriginLive, Private: true, MsgID: "source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := bossDM
+	other.Thread = "20"
+	_, _, _ = r.st.AddInbound(core.Inbound{Conv: other, From: boss, Origin: core.OriginLive, Private: true, MsgID: "unrelated-newer"})
+	c.source = &source
+	got := c.execute(context.Background(), 1234, ControlRequest{Action: "create", RequestID: "bound", Definition: json.RawMessage(`{"name":"monitor","schedule":{"every":"1h"},"prompt":"synthetic","paused":true}`)})
+	if got.Error != "" || r.job(got.DraftID).CreatedIn != source {
+		t.Fatal(got)
+	}
+	outs := r.sent()
+	if len(outs) != 1 || outs[0].Conv != source || !outs[0].Formatted {
+		t.Fatal(outs)
+	}
+	if _, _, ok := r.s.Answer(asBoss, "Yes"); ok {
+		t.Fatal("confirmed in unrelated topic")
+	}
+	missing := source
+	missing.Thread = "unknown"
+	c.source = &missing
+	if _, err := c.caller(context.Background()); err == nil {
+		t.Fatal("missing source fell back")
+	}
+	c.source = &source
+	if change := r.cmd(Caller{Principal: boss, Role: core.RoleOwner, Conv: source, Private: true}, "job confirm "+got.DraftID); !strings.Contains(change, "Paused") {
+		t.Fatal(change)
+	}
+	if r.job(got.DraftID).CreatedIn != source {
+		t.Fatal("source lost")
+	}
+}
+
+func TestNativeErrorPrivateCheckpointFailure(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"scan","schedule":{"every":"1h"},"prompt":"PRIVATE PROMPT","quiet":true,"checkpoint":true}`)
+	r.run(id)
+	r.sent()
+	detail := core.SanitizeNativeError("mcp__test__list_workspaces: requested limit 100; maximum 50. token=synthetic-token https://example.test/private?signature=SYNTHETIC\nPRIVATE CONTENT", "")
+	e := r.finish("model recovered", Outcome{Harness: "codex", ToolErrors: []string{detail}, Result: harness.Result{Ready: true}})
+	if e.Run.State != store.RunFailed || !e.Run.Retry.IsZero() {
+		t.Fatal(e.Run)
+	}
+	cp, _ := r.st.Checkpoint(id, boss.Key())
+	if cp.Version != 0 {
+		t.Fatal("failed scan committed", cp)
+	}
+	notices := r.sent()
+	if len(notices) == 0 {
+		t.Fatal("missing failure notice")
+	}
+	body := texts(notices)
+	for _, w := range []string{"requested limit 100; maximum 50", "Automatic retry: no", "Next scheduled run:", "scan not committed"} {
+		if !strings.Contains(body, w) {
+			t.Fatal(w, body)
+		}
+	}
+	for _, bad := range []string{"synthetic-token", "SYNTHETIC", "PRIVATE CONTENT", id} {
+		if strings.Contains(body, bad) {
+			t.Fatal("leak", body)
+		}
+	}
+	if !notices[0].Formatted {
+		t.Fatal("unformatted failure")
+	}
+	if h := r.cmd(asBoss, "job history "+id); !strings.Contains(h, "requested limit 100") {
+		t.Fatal(h)
+	}
+	if h := r.cmd(inGroup, "job history "+id); strings.Contains(h, "requested limit 100") {
+		t.Fatal(h)
+	}
+	// The next scheduled check is not a retry, even when it remains active.
+	if r.job(id).State != store.JobActive {
+		t.Fatal("falsely paused")
+	}
+	r.now = r.now.Add(25 * time.Hour)
+	if _, _, ok := r.s.Answer(asBoss, "Details"); ok {
+		t.Fatal("no request")
+	}
+}

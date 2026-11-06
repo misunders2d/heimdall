@@ -201,13 +201,20 @@ func saveCheckpoint(tx *sql.Tx, turn int64, who string, run *RunEnd, u Checkpoin
 // ControlBinding reads a real private platform ingress, without reading its text.
 // A selector is deployment configuration, not caller-supplied authority. Admission
 // and, for Slack, live platform identity still have to be rechecked by scheduler.
-func (s *Store) ControlBinding(key string) (core.Principal, core.ConvKey, error) {
+func (s *Store) ControlBinding(key string, source ...*core.ConvKey) (core.Principal, core.ConvKey, error) {
 	p, err := core.ParsePrincipalKey(key)
 	if err != nil {
 		return p, core.ConvKey{}, err
 	}
 	var k core.ConvKey
-	err = s.db.QueryRow(`SELECT iface,chat,thread,user_email,user_team,user_key_id FROM inbound WHERE platform=? AND user_id=? AND private=1 AND origin=? AND coalesce(json_extract(nullif(extra,''),'$.mcp_control'),0)=0 ORDER BY id DESC LIMIT 1`, p.Platform, p.ID, core.OriginLive).Scan(&k.Interface, &k.Chat, &k.Thread, &p.Email, &p.Team, &p.KeyID)
+	query := `SELECT iface,chat,thread,user_email,user_team,user_key_id FROM inbound WHERE platform=? AND user_id=? AND private=1 AND origin=? AND coalesce(json_extract(nullif(extra,''),'$.mcp_control'),0)=0`
+	args := []any{p.Platform, p.ID, core.OriginLive}
+	if len(source) > 0 && source[0] != nil {
+		k := source[0]
+		query += ` AND iface=? AND chat=? AND thread=?`
+		args = append(args, k.Interface, k.Chat, k.Thread)
+	}
+	err = s.db.QueryRow(query+` ORDER BY id DESC LIMIT 1`, args...).Scan(&k.Interface, &k.Chat, &k.Thread, &p.Email, &p.Team, &p.KeyID)
 	if err != nil {
 		return p, k, fmt.Errorf("owner has no registered private platform conversation")
 	}

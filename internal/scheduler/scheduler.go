@@ -415,7 +415,11 @@ func (s *Scheduler) refusal(j store.Job, d Def, r store.Run, why string) (store.
 	for _, key := range s.access.OwnerKeys() {
 		if p, err := core.ParsePrincipalKey(key); err == nil {
 			if k, ok, _ := s.st.PrivateChat(p); ok && !slices.ContainsFunc(outs, func(o core.Outbound) bool { return o.Conv == k }) {
-				outs = append(outs, core.Outbound{Conv: k, Text: text, Window: d.DeliveryWindow})
+				body := text
+				if k.Interface == core.PlatformTelegram {
+					body = strings.ReplaceAll(body, "**", "*")
+				}
+				outs = append(outs, core.Outbound{Conv: k, Text: body, Formatted: Formatted(text), Window: d.DeliveryWindow})
 			}
 		}
 	}
@@ -487,7 +491,7 @@ func (s *Scheduler) endNotices(j store.Job, d Def, end store.RunEnd) []core.Outb
 		}
 		if !end.Retry.IsZero() {
 			what = "will retry the same slot"
-			retry = fmt.Sprintf("automatically at %s (attempt %d)", when(d, end.Retry), run.Attempt+2)
+			retry = fmt.Sprintf("queued for %s (attempt %d)", when(d, end.Retry), run.Attempt+2)
 		}
 		body := s.text(j, d, what, run.Due, cause, run.Attempt+1, retry)
 		outs = s.notices(j, d, true, body)
@@ -500,7 +504,7 @@ func (s *Scheduler) endNotices(j store.Job, d Def, end store.RunEnd) []core.Outb
 			}
 			for i := range outs {
 				if private[outs[i].Conv] {
-					outs[i].Text = strings.Replace(body, "\nCause: "+cause, "\nCause: "+cause+"\nError: "+detail, 1)
+					outs[i].Text = strings.Replace(outs[i].Text, "\nCause: "+cause, "\nCause: "+cause+"\nError: "+literal(detail), 1)
 				}
 			}
 		}
@@ -534,7 +538,7 @@ func signInHint(id string, d Def, cause string) string {
 	if len(logins) == 0 {
 		return ""
 	}
-	return fmt.Sprintf(" To sign in (%s): send %s in your private chat with the bot, then !job resume %s if the job was paused.", strings.Join(services, ", "), strings.Join(logins, " and "), id)
+	return fmt.Sprintf(" Sign in through your private chat: send %s. Paused checks remain inactive until explicitly resumed.", strings.Join(logins, " and "))
 }
 
 func (s *Scheduler) setState(j store.Job, state, reason string, outs ...core.Outbound) {
@@ -790,7 +794,8 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 	case t.Def.Checkpoint && res.Unclean:
 		fail("workflow checkpoint: unclean native result")
 	case t.Def.Checkpoint && len(o.ToolErrors) > 0:
-		fail("workflow checkpoint: native tool failed; scan not committed")
+		detail := core.SanitizeNativeError(strings.Join(o.ToolErrors, "; "), t.Def.Prompt)
+		fail("workflow checkpoint: native tool failed; scan not committed — " + detail)
 	case t.Def.Checkpoint:
 		cp, err := s.checkpointResult(t, text, o.Files, o.Tools)
 		if err != nil {
@@ -837,7 +842,7 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 		default:
 			run.State, run.Cause = store.RunUnverified, check
 			if k, private := s.noticeChat(j); private {
-				reply(k, fmt.Sprintf("⚠ unverified: %s — job %q (%s); withheld from its target:\n\n%s", check, j.Name, j.ID, text))
+				reply(k, fmt.Sprintf("⚠ Result unverified: %s; withheld from its target:\n\n%s", check, text))
 			}
 		}
 	}
@@ -914,7 +919,19 @@ func (s *Scheduler) notices(j store.Job, d Def, toTarget bool, text string) []co
 	var outs []core.Outbound
 	add := func(k core.ConvKey) {
 		if k.Interface != "" && !slices.ContainsFunc(outs, func(o core.Outbound) bool { return o.Conv == k }) {
-			outs = append(outs, core.Outbound{Conv: k, Text: text, Window: d.DeliveryWindow})
+			body := text
+			privateKey, isPrivate := s.noticeChat(j)
+			private := isPrivate && privateKey == k
+			if tgt, err := s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate}); err == nil && tgt.Conv == k && tgt.Private {
+				private = true
+			}
+			if private {
+				body = strings.Replace(body, "\n", "\n"+literal(j.Name)+"\n", 1)
+			}
+			if k.Interface == core.PlatformTelegram {
+				body = strings.ReplaceAll(body, "**", "*")
+			}
+			outs = append(outs, core.Outbound{Conv: k, Text: body, Formatted: Formatted(text), Window: d.DeliveryWindow})
 		}
 	}
 	if toTarget {
@@ -931,23 +948,23 @@ func (s *Scheduler) notices(j store.Job, d Def, toTarget bool, text string) []co
 // for private destinations by endNotices.
 func (s *Scheduler) text(j store.Job, d Def, what string, slot time.Time, cause string, attempts int, retry ...string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "⚠ Job %q (%s) %s", j.Name, j.ID, strings.TrimSuffix(what, "."))
+	fmt.Fprintf(&b, "**Scheduled task %s**", literal(strings.TrimSuffix(what, ".")))
 	if !slot.IsZero() {
 		fmt.Fprintf(&b, "\nSlot: %s", when(d, slot))
 	}
 	if cause != "" {
-		fmt.Fprintf(&b, "\nCause: %s", cause)
+		fmt.Fprintf(&b, "\nCause: %s", literal(cause))
 	}
 	if attempts > 0 {
 		fmt.Fprintf(&b, "\nAttempts: %d", attempts)
 	}
 	if len(retry) > 0 {
-		fmt.Fprintf(&b, "\nRetry: %s", retry[0])
+		fmt.Fprintf(&b, "\nAutomatic retry: %s", retry[0])
 	}
 	if j.State == store.JobActive && !j.NextDue.IsZero() {
 		fmt.Fprintf(&b, "\nNext scheduled run: %s", when(d, j.NextDue))
 	}
-	fmt.Fprintf(&b, "\n!job show %s\n— heimdall", j.ID)
+	b.WriteString("\n— heimdall")
 	return b.String()
 }
 

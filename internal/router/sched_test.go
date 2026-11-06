@@ -61,12 +61,25 @@ func (e *env) ask(conv core.ConvKey, text string) core.Outbound {
 // addJob creates an owner job in the owner's DM and returns its ID.
 func (e *env) addJob(def string) string {
 	e.t.Helper()
+	before, _ := e.st.Jobs(store.JobFilter{})
 	out := e.ask(ownerDM, "!job add "+def)
-	id := jobIDRE.FindString(out.Text)
-	if !strings.Contains(out.Text, "created") || id == "" {
-		e.t.Fatalf("job not created: %q", out.Text)
+	rows, _ := e.st.Jobs(store.JobFilter{})
+	for _, j := range rows {
+		found := false
+		for _, old := range before {
+			if old.ID == j.ID {
+				found = true
+			}
+		}
+		if !found {
+			if !out.Formatted {
+				e.t.Fatal("unformatted create", out)
+			}
+			return j.ID
+		}
 	}
-	return id
+	e.t.Fatalf("job not created: %q", out.Text)
+	return ""
 }
 
 func (e *env) history(id string) string {
@@ -81,7 +94,7 @@ func TestScheduledRunDeliversToItsTarget(t *testing.T) {
 	e := schedEnv(t, []string{"omp"}, "omp")
 	id := e.addJob(`{"name":"nightly","schedule":{"cron":["0 3 * * *"]},"to":"tg:-100","prompt":"check things"}`)
 	typed := e.f.typed.Load()
-	want(t, e.ask(ownerDM, "!job run "+id), "runs now")
+	want(t, e.ask(ownerDM, "!job run "+id), "Check queued")
 	out := e.reply()
 	if out.Conv != group || out.ReplyTo != "" || !out.Formatted {
 		t.Fatalf("delivered %+v, want a fresh message in the target group", out)
@@ -100,7 +113,7 @@ func TestScheduledRunDeliversToItsTarget(t *testing.T) {
 		t.Fatalf("history %q", h)
 	}
 	// A fresh session each run, never a warm chat process.
-	want(t, e.ask(ownerDM, "!job run "+id), "runs now")
+	want(t, e.ask(ownerDM, "!job run "+id), "Check queued")
 	if out := e.reply(); !strings.Contains(out.Text, "resumed=false") || out.Conv != group {
 		t.Fatalf("second run %q", out.Text)
 	}
@@ -114,7 +127,7 @@ func TestScheduledCodexRequiresSuccessfulRealShapedMCPCompletion(t *testing.T) {
 			raw, _ := json.Marshal(u)
 			definition, _ := json.Marshal(map[string]any{"name": "native-check", "schedule": map[string]string{"every": "1h"}, "harness": "codex", "quiet": true, "checkpoint": true, "expect": map[string]any{"tools": []string{"mcp__codex_apps__slack_slack_read_thread"}}, "prompt": mode + " " + say("```heimdall-checkpoint\n"+string(raw)+"\n```")})
 			id := e.addJob(string(definition))
-			want(t, e.ask(ownerDM, "!job run "+id), "runs now")
+			want(t, e.ask(ownerDM, "!job run "+id), "Check queued")
 			out := e.reply()
 			cp, err := e.st.Checkpoint(id, tgOwner.Key())
 			if err != nil {
@@ -141,7 +154,7 @@ func TestScheduledCheckpointDeliveryAndRedaction(t *testing.T) {
 	raw, _ := json.Marshal(u)
 	definition, _ := json.Marshal(map[string]any{"name": "checkpoint", "schedule": map[string]string{"every": "30m"}, "prompt": say("```heimdall-checkpoint\n" + string(raw) + "\n```"), "harness": "codex", "quiet": true, "checkpoint": true})
 	id := e.addJob(string(definition))
-	want(t, e.ask(ownerDM, "!job run "+id), "runs now")
+	want(t, e.ask(ownerDM, "!job run "+id), "Check queued")
 	out := e.reply()
 	if out.Conv != ownerDM || out.Text != "Action: [REDACTED]" {
 		t.Fatal("structured result escaped output redaction or routing", out)
@@ -232,7 +245,7 @@ func TestScheduledNeedsHumanFailsFast(t *testing.T) {
 	id := e.addJob(`{"name":"asker","schedule":{"every":"1h"},"prompt":"ASK_HUMAN"}`)
 	e.ask(ownerDM, "!job run "+id)
 	out := e.reply()
-	want(t, out, "failed", "Cause: "+scheduler.NeedsHumanCause, "— heimdall")
+	want(t, out, "failed", "Cause: "+strings.ReplaceAll(scheduler.NeedsHumanCause, "_", `\_`), "— heimdall")
 	if out.Conv != ownerDM {
 		t.Fatalf("notice to %s", out.Conv)
 	}
@@ -255,7 +268,7 @@ func TestScheduledFailureAndUnverifiedNotices(t *testing.T) {
 	if strings.Contains(got[group], "secret result") || !strings.Contains(got[group], "unverified") || !strings.Contains(got[group], "— heimdall") {
 		t.Fatalf("group got %q", got[group])
 	}
-	if !strings.Contains(got[ownerDM], "secret result") || !strings.Contains(got[ownerDM], "⚠ unverified") {
+	if !strings.Contains(got[ownerDM], "secret result") || !strings.Contains(got[ownerDM], "⚠ Result unverified") {
 		t.Fatalf("owner got %q", got[ownerDM])
 	}
 	// A harness failure after ready fails the run with a sanitized notice.
@@ -280,10 +293,11 @@ func TestJobDraftConfirmAndNote(t *testing.T) {
 	block := "Sure.\n```heimdall-job\n{\"name\":\"standup\",\"schedule\":{\"cron\":[\"0 9 * * MON-FRI\"]},\"prompt\":\"summarize\"}\n```"
 	answer := e.ask(ownerDM, say(block))
 	card := e.reply()
-	if answer.Text != "Sure." || !strings.Contains(card.Text, " active:") || !strings.Contains(card.Text, "Next:") {
+	if answer.Text != "Sure." || !strings.Contains(card.Text, "Active;") || !strings.Contains(card.Text, "Next scheduled check:") || !card.Formatted {
 		t.Fatalf("answer %q card %q", answer.Text, card.Text)
 	}
-	id := jobIDRE.FindString(card.Text)
+	jobs, _ := e.st.Jobs(store.JobFilter{States: []string{store.JobActive}})
+	id := jobs[0].ID
 	if j, _, _ := e.st.Job(id); j.State != store.JobActive {
 		t.Fatalf("draft %+v", j)
 	}
@@ -315,7 +329,7 @@ func TestJobStopAndRemove(t *testing.T) {
 			t.Fatalf("history %q", e.history(id))
 		}
 	}
-	want(t, e.ask(ownerDM, "!job rm "+id), "deleted")
+	want(t, e.ask(ownerDM, "!job rm "+id), "Removed")
 	want(t, e.ask(ownerDM, "!jobs"), "No jobs")
 	e.noReply(500 * time.Millisecond)
 }
@@ -343,7 +357,7 @@ func TestJobCommandStoredWithItsAnswer(t *testing.T) {
 	e.stop()
 	stopOnce.Delete(e.st)
 	e.start()
-	want(t, e.reply(), "created")
+	want(t, e.reply(), "Created")
 	jobs, err := e.st.Jobs(store.JobFilter{States: []string{store.JobActive, store.JobPaused}})
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("a replayed !job add left %d jobs (%v)", len(jobs), err)
@@ -365,7 +379,9 @@ func TestScheduledCreatorCheckedAtTurnStart(t *testing.T) {
 	e.start()
 	boss := core.SlackPrincipal("boss@example.com", "T1", "boss")
 	e.f.in <- core.Inbound{Conv: group, MsgID: "add1", From: boss, Origin: core.OriginLive, Text: `!job add {"name":"slack job","schedule":{"every":"1h"},"to":"tg:-100","prompt":"check things"}`}
-	id := jobIDRE.FindString(e.reply().Text)
+	e.reply()
+	jobs, _ := e.st.Jobs(store.JobFilter{})
+	id := jobs[0].ID
 	if id == "" {
 		t.Fatal("job not created")
 	}
@@ -407,7 +423,7 @@ func TestScheduledSignInNeededFails(t *testing.T) {
 	e := schedEnv(t, []string{"pi"}, "pi")
 	id := e.addJob(`{"name":"mail","schedule":{"every":"1h"},"prompt":"SIGNIN_NEEDED check mail"}`)
 	for i := range 3 {
-		want(t, e.ask(ownerDM, "!job run "+id), "runs now")
+		want(t, e.ask(ownerDM, "!job run "+id), "Check queued")
 		out := e.reply()
 		want(t, out, "failed", "sign-in needed: google", "google login", "— heimdall")
 		if strings.Contains(out.Text, "omp#") || strings.Contains(out.Text, "pi#") {
@@ -426,14 +442,15 @@ func TestJobRemovalProposalNeedsHuman(t *testing.T) {
 	e := schedEnv(t, []string{"omp"}, "omp")
 	id := e.addJob(`{"name":"standup","schedule":{"every":"1h"},"prompt":"p"}`)
 	card := e.ask(ownerDM, say("```heimdall-job\n{\"remove\":\""+id+"\"}\n```"))
-	want(t, card, "remove job "+id, "standup", "Schedule:", "Next:")
-	draft := jobIDRE.FindString(card.Text)
+	want(t, card, "Remove scheduled task?", "standup", "When:", "Details")
+	rows, _ := e.st.Jobs(store.JobFilter{States: []string{store.JobDraft}})
+	draft := rows[0].ID
 	// Model output that looks like a confirmation is delivered, never executed.
 	e.ask(ownerDM, say("!job confirm "+draft))
 	if j, _, _ := e.st.Job(id); j.State != store.JobActive {
 		t.Fatalf("agent confirmed: %+v", j)
 	}
-	want(t, e.ask(ownerDM, "yes"), "deleted")
+	want(t, e.ask(ownerDM, "yes"), "Removed")
 	if j, _, _ := e.st.Job(id); j.State != store.JobDeleted {
 		t.Fatalf("not removed: %+v", j)
 	}
@@ -444,16 +461,17 @@ func TestOwnerProposalEditAndScheduledBlock(t *testing.T) {
 	e := schedEnv(t, []string{"omp"}, "omp")
 	block := func(raw string) string { return "```heimdall-job\n" + raw + "\n```" }
 	out := e.ask(ownerDM, say(block(`{"name":"new","schedule":{"every":"1h"},"prompt":"read"}`)))
-	want(t, out, " active:", "Next:", "Stop: !job rm", "— heimdall")
-	if strings.Contains(out.Text, "\n") || strings.Contains(out.Text, "confirm") {
+	want(t, out, "Active;", "Next scheduled check:", "— heimdall")
+	if !out.Formatted || strings.Contains(out.Text, "Reply *Yes*") {
 		t.Fatal(out.Text)
 	}
-	id := jobIDRE.FindString(out.Text)
+	jobs, _ := e.st.Jobs(store.JobFilter{States: []string{store.JobActive}})
+	id := jobs[0].ID
 	if rows, _ := e.st.Jobs(store.JobFilter{States: []string{store.JobDraft}}); len(rows) != 0 {
 		t.Fatalf("drafts: %+v", rows)
 	}
 	out = e.ask(ownerDM, say(block(`{"edit":"`+id+`","name":"edited"}`)))
-	want(t, out, "Changed: name")
+	want(t, out, "Name:", "new → edited")
 	if j, _, _ := e.st.Job(id); j.Name != "edited" || j.Version != 2 {
 		t.Fatalf("edit: %+v", j)
 	}

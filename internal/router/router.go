@@ -719,7 +719,7 @@ func (c *conv) reply(row store.InboundRow, text string) {
 // answer settles a ! command and its reply together. If that cannot be
 // recorded the message stays pending and is answered after a restart.
 func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
-	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: c.r.scrub(text) + "\n— heimdall"}
+	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: c.r.scrub(text) + "\n— heimdall", Formatted: (e.Detail == "job" || e.Detail == "job answer") && scheduler.Formatted(text)}
 	if err := c.r.store.AnswerCommand(row.ID, c.key, e); err != nil {
 		c.r.log.Printf("message %d: command %s not recorded: %v", row.ID, e.Detail, err)
 		return
@@ -1367,7 +1367,18 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 						t.tools = append(t.tools, p.Tool)
 					}
 					if p.Completed && p.Error {
-						t.toolErrors = append(t.toolErrors, p.Tool)
+						if len(t.toolErrors) < 2 {
+							name := p.Tool
+							if strings.TrimLeft(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:-") != "" {
+								name = "native_tool"
+							}
+							name = clipRunes(name, 80)
+							detail := core.SanitizeNativeError(p.ErrorSummary, t.job.Def.Prompt)
+							if detail != "" {
+								name += ": " + detail
+							}
+							t.toolErrors = append(t.toolErrors, name)
+						}
 					}
 				}
 				if p.SignIn != "" && !slices.Contains(t.signIn, p.SignIn) {
@@ -1807,7 +1818,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	if e.State == store.TurnDone {
 		e.Files = c.fileReplies(t, d.files)
 		if card != "" {
-			e.Draft, e.Job, e.Notices = draft, jobChange, []core.Outbound{{Conv: c.key, ReplyTo: t.replyTo, Text: c.r.scrub(card)}}
+			e.Draft, e.Job, e.Notices = draft, jobChange, []core.Outbound{{Conv: c.key, ReplyTo: t.replyTo, Text: c.r.scrub(card), Formatted: scheduler.Formatted(card)}}
 			if e.Reply != nil && e.Reply.Text == "" && len(e.Reply.Reactions) == 0 {
 				e.Reply = nil // only the block: Heimdall's notice says it
 			}
