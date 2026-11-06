@@ -3,9 +3,11 @@ package scheduler
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/schedule"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -37,25 +39,20 @@ func (s *Scheduler) name(c Caller, d Def) string {
 	}
 	return literal(d.Name)
 }
-func purpose(c Caller, d Def) string {
-	if !c.Private {
-		return "Run the saved task."
+func (s *Scheduler) taskTitle(c Caller, action string, d Def) string {
+	text := s.heading(c, action+"?") + " " + s.name(c, d)
+	if c.Private && d.Summary != "" && !strings.EqualFold(d.Summary, d.Name) {
+		text += " — " + literal(d.Summary)
 	}
-	if d.Summary != "" {
-		return literal(d.Summary)
-	}
-	if d.Kind == KindNotify {
-		return "Send the saved reminder."
-	}
-	return "Run the saved instructions."
+	return text
 }
 func (s *Scheduler) destination(c Caller, j store.Job, d Def) string {
 	t, err := s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate})
 	if err != nil {
-		return "Saved destination (currently unavailable)"
+		return "Saved destination unavailable"
 	}
 	if t.AgentNet != "" {
-		return "Configured AgentNet recipient; the agent delivers"
+		return "AgentNet recipient; agent delivers"
 	}
 	if t.Conv == c.Conv {
 		if j.CreatedPrivate {
@@ -66,28 +63,19 @@ func (s *Scheduler) destination(c Caller, j store.Job, d Def) string {
 		}
 		return "This conversation"
 	}
-	if t.Private {
-		platform := "Telegram"
-		if t.Conv.Interface == core.PlatformSlack {
-			platform = "Slack"
-		}
-		where := "Your private " + platform + " conversation"
-		if t.Conv.Thread != "" {
-			where += " topic"
-		}
-		return where
-	}
+	// Cross-platform targets have no verified display name or DM alias here.
+	// A positive Telegram ID alone is not evidence of a private destination.
 	switch t.Conv.Interface {
 	case core.PlatformTelegram:
 		if t.Conv.Thread != "" {
-			return "Configured Telegram chat topic"
+			return "Telegram topic"
 		}
-		return "Configured Telegram chat"
+		return "Telegram"
 	case core.PlatformSlack:
 		if t.Conv.Thread != "" {
-			return "Configured Slack conversation thread"
+			return "Slack thread"
 		}
-		return "Configured Slack conversation"
+		return "Slack"
 	}
 	return "Saved destination"
 }
@@ -97,75 +85,96 @@ func (s *Scheduler) status(c Caller, j store.Job, d Def) string {
 	case j.State == store.JobDeleted:
 		return label + "Removed. Future checks and pending retries cancelled; any current check is being stopped. Already delivered messages remain."
 	case j.State == store.JobPaused || d.Paused:
-		return label + "Paused; automatic checks are not active."
+		return label + "Paused; no automatic checks."
 	case j.State == store.JobDone:
-		return label + "Finished; automatic checks are not active."
+		return label + "Finished; no automatic checks."
 	case j.State == store.JobDraft:
 		return label + "Awaiting your approval; no change applied."
 	default:
-		text := label + "Active; scheduled checks are enabled."
+		text := label + "Active; scheduled checks enabled."
 		if !j.NextDue.IsZero() {
-			text += "\n" + bold(c.Conv, "Next scheduled check:") + " " + literal(when(d, j.NextDue))
+			text = label + "Active; " + bold(c.Conv, "Next scheduled check:") + " " + literal(shortWhen(d, j.NextDue))
 		}
 		return text
 	}
 }
-func (s *Scheduler) overview(c Caller, j store.Job, d Def) string {
-	text := purpose(c, d) + "\n" + bold(c.Conv, "When:") + " " + literal(scheduleWords(d.Schedule)) + " · " + literal(d.TZ) + "\n" + bold(c.Conv, "Delivery:") + " " + literal(s.destination(c, j, d))
-	if d.Until != "" {
-		text += "\n" + bold(c.Conv, "Ends:") + " " + literal(d.Until)
+func (s *Scheduler) overview(c Caller, j store.Job, d Def, before *Def) string {
+	when := scheduleWords(d.Schedule) + " · " + d.TZ
+	to := s.destination(c, j, d)
+	if before != nil {
+		if mustJSON(before.Schedule) != mustJSON(d.Schedule) || before.TZ != d.TZ {
+			old := scheduleWords(before.Schedule) + " · " + before.TZ
+			if old == when {
+				when += " (changed; exact settings in Details)"
+			} else {
+				when = old + " → " + when
+			}
+		}
+		if before.To != d.To {
+			old := s.destination(c, j, *before)
+			if old == to {
+				to += " (destination changed; see Details)"
+			} else {
+				to = old + " → " + to
+			}
+		}
 	}
-	if d.Quiet {
-		text += "\nRoutine checks stay silent when there is no update."
-	}
-	return text
+	return bold(c.Conv, "When:") + " " + literal(when) + "\n" + bold(c.Conv, "Delivery:") + " " + literal(to)
 }
 func repeatWarning(c Caller, d Def) string {
 	if !d.RerunOnTimeout {
 		return ""
 	}
-	return "\n" + bold(c.Conv, "Repeat-safe rerun:") + " Approving asserts all work and effects are safe to repeat. One full rerun after timeout, in a fresh session, within twice the timeout (" + literal(d.Timeout) + "). Work may repeat."
+	return "\n" + bold(c.Conv, "Repeat-safe rerun:") + " Approving asserts all work and effects are safe to repeat. One full rerun after timeout (" + literal(d.Timeout) + "), fresh session, within twice the timeout."
 }
 func (s *Scheduler) request(c Caller, j store.Job) string {
 	if id := removalID(j); id != "" {
 		orig, _, _ := s.st.Job(id)
 		d, _, _ := parse(orig)
-		return s.heading(c, "Remove scheduled task?") + "\n" + s.name(c, d) + "\n" + s.overview(c, orig, d) + "\nFuture checks and pending retries will stop; any current check will be stopped. Already delivered messages remain." + s.confirmAction(c)
+		return s.taskTitle(c, "Remove", d) + "\n" + s.overview(c, orig, d, nil) + "\nFuture checks and pending retries will stop; any current check will be stopped. Already delivered messages remain." + s.confirmAction(c)
 	}
 	d, _, _ := parse(j)
-	title := "Set up scheduled task?"
+	title := "Schedule"
 	changes := ""
 	display := j
-	state := j.State
+	state := ""
+	var before *Def
 	if j.EditOf != "" {
-		title = "Update scheduled task?"
+		title = "Update"
 		orig, _, _ := s.st.Job(j.EditOf)
-		before, _, _ := parse(orig)
-		state = orig.State
+		old, _, _ := parse(orig)
+		before = &old
 		display = orig
-		changes = "\n" + s.material(c, orig, before, d)
-	}
-	status := s.heading(c, "Status:") + " Awaiting your approval; automatic checks will start after approval. Approval does not verify a successful test."
-	if j.EditOf != "" {
-		display.State = state
-		status = s.status(c, display, d) + " Current settings stay until approval."
+		// Schedule and destination changes are already shown in this one diff.
+		changes = s.material(c, orig, old, d, false)
+		if orig.State == store.JobPaused {
+			state = "Remains paused; no automatic checks."
+		}
 	}
 	if d.Paused {
-		status = s.heading(c, "Status:") + " Will be created paused; automatic checks will not be active. Approval does not verify a successful test."
+		state = "Starts paused; no automatic checks."
 	}
-	return s.heading(c, title) + "\n" + s.name(c, d) + "\n" + s.overview(c, display, d) + changes + "\n" + status + repeatWarning(c, d) + s.confirmAction(c)
+	body := s.overview(c, display, d, before)
+	if extra := strings.TrimSpace(state + " " + changes); extra != "" {
+		body += "\n" + extra
+	}
+	return s.taskTitle(c, title, d) + "\n" + body + repeatWarning(c, d) + s.confirmAction(c)
 }
 func (s *Scheduler) confirmAction(c Caller) string {
-	return "\nReply " + bold(c.Conv, "Yes") + " to approve or " + bold(c.Conv, "No") + " to cancel. " + bold(c.Conv, "Details") + " shows full settings. Only you, here, within 24 hours."
+	return "\nReply " + bold(c.Conv, "Yes") + " · " + bold(c.Conv, "No") + " · " + bold(c.Conv, "Details")
 }
 func (s *Scheduler) result(c Caller, j store.Job, d Def, title string, before *Def) string {
-	text := s.heading(c, title) + "\n" + s.name(c, d) + "\n" + s.overview(c, j, d)
+	text := s.heading(c, title+":") + " " + s.name(c, d) + "\n" + s.status(c, j, d)
 	if before != nil {
-		text += "\n" + s.material(c, j, *before, d)
+		text += "\n" + s.material(c, j, *before, d, true)
+	} else if title == "Renewed" {
+		if until, err := time.Parse(time.RFC3339, d.Until); err == nil {
+			text += "\n" + bold(c.Conv, "Ends:") + " " + literal(shortWhen(d, until))
+		}
 	}
-	return text + "\n" + s.status(c, j, d)
+	return text
 }
-func (s *Scheduler) material(c Caller, j store.Job, a, b Def) string {
+func (s *Scheduler) material(c Caller, j store.Job, a, b Def, includeRoute bool) string {
 	var rows []string
 	add := func(label, before, after string) {
 		if before != after {
@@ -176,18 +185,22 @@ func (s *Scheduler) material(c Caller, j store.Job, a, b Def) string {
 		add("Name", a.Name, b.Name)
 		add("Purpose", or(a.Summary, "Saved instructions"), or(b.Summary, "Saved instructions"))
 	}
-	add("When", scheduleWords(a.Schedule)+" · "+a.TZ, scheduleWords(b.Schedule)+" · "+b.TZ)
-	if mustJSON(a.Schedule) != mustJSON(b.Schedule) && scheduleWords(a.Schedule) == scheduleWords(b.Schedule) {
-		rows = append(rows, "Schedule: changed (exact settings in Details).")
+	if includeRoute {
+		add("When", scheduleWords(a.Schedule)+" · "+a.TZ, scheduleWords(b.Schedule)+" · "+b.TZ)
+		if mustJSON(a.Schedule) != mustJSON(b.Schedule) && scheduleWords(a.Schedule) == scheduleWords(b.Schedule) {
+			rows = append(rows, "Schedule: changed (exact settings in Details).")
+		}
 	}
 	add("Ends", or(a.Until, "No expiry"), or(b.Until, "No expiry"))
 	if a.Quiet != b.Quiet {
 		rows = append(rows, fmt.Sprintf("Silent when no update: %t → %t", a.Quiet, b.Quiet))
 	}
 	add("Timeout", or(a.Timeout, "Configured limit"), or(b.Timeout, "Configured limit"))
-	add("Delivery", s.destination(c, j, a), s.destination(c, j, b))
-	if a.To != b.To && s.destination(c, j, a) == s.destination(c, j, b) {
-		rows = append(rows, "Delivery destination: changed (see Details).")
+	if includeRoute {
+		add("Delivery", s.destination(c, j, a), s.destination(c, j, b))
+		if a.To != b.To && s.destination(c, j, a) == s.destination(c, j, b) {
+			rows = append(rows, "Delivery destination: changed (see Details).")
+		}
 	}
 	if a.Prompt != b.Prompt || a.Text != b.Text {
 		rows = append(rows, "Saved instructions or reminder: changed (see Details).")
@@ -205,8 +218,17 @@ func (s *Scheduler) material(c Caller, j store.Job, a, b Def) string {
 	if mustJSON(aa) != mustJSON(bb) {
 		rows = append(rows, "Execution or delivery settings: changed (see Details).")
 	}
-	if len(rows) == 0 {
+	if len(rows) == 0 && includeRoute {
 		return "No settings changed."
 	}
-	return strings.Join(rows, "\n")
+	return strings.Join(rows, "; ")
+}
+
+// Human receipts use one local time. Operator Details retain UTC as well.
+func shortWhen(d Def, t time.Time) string {
+	loc, err := schedule.Zone(d.TZ)
+	if err != nil {
+		loc = time.UTC
+	}
+	return t.In(loc).Format("2 Jan 2006 at 15:04") + " · " + d.TZ
 }

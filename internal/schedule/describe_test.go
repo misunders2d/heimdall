@@ -16,8 +16,8 @@ func TestDescribeExactUnionAndFallback(t *testing.T) {
 		{Spec{Cron: []string{"0 9 * * MON", "0 17 * * FRI"}}, "Custom schedule"},
 		{Spec{Cron: []string{"0 9 * * MON#2"}}, "Custom schedule"},
 		{Spec{Every: "90m"}, "Every 90 minutes"},
-		{Spec{Every: "2w", At: "09:00", From: "2026-11-05"}, "Every 2 weeks at 09:00, starting 2026-11-05"},
-		{Spec{At: "2026-11-05T09:00"}, "Once, 2026-11-05 09:00"},
+		{Spec{Every: "2w", At: "09:00", From: "2026-11-05"}, "Every 2 weeks at 09:00, starting 5 Nov 2026"},
+		{Spec{At: "2026-11-05T09:00"}, "Once, 5 Nov 2026 at 09:00"},
 	} {
 		if got := Describe(tc.spec); got != tc.want {
 			t.Errorf("%+v: %q != %q", tc.spec, got, tc.want)

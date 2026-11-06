@@ -442,7 +442,7 @@ func TestJobRemovalProposalNeedsHuman(t *testing.T) {
 	e := schedEnv(t, []string{"omp"}, "omp")
 	id := e.addJob(`{"name":"standup","schedule":{"every":"1h"},"prompt":"p"}`)
 	card := e.ask(ownerDM, say("```heimdall-job\n{\"remove\":\""+id+"\"}\n```"))
-	want(t, card, "Remove scheduled task?", "standup", "When:", "Details")
+	want(t, card, "*Remove?*", "standup", "When:", "Details")
 	rows, _ := e.st.Jobs(store.JobFilter{States: []string{store.JobDraft}})
 	draft := rows[0].ID
 	// Model output that looks like a confirmation is delivered, never executed.

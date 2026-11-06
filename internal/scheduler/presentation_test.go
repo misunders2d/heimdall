@@ -3,14 +3,126 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/schedule"
 	"github.com/misunders2d/heimdall/internal/store"
 )
+
+func TestCompactRequestAndReceiptGoldens(t *testing.T) {
+	for _, platform := range []string{core.PlatformTelegram, core.PlatformSlack} {
+		for _, paused := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/paused=%t", platform, paused), func(t *testing.T) {
+				r := newRig(t)
+				r.s.cfg.Interfaces = []string{core.PlatformTelegram, core.PlatformSlack}
+				c := asBoss
+				if platform == core.PlatformSlack {
+					c.Principal = core.SlackPrincipal("owner@example.test", "T1", "U1")
+					c.Conv = core.ConvKey{Interface: platform, Chat: "D1", Thread: "1000.1"}
+				}
+				raw := mustJSON(Def{Name: "Drive watch", Summary: "Review new requests.", Schedule: schedule.Spec{Every: "2w", At: "09:00", From: "2026-11-20"}, To: "tg:99", Quiet: true, Paused: paused, Prompt: "PRIVATE INSTRUCTIONS", Until: "2027-01-01"})
+				_, j, card := r.s.Draft(c, []string{"```heimdall-job\n" + raw + "\n```"})
+				if j == nil {
+					t.Fatal(card)
+				}
+				want := "*Schedule?* Drive watch — Review new requests.\n*When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*Delivery:* Telegram\n"
+				if paused {
+					want += "Starts paused; no automatic checks.\n"
+				}
+				want += "Reply *Yes* · *No* · *Details*\n— heimdall"
+				if platform == core.PlatformSlack {
+					want = strings.ReplaceAll(want, "*", "**")
+				}
+				if card != want {
+					t.Fatalf("approval golden\nwant:\n%s\ngot:\n%s", want, card)
+				}
+				contentLines(t, card, 6)
+				r.apply(&store.JobChange{Add: j})
+				out, ok := r.answer(c, "Yes")
+				want = "*Created:* Drive watch\n*Status:* Active; *Next scheduled check:* 20 Nov 2026 at 09:00 · Europe/Kyiv"
+				if paused {
+					want = "*Created:* Drive watch\n*Status:* Paused; no automatic checks."
+				}
+				if platform == core.PlatformSlack {
+					want = strings.ReplaceAll(want, "*", "**")
+				}
+				if !ok || out != want {
+					t.Fatalf("receipt golden\nwant:\n%s\ngot:\n%s", want, out)
+				}
+				contentLines(t, out, 3)
+				list := r.cmd(c, "jobs")
+				contentLines(t, list, 3)
+				for _, bad := range []string{"PRIVATE INSTRUCTIONS", "Routine checks", "successful test", "2027-01-01", j.ID, "your DM", "Your private"} {
+					if strings.Contains(card+out+list, bad) {
+						t.Fatalf("unexpected boilerplate or private data %q", bad)
+					}
+				}
+				if paused && strings.Contains(out+list, "Next scheduled") {
+					t.Fatal("paused job advertised an automatic run")
+				}
+				if details := r.cmd(c, "job show "+j.ID); !strings.Contains(details, "PRIVATE INSTRUCTIONS") || !strings.Contains(details, "2027-01-01") {
+					t.Fatal("operator details lost", details)
+				}
+			})
+		}
+	}
+}
+
+func contentLines(t *testing.T, text string, limit int) {
+	t.Helper()
+	text = strings.TrimSuffix(strings.TrimSpace(text), "\n— heimdall")
+	if got := len(strings.Split(text, "\n")); got > limit {
+		t.Fatalf("%d content lines exceeds %d:\n%s", got, limit, text)
+	}
+}
+
+func TestCompactRenewalReceiptKeepsNewEndTime(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"Drive watch","schedule":{"every":"1h"},"prompt":"PRIVATE","paused":true}`)
+	out := r.cmd(asBoss, "job renew "+id+" 30d")
+	want := "*Renewed:* Drive watch\n*Status:* Paused; no automatic checks.\n*Ends:* 3 Dec 2026 at 12:00 · Europe/Kyiv"
+	if out != want {
+		t.Fatalf("renewal golden\nwant:\n%s\ngot:\n%s", want, out)
+	}
+	contentLines(t, out, 3)
+	d, _, _ := parse(r.job(id))
+	if d.Until != "2026-12-03T10:00:00Z" || r.job(id).State != store.JobPaused {
+		t.Fatal("renewal changed state or lost expiry", r.job(id))
+	}
+}
+
+func TestCompactEditKeepsMaterialChangesAndPausedState(t *testing.T) {
+	r := newRig(t)
+	id := r.add(asBoss, `{"name":"Drive watch","summary":"Review new requests.","schedule":{"every":"1h"},"prompt":"PRIVATE","paused":true}`)
+	_, j, card := r.s.Draft(asBoss, []string{"```heimdall-job\n" + `{"edit":"` + id + `","schedule":{"every":"2h"},"to":"tg:99","quiet":true,"prompt":"PRIVATE CHANGED","timeout":"2m"}` + "\n```"})
+	if j == nil {
+		t.Fatal(card)
+	}
+	want := "*Update?* Drive watch — Review new requests.\n*When:* Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv\n*Delivery:* This private conversation → Telegram\nRemains paused; no automatic checks. Silent when no update: false → true; *Timeout:* Configured limit → 2m; Saved instructions or reminder: changed (see Details).\nReply *Yes* · *No* · *Details*\n— heimdall"
+	if card != want {
+		t.Fatalf("edit golden\nwant:\n%s\ngot:\n%s", want, card)
+	}
+	contentLines(t, card, 6)
+	r.apply(&store.JobChange{Add: j})
+	out, ok := r.answer(asBoss, "Yes")
+	if !ok || !strings.Contains(out, "*Updated:* Drive watch\n*Status:* Paused;") || strings.Contains(out, "Next scheduled") || strings.Contains(out, "PRIVATE") {
+		t.Fatal(out)
+	}
+	contentLines(t, out, 3)
+	for _, want := range []string{"Every 1 hour", "Every 2 hours", "This private conversation → Telegram", "false → true", "Configured limit → 2m", "Saved instructions or reminder: changed"} {
+		if !strings.Contains(out, want) {
+			t.Fatal("lost material change", want, out)
+		}
+	}
+	if r.job(id).State != store.JobPaused {
+		t.Fatal("UI edit resumed paused job")
+	}
+}
 
 func TestConciseRequestDetailsAndState(t *testing.T) {
 	r := newRig(t)
@@ -23,7 +135,7 @@ func TestConciseRequestDetailsAndState(t *testing.T) {
 		t.Fatal(err)
 	}
 	card := r.s.card(asBoss, j)
-	for _, want := range []string{"*Set up scheduled task?*", "Find requests needing attention.", "12:00–20:30, plus 20:45", "Europe/Kyiv", "This private conversation", "created paused", "*Yes*", "*No*", "*Details*", `\*x\*`, `\[click\]`} {
+	for _, want := range []string{"*Schedule?*", "Find requests needing attention.", "12:00–20:30, plus 20:45", "Europe/Kyiv", "This private conversation", "Starts paused", "*Yes*", "*No*", "*Details*", `\*x\*`, `\[click\]`} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("missing %q: %s", want, card)
 		}

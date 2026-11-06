@@ -26,7 +26,7 @@ func TestSchedulerNoticeFakePayload(t *testing.T) {
 	defer st.Close()
 	c := scheduler.Caller{Principal: core.SlackPrincipal("owner@example.test", "T1", ""), Role: core.RoleOwner, Conv: core.ConvKey{Interface: "slack", Chat: "D1", Thread: "1000.1"}, Private: true}
 	jobs := scheduler.New(scheduler.Config{DefaultTZ: "UTC", Interfaces: []string{"slack"}}, st, core.Access{}, log.New(io.Discard, "", 0))
-	_, draft, card := jobs.Draft(c, []string{"```heimdall-job\n" + `{"name":"Literal *star* _u_ ` + "`code`" + `","summary":"[click](https://example.test) <https://example.test|link> <!channel> &","schedule":{"every":"1h"},"prompt":"PRIVATE PROMPT","paused":true}` + "\n```"})
+	_, draft, card := jobs.Draft(c, []string{"```heimdall-job\n" + `{"name":"Literal C:\\temp *star* _u_ ` + "`code`" + `","summary":"[click](https://example.test) <https://example.test|link> <!channel> &","schedule":{"every":"1h"},"prompt":"PRIVATE PROMPT","paused":true}` + "\n```"})
 	if draft == nil {
 		t.Fatal(card)
 	}
@@ -53,10 +53,9 @@ func TestSchedulerNoticeFakePayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	text, _ := payload["text"].(string)
-	for _, want := range []string{"*Set up scheduled task?*", "Literal ∗star∗ ＿u＿ ˋcodeˋ", "[click](https://example.test)", "&lt;!channel&gt;", "&amp;", "*Yes*"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("missing %q: %s", want, text)
-		}
+	want := "*Schedule?* Literal C:\\temp ∗star∗ ＿u＿ ˋcodeˋ — [click](https://example.test) &lt;https://example.test|link&gt; &lt;!channel&gt; &amp;\n*When:* Every 1 hour · UTC\n*Delivery:* This private conversation topic\nStarts paused; no automatic checks.\nReply *Yes* · *No* · *Details*\n— heimdall"
+	if text != want || len(strings.Split(text, "\n"))-1 > 6 {
+		t.Fatalf("approval payload golden\nwant:\n%s\ngot:\n%s", want, text)
 	}
 	for _, bad := range []string{"<!channel>", "<https://", "PRIVATE PROMPT", draft.ID, "\\*", "\\[", "**Set up"} {
 		if strings.Contains(text, bad) {
@@ -65,5 +64,22 @@ func TestSchedulerNoticeFakePayload(t *testing.T) {
 	}
 	if payload["thread_ts"] != "1000.1" {
 		t.Fatal("thread lost", payload)
+	}
+	if err := st.AnswerCommand(0, c.Conv, store.CommandEnd{Job: &store.JobChange{Add: draft}}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, change, ok := jobs.Answer(c, "Yes")
+	if !ok || change == nil {
+		t.Fatal(receipt)
+	}
+	if err := st.AnswerCommand(0, c.Conv, store.CommandEnd{Job: change}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Send(context.Background(), core.Outbound{ID: 2, Conv: c.Conv, Text: receipt, Formatted: scheduler.Formatted(receipt)}); err != nil {
+		t.Fatal(err)
+	}
+	want = "*Created:* Literal C:\\temp ∗star∗ ＿u＿ ˋcodeˋ\n*Status:* Paused; no automatic checks."
+	if payload["text"] != want || payload["thread_ts"] != "1000.1" {
+		t.Fatal("receipt payload golden or thread changed", payload)
 	}
 }

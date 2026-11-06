@@ -13,7 +13,11 @@ import (
 func Describe(sp Spec) string {
 	if len(sp.Cron) == 0 {
 		if sp.Every == "" {
-			return "Once, " + strings.ReplaceAll(sp.At, "T", " ")
+			at, err := time.Parse(KeyLayout, strings.Replace(sp.At, " ", "T", 1))
+			if err != nil {
+				return "Once, " + sp.At
+			}
+			return "Once, " + at.Format("2 Jan 2006 at 15:04")
 		}
 		every := sp.Every
 		if d, err := time.ParseDuration(every); err == nil {
@@ -35,7 +39,11 @@ func Describe(sp Spec) string {
 			text += " at " + sp.At
 		}
 		if sp.From != "" {
-			text += ", starting " + sp.From
+			from := sp.From
+			if date, err := time.Parse("2006-01-02", from); err == nil {
+				from = date.Format("2 Jan 2006")
+			}
+			text += ", starting " + from
 		}
 		return text
 	}

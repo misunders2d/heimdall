@@ -496,7 +496,7 @@ func TestRoleRulesAndCommands(t *testing.T) {
 	if out := r.cmd(asWork, "job resume "+mine); !strings.Contains(out, "Resumed") {
 		t.Fatal(out)
 	}
-	if out := r.cmd(asWork, "job renew "+mine+" 30d"); !strings.Contains(out, "2026-12-03") {
+	if out := r.cmd(asWork, "job renew "+mine+" 30d"); !strings.Contains(out, "3 Dec 2026") {
 		t.Fatal(out)
 	}
 	if out := r.cmd(asWork, "job frobnicate"); !strings.Contains(out, "Job commands") {
@@ -1185,7 +1185,7 @@ func TestRemovalDrafts(t *testing.T) {
 				if d == nil || clean[0] != "Sure." {
 					t.Fatalf("draft: %v %s", d, card)
 				}
-				for _, want := range []string{"Remove scheduled task?", "When:", "Every 1 hour", "Europe/Kyiv", "Future checks and pending retries", "Yes", "No", "Details"} {
+				for _, want := range []string{"Remove?", "When:", "Every 1 hour", "Europe/Kyiv", "Future checks and pending retries", "Yes", "No", "Details"} {
 					if !strings.Contains(card, want) {
 						t.Fatalf("missing %q: %s", want, card)
 					}
@@ -1353,9 +1353,9 @@ func TestScheduleWords(t *testing.T) {
 		want string
 	}{
 		{schedule.Spec{Every: "5m"}, "Every 5 minutes"},
-		{schedule.Spec{Every: "2d", At: "09:00", From: "2026-11-05"}, "Every 2 days at 09:00, starting 2026-11-05"},
+		{schedule.Spec{Every: "2d", At: "09:00", From: "2026-11-05"}, "Every 2 days at 09:00, starting 5 Nov 2026"},
 		{schedule.Spec{Cron: []string{"0 9 * * MON", "0 17 * * FRI"}}, "Custom schedule"},
-		{schedule.Spec{At: "2026-11-05T09:00"}, "Once, 2026-11-05 09:00"},
+		{schedule.Spec{At: "2026-11-05T09:00"}, "Once, 5 Nov 2026 at 09:00"},
 	} {
 		if got := scheduleWords(tc.spec); got != tc.want {
 			t.Errorf("got %q, want %q", got, tc.want)
