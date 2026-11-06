@@ -211,6 +211,11 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		if json.Unmarshal(e.Params, &p) != nil {
 			return
 		}
+		// Input items have no tool status. Treating their completion as a
+		// tool failure rejects otherwise successful scheduled checkpoints.
+		if p.Item.Type == "userMessage" {
+			return
+		}
 		// Installed Codex 0.166.0 v2.ThreadItem (generated schema): MCP
 		// calls carry server/tool/status, not a synthesized name field.
 		tool := p.Item.Name

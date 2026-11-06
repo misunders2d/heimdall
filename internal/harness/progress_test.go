@@ -84,6 +84,24 @@ func TestProgressWiredIntoNativeAdapters(t *testing.T) {
 	}
 }
 
+func TestCodexInputEventsAreNotToolEvidence(t *testing.T) {
+	b := codexTestBridge()
+	var got []Progress
+	b.progress = func(p Progress) { got = append(got, p) }
+	// Native Codex emits these for the submitted input, without a status.
+	// Neither event is a tool call, including when the input contains images.
+	for _, method := range []string{"item/started", "item/completed"} {
+		b.event([]byte(`{"method":"` + method + `","params":{"threadId":"t1","turnId":"turn-1","item":{"id":"input-1","type":"userMessage","content":[{"type":"text","text":"synthetic input"},{"type":"image","url":"https://example.invalid/image.png"}]}}}`))
+	}
+	if len(got) != 0 {
+		t.Fatalf("input counted as tool telemetry: %+v", got)
+	}
+	b.event([]byte(`{"method":"item/completed","params":{"threadId":"t1","turnId":"turn-1","item":{"id":"m1","type":"mcpToolCall","server":"example","tool":"read","status":"completed","result":{"content":[],"isError":false},"error":null}}}`))
+	if len(got) != 1 || !got[0].Completed || got[0].Error || got[0].Tool != "mcp__example__read" {
+		t.Fatalf("real tool evidence changed: %+v", got)
+	}
+}
+
 func TestCodexNativeMCPCompletionEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name, status, result, err string
