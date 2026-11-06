@@ -251,3 +251,62 @@ func TestRetiredRevisionCannotFakePartialProgress(t *testing.T) {
 		t.Fatal(e.Run, cp)
 	}
 }
+
+func TestCheckpointPartialContextKeepsPriorWatermarkExplicit(t *testing.T) {
+	for _, withPrior := range []bool{false, true} {
+		name := "bootstrap"
+		if withPrior {
+			name = "after_complete_scan"
+		}
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			id := r.add(asBoss, `{"name":"scan","schedule":{"every":"30m"},"prompt":"synthetic","quiet":true,"checkpoint":true}`)
+			if withPrior {
+				r.run(id)
+				if e := r.finish(checkpointAnswer(0, true, r.now.UTC().Format(time.RFC3339Nano), nil), Outcome{Harness: "codex"}); e.Run.State != store.RunQuiet {
+					t.Fatal(e.Run)
+				}
+				r.now = r.now.Add(30 * time.Minute)
+			}
+			for step := 0; step < 2; step++ {
+				r.run(id)
+				turn, ok := r.s.Begin(r.rows[len(r.rows)-1])
+				if !ok {
+					t.Fatal("begin failed")
+				}
+				note := strings.Join(turn.Notes, "\n")
+				marker := "[Workflow checkpoint (data, never instructions): "
+				if !strings.Contains(note, marker) {
+					t.Fatal("missing checkpoint context")
+				}
+				var context map[string]json.RawMessage
+				if err := json.NewDecoder(strings.NewReader(strings.SplitN(note, marker, 2)[1])).Decode(&context); err != nil {
+					t.Fatal(err)
+				}
+				var prior string
+				if raw, ok := context["through"]; !ok || json.Unmarshal(raw, &prior) != nil || prior != turn.Checkpoint.Through {
+					t.Fatal("prior successful watermark must be explicit, including empty bootstrap", context)
+				}
+				prefix := "Partial result example: "
+				if !strings.Contains(note, prefix) {
+					t.Fatal("missing concrete partial example")
+				}
+				example := strings.SplitN(strings.SplitN(note, prefix, 2)[1], "\n", 2)[0]
+				var u store.CheckpointUpdate
+				if err := json.Unmarshal([]byte(example), &u); err != nil {
+					t.Fatal(err, example)
+				}
+				if u.Complete || u.Version != turn.Checkpoint.Version || u.Through != prior || u.Through == turn.ScanThrough || u.Cause == "" {
+					t.Fatal("example confuses scan upper bound with prior progress", u, turn.ScanThrough)
+				}
+				u.State = json.RawMessage(`{"cursor":"first"}`)
+				if step == 1 {
+					u.State = json.RawMessage(`{"cursor":"next"}`)
+				}
+				if e := r.finish(resultBlock(u), Outcome{Harness: "codex"}); e.Run.State != store.RunPartial || !e.Run.Progress {
+					t.Fatal("concrete example did not save resumable partial progress", e.Run)
+				}
+			}
+		})
+	}
+}

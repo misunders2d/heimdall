@@ -18,7 +18,7 @@ type Checkpoint struct {
 	ScanThrough string          `json:"scan_through,omitempty"`
 	Partial     bool            `json:"partial"`
 	Cause       string          `json:"cause,omitempty"`
-	Through     string          `json:"through,omitempty"`
+	Through     string          `json:"through"`
 	State       json.RawMessage `json:"state"`
 	Receipts    []AlertReceipt  `json:"receipts"`
 }
