@@ -27,6 +27,31 @@ func bold(k core.ConvKey, text string) string {
 	mark := "**"
 	if k.Interface == core.PlatformTelegram {
 		mark = "*"
+		if strings.Contains(text, "\\") {
+			// Legacy Markdown permits literal escapes only outside entities.
+			var b strings.Builder
+			for text != "" {
+				span, rest, escaped := strings.Cut(text, "\\")
+				if strings.TrimSpace(span) == "" {
+					b.WriteString(span)
+				} else {
+					b.WriteString(mark + span + mark)
+				}
+				if escaped {
+					b.WriteByte('\\')
+					if rest != "" {
+						b.WriteByte(rest[0])
+						rest = rest[1:]
+					}
+				}
+				text = rest
+			}
+			return b.String()
+		}
+	} else if k.Interface == core.PlatformSlack {
+		// The Slack converter escapes a bold span as a whole. Match its
+		// literal glyphs here so names stay literal without visible escapes.
+		text = strings.NewReplacer("\\\\", "\\", "\\*", "∗", "\\_", "＿", "\\`", "ˋ", "\\~", "∼", "\\#", "#", "\\[", "[", "\\]", "]", "\\<", "<", "\\>", ">").Replace(text)
 	}
 	return mark + text + mark
 }
@@ -40,7 +65,7 @@ func (s *Scheduler) name(c Caller, d Def) string {
 	return literal(d.Name)
 }
 func (s *Scheduler) taskTitle(c Caller, action string, d Def) string {
-	text := s.heading(c, action) + "\n\n" + s.name(c, d)
+	text := s.heading(c, action) + "\n\n" + bold(c.Conv, s.name(c, d))
 	if c.Private && d.Summary != "" && !strings.EqualFold(d.Summary, d.Name) {
 		text += "\n" + literal(d.Summary)
 	}
@@ -80,20 +105,19 @@ func (s *Scheduler) destination(c Caller, j store.Job, d Def) string {
 	return "Saved destination"
 }
 func (s *Scheduler) status(c Caller, j store.Job, d Def) string {
-	label := bold(c.Conv, "Status:") + " "
 	switch {
 	case j.State == store.JobDeleted:
-		return label + "Removed.\nFuture checks and pending retries cancelled.\nAny current check is being stopped.\nAlready delivered messages remain."
+		return bold(c.Conv, "🗑️ Removed") + ".\nFuture checks and pending retries cancelled.\nAny current check is being stopped.\nAlready delivered messages remain."
 	case j.State == store.JobPaused || d.Paused:
-		return label + "Paused; no automatic checks."
+		return bold(c.Conv, "⏸️ Paused") + "; no automatic checks."
 	case j.State == store.JobDone:
-		return label + "Finished; no automatic checks."
+		return bold(c.Conv, "✅ Finished") + "; no automatic checks."
 	case j.State == store.JobDraft:
-		return label + "Awaiting your approval; no change applied."
+		return bold(c.Conv, "📝 Awaiting your approval") + "; no change applied."
 	default:
-		text := label + "Active; scheduled checks enabled."
+		text := bold(c.Conv, "🟢 Active") + "; scheduled checks enabled."
 		if !j.NextDue.IsZero() {
-			text = label + "Active.\n" + bold(c.Conv, "Next scheduled check:") + " " + literal(shortWhen(d, j.NextDue))
+			text = bold(c.Conv, "🟢 Active") + ".\n" + bold(c.Conv, "Next scheduled check:") + " " + literal(shortWhen(d, j.NextDue))
 		}
 		return text
 	}
@@ -119,28 +143,28 @@ func (s *Scheduler) overview(c Caller, j store.Job, d Def, before *Def) string {
 			}
 		}
 	}
-	return bold(c.Conv, "When:") + " " + literal(when) + "\n" + bold(c.Conv, "Delivery:") + " " + literal(to)
+	return bold(c.Conv, "🕒 When:") + " " + literal(when) + "\n" + bold(c.Conv, "📬 Delivery:") + " " + literal(to)
 }
 func repeatWarning(c Caller, d Def) string {
 	if !d.RerunOnTimeout {
 		return ""
 	}
-	return "\n\n" + bold(c.Conv, "Repeat-safe rerun:") + " Approving asserts all work and effects are safe to repeat. One full rerun after timeout (" + literal(d.Timeout) + "), fresh session, within twice the timeout."
+	return "\n\n" + bold(c.Conv, "⚠️ Repeat-safe rerun:") + " Approving asserts all work and effects are safe to repeat. One full rerun after timeout (" + literal(d.Timeout) + "), fresh session, within twice the timeout."
 }
 func (s *Scheduler) request(c Caller, j store.Job) string {
 	if id := removalID(j); id != "" {
 		orig, _, _ := s.st.Job(id)
 		d, _, _ := parse(orig)
-		return s.taskTitle(c, "Remove scheduled task?", d) + "\n\n" + s.overview(c, orig, d, nil) + "\n\nFuture checks and pending retries will stop.\nAny current check will be stopped.\nAlready delivered messages remain." + s.confirmAction(c)
+		return s.taskTitle(c, "🗑️ Remove scheduled task?", d) + "\n\n" + s.overview(c, orig, d, nil) + "\n\nFuture checks and pending retries will stop.\nAny current check will be stopped.\nAlready delivered messages remain." + s.confirmAction(c)
 	}
 	d, _, _ := parse(j)
-	title := "Schedule task?"
+	title := "📅 Schedule task?"
 	changes := ""
 	display := j
 	state := ""
 	var before *Def
 	if j.EditOf != "" {
-		title = "Update scheduled task?"
+		title = "📝 Update scheduled task?"
 		orig, _, _ := s.st.Job(j.EditOf)
 		old, _, _ := parse(orig)
 		before = &old
@@ -148,15 +172,15 @@ func (s *Scheduler) request(c Caller, j store.Job) string {
 		// Schedule and destination changes are already shown in this one diff.
 		changes = s.material(c, old, d)
 		if orig.State == store.JobPaused {
-			state = "Still paused. No automatic checks."
+			state = bold(c.Conv, "⏸️ Still paused") + ". No automatic checks."
 		}
 	}
 	if d.Paused {
-		state = "Starts paused. No automatic checks."
+		state = bold(c.Conv, "⏸️ Starts paused") + ". No automatic checks."
 	}
 	body := s.overview(c, display, d, before)
 	if changes != "" {
-		body += "\n\n" + changes
+		body += "\n\n" + bold(c.Conv, "📋 Changes") + "\n" + changes
 	}
 	if state != "" {
 		body += "\n\n" + state
@@ -164,13 +188,26 @@ func (s *Scheduler) request(c Caller, j store.Job) string {
 	return s.taskTitle(c, title, d) + "\n\n" + body + repeatWarning(c, d) + s.confirmAction(c)
 }
 func (s *Scheduler) confirmAction(c Caller) string {
-	return "\n\nReply " + bold(c.Conv, "Yes") + " to apply or " + bold(c.Conv, "No") + " to cancel. " + bold(c.Conv, "Details") + " shows full settings."
+	return "\n\n👉 Reply " + bold(c.Conv, "Yes") + " to apply or " + bold(c.Conv, "No") + " to cancel. " + bold(c.Conv, "Details") + " shows full settings."
 }
 func (s *Scheduler) result(c Caller, j store.Job, d Def, title string, before *Def) string {
-	text := s.taskTitle(c, "Scheduled task "+strings.ToLower(title), d) + "\n\n" + s.overview(c, j, d, before)
+	icon := "📅"
+	switch title {
+	case "Updated":
+		icon = "📝"
+	case "Paused":
+		icon = "⏸️"
+	case "Resumed":
+		icon = "🟢"
+	case "Removed":
+		icon = "🗑️"
+	case "Status":
+		icon = "📋"
+	}
+	text := s.taskTitle(c, icon+" Scheduled task "+strings.ToLower(title), d) + "\n\n" + s.overview(c, j, d, before)
 	if before != nil {
 		if changes := s.material(c, *before, d); changes != "" {
-			text += "\n\n" + changes
+			text += "\n\n" + bold(c.Conv, "📋 Changes") + "\n" + changes
 		}
 	} else if title == "Renewed" {
 		if until, err := time.Parse(time.RFC3339, d.Until); err == nil {

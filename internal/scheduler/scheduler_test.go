@@ -510,7 +510,14 @@ func TestRoleRulesAndCommands(t *testing.T) {
 	r.sent()
 	r.now = r.now.Add(2 * time.Hour)
 	r.tick()
-	if r.job(exp).State != store.JobDone || !strings.Contains(texts(r.sent()), "expired") {
+	notices := ""
+	for _, o := range r.sent() {
+		if strings.Contains(o.Text, "\n\n*short*\n\n") {
+			notices = o.Text
+			break
+		}
+	}
+	if r.job(exp).State != store.JobDone || !strings.Contains(notices, "✅ Scheduled task expired") || !strings.Contains(notices, "*✅ Finished*") || strings.Contains(notices, "*🟢 Active*") {
 		t.Fatalf("expiry: %+v", r.job(exp))
 	}
 }
@@ -549,7 +556,7 @@ func TestDrafts(t *testing.T) {
 		t.Fatal(out)
 	}
 	r.cmd(asBoss, "job discard "+second.ID)
-	if out, ok := r.answer(asBoss, "так"); !ok || !strings.Contains(out, "*Status:* Active.\n*Next scheduled check:*") || r.job(draft.ID).State != store.JobActive {
+	if out, ok := r.answer(asBoss, "так"); !ok || !strings.Contains(out, "*🟢 Active*.\n*Next scheduled check:*") || r.job(draft.ID).State != store.JobActive {
 		t.Fatalf("confirm: %s", out)
 	}
 	// An edit draft shows its diff; an expired draft cannot be confirmed.
@@ -1043,7 +1050,7 @@ func TestTimeoutRetryCardShowsOwnerAssertion(t *testing.T) {
 			t.Fatal(card)
 		}
 	}
-	if !strings.Contains(card, "\n\n*Repeat-safe rerun:*") || !strings.Contains(card, "\n\nReply *Yes* to apply or *No* to cancel.") {
+	if !strings.Contains(card, "\n\n*⚠️ Repeat-safe rerun:*") || !strings.Contains(card, "\n\n👉 Reply *Yes* to apply or *No* to cancel.") {
 		t.Fatal("repeat-safe approval lost paragraph hierarchy", card)
 	}
 }

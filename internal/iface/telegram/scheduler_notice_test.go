@@ -57,7 +57,7 @@ func TestSchedulerNoticeFakePayloadAndFallback(t *testing.T) {
 		t.Fatal(payloads)
 	}
 	text := payloads[0]["text"].(string)
-	want := "*Schedule task?*\n\n" + `Literal C:\\temp \*star\* \_u\_ \[click\](https://example.test)` + "\n\n*When:* Every 1 hour · UTC\n*Delivery:* This private conversation topic\n\nStarts paused. No automatic checks.\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
+	want := "*📅 Schedule task?*\n\n" + `*Literal C:*\\*temp *\**star*\* \_*u*\_ \[*click*\]*(https://example.test)*` + "\n\n*🕒 When:* Every 1 hour · UTC\n*📬 Delivery:* This private conversation topic\n\n*⏸️ Starts paused*. No automatic checks.\n\n👉 Reply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
 	if text != want {
 		t.Fatalf("approval payload golden\nwant:\n%s\ngot:\n%s", want, text)
 	}
@@ -77,7 +77,7 @@ func TestSchedulerNoticeFakePayloadAndFallback(t *testing.T) {
 	if err := i.Send(context.Background(), core.Outbound{Conv: c.Conv, Text: receipt, Formatted: scheduler.Formatted(receipt)}); err != nil {
 		t.Fatal(err)
 	}
-	want = "*Scheduled task created*\n\n" + `Literal C:\\temp \*star\* \_u\_ \[click\](https://example.test)` + "\n\n*When:* Every 1 hour · UTC\n*Delivery:* This private conversation topic\n\n*Status:* Paused; no automatic checks."
+	want = "*📅 Scheduled task created*\n\n" + `*Literal C:*\\*temp *\**star*\* \_*u*\_ \[*click*\]*(https://example.test)*` + "\n\n*🕒 When:* Every 1 hour · UTC\n*📬 Delivery:* This private conversation topic\n\n*⏸️ Paused*; no automatic checks."
 	if len(payloads) != 4 || payloads[2]["text"] != want || payloads[3]["text"] != want || payloads[2]["parse_mode"] != "Markdown" || payloads[3]["parse_mode"] != nil {
 		t.Fatal("receipt payload or fallback changed", payloads)
 	}
@@ -114,7 +114,7 @@ func TestSchedulerNoticeFakePayloadAndFallback(t *testing.T) {
 	if edit == nil {
 		t.Fatal(editCard)
 	}
-	sendCheck(c, editCard, "*Update scheduled task?*\n\nLiteral", "\n\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated.", "\n\nStill paused. No automatic checks.\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.")
+	sendCheck(c, editCard, "*📝 Update scheduled task?*\n\n*Literal", "\n\n*📋 Changes*\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated.", "\n\n*⏸️ Still paused*. No automatic checks.\n\n👉 Reply *Yes* to apply or *No* to cancel. *Details* shows full settings.")
 	if err := st.AnswerCommand(0, c.Conv, store.CommandEnd{Job: &store.JobChange{Add: edit}}); err != nil {
 		t.Fatal(err)
 	}
@@ -125,10 +125,27 @@ func TestSchedulerNoticeFakePayloadAndFallback(t *testing.T) {
 	if err := st.AnswerCommand(0, c.Conv, store.CommandEnd{Job: change}); err != nil {
 		t.Fatal(err)
 	}
-	sendCheck(c, receipt, "*Scheduled task updated*\n\nLiteral", "\n\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated.", "\n\n*Status:* Paused; no automatic checks.")
+	sendCheck(c, receipt, "*📝 Scheduled task updated*\n\n*Literal", "\n\n*📋 Changes*\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated.", "\n\n*⏸️ Paused*; no automatic checks.")
 	job, _, err := st.Job(draft.ID)
 	if err != nil || job.State != store.JobPaused || job.Version != 2 {
 		t.Fatal("presentation changed paused state", job, err)
+	}
+	// Enabled and finished are distinct persisted states, never validation claims.
+	receipt, change = jobs.Command(c, "job resume "+draft.ID)
+	if change == nil {
+		t.Fatal(receipt)
+	}
+	if err := st.AnswerCommand(0, c.Conv, store.CommandEnd{Job: change}); err != nil {
+		t.Fatal(err)
+	}
+	sendCheck(c, receipt, "*🟢 Scheduled task resumed*", "\n\n*🟢 Active*.\n*Next scheduled check:*")
+	if err := st.AnswerCommand(0, c.Conv, store.CommandEnd{Job: &store.JobChange{Update: draft.ID, Set: store.Set{"state": store.JobDone}}}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, _ = jobs.Command(c, "jobs")
+	sendCheck(c, receipt, "*📋 Scheduled task status*", "\n\n*✅ Finished*; no automatic checks.")
+	if strings.Contains(receipt, "Next scheduled") || strings.Contains(receipt, "Reply ") || strings.Contains(receipt, "Details") {
+		t.Fatal("finished receipt advertised a run or pending controls", receipt)
 	}
 	shared := c
 	shared.Private = false
@@ -137,7 +154,7 @@ func TestSchedulerNoticeFakePayloadAndFallback(t *testing.T) {
 	if removal == nil {
 		t.Fatal(removalCard)
 	}
-	sendCheck(shared, removalCard, "*Remove scheduled task?*\n\nScheduled task\n\n*When:*", "\n\nFuture checks and pending retries will stop.\nAny current check will be stopped.\nAlready delivered messages remain.\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.")
+	sendCheck(shared, removalCard, "*🗑️ Remove scheduled task?*\n\n*Scheduled task*\n\n*🕒 When:*", "\n\nFuture checks and pending retries will stop.\nAny current check will be stopped.\nAlready delivered messages remain.\n\n👉 Reply *Yes* to apply or *No* to cancel. *Details* shows full settings.")
 	if err := st.AnswerCommand(0, shared.Conv, store.CommandEnd{Job: &store.JobChange{Add: removal}}); err != nil {
 		t.Fatal(err)
 	}
@@ -145,5 +162,5 @@ func TestSchedulerNoticeFakePayloadAndFallback(t *testing.T) {
 	if !ok || change == nil {
 		t.Fatal(receipt)
 	}
-	sendCheck(shared, receipt, "*Scheduled task removed*\n\nScheduled task\n\n*When:*", "\n\n*Status:* Removed.\nFuture checks and pending retries cancelled.\nAny current check is being stopped.\nAlready delivered messages remain.")
+	sendCheck(shared, receipt, "*🗑️ Scheduled task removed*\n\n*Scheduled task*\n\n*🕒 When:*", "\n\n*🗑️ Removed*.\nFuture checks and pending retries cancelled.\nAny current check is being stopped.\nAlready delivered messages remain.")
 }

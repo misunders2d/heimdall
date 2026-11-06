@@ -30,11 +30,11 @@ func TestReadableRequestAndReceiptGoldens(t *testing.T) {
 				if j == nil {
 					t.Fatal(card)
 				}
-				want := "*Schedule task?*\n\nDrive watch\nReview new requests.\n\n*When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*Delivery:* Telegram"
+				want := "*📅 Schedule task?*\n\n*Drive watch*\nReview new requests.\n\n*🕒 When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*📬 Delivery:* Telegram"
 				if paused {
-					want += "\n\nStarts paused. No automatic checks."
+					want += "\n\n*⏸️ Starts paused*. No automatic checks."
 				}
-				want += "\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
+				want += "\n\n👉 Reply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
 				if platform == core.PlatformSlack {
 					want = strings.ReplaceAll(want, "*", "**")
 				}
@@ -43,9 +43,9 @@ func TestReadableRequestAndReceiptGoldens(t *testing.T) {
 				}
 				r.apply(&store.JobChange{Add: j})
 				out, ok := r.answer(c, "Yes")
-				want = "*Scheduled task created*\n\nDrive watch\nReview new requests.\n\n*When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*Delivery:* Telegram\n\n*Status:* Active.\n*Next scheduled check:* 20 Nov 2026 at 09:00 · Europe/Kyiv"
+				want = "*📅 Scheduled task created*\n\n*Drive watch*\nReview new requests.\n\n*🕒 When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*📬 Delivery:* Telegram\n\n*🟢 Active*.\n*Next scheduled check:* 20 Nov 2026 at 09:00 · Europe/Kyiv"
 				if paused {
-					want = "*Scheduled task created*\n\nDrive watch\nReview new requests.\n\n*When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*Delivery:* Telegram\n\n*Status:* Paused; no automatic checks."
+					want = "*📅 Scheduled task created*\n\n*Drive watch*\nReview new requests.\n\n*🕒 When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*📬 Delivery:* Telegram\n\n*⏸️ Paused*; no automatic checks."
 				}
 				if platform == core.PlatformSlack {
 					want = strings.ReplaceAll(want, "*", "**")
@@ -54,7 +54,7 @@ func TestReadableRequestAndReceiptGoldens(t *testing.T) {
 					t.Fatalf("receipt golden\nwant:\n%s\ngot:\n%s", want, out)
 				}
 				list := r.cmd(c, "jobs")
-				if wantList := strings.Replace(out, "Scheduled task created", "Scheduled task status", 1); list != wantList {
+				if wantList := strings.Replace(out, "📅 Scheduled task created", "📋 Scheduled task status", 1); list != wantList {
 					t.Fatalf("list lost paragraph hierarchy:\n%s", list)
 				}
 				for _, bad := range []string{"PRIVATE INSTRUCTIONS", "Routine checks", "successful test", "2027-01-01", j.ID, "your DM", "Your private"} {
@@ -77,7 +77,7 @@ func TestReadableRenewalReceiptKeepsNewEndTime(t *testing.T) {
 	r := newRig(t)
 	id := r.add(asBoss, `{"name":"Drive watch","schedule":{"every":"1h"},"prompt":"PRIVATE","paused":true}`)
 	out := r.cmd(asBoss, "job renew "+id+" 30d")
-	want := "*Scheduled task renewed*\n\nDrive watch\n\n*When:* Every 1 hour · Europe/Kyiv\n*Delivery:* This private conversation\n*Ends:* 3 Dec 2026 at 12:00 · Europe/Kyiv\n\n*Status:* Paused; no automatic checks."
+	want := "*📅 Scheduled task renewed*\n\n*Drive watch*\n\n*🕒 When:* Every 1 hour · Europe/Kyiv\n*📬 Delivery:* This private conversation\n*Ends:* 3 Dec 2026 at 12:00 · Europe/Kyiv\n\n*⏸️ Paused*; no automatic checks."
 	if out != want {
 		t.Fatalf("renewal golden\nwant:\n%s\ngot:\n%s", want, out)
 	}
@@ -94,13 +94,13 @@ func TestReadableEditKeepsMaterialChangesAndPausedState(t *testing.T) {
 	if j == nil {
 		t.Fatal(card)
 	}
-	want := "*Update scheduled task?*\n\nDrive watch\nReview new requests.\n\n*When:* Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv\n*Delivery:* This private conversation → Telegram\n\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated. Details shows the full text.\n\nStill paused. No automatic checks.\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
+	want := "*📝 Update scheduled task?*\n\n*Drive watch*\nReview new requests.\n\n*🕒 When:* Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv\n*📬 Delivery:* This private conversation → Telegram\n\n*📋 Changes*\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated. Details shows the full text.\n\n*⏸️ Still paused*. No automatic checks.\n\n👉 Reply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
 	if card != want {
 		t.Fatalf("edit golden\nwant:\n%s\ngot:\n%s", want, card)
 	}
 	r.apply(&store.JobChange{Add: j})
 	out, ok := r.answer(asBoss, "Yes")
-	want = "*Scheduled task updated*\n\nDrive watch\nReview new requests.\n\n*When:* Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv\n*Delivery:* This private conversation → Telegram\n\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated. Details shows the full text.\n\n*Status:* Paused; no automatic checks."
+	want = "*📝 Scheduled task updated*\n\n*Drive watch*\nReview new requests.\n\n*🕒 When:* Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv\n*📬 Delivery:* This private conversation → Telegram\n\n*📋 Changes*\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated. Details shows the full text.\n\n*⏸️ Paused*; no automatic checks."
 	if !ok || out != want {
 		t.Fatalf("edit receipt golden\nwant:\n%s\ngot:\n%s", want, out)
 	}
@@ -137,7 +137,7 @@ func TestConciseRequestDetailsAndState(t *testing.T) {
 		t.Fatal(err)
 	}
 	card := r.s.card(asBoss, j)
-	for _, want := range []string{"*Schedule task?*", "Find requests needing attention.", "12:00–20:30, plus 20:45", "Europe/Kyiv", "This private conversation", "Starts paused", "*Yes*", "*No*", "*Details*", `\*x\*`, `\[click\]`} {
+	for _, want := range []string{"*📅 Schedule task?*", "Find requests needing attention.", "12:00–20:30, plus 20:45", "Europe/Kyiv", "This private conversation", "Starts paused", "*Yes*", "*No*", "*Details*", `\**x*\*`, `\[*click*\]`} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("missing %q: %s", want, card)
 		}
@@ -160,7 +160,7 @@ func TestConciseRequestDetailsAndState(t *testing.T) {
 		t.Fatal("question confirmed")
 	}
 	out, ok := r.answer(asBoss, "Yes")
-	if !ok || r.job(j.ID).State != store.JobPaused || strings.Contains(out, "Next") || !strings.Contains(out, "Paused;") {
+	if !ok || r.job(j.ID).State != store.JobPaused || strings.Contains(out, "Next") || !strings.Contains(out, "⏸️ Paused") {
 		t.Fatal(out)
 	}
 	show := r.cmd(asBoss, "job show "+j.ID)

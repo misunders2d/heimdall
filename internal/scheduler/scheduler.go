@@ -926,11 +926,11 @@ func (s *Scheduler) notices(j store.Job, d Def, toTarget bool, text string) []co
 			if tgt, err := s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate}); err == nil && tgt.Conv == k && tgt.Private {
 				private = true
 			}
-			if private {
-				body = strings.Replace(body, "\n", "\n"+literal(j.Name)+"\n", 1)
-			}
 			if k.Interface == core.PlatformTelegram {
 				body = strings.ReplaceAll(body, "**", "*")
+			}
+			if private {
+				body = strings.Replace(body, "\n", "\n\n"+bold(k, literal(j.Name))+"\n", 1)
 			}
 			outs = append(outs, core.Outbound{Conv: k, Text: body, Formatted: Formatted(text), Window: d.DeliveryWindow})
 		}
@@ -949,7 +949,20 @@ func (s *Scheduler) notices(j store.Job, d Def, toTarget bool, text string) []co
 // for private destinations by endNotices.
 func (s *Scheduler) text(j store.Job, d Def, what string, slot time.Time, cause string, attempts int, retry ...string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "**Scheduled task %s**", literal(strings.TrimSuffix(what, ".")))
+	icon := "⚠️"
+	switch {
+	case len(retry) > 0 && strings.HasPrefix(retry[0], "queued for "):
+		icon = "🔄"
+	case strings.HasPrefix(what, "was paused:"):
+		icon = "⏸️"
+	case strings.HasPrefix(what, "expired"):
+		icon = "✅"
+		j.State = store.JobDone // the fixed notice describes the resulting state
+	}
+	fmt.Fprintf(&b, "**%s Scheduled task %s**", icon, literal(strings.TrimSuffix(what, ".")))
+	if !slot.IsZero() || cause != "" || attempts > 0 {
+		b.WriteByte('\n')
+	}
 	if !slot.IsZero() {
 		fmt.Fprintf(&b, "\nSlot: %s", when(d, slot))
 	}
@@ -960,7 +973,17 @@ func (s *Scheduler) text(j store.Job, d Def, what string, slot time.Time, cause 
 		fmt.Fprintf(&b, "\nAttempts: %d", attempts)
 	}
 	if len(retry) > 0 {
-		fmt.Fprintf(&b, "\nAutomatic retry: %s", retry[0])
+		fmt.Fprintf(&b, "\n\nAutomatic retry: %s", retry[0])
+	}
+	switch j.State {
+	case store.JobActive:
+		b.WriteString("\n\n**🟢 Active**; scheduled checks enabled.")
+	case store.JobPaused:
+		b.WriteString("\n\n**⏸️ Paused**; no automatic checks.")
+	case store.JobDone:
+		b.WriteString("\n\n**✅ Finished**; no automatic checks.")
+	case store.JobDeleted:
+		b.WriteString("\n\n**🗑️ Removed**; no automatic checks.")
 	}
 	if j.State == store.JobActive && !j.NextDue.IsZero() {
 		fmt.Fprintf(&b, "\nNext scheduled run: %s", when(d, j.NextDue))

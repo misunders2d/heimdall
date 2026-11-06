@@ -41,13 +41,17 @@ func TestFailureNoticeCapacityAndTerminalState(t *testing.T) {
 				t.Fatalf("terminal failure: %+v, notices %+v", e, outs)
 			}
 			body := outs[0].Text
-			for _, want := range []string{"Cause: provider unavailable", "Error: " + capacityError, "Attempts: 1", "Automatic retry: no", "— heimdall"} {
+			status := map[string]string{"recurring": "🟢 Active", "paused": "⏸️ Paused", "one-off": "✅ Finished", "completed": "✅ Finished"}[state]
+			for _, want := range []string{"*⚠️ Scheduled task failed*\n\n*capacity*\n\nSlot:", "Cause: provider unavailable", "Error: " + capacityError, "Attempts: 1", "\n\nAutomatic retry: no", "\n\n*" + status + "*", "— heimdall"} {
 				if !strings.Contains(body, want) {
 					t.Errorf("notice missing %q: %s", want, body)
 				}
 			}
 			if strings.Contains(body, "Next run:") || strings.Contains(body, "RAW ANSWER") || strings.Contains(body, "private job prompt") {
 				t.Fatalf("ambiguous or private notice: %s", body)
+			}
+			if state == "recurring" && strings.Contains(body, "⏸️") {
+				t.Fatal("no retry was presented as paused", body)
 			}
 			if got := strings.Contains(body, "Next scheduled run: 2026-11-03 12:00 UTC"); got != (state == "recurring") {
 				t.Fatalf("next slot in %s notice: %s", state, body)
@@ -79,7 +83,7 @@ func TestRetryNoticeMatchesQueuedSameSlot(t *testing.T) {
 	if len(outs) != 1 || outs[0].Conv != bossDM {
 		t.Fatalf("retry not persisted to creator: %+v", outs)
 	}
-	for _, want := range []string{"will retry the same slot", capacityError, "Attempts: 1", "Automatic retry: queued for " + when(Def{TZ: "UTC"}, after.NotBefore) + " (attempt 2)", "Next scheduled run: 2026-11-03 12:00 UTC"} {
+	for _, want := range []string{"*🔄 Scheduled task will retry the same slot*\n\n*retry*\n\nSlot:", capacityError, "Attempts: 1", "Automatic retry: queued for " + when(Def{TZ: "UTC"}, after.NotBefore) + " (attempt 2)", "Next scheduled run: 2026-11-03 12:00 UTC"} {
 		if !strings.Contains(outs[0].Text, want) {
 			t.Errorf("retry notice missing %q: %s", want, outs[0].Text)
 		}
@@ -103,7 +107,7 @@ func TestFailureDetailsStayPrivateInNoticesAndHistory(t *testing.T) {
 	for _, caller := range []Caller{asBoss, inGroup} {
 		t.Run(fmt.Sprint(caller.Private), func(t *testing.T) {
 			r := newRig(t)
-			id := r.add(caller, `{"name":"shared","schedule":{"every":"1h"},"to":"tg:-100","prompt":"p"}`)
+			id := r.add(caller, `{"name":"shared","schedule":{"every":"1h"},"to":"tg:-100","prompt":"p","delivery_window":{"tz":"UTC","days":[2],"start":"09:00","end":"18:00"}}`)
 			r.now = r.now.Add(time.Hour)
 			r.tick()
 			r.sent()
@@ -114,6 +118,9 @@ func TestFailureDetailsStayPrivateInNoticesAndHistory(t *testing.T) {
 			for _, o := range e.Notices {
 				if o.Conv != bossDM && o.Conv != team || strings.Contains(o.Text, capacityError) != (o.Conv == bossDM) || !strings.Contains(o.Text, "Cause: provider unavailable") || !strings.Contains(o.Text, "Automatic retry: no") {
 					t.Fatalf("wrong disclosure: %+v", o)
+				}
+				if !o.Formatted || o.Window == nil || mustJSON(o.Window) != `{"tz":"UTC","days":[2],"start":"09:00","end":"18:00"}` {
+					t.Fatalf("notice lost formatting or delivery window: %+v", o)
 				}
 			}
 			for _, cmd := range []string{"job history ", "job show "} {
@@ -209,7 +216,7 @@ func TestRetryNoticeSuppressedWhenCommitFenceWins(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if after := r.runs(id)[0]; after.State == store.RunPending || strings.Contains(texts(r.sent()), "Retry: automatically") {
+				if after := r.runs(id)[0]; after.State == store.RunPending || strings.Contains(texts(r.sent()), "Automatic retry: queued for ") {
 					t.Fatalf("vetoed retry announced or revived: %+v", after)
 				}
 			})
@@ -255,7 +262,7 @@ func TestRetryNoticesForIdentityTimeoutAndDrain(t *testing.T) {
 		r.now = r.now.Add(time.Minute)
 		r.sent()
 		e := r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
-		if e.Run.Retry.IsZero() || !strings.Contains(texts(r.sent()), "Cause: repeat-safe timeout retry\nAttempts: 1\nAutomatic retry: queued for ") {
+		if e.Run.Retry.IsZero() || !strings.Contains(texts(r.sent()), "Cause: repeat-safe timeout retry\nAttempts: 1\n\nAutomatic retry: queued for ") {
 			t.Fatalf("silent timeout retry: %+v", e)
 		}
 	})
