@@ -40,9 +40,9 @@ func (s *Scheduler) name(c Caller, d Def) string {
 	return literal(d.Name)
 }
 func (s *Scheduler) taskTitle(c Caller, action string, d Def) string {
-	text := s.heading(c, action+"?") + " " + s.name(c, d)
+	text := s.heading(c, action) + "\n\n" + s.name(c, d)
 	if c.Private && d.Summary != "" && !strings.EqualFold(d.Summary, d.Name) {
-		text += " — " + literal(d.Summary)
+		text += "\n" + literal(d.Summary)
 	}
 	return text
 }
@@ -83,7 +83,7 @@ func (s *Scheduler) status(c Caller, j store.Job, d Def) string {
 	label := bold(c.Conv, "Status:") + " "
 	switch {
 	case j.State == store.JobDeleted:
-		return label + "Removed. Future checks and pending retries cancelled; any current check is being stopped. Already delivered messages remain."
+		return label + "Removed.\nFuture checks and pending retries cancelled.\nAny current check is being stopped.\nAlready delivered messages remain."
 	case j.State == store.JobPaused || d.Paused:
 		return label + "Paused; no automatic checks."
 	case j.State == store.JobDone:
@@ -93,7 +93,7 @@ func (s *Scheduler) status(c Caller, j store.Job, d Def) string {
 	default:
 		text := label + "Active; scheduled checks enabled."
 		if !j.NextDue.IsZero() {
-			text = label + "Active; " + bold(c.Conv, "Next scheduled check:") + " " + literal(shortWhen(d, j.NextDue))
+			text = label + "Active.\n" + bold(c.Conv, "Next scheduled check:") + " " + literal(shortWhen(d, j.NextDue))
 		}
 		return text
 	}
@@ -125,56 +125,61 @@ func repeatWarning(c Caller, d Def) string {
 	if !d.RerunOnTimeout {
 		return ""
 	}
-	return "\n" + bold(c.Conv, "Repeat-safe rerun:") + " Approving asserts all work and effects are safe to repeat. One full rerun after timeout (" + literal(d.Timeout) + "), fresh session, within twice the timeout."
+	return "\n\n" + bold(c.Conv, "Repeat-safe rerun:") + " Approving asserts all work and effects are safe to repeat. One full rerun after timeout (" + literal(d.Timeout) + "), fresh session, within twice the timeout."
 }
 func (s *Scheduler) request(c Caller, j store.Job) string {
 	if id := removalID(j); id != "" {
 		orig, _, _ := s.st.Job(id)
 		d, _, _ := parse(orig)
-		return s.taskTitle(c, "Remove", d) + "\n" + s.overview(c, orig, d, nil) + "\nFuture checks and pending retries will stop; any current check will be stopped. Already delivered messages remain." + s.confirmAction(c)
+		return s.taskTitle(c, "Remove scheduled task?", d) + "\n\n" + s.overview(c, orig, d, nil) + "\n\nFuture checks and pending retries will stop.\nAny current check will be stopped.\nAlready delivered messages remain." + s.confirmAction(c)
 	}
 	d, _, _ := parse(j)
-	title := "Schedule"
+	title := "Schedule task?"
 	changes := ""
 	display := j
 	state := ""
 	var before *Def
 	if j.EditOf != "" {
-		title = "Update"
+		title = "Update scheduled task?"
 		orig, _, _ := s.st.Job(j.EditOf)
 		old, _, _ := parse(orig)
 		before = &old
 		display = orig
 		// Schedule and destination changes are already shown in this one diff.
-		changes = s.material(c, orig, old, d, false)
+		changes = s.material(c, old, d)
 		if orig.State == store.JobPaused {
-			state = "Remains paused; no automatic checks."
+			state = "Still paused. No automatic checks."
 		}
 	}
 	if d.Paused {
-		state = "Starts paused; no automatic checks."
+		state = "Starts paused. No automatic checks."
 	}
 	body := s.overview(c, display, d, before)
-	if extra := strings.TrimSpace(state + " " + changes); extra != "" {
-		body += "\n" + extra
+	if changes != "" {
+		body += "\n\n" + changes
 	}
-	return s.taskTitle(c, title, d) + "\n" + body + repeatWarning(c, d) + s.confirmAction(c)
+	if state != "" {
+		body += "\n\n" + state
+	}
+	return s.taskTitle(c, title, d) + "\n\n" + body + repeatWarning(c, d) + s.confirmAction(c)
 }
 func (s *Scheduler) confirmAction(c Caller) string {
-	return "\nReply " + bold(c.Conv, "Yes") + " · " + bold(c.Conv, "No") + " · " + bold(c.Conv, "Details")
+	return "\n\nReply " + bold(c.Conv, "Yes") + " to apply or " + bold(c.Conv, "No") + " to cancel. " + bold(c.Conv, "Details") + " shows full settings."
 }
 func (s *Scheduler) result(c Caller, j store.Job, d Def, title string, before *Def) string {
-	text := s.heading(c, title+":") + " " + s.name(c, d) + "\n" + s.status(c, j, d)
+	text := s.taskTitle(c, "Scheduled task "+strings.ToLower(title), d) + "\n\n" + s.overview(c, j, d, before)
 	if before != nil {
-		text += "\n" + s.material(c, j, *before, d, true)
+		if changes := s.material(c, *before, d); changes != "" {
+			text += "\n\n" + changes
+		}
 	} else if title == "Renewed" {
 		if until, err := time.Parse(time.RFC3339, d.Until); err == nil {
 			text += "\n" + bold(c.Conv, "Ends:") + " " + literal(shortWhen(d, until))
 		}
 	}
-	return text
+	return text + "\n\n" + s.status(c, j, d)
 }
-func (s *Scheduler) material(c Caller, j store.Job, a, b Def, includeRoute bool) string {
+func (s *Scheduler) material(c Caller, a, b Def) string {
 	var rows []string
 	add := func(label, before, after string) {
 		if before != after {
@@ -185,25 +190,17 @@ func (s *Scheduler) material(c Caller, j store.Job, a, b Def, includeRoute bool)
 		add("Name", a.Name, b.Name)
 		add("Purpose", or(a.Summary, "Saved instructions"), or(b.Summary, "Saved instructions"))
 	}
-	if includeRoute {
-		add("When", scheduleWords(a.Schedule)+" · "+a.TZ, scheduleWords(b.Schedule)+" · "+b.TZ)
-		if mustJSON(a.Schedule) != mustJSON(b.Schedule) && scheduleWords(a.Schedule) == scheduleWords(b.Schedule) {
-			rows = append(rows, "Schedule: changed (exact settings in Details).")
-		}
-	}
 	add("Ends", or(a.Until, "No expiry"), or(b.Until, "No expiry"))
 	if a.Quiet != b.Quiet {
 		rows = append(rows, fmt.Sprintf("Silent when no update: %t → %t", a.Quiet, b.Quiet))
 	}
 	add("Timeout", or(a.Timeout, "Configured limit"), or(b.Timeout, "Configured limit"))
-	if includeRoute {
-		add("Delivery", s.destination(c, j, a), s.destination(c, j, b))
-		if a.To != b.To && s.destination(c, j, a) == s.destination(c, j, b) {
-			rows = append(rows, "Delivery destination: changed (see Details).")
-		}
-	}
 	if a.Prompt != b.Prompt || a.Text != b.Text {
-		rows = append(rows, "Saved instructions or reminder: changed (see Details).")
+		label := "Instructions updated."
+		if a.Prompt == b.Prompt {
+			label = "Reminder text updated."
+		}
+		rows = append(rows, label+" Details shows the full text.")
 	}
 	if a.RerunOnTimeout != b.RerunOnTimeout {
 		rows = append(rows, fmt.Sprintf("Repeat-safe timeout rerun: %t → %t", a.RerunOnTimeout, b.RerunOnTimeout))
@@ -218,10 +215,7 @@ func (s *Scheduler) material(c Caller, j store.Job, a, b Def, includeRoute bool)
 	if mustJSON(aa) != mustJSON(bb) {
 		rows = append(rows, "Execution or delivery settings: changed (see Details).")
 	}
-	if len(rows) == 0 && includeRoute {
-		return "No settings changed."
-	}
-	return strings.Join(rows, "; ")
+	return strings.Join(rows, "\n")
 }
 
 // Human receipts use one local time. Operator Details retain UTC as well.

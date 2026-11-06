@@ -293,7 +293,7 @@ func TestJobDraftConfirmAndNote(t *testing.T) {
 	block := "Sure.\n```heimdall-job\n{\"name\":\"standup\",\"schedule\":{\"cron\":[\"0 9 * * MON-FRI\"]},\"prompt\":\"summarize\"}\n```"
 	answer := e.ask(ownerDM, say(block))
 	card := e.reply()
-	if answer.Text != "Sure." || !strings.Contains(card.Text, "Active;") || !strings.Contains(card.Text, "Next scheduled check:") || !card.Formatted {
+	if answer.Text != "Sure." || !strings.Contains(card.Text, "*Status:* Active.\n*Next scheduled check:*") || !card.Formatted {
 		t.Fatalf("answer %q card %q", answer.Text, card.Text)
 	}
 	jobs, _ := e.st.Jobs(store.JobFilter{States: []string{store.JobActive}})
@@ -357,7 +357,7 @@ func TestJobCommandStoredWithItsAnswer(t *testing.T) {
 	e.stop()
 	stopOnce.Delete(e.st)
 	e.start()
-	want(t, e.reply(), "Created")
+	want(t, e.reply(), "Scheduled task created")
 	jobs, err := e.st.Jobs(store.JobFilter{States: []string{store.JobActive, store.JobPaused}})
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("a replayed !job add left %d jobs (%v)", len(jobs), err)
@@ -442,7 +442,7 @@ func TestJobRemovalProposalNeedsHuman(t *testing.T) {
 	e := schedEnv(t, []string{"omp"}, "omp")
 	id := e.addJob(`{"name":"standup","schedule":{"every":"1h"},"prompt":"p"}`)
 	card := e.ask(ownerDM, say("```heimdall-job\n{\"remove\":\""+id+"\"}\n```"))
-	want(t, card, "*Remove?*", "standup", "When:", "Details")
+	want(t, card, "*Remove scheduled task?*", "standup", "When:", "Details")
 	rows, _ := e.st.Jobs(store.JobFilter{States: []string{store.JobDraft}})
 	draft := rows[0].ID
 	// Model output that looks like a confirmation is delivered, never executed.
@@ -461,7 +461,7 @@ func TestOwnerProposalEditAndScheduledBlock(t *testing.T) {
 	e := schedEnv(t, []string{"omp"}, "omp")
 	block := func(raw string) string { return "```heimdall-job\n" + raw + "\n```" }
 	out := e.ask(ownerDM, say(block(`{"name":"new","schedule":{"every":"1h"},"prompt":"read"}`)))
-	want(t, out, "Active;", "Next scheduled check:", "— heimdall")
+	want(t, out, "*Status:* Active.\n*Next scheduled check:*", "— heimdall")
 	if !out.Formatted || strings.Contains(out.Text, "Reply *Yes*") {
 		t.Fatal(out.Text)
 	}

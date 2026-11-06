@@ -487,13 +487,13 @@ func TestRoleRulesAndCommands(t *testing.T) {
 	}
 	// An edit applies from the next run, with its diff.
 	out := r.cmd(asWork, "job edit "+mine+` {"prompt":"q"}`)
-	if !strings.Contains(out, `Saved instructions or reminder: changed`) || r.job(mine).Version != 2 {
+	if !strings.Contains(out, `Instructions updated.`) || r.job(mine).Version != 2 {
 		t.Fatalf("edit: %s %+v", out, r.job(mine))
 	}
 	if out := r.cmd(asWork, "job pause "+mine); !strings.Contains(out, "Paused") || r.job(mine).State != store.JobPaused {
 		t.Fatal(out)
 	}
-	if out := r.cmd(asWork, "job resume "+mine); !strings.Contains(out, "Resumed") {
+	if out := r.cmd(asWork, "job resume "+mine); !strings.Contains(out, "Scheduled task resumed") {
 		t.Fatal(out)
 	}
 	if out := r.cmd(asWork, "job renew "+mine+" 30d"); !strings.Contains(out, "3 Dec 2026") {
@@ -549,12 +549,12 @@ func TestDrafts(t *testing.T) {
 		t.Fatal(out)
 	}
 	r.cmd(asBoss, "job discard "+second.ID)
-	if out, ok := r.answer(asBoss, "так"); !ok || !strings.Contains(out, "Active;") || r.job(draft.ID).State != store.JobActive {
+	if out, ok := r.answer(asBoss, "так"); !ok || !strings.Contains(out, "*Status:* Active.\n*Next scheduled check:*") || r.job(draft.ID).State != store.JobActive {
 		t.Fatalf("confirm: %s", out)
 	}
 	// An edit draft shows its diff; an expired draft cannot be confirmed.
 	_, edit, card := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"edit\":\"" + draft.ID + "\",\"prompt\":\"shorter\"}\n```"})
-	if edit == nil || !strings.Contains(card, `Saved instructions or reminder: changed`) {
+	if edit == nil || !strings.Contains(card, `Instructions updated.`) {
 		t.Fatalf("edit card %q", card)
 	}
 	r.apply(&store.JobChange{Add: edit})
@@ -719,7 +719,7 @@ func TestSharedRepliesHidePrompt(t *testing.T) {
 	if out := r.cmd(inGroup, "job show "+id); strings.Contains(out, "secret") || !strings.Contains(out, "private plan") {
 		t.Fatalf("shared show: %q", out)
 	}
-	if out := r.cmd(inGroup, "job edit "+id+` {"prompt":"another secret"}`); strings.Contains(out, "secret") || !strings.Contains(out, "instructions") {
+	if out := r.cmd(inGroup, "job edit "+id+` {"prompt":"another secret"}`); strings.Contains(out, "secret") || !strings.Contains(out, "Instructions updated.") {
 		t.Fatalf("shared edit: %q", out)
 	}
 	if out := r.cmd(asBoss, "job show "+id); !strings.Contains(out, "another secret") {
@@ -1043,6 +1043,9 @@ func TestTimeoutRetryCardShowsOwnerAssertion(t *testing.T) {
 			t.Fatal(card)
 		}
 	}
+	if !strings.Contains(card, "\n\n*Repeat-safe rerun:*") || !strings.Contains(card, "\n\nReply *Yes* to apply or *No* to cancel.") {
+		t.Fatal("repeat-safe approval lost paragraph hierarchy", card)
+	}
 }
 
 func TestQueuedFirstTimeoutJobGetsFullLimit(t *testing.T) {
@@ -1062,7 +1065,7 @@ func TestDisablingTimeoutRetryCancelsPendingReplay(t *testing.T) {
 		t.Fatal("no retry")
 	}
 	text := r.cmd(asBoss, `job edit `+id+` {"rerun_on_timeout":false}`)
-	if !strings.Contains(text, "Updated") {
+	if !strings.Contains(text, "Scheduled task updated") {
 		t.Fatal(text)
 	}
 	r.rows = nil
@@ -1185,7 +1188,7 @@ func TestRemovalDrafts(t *testing.T) {
 				if d == nil || clean[0] != "Sure." {
 					t.Fatalf("draft: %v %s", d, card)
 				}
-				for _, want := range []string{"Remove?", "When:", "Every 1 hour", "Europe/Kyiv", "Future checks and pending retries", "Yes", "No", "Details"} {
+				for _, want := range []string{"Remove scheduled task?", "When:", "Every 1 hour", "Europe/Kyiv", "Future checks and pending retries", "Yes", "No", "Details"} {
 					if !strings.Contains(card, want) {
 						t.Fatalf("missing %q: %s", want, card)
 					}

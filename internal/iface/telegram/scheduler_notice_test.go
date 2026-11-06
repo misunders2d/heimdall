@@ -57,8 +57,8 @@ func TestSchedulerNoticeFakePayloadAndFallback(t *testing.T) {
 		t.Fatal(payloads)
 	}
 	text := payloads[0]["text"].(string)
-	want := `*Schedule?* Literal C:\\temp \*star\* \_u\_ \[click\](https://example.test)` + "\n*When:* Every 1 hour · UTC\n*Delivery:* This private conversation topic\nStarts paused; no automatic checks.\nReply *Yes* · *No* · *Details*\n— heimdall"
-	if text != want || len(strings.Split(text, "\n"))-1 > 6 {
+	want := "*Schedule task?*\n\n" + `Literal C:\\temp \*star\* \_u\_ \[click\](https://example.test)` + "\n\n*When:* Every 1 hour · UTC\n*Delivery:* This private conversation topic\n\nStarts paused. No automatic checks.\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
+	if text != want {
 		t.Fatalf("approval payload golden\nwant:\n%s\ngot:\n%s", want, text)
 	}
 	if payloads[0]["message_thread_id"] != float64(7) || payloads[1]["text"] != text {
@@ -77,8 +77,73 @@ func TestSchedulerNoticeFakePayloadAndFallback(t *testing.T) {
 	if err := i.Send(context.Background(), core.Outbound{Conv: c.Conv, Text: receipt, Formatted: scheduler.Formatted(receipt)}); err != nil {
 		t.Fatal(err)
 	}
-	want = `*Created:* Literal C:\\temp \*star\* \_u\_ \[click\](https://example.test)` + "\n*Status:* Paused; no automatic checks."
+	want = "*Scheduled task created*\n\n" + `Literal C:\\temp \*star\* \_u\_ \[click\](https://example.test)` + "\n\n*When:* Every 1 hour · UTC\n*Delivery:* This private conversation topic\n\n*Status:* Paused; no automatic checks."
 	if len(payloads) != 4 || payloads[2]["text"] != want || payloads[3]["text"] != want || payloads[2]["parse_mode"] != "Markdown" || payloads[3]["parse_mode"] != nil {
 		t.Fatal("receipt payload or fallback changed", payloads)
 	}
+
+	// Exercise edit and shared removal through the real renderer and adapter.
+	nextID := int64(2)
+	sendCheck := func(caller scheduler.Caller, body string, fragments ...string) {
+		t.Helper()
+
+		nextID++
+		before := len(payloads)
+		if err := i.Send(context.Background(), core.Outbound{ID: nextID, Conv: caller.Conv, Text: body, Formatted: scheduler.Formatted(body)}); err != nil {
+			t.Fatal(err)
+		}
+		if len(payloads) != before+2 || payloads[before]["parse_mode"] != "Markdown" || payloads[before+1]["parse_mode"] != nil || payloads[before]["text"] != payloads[before+1]["text"] {
+			t.Fatal("paragraphs or fallback changed", payloads[before:])
+		}
+		got := payloads[before]["text"].(string)
+		for _, want := range fragments {
+			if !strings.Contains(got, want) {
+				t.Fatalf("payload lost %q:\n%s", want, got)
+			}
+		}
+		for _, bad := range []string{"PRIVATE PROMPT", "PRIVATE CHANGED", draft.ID} {
+			if strings.Contains(got, bad) {
+				t.Fatal("private payload leak", got)
+			}
+		}
+		if !caller.Private && strings.Contains(got, "Literal") {
+			t.Fatal("shared task name leak", got)
+		}
+	}
+	_, edit, editCard := jobs.Draft(c, []string{"```heimdall-job\n" + `{"edit":"` + draft.ID + `","prompt":"PRIVATE CHANGED","quiet":true,"timeout":"2m"}` + "\n```"})
+	if edit == nil {
+		t.Fatal(editCard)
+	}
+	sendCheck(c, editCard, "*Update scheduled task?*\n\nLiteral", "\n\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated.", "\n\nStill paused. No automatic checks.\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.")
+	if err := st.AnswerCommand(0, c.Conv, store.CommandEnd{Job: &store.JobChange{Add: edit}}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, change, ok = jobs.Answer(c, "Yes")
+	if !ok || change == nil {
+		t.Fatal(receipt)
+	}
+	if err := st.AnswerCommand(0, c.Conv, store.CommandEnd{Job: change}); err != nil {
+		t.Fatal(err)
+	}
+	sendCheck(c, receipt, "*Scheduled task updated*\n\nLiteral", "\n\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated.", "\n\n*Status:* Paused; no automatic checks.")
+	job, _, err := st.Job(draft.ID)
+	if err != nil || job.State != store.JobPaused || job.Version != 2 {
+		t.Fatal("presentation changed paused state", job, err)
+	}
+	shared := c
+	shared.Private = false
+	shared.Conv.Chat = "-100"
+	_, removal, removalCard := jobs.Draft(shared, []string{"```heimdall-job\n" + `{"remove":"` + draft.ID + `"}` + "\n```"})
+	if removal == nil {
+		t.Fatal(removalCard)
+	}
+	sendCheck(shared, removalCard, "*Remove scheduled task?*\n\nScheduled task\n\n*When:*", "\n\nFuture checks and pending retries will stop.\nAny current check will be stopped.\nAlready delivered messages remain.\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.")
+	if err := st.AnswerCommand(0, shared.Conv, store.CommandEnd{Job: &store.JobChange{Add: removal}}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, change, ok = jobs.Answer(shared, "Yes")
+	if !ok || change == nil {
+		t.Fatal(receipt)
+	}
+	sendCheck(shared, receipt, "*Scheduled task removed*\n\nScheduled task\n\n*When:*", "\n\n*Status:* Removed.\nFuture checks and pending retries cancelled.\nAny current check is being stopped.\nAlready delivered messages remain.")
 }

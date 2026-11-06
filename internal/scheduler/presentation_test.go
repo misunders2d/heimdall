@@ -14,7 +14,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
-func TestCompactRequestAndReceiptGoldens(t *testing.T) {
+func TestReadableRequestAndReceiptGoldens(t *testing.T) {
 	for _, platform := range []string{core.PlatformTelegram, core.PlatformSlack} {
 		for _, paused := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/paused=%t", platform, paused), func(t *testing.T) {
@@ -30,23 +30,22 @@ func TestCompactRequestAndReceiptGoldens(t *testing.T) {
 				if j == nil {
 					t.Fatal(card)
 				}
-				want := "*Schedule?* Drive watch — Review new requests.\n*When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*Delivery:* Telegram\n"
+				want := "*Schedule task?*\n\nDrive watch\nReview new requests.\n\n*When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*Delivery:* Telegram"
 				if paused {
-					want += "Starts paused; no automatic checks.\n"
+					want += "\n\nStarts paused. No automatic checks."
 				}
-				want += "Reply *Yes* · *No* · *Details*\n— heimdall"
+				want += "\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
 				if platform == core.PlatformSlack {
 					want = strings.ReplaceAll(want, "*", "**")
 				}
 				if card != want {
 					t.Fatalf("approval golden\nwant:\n%s\ngot:\n%s", want, card)
 				}
-				contentLines(t, card, 6)
 				r.apply(&store.JobChange{Add: j})
 				out, ok := r.answer(c, "Yes")
-				want = "*Created:* Drive watch\n*Status:* Active; *Next scheduled check:* 20 Nov 2026 at 09:00 · Europe/Kyiv"
+				want = "*Scheduled task created*\n\nDrive watch\nReview new requests.\n\n*When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*Delivery:* Telegram\n\n*Status:* Active.\n*Next scheduled check:* 20 Nov 2026 at 09:00 · Europe/Kyiv"
 				if paused {
-					want = "*Created:* Drive watch\n*Status:* Paused; no automatic checks."
+					want = "*Scheduled task created*\n\nDrive watch\nReview new requests.\n\n*When:* Every 2 weeks at 09:00, starting 20 Nov 2026 · Europe/Kyiv\n*Delivery:* Telegram\n\n*Status:* Paused; no automatic checks."
 				}
 				if platform == core.PlatformSlack {
 					want = strings.ReplaceAll(want, "*", "**")
@@ -54,9 +53,10 @@ func TestCompactRequestAndReceiptGoldens(t *testing.T) {
 				if !ok || out != want {
 					t.Fatalf("receipt golden\nwant:\n%s\ngot:\n%s", want, out)
 				}
-				contentLines(t, out, 3)
 				list := r.cmd(c, "jobs")
-				contentLines(t, list, 3)
+				if wantList := strings.Replace(out, "Scheduled task created", "Scheduled task status", 1); list != wantList {
+					t.Fatalf("list lost paragraph hierarchy:\n%s", list)
+				}
 				for _, bad := range []string{"PRIVATE INSTRUCTIONS", "Routine checks", "successful test", "2027-01-01", j.ID, "your DM", "Your private"} {
 					if strings.Contains(card+out+list, bad) {
 						t.Fatalf("unexpected boilerplate or private data %q", bad)
@@ -73,54 +73,56 @@ func TestCompactRequestAndReceiptGoldens(t *testing.T) {
 	}
 }
 
-func contentLines(t *testing.T, text string, limit int) {
-	t.Helper()
-	text = strings.TrimSuffix(strings.TrimSpace(text), "\n— heimdall")
-	if got := len(strings.Split(text, "\n")); got > limit {
-		t.Fatalf("%d content lines exceeds %d:\n%s", got, limit, text)
-	}
-}
-
-func TestCompactRenewalReceiptKeepsNewEndTime(t *testing.T) {
+func TestReadableRenewalReceiptKeepsNewEndTime(t *testing.T) {
 	r := newRig(t)
 	id := r.add(asBoss, `{"name":"Drive watch","schedule":{"every":"1h"},"prompt":"PRIVATE","paused":true}`)
 	out := r.cmd(asBoss, "job renew "+id+" 30d")
-	want := "*Renewed:* Drive watch\n*Status:* Paused; no automatic checks.\n*Ends:* 3 Dec 2026 at 12:00 · Europe/Kyiv"
+	want := "*Scheduled task renewed*\n\nDrive watch\n\n*When:* Every 1 hour · Europe/Kyiv\n*Delivery:* This private conversation\n*Ends:* 3 Dec 2026 at 12:00 · Europe/Kyiv\n\n*Status:* Paused; no automatic checks."
 	if out != want {
 		t.Fatalf("renewal golden\nwant:\n%s\ngot:\n%s", want, out)
 	}
-	contentLines(t, out, 3)
 	d, _, _ := parse(r.job(id))
 	if d.Until != "2026-12-03T10:00:00Z" || r.job(id).State != store.JobPaused {
 		t.Fatal("renewal changed state or lost expiry", r.job(id))
 	}
 }
 
-func TestCompactEditKeepsMaterialChangesAndPausedState(t *testing.T) {
+func TestReadableEditKeepsMaterialChangesAndPausedState(t *testing.T) {
 	r := newRig(t)
 	id := r.add(asBoss, `{"name":"Drive watch","summary":"Review new requests.","schedule":{"every":"1h"},"prompt":"PRIVATE","paused":true}`)
 	_, j, card := r.s.Draft(asBoss, []string{"```heimdall-job\n" + `{"edit":"` + id + `","schedule":{"every":"2h"},"to":"tg:99","quiet":true,"prompt":"PRIVATE CHANGED","timeout":"2m"}` + "\n```"})
 	if j == nil {
 		t.Fatal(card)
 	}
-	want := "*Update?* Drive watch — Review new requests.\n*When:* Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv\n*Delivery:* This private conversation → Telegram\nRemains paused; no automatic checks. Silent when no update: false → true; *Timeout:* Configured limit → 2m; Saved instructions or reminder: changed (see Details).\nReply *Yes* · *No* · *Details*\n— heimdall"
+	want := "*Update scheduled task?*\n\nDrive watch\nReview new requests.\n\n*When:* Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv\n*Delivery:* This private conversation → Telegram\n\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated. Details shows the full text.\n\nStill paused. No automatic checks.\n\nReply *Yes* to apply or *No* to cancel. *Details* shows full settings.\n— heimdall"
 	if card != want {
 		t.Fatalf("edit golden\nwant:\n%s\ngot:\n%s", want, card)
 	}
-	contentLines(t, card, 6)
 	r.apply(&store.JobChange{Add: j})
 	out, ok := r.answer(asBoss, "Yes")
-	if !ok || !strings.Contains(out, "*Updated:* Drive watch\n*Status:* Paused;") || strings.Contains(out, "Next scheduled") || strings.Contains(out, "PRIVATE") {
-		t.Fatal(out)
-	}
-	contentLines(t, out, 3)
-	for _, want := range []string{"Every 1 hour", "Every 2 hours", "This private conversation → Telegram", "false → true", "Configured limit → 2m", "Saved instructions or reminder: changed"} {
-		if !strings.Contains(out, want) {
-			t.Fatal("lost material change", want, out)
-		}
+	want = "*Scheduled task updated*\n\nDrive watch\nReview new requests.\n\n*When:* Every 1 hour · Europe/Kyiv → Every 2 hours · Europe/Kyiv\n*Delivery:* This private conversation → Telegram\n\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated. Details shows the full text.\n\n*Status:* Paused; no automatic checks."
+	if !ok || out != want {
+		t.Fatalf("edit receipt golden\nwant:\n%s\ngot:\n%s", want, out)
 	}
 	if r.job(id).State != store.JobPaused {
 		t.Fatal("UI edit resumed paused job")
+	}
+}
+
+func TestReadableMaterialChangesKeepSeparateLinesAndPrivacy(t *testing.T) {
+	r := newRig(t)
+	a := Def{Name: "Old name", Summary: "Old purpose", Prompt: "PRIVATE OLD"}
+	b := Def{Name: "New name", Summary: "New purpose", Prompt: "PRIVATE NEW", Until: "2027-01-01", Quiet: true, Timeout: "2m", RerunOnTimeout: true, Harness: "codex"}
+	want := "*Name:* Old name → New name\n*Purpose:* Old purpose → New purpose\n*Ends:* No expiry → 2027-01-01\nSilent when no update: false → true\n*Timeout:* Configured limit → 2m\nInstructions updated. Details shows the full text.\nRepeat-safe timeout rerun: false → true\nExecution or delivery settings: changed (see Details)."
+	if got := r.s.material(asBoss, a, b); got != want {
+		t.Fatalf("material changes\nwant:\n%s\ngot:\n%s", want, got)
+	}
+	shared := r.s.material(inGroup, a, b)
+	if want = strings.Join(strings.Split(want, "\n")[2:], "\n"); shared != want {
+		t.Fatalf("shared changes lost privacy or material settings:\n%s", shared)
+	}
+	if got := r.s.material(asBoss, Def{Text: "PRIVATE OLD"}, Def{Text: "PRIVATE NEW"}); got != "Reminder text updated. Details shows the full text." {
+		t.Fatal(got)
 	}
 }
 
@@ -135,7 +137,7 @@ func TestConciseRequestDetailsAndState(t *testing.T) {
 		t.Fatal(err)
 	}
 	card := r.s.card(asBoss, j)
-	for _, want := range []string{"*Schedule?*", "Find requests needing attention.", "12:00–20:30, plus 20:45", "Europe/Kyiv", "This private conversation", "Starts paused", "*Yes*", "*No*", "*Details*", `\*x\*`, `\[click\]`} {
+	for _, want := range []string{"*Schedule task?*", "Find requests needing attention.", "12:00–20:30, plus 20:45", "Europe/Kyiv", "This private conversation", "Starts paused", "*Yes*", "*No*", "*Details*", `\*x\*`, `\[click\]`} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("missing %q: %s", want, card)
 		}
