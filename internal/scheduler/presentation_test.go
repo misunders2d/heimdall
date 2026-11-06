@@ -188,3 +188,16 @@ func TestNativeErrorPrivateCheckpointFailure(t *testing.T) {
 		t.Fatal("no request")
 	}
 }
+
+func TestPresentationSummaryBounds(t *testing.T) {
+	r := newRig(t)
+	for _, summary := range []string{strings.Repeat("x", 161), "first\nsecond", "first\u2028second", "first\u2029second", "first\u202esecond"} {
+		raw := mustJSON(map[string]any{"name": "x", "summary": summary, "schedule": map[string]string{"every": "1h"}, "prompt": "synthetic"})
+		if _, err := r.s.proposal(asBoss, []byte(raw)); err == nil {
+			t.Fatal("invalid summary accepted")
+		}
+	}
+	if got := literal("a\u2028b\u2029c\u202ed"); strings.ContainsAny(got, "\u2028\u2029\u202e") {
+		t.Fatal(got)
+	}
+}

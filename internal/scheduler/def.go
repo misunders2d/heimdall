@@ -169,7 +169,9 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 		return fail("name: 1-80 characters on one line")
 	}
 	d.Summary = strings.TrimSpace(d.Summary)
-	if utf8.RuneCountInString(d.Summary) > 160 || strings.ContainsFunc(d.Summary, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) {
+	if utf8.RuneCountInString(d.Summary) > 160 || strings.ContainsFunc(d.Summary, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029'
+	}) {
 		return fail("summary: at most 160 characters on one line")
 	}
 	switch d.Kind {
