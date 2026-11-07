@@ -463,6 +463,21 @@ func TestWhich(t *testing.T) {
 	want(t, e.reply(), "Stopping current run")
 }
 
+func TestWhichOMPConfig(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"codex", "omp"}, "codex", "omp")
+	dir := filepath.Join(os.Getenv("HOME"), ".omp", "agent")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("modelRoles:\n  default: google-antigravity/gemini-3.8-flash:high\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.send(owner, "c1", "!use omp")
+	want(t, e.reply(), "now uses omp")
+	e.send(owner, "c1", "!which")
+	want(t, e.reply(), "omp (set with !use", "Model: google-antigravity/gemini-3.8-flash\nThinking: high", "— heimdall")
+}
+
 func TestMidTurnMessageSteers(t *testing.T) {
 	for _, h := range []string{"omp", "pi", "claude", "codex"} {
 		t.Run(h, func(t *testing.T) {

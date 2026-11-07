@@ -90,6 +90,126 @@ func TestModel(t *testing.T) {
 	}
 }
 
+func TestOMPSettings(t *testing.T) {
+	const model = "google-antigravity/gemini-3.8-flash"
+	for _, tc := range []struct {
+		name, text, model, level string
+	}{
+		{"with thinking", "modelRoles:\n  default: " + model + ":high\n", model, "high"},
+		{"high abbreviation", "modelRoles:\n  default: " + model + ":hi\n", model, "high"},
+		{"medium abbreviation", "modelRoles:\n  default: " + model + ":med\n", model, "medium"},
+		{"xhigh abbreviation", "modelRoles:\n  default: " + model + ":xhi\n", model, "xhigh"},
+		{"single letter not thinking", "modelRoles:\n  default: " + model + ":m\n", model + ":m", ""},
+		{"auto sentinel", "modelRoles:\n  default: " + model + ":auto\n", model, "auto"},
+		{"auto abbreviation not thinking", "modelRoles:\n  default: " + model + ":au\n", model + ":au", ""},
+		{"without thinking", "modelRoles:\n  default: " + model + "\n", model, ""},
+		{"double quoted", "modelRoles:\n  default: \"" + model + ":high\" # saved\n", model, "high"},
+		{"single quoted", "modelRoles: # saved\n    smol: other/model\n    default: '" + model + ":low'\n", model, "low"},
+		{"comments and siblings", "# settings\nmodelRoles:\n\n  smol: other/model\n  # default model\n  default: " + model + ":medium # saved\nother: value\n", model, "medium"},
+		{"literal model colon", "modelRoles:\n  default: openrouter/model:free\n", "openrouter/model:free", ""},
+		{"missing file", "", "", ""},
+		{"missing key", "modelRoles:\n  smol: other/model:high\n", "", ""},
+		{"wrong parent", "other:\n  default: " + model + ":high\n", "", ""},
+		{"nested key", "modelRoles:\n  other:\n    default: " + model + ":high\n", "", ""},
+		{"after parent", "modelRoles:\n  smol: other/model\nother:\n  default: " + model + ":high\n", "", ""},
+		{"missing quote", "modelRoles:\n  default: \"" + model + ":high\n", "", ""},
+		{"trailing junk", "modelRoles:\n  default: '" + model + ":high' junk\n", "", ""},
+		{"malformed token", "modelRoles:\n  default: bad model:high\n", "", ""},
+		{"escaped newline", "modelRoles:\n  default: \"model\\nnotice:high\"\n", "", ""},
+		{"empty model", "modelRoles:\n  default: :high\n", "", ""},
+		{"empty level", "modelRoles:\n  default: model:\n", "", ""},
+		{"null", "modelRoles:\n  default: null\n", "", ""},
+		{"sequence", "modelRoles:\n  default: [model:high]\n", "", ""},
+		{"block scalar", "modelRoles:\n  default: |\n    model:high\n", "", ""},
+		{"model too long", "modelRoles:\n  default: " + strings.Repeat("m", 65) + ":high\n", "", ""},
+		{"model at limit", "modelRoles:\n  default: " + strings.Repeat("m", 64) + ":high\n", strings.Repeat("m", 64), "high"},
+		{"level too long", "modelRoles:\n  default: model:" + strings.Repeat("h", 65) + "\n", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tc.text != "" {
+				dir := filepath.Join(home, ".omp", "agent")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte(tc.text), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			l := Launch{Home: home}
+			if got := Model("omp", l); got != tc.model {
+				t.Fatalf("Model = %q, want %q", got, tc.model)
+			}
+			if got := Thinking("omp", l); got != tc.level {
+				t.Fatalf("Thinking = %q, want %q", got, tc.level)
+			}
+		})
+	}
+}
+
+func TestOMPAgentDir(t *testing.T) {
+	home := t.TempDir()
+	pinned := filepath.Join(home, ".omp", "agent")
+	other := filepath.Join(t.TempDir(), "agent")
+	for _, dir := range []string{pinned, other} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("modelRoles:\n  default: provider/model:high\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	launcher := filepath.Join(t.TempDir(), "omp-native-cli.sh")
+	link := filepath.Join(t.TempDir(), "omp")
+	if err := os.Symlink(launcher, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, script, home, override, want string
+	}{
+		{"native default", "", home, "", pinned},
+		{"native override", "", home, other, other},
+		{"native relative override", "", home, ".omp/agent", pinned},
+		{"literal launcher wins", "#!/bin/sh\nunset PI_CONFIG_DIR\nexport PI_CODING_AGENT_DIR=" + pinned + "\nexec /example/runtime/omp \"$@\"\n", home, other, pinned},
+		{"launcher cannot select owner for employee", "#!/bin/sh\nunset PI_CONFIG_DIR\nexport PI_CODING_AGENT_DIR=" + pinned + "\nexec /example/runtime/omp \"$@\"\n", other, "", filepath.Join(other, ".omp", "agent")},
+		{"no shell evaluation", "#!/bin/sh\nunset PI_CONFIG_DIR\nexport PI_CODING_AGENT_DIR=$(echo " + pinned + ")\nexec /example/runtime/omp \"$@\"\n", home, other, other},
+		{"later override not recognized", "#!/bin/sh\nunset PI_CONFIG_DIR\nexport PI_CODING_AGENT_DIR=" + pinned + "\nexport PI_CODING_AGENT_DIR=/other\nexec /example/runtime/omp \"$@\"\n", home, other, other},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(launcher, []byte(tc.script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			l := Launch{Path: link, Home: tc.home, Env: []string{"PI_CODING_AGENT_DIR=" + tc.override}}
+			if got := ompAgentDir(l); got != tc.want {
+				t.Fatalf("directory = %q, want %q", got, tc.want)
+			}
+			want := "provider/model"
+			if tc.home != home {
+				want = ""
+			}
+			if got := Model("omp", l); got != want {
+				t.Fatalf("Model = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestOMPConfigRootAndRelativeAgentDir(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	for _, tc := range []struct {
+		env  []string
+		want string
+	}{
+		{[]string{"PI_CONFIG_DIR=.other"}, filepath.Join(home, ".other", "agent")},
+		{[]string{"PI_CONFIG_DIR=.other", "PI_CODING_AGENT_DIR=relative"}, filepath.Join(cwd, "relative")},
+	} {
+		l := Launch{Home: home, Dir: cwd, Env: tc.env}
+		if got := ompAgentDir(l); got != tc.want {
+			t.Fatalf("directory = %q, want %q", got, tc.want)
+		}
+	}
+}
+
 func TestClaudeSessionModel(t *testing.T) {
 	home := t.TempDir()
 	id := "0f1e2d3c-aaaa-bbbb-cccc-123456789abc"

@@ -699,6 +699,37 @@ func TestEmployeeEnvironmentRebuiltByRole(t *testing.T) {
 	}
 }
 
+func TestOMPSettingsUsePreparedRoleHome(t *testing.T) {
+	a, homes := stubAccounts(t, 0, map[string]int{"boss": 0, "emp": 1001})
+	a.GroupIDs = func(*user.User) ([]string, error) { return []string{"1001"}, nil }
+	for name, home := range homes {
+		dir := filepath.Join(home, ".omp", "agent")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("modelRoles:\n  default: provider/"+name+":high\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", homes["boss"])
+	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(homes["boss"], ".omp", "agent"))
+	for _, tc := range []struct {
+		role core.Role
+		name string
+	}{{core.RoleOwner, "boss"}, {core.RoleEmployee, "emp"}} {
+		l, err := a.Prepare(tc.role, false, "sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := harness.Model("omp", l); got != "provider/"+tc.name {
+			t.Fatalf("%s model = %q", tc.role, got)
+		}
+		if got := harness.Thinking("omp", l); got != "high" {
+			t.Fatalf("%s thinking = %q", tc.role, got)
+		}
+	}
+}
+
 func TestCancelSendsSIGTERMBeforeKill(t *testing.T) {
 	setGrace(t, 30*time.Second, 300*time.Millisecond)
 	r, state, _ := lingers(t, "")

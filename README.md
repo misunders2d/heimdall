@@ -196,7 +196,7 @@ Commands work the same on every interface:
 ```
 !help              list commands
 !status            what is running and queued in this conversation
-!which             the harness this conversation uses now and its thinking level
+!which             this conversation's harness, configured model and thinking level
 !stop              stop the current turn and clear your queued messages
 !cancel            clear your queued messages; the turn keeps running
 !reset             your next message here starts fresh native sessions
@@ -207,6 +207,26 @@ Commands work the same on every interface:
 !next <msg>        queue as follow-up instead of steering
 !jobs, !job …      scheduled jobs (see below)
 ```
+
+`!which` reads native config under the asking caller's launch home/environment.
+For OMP, it reads `modelRoles.default` in `<agent dir>/config.yml` as a simple
+YAML block mapping (plain or quoted scalar, with optional comments).
+`provider/model:high` shows model `provider/model` and thinking `high`; a model
+without a thinking suffix leaves thinking at `default`. OMP's unambiguous
+abbreviations (such as `:hi`) display the full level (`high`). Missing, unsupported or
+unsafe values also show `default`; AGY remains `default`.
+OMP's agent directory override is `PI_CODING_AGENT_DIR`, otherwise
+`<launch home>/.omp/agent` (`PI_CONFIG_DIR` can replace `.omp`). Relative agent
+overrides resolve from the launch working directory. The canonical
+`omp-native-cli.sh` launcher pins this
+home-local OMP directory, overriding an inherited Pi directory: `!which` reads
+only its literal final unset/export/exec lines, never executes the script, and
+never accepts a pinned directory in another caller's home.
+This shows configured defaults, not live OMP session overrides or fallback models.
+Claude alone can show its last reply's model when its configured model is unset.
+OMP directory/selector rules were checked against upstream
+[directory source](https://github.com/can1357/oh-my-pi/blob/v18.16.0/packages/utils/src/dirs.ts)
+and [selector source](https://github.com/can1357/oh-my-pi/blob/v18.16.0/packages/tui/src/overlays/model-selector.ts).
 
 `stop`, `cancel` (or `abort`, `nevermind`), `reset` and `chatid` alone in a
 message work without the `!`. Only the turn's sender or the owner can stop

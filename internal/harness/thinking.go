@@ -11,7 +11,7 @@ import (
 
 // Thinking is the thinking level a harness is configured with under the
 // launch's home, or "" when it is not known: no such file or key, an
-// unreadable file, or a harness whose level is not read (omp, agy). Agents
+// unreadable file, or a harness whose level is not read (agy). Agents
 // change their own level by editing these files; Heimdall only reads them.
 func Thinking(name string, l Launch) string {
 	var level string
@@ -22,6 +22,8 @@ func Thinking(name string, l Launch) string {
 		level = jsonString(readObject(filepath.Join(l.Home, ".claude", "settings.json")), "effortLevel")
 	case "pi":
 		level = piThinking(filepath.Join(configDir(l, "PI_CODING_AGENT_DIR", filepath.Join(".pi", "agent")), "settings.json"))
+	case "omp":
+		_, level = ompDefault(l)
 	}
 	if len(level) > 32 || strings.TrimLeft(level, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != "" {
 		return "" // shown in chat as is: one plain word only
@@ -32,7 +34,8 @@ func Thinking(name string, l Launch) string {
 // Model is the model a harness is configured with under the launch's home,
 // or "" when not set there (the harness then uses its own default): Codex
 // config.toml top-level `model`, Claude settings.json `model`, Pi
-// settings.json "<defaultProvider>/<defaultModel>". Like Thinking, it only
+// settings.json "<defaultProvider>/<defaultModel>", OMP config.yml
+// modelRoles.default (without its thinking suffix). Like Thinking, it only
 // reads the files the agents themselves edit.
 func Model(name string, l Launch) string {
 	var model string
@@ -49,6 +52,8 @@ func Model(name string, l Launch) string {
 				model = p + "/" + m
 			}
 		}
+	case "omp":
+		model, _ = ompDefault(l)
 	}
 	if len(model) > 64 || strings.TrimLeft(model, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/[]") != "" {
 		return "" // shown in chat as is: one plain token only
@@ -99,6 +104,141 @@ func configDir(l Launch, variable, rel string) string {
 		return dir
 	}
 	return filepath.Join(l.Home, rel)
+}
+
+// ompDefault reads only the simple block mapping OMP writes for modelRoles.
+// Directory and selector syntax checked against oh-my-pi v18.16.0:
+// packages/utils/src/dirs.ts and packages/tui/src/overlays/model-selector.ts.
+// More complex YAML/selectors are unknown; never render them as chat text.
+func ompDefault(l Launch) (model, level string) {
+	value := ompDefaultValue(filepath.Join(ompAgentDir(l), "config.yml"))
+	if len(value) > 97 || strings.HasPrefix(value, "[") || strings.TrimLeft(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/[]") != "" {
+		return "", ""
+	}
+	if i := strings.LastIndexByte(value, ':'); i >= 0 {
+		if i == 0 || i == len(value)-1 {
+			return "", ""
+		}
+		suffix := value[i+1:]
+		// OMP accepts unambiguous abbreviations of at least two letters;
+		// all these concrete names have distinct two-letter prefixes. Auto
+		// is a separate sentinel and only its full spelling is recognized.
+		for _, candidate := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max", "inherit", "auto"} {
+			if suffix == candidate || len(suffix) >= 2 && candidate != "auto" && strings.HasPrefix(candidate, suffix) {
+				if i > 64 {
+					return "", ""
+				}
+				return value[:i], candidate
+			}
+		}
+	}
+	return value, ""
+}
+
+// The canonical hub OMP launcher pins its own agent directory after removing
+// Pi's inherited config root. Recognize only its final three literal lines;
+// never evaluate shell text or accept a pinned path outside this caller's home.
+// Native installs keep the usual launch environment/default resolution.
+func ompAgentDir(l Launch) string {
+	rel := filepath.Join(".omp", "agent")
+	if root := envValue(l.Env, "PI_CONFIG_DIR"); root != "" {
+		rel = filepath.Join(root, "agent")
+	}
+	dir := configDir(l, "PI_CODING_AGENT_DIR", rel)
+	if override := envValue(l.Env, "PI_CODING_AGENT_DIR"); override != "" && !filepath.IsAbs(override) {
+		cwd := l.Dir
+		if cwd == "" {
+			cwd = l.Home
+		}
+		dir = filepath.Join(cwd, override) // OMP uses path.resolve, unlike Pi's reader.
+	}
+	path, err := filepath.EvalSymlinks(l.Path)
+	if err != nil || filepath.Base(path) != "omp-native-cli.sh" {
+		return dir
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return dir
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 8193))
+	if err != nil || len(data) > 8192 {
+		return dir
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 3 {
+		return dir
+	}
+	tail := lines[len(lines)-3:]
+	pinned := filepath.Join(l.Home, ".omp", "agent")
+	target := strings.TrimSuffix(strings.TrimPrefix(tail[2], "exec "), ` "$@"`)
+	if tail[0] == "unset PI_CONFIG_DIR" && tail[1] == "export PI_CODING_AGENT_DIR="+pinned &&
+		tail[2] == "exec "+target+` "$@"` && filepath.IsAbs(target) && filepath.Base(target) == "omp" &&
+		strings.TrimLeft(target, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-/.") == "" {
+		return pinned
+	}
+	return dir
+}
+
+func ompDefaultValue(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	s := bufio.NewScanner(io.LimitReader(f, 1<<20))
+	inRoles, childIndent := false, 0
+	for s.Scan() {
+		line := s.Text()
+		text := strings.TrimSpace(line)
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if strings.HasPrefix(line[indent:], "\t") {
+			return "" // tabs are not YAML indentation
+		}
+		key, value, ok := strings.Cut(text, ":")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if indent == 0 {
+			inRoles = ok && key == "modelRoles" && (value == "" || strings.HasPrefix(value, "#"))
+			childIndent = 0
+			continue
+		}
+		if !inRoles {
+			continue
+		}
+		if childIndent == 0 {
+			childIndent = indent
+		}
+		if indent != childIndent || !ok || key != "default" {
+			continue
+		}
+		if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+			end := strings.IndexByte(value[1:], value[0]) + 1
+			if end == 0 {
+				return ""
+			}
+			rest := value[end+1:]
+			if rest != "" && (!strings.ContainsAny(rest[:1], " \t") || !strings.HasPrefix(strings.TrimSpace(rest), "#") && strings.TrimSpace(rest) != "") {
+				return ""
+			}
+			return value[1:end]
+		}
+		if i := strings.Index(value, " #"); i >= 0 {
+			value = value[:i]
+		}
+		if i := strings.Index(value, "\t#"); i >= 0 {
+			value = value[:i]
+		}
+		value = strings.TrimSpace(value)
+		switch value {
+		case "null", "Null", "NULL", "true", "True", "TRUE", "false", "False", "FALSE", "[]":
+			return ""
+		}
+		return value
+	}
+	return ""
 }
 
 // codexKey is a top-level string key of a Codex config.toml; keys in tables
