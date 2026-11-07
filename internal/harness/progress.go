@@ -3,6 +3,8 @@ package harness
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/misunders2d/heimdall/internal/core"
 )
 
 // Progress is optional native public telemetry, never an answer or readiness
@@ -11,6 +13,8 @@ type Progress struct {
 	Phase, Text, Tool string
 	Reset             bool
 	Error             bool
+	ErrorSummary      string // bounded sanitized native error field only, never public progress
+	Completed         bool   // terminal native tool event; starts never prove success
 	// SignIn names the service a tool's result said needs a sign-in: a
 	// structured auth_needed result (details.status), which Pi reports as an
 	// ordinary tool result, not an error. Scheduled runs fail on it.
@@ -21,11 +25,12 @@ type Progress struct {
 // internal/client/{pirpc,claudestream,codexroom}.go. Only public summary
 // fields are used for Codex; raw reasoning text is never consumed.
 type progressTracker struct {
-	open    bool
-	started bool
-	key     string
-	index   int
-	text    string
+	open        bool
+	started     bool
+	key         string
+	index       int
+	text        string
+	claudeTools map[string]string
 }
 
 func (t *progressTracker) start(key string, index int, emit func(Progress)) {
@@ -84,7 +89,12 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		Params                 json.RawMessage
 		Message                struct {
 			Role    string
-			Content []struct{ Type, Name, Thinking string }
+			Content []struct {
+				Type, ID, Name, Thinking string
+				ToolUseID                string          `json:"tool_use_id"`
+				IsError                  bool            `json:"is_error"`
+				Content                  json.RawMessage `json:"content"`
+			}
 		}
 	}
 	if json.Unmarshal(raw, &e) != nil {
@@ -103,7 +113,7 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		case "tool_execution_start":
 			emit(Progress{Phase: "tools", Tool: e.ToolName})
 		case "tool_execution_end":
-			emit(Progress{Phase: "tools", Tool: e.ToolName, Error: e.IsError, SignIn: signIn(e.ToolName, e.Result)})
+			emit(Progress{Phase: "tools", Tool: e.ToolName, Completed: true, Error: e.IsError, ErrorSummary: toolError(e.ToolName, e.IsError, e.Result), SignIn: signIn(e.ToolName, e.Result)})
 		case "message_update":
 			var u struct {
 				Type, Delta, Content string
@@ -129,8 +139,22 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 			}
 		}
 	case "claude":
+		if e.Type == "user" {
+			for _, b := range e.Message.Content {
+				if name := t.claudeTools[b.ToolUseID]; b.Type == "tool_result" && name != "" {
+					emit(Progress{Phase: "tools", Tool: name, Completed: true, Error: b.IsError, ErrorSummary: toolError(name, b.IsError, b.Content)})
+					delete(t.claudeTools, b.ToolUseID)
+				}
+			}
+		}
 		if e.Type == "assistant" {
 			for _, b := range e.Message.Content {
+				if b.Type == "tool_use" && b.ID != "" {
+					if t.claudeTools == nil {
+						t.claudeTools = map[string]string{}
+					}
+					t.claudeTools[b.ID] = b.Name
+				}
 				if b.Type == "thinking" && b.Thinking != "" {
 					emit(Progress{Phase: "thinking", Text: tailProgress(b.Thinking, 2000), Reset: true})
 				}
@@ -178,8 +202,11 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 	case "codex":
 		var p struct {
 			Item struct {
-				ID, Type, Name, Tool string
-				Summary              json.RawMessage
+				ID, Type, Name, Tool, Server, Status string
+				Summary                              json.RawMessage
+				Error                                json.RawMessage
+				Result                               json.RawMessage
+				ExitCode                             *int
 			}
 			ItemID       string
 			SummaryIndex *int
@@ -187,6 +214,25 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		}
 		if json.Unmarshal(e.Params, &p) != nil {
 			return
+		}
+		// Input items have no tool status. Treating their completion as a
+		// tool failure rejects otherwise successful scheduled checkpoints.
+		if p.Item.Type == "userMessage" {
+			return
+		}
+		// Installed Codex 0.166.0 v2.ThreadItem (generated schema): MCP
+		// calls carry server/tool/status, not a synthesized name field.
+		tool := p.Item.Name
+		if p.Item.Type == "mcpToolCall" {
+			tool = ""
+			if p.Item.Server != "" && p.Item.Tool != "" {
+				tool = "mcp__" + p.Item.Server + "__" + p.Item.Tool
+			}
+		} else if tool == "" {
+			tool = p.Item.Tool
+			if tool == "" {
+				tool = p.Item.Type
+			}
 		}
 		switch e.Method {
 		case "item/started":
@@ -196,13 +242,6 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 			} else if p.Item.Type == "agentMessage" {
 				emit(Progress{Phase: "finalizing"})
 			} else {
-				tool := p.Item.Name
-				if tool == "" {
-					tool = p.Item.Tool
-				}
-				if tool == "" {
-					tool = p.Item.Type
-				}
 				emit(Progress{Phase: "tools", Tool: tool})
 			}
 		case "item/reasoning/summaryPartAdded":
@@ -233,8 +272,77 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 			} else if p.Item.Type == "agentMessage" {
 				emit(Progress{Phase: "finalizing"})
 			} else {
-				emit(Progress{Phase: "tools", Tool: p.Item.Type})
+				var result struct {
+					IsError bool `json:"isError"`
+				}
+				_ = json.Unmarshal(p.Item.Result, &result)
+				failed := p.Item.Status != "completed" || len(p.Item.Error) > 0 && string(p.Item.Error) != "null" || result.IsError || p.Item.ExitCode != nil && *p.Item.ExitCode != 0
+				summary := ""
+				if p.Item.Type == "mcpToolCall" {
+					summary = nativeError(failed, p.Item.Error, p.Item.Result)
+				}
+				emit(Progress{Phase: "tools", Tool: tool, Completed: true, Error: failed, ErrorSummary: summary})
 			}
 		}
 	}
 }
+
+// Only explicit native error/message fields or failed tool text blocks count.
+// Never serialize a whole result, command output, arguments or stderr.
+func nativeError(failed bool, fields ...json.RawMessage) string {
+	if !failed {
+		return ""
+	}
+	for _, raw := range fields {
+		if text := errorText(raw, 0); text != "" {
+			return core.SanitizeNativeError(text, "")
+		}
+	}
+	return ""
+}
+func errorText(raw json.RawMessage, depth int) string {
+	if depth > 6 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		trimmed := strings.TrimSpace(text)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			return errorText(json.RawMessage(trimmed), depth+1)
+		}
+		return text
+	}
+	var obj struct {
+		Message string
+		Error   json.RawMessage
+		Content json.RawMessage
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		if obj.Message != "" {
+			return obj.Message
+		}
+		if text := errorText(obj.Error, depth+1); text != "" {
+			return text
+		}
+		return errorText(obj.Content, depth+1)
+	}
+	var blocks []struct{ Type, Text string }
+	if json.Unmarshal(raw, &blocks) == nil {
+		for _, b := range blocks {
+			if b.Type == "text" {
+				return errorText(json.RawMessage(mustErrorJSON(b.Text)), depth+1)
+			}
+		}
+	}
+	return ""
+}
+
+func toolError(name string, failed bool, raw json.RawMessage) string {
+	switch strings.ToLower(name) {
+	case "bash", "shell", "exec_command", "commandexecution":
+		return ""
+	}
+	return nativeError(failed, raw)
+}
+
+func mustErrorJSON(s string) []byte { b, _ := json.Marshal(s); return b }

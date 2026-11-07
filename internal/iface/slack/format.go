@@ -22,6 +22,11 @@ var markdownLink = regexp.MustCompile(`^\[([^\]\n]+)\]\((https?://[^\s)]+)\)`)
 func mrkdwn(s string) string {
 	var out strings.Builder
 	for len(s) > 0 {
+		if s[0] == '\\' && len(s) > 1 && strings.ContainsRune("\\*_`[]<>~#", rune(s[1])) {
+			out.WriteString(escapedLiteral(s[1]))
+			s = s[2:]
+			continue
+		}
 		if strings.HasPrefix(s, "```") {
 			end := strings.Index(s[3:], "```")
 			if end < 0 {
@@ -42,9 +47,15 @@ func mrkdwn(s string) string {
 			}
 		}
 		// Process only text outside code, preserving delimiter state locally.
-		end := strings.IndexByte(s, '`')
-		if end < 0 {
-			end = len(s)
+		// Escapes belong to the same text chunk: splitting at a backslash
+		// breaks formatting around paths. Only unescaped backticks end it.
+		end := 0
+		for end < len(s) && s[end] != '`' {
+			if s[end] == '\\' && end+1 < len(s) && strings.ContainsRune("\\*_`[]<>~#", rune(s[end+1])) {
+				end += 2
+			} else {
+				end++
+			}
 		}
 		if end == 0 {
 			end = 1
@@ -59,6 +70,14 @@ func plainMrkdwn(s string) string {
 	lineStart := true
 	previous := rune(0)
 	for len(s) > 0 {
+		if s[0] == '\\' && len(s) > 1 && strings.ContainsRune("\\*_`[]<>~#", rune(s[1])) {
+			// Literal template fields cannot open formatting, links or mentions.
+			out.WriteString(escapedLiteral(s[1]))
+			previous = rune(s[1])
+			s = s[2:]
+			lineStart = false
+			continue
+		}
 		if lineStart && s[0] == '#' {
 			n := 0
 			for n < len(s) && s[n] == '#' {
@@ -154,4 +173,20 @@ func (s *Slack) CleanAnswer(text, inDir, outDir string) string {
 		text = regexp.MustCompile("```[A-Za-z0-9_-]*\\s*\\n\\s*```").ReplaceAllString(text, "")
 	}
 	return strings.TrimSpace(text)
+}
+
+// Slack only decodes &amp;/&lt;/&gt;, and does not escape mrkdwn markers
+// with backslashes. Use visible lookalikes for explicitly literal markers.
+func escapedLiteral(b byte) string {
+	switch b {
+	case '*':
+		return "∗"
+	case '_':
+		return "＿"
+	case '`':
+		return "ˋ"
+	case '~':
+		return "∼"
+	}
+	return escapeText(string(b))
 }

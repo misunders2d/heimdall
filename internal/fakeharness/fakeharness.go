@@ -721,6 +721,22 @@ func (f *fake) codex() {
 		reply(turnReq["id"], map[string]any{"turn": map[string]any{"id": turnID}})
 		f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": turnID}}})
 		f.failPost()
+		if f.has("MCP_SCAN_") {
+			item := map[string]any{"id": "mcp-read", "type": "mcpToolCall", "server": "codex_apps", "tool": "slack_slack_read_thread", "status": "inProgress", "arguments": map[string]any{}}
+			f.emit(map[string]any{"method": "item/started", "params": map[string]any{"threadId": thread, "turnId": turnID, "item": item}})
+			if !f.has("MCP_SCAN_START_ONLY") {
+				item["status"] = "completed"
+				item["result"] = map[string]any{"content": []any{}}
+				if f.has("MCP_SCAN_ERROR") {
+					item["status"] = "failed"
+					item["error"] = map[string]any{"message": "synthetic failure"}
+				}
+				if f.has("MCP_SCAN_ISERROR") {
+					item["result"] = map[string]any{"content": []any{}, "isError": true}
+				}
+				f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": turnID, "item": item}})
+			}
+		}
 		if f.has("FINALFIRST") {
 			f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": thread, "turnId": turnID, "item": map[string]any{"id": "i0", "type": "agentMessage", "text": "early answer: " + lastLine(f.prompt), "phase": "final_answer"}}})
 		}

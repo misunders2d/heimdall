@@ -542,23 +542,25 @@ type turn struct {
 
 	nativeText, nativeContext, instructions string
 
-	ready    bool
-	steerQ   []item
-	steering bool
-	steered  int
-	done     *doneEvent
-	stopped  atomic.Bool
-	mu       sync.Mutex
-	run      *harness.Run
-	typing   chan struct{}     // closed when the turn ends: stops the typing indicator
-	reset    bool              // the caller reset their sessions: keep none from this turn
-	launch   harness.Launch    // how the harness was launched (t.mu)
-	dir      *harness.TurnDir  // the turn's directory, once created (t.mu)
-	refs     map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
-	batch    []item            // the messages the turn started with
-	job      *scheduler.Turn   // a scheduled run's job; nil for a chat turn
-	tools    []string          // native tool names seen, for the job's expect checks (t.mu)
-	signIn   []string          // services a tool result said need a sign-in, for the job's outcome (t.mu)
+	ready        bool
+	steerQ       []item
+	steering     bool
+	steered      int
+	done         *doneEvent
+	stopped      atomic.Bool
+	mu           sync.Mutex
+	run          *harness.Run
+	typing       chan struct{}     // closed when the turn ends: stops the typing indicator
+	reset        bool              // the caller reset their sessions: keep none from this turn
+	launch       harness.Launch    // how the harness was launched (t.mu)
+	dir          *harness.TurnDir  // the turn's directory, once created (t.mu)
+	refs         map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
+	batch        []item            // the messages the turn started with
+	job          *scheduler.Turn   // a scheduled run's job; nil for a chat turn
+	tools        []string          // successful completed native tools, for expect (t.mu)
+	toolsStarted []string          // starts are progress only, never proof of success
+	toolErrors   []string
+	signIn       []string // services a tool result said need a sign-in, for the job's outcome (t.mu)
 }
 
 type readyEvent struct {
@@ -734,7 +736,7 @@ func (c *conv) reply(row store.InboundRow, text string) {
 // answer settles a ! command and its reply together. If that cannot be
 // recorded the message stays pending and is answered after a restart.
 func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
-	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: c.r.scrub(text) + "\n— heimdall"}
+	e.Reply = core.Outbound{Conv: c.key, ReplyTo: row.MsgID, Text: c.r.scrub(text) + "\n— heimdall", Formatted: (e.Detail == "job" || e.Detail == "job answer") && scheduler.Formatted(text)}
 	if err := c.r.store.AnswerCommand(row.ID, c.key, e); err != nil {
 		c.r.log.Printf("message %d: command %s not recorded: %v", row.ID, e.Detail, err)
 		return
@@ -1150,12 +1152,23 @@ func (c *conv) start(ctx context.Context) {
 	id, err := c.r.store.StartTurn(c.key, first.role, who, first.row.MsgID, ids)
 	if err != nil {
 		c.r.log.Printf("turn in %s not started: %v", c.key, err)
+		// A committed job stop can cancel the inbound between Begin and
+		// StartTurn. Keep that cancellation; its command already answered.
+		cancelled := false
+		if job != nil {
+			run, readErr := c.r.store.Run(job.Run)
+			cancelled = readErr == nil && run.State == store.RunCancelled
+		}
 		<-c.r.sem
 		c.queue = c.queue[n:]
 		for _, it := range batch {
-			_ = c.r.store.SetInbound(it.row.ID, store.InFailed, "turn could not be recorded")
+			if !cancelled {
+				_ = c.r.store.SetInbound(it.row.ID, store.InFailed, "turn could not be recorded")
+			}
 			c.r.release(it.row.Inbound)
-			c.reply(it.row, "Heimdall could not record this turn, so it did not run: "+err.Error()+"\n— heimdall")
+			if !cancelled {
+				c.reply(it.row, "Heimdall could not record this turn, so it did not run: "+err.Error()+"\n— heimdall")
+			}
 		}
 		return
 	}
@@ -1166,9 +1179,17 @@ func (c *conv) start(ctx context.Context) {
 	c.generation[who] = c.generation[who]
 	startCtx, startCancel := context.WithCancel(ctx)
 	t := &turn{startCtx: startCtx, startCancel: startCancel, generation: c.generation[who], id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, job: job}
-	switch sticky, _ := c.r.store.ChatHarness(c.key); {
+	// Scheduled sessions stay in sched:<job>, while their routing preference
+	// comes from the creator-bound source conversation at actual turn start.
+	route := c.key
+	if job != nil {
+		route = job.Source
+	}
+	switch sticky, _ := c.r.store.ChatHarness(route); {
 	case job != nil && job.Def.Harness != "":
 		t.candidates, t.explicit = []string{job.Def.Harness}, true
+	case job != nil && sticky != "":
+		t.candidates, t.explicit = []string{sticky}, true
 	case job != nil:
 		t.candidates = c.r.opt.Order
 	case first.harness != "":
@@ -1388,6 +1409,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			}
 		}
 		sessionNote := c.sessionPointer(t, h, sess, launch, batch[0].row.MCPControl)
+		ownerInputs := c.ownerRequestContext(t, h, sess, prev, clean, batch[0].row.Inbound)
 		// Recorded before the harness gets any input: a crash from here on
 		// leaves this session not resumable.
 		if err := c.r.store.BindTurn(t.id, c.key, t.who, h, sess.ID); err != nil {
@@ -1406,8 +1428,27 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			// nothing is shown.
 			progress = func(p harness.Progress) {
 				t.mu.Lock()
-				if p.Tool != "" && len(t.job.Def.Expect.Tools) > 0 {
-					t.tools = append(t.tools, p.Tool)
+				if p.Tool != "" {
+					if !p.Completed {
+						t.toolsStarted = append(t.toolsStarted, p.Tool)
+					}
+					if p.Completed && !p.Error && p.SignIn == "" {
+						t.tools = append(t.tools, p.Tool)
+					}
+					if p.Completed && p.Error {
+						if len(t.toolErrors) < 2 {
+							name := p.Tool
+							if strings.TrimLeft(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:-") != "" {
+								name = "native_tool"
+							}
+							name = clipRunes(name, 80)
+							detail := core.SanitizeNativeError(p.ErrorSummary, t.job.Def.Prompt)
+							if detail != "" {
+								name += ": " + detail
+							}
+							t.toolErrors = append(t.toolErrors, name)
+						}
+					}
 				}
 				if p.SignIn != "" && !slices.Contains(t.signIn, p.SignIn) {
 					t.signIn = append(t.signIn, p.SignIn)
@@ -1446,6 +1487,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			} else {
 				nativePrompt = sessionNote + "\n\n" + nativePrompt
 			}
+		}
+		if ownerInputs != "" {
+			turnContext = strings.TrimSpace(ownerInputs + "\n\n" + turnContext)
 		}
 		var notify func(string)
 		if t.job == nil {
@@ -1875,7 +1919,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	if e.State == store.TurnDone {
 		e.Files = c.fileReplies(t, d.files)
 		if card != "" {
-			e.Draft, e.Job, e.Notices = draft, jobChange, []core.Outbound{{Conv: c.key, ReplyTo: t.replyTo, Text: c.r.scrub(card)}}
+			e.Draft, e.Job, e.Notices = draft, jobChange, []core.Outbound{{Conv: c.key, ReplyTo: t.replyTo, Text: c.r.scrub(card), Formatted: scheduler.Formatted(card)}}
 			if e.Reply != nil && e.Reply.Text == "" && len(e.Reply.Reactions) == 0 {
 				e.Reply = nil // only the block: Heimdall's notice says it
 			}
@@ -1937,14 +1981,16 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 // files go to the job's target, not to the run's own conversation.
 func (c *conv) jobEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEnd {
 	t.mu.Lock()
-	tools, signIn := t.tools, t.signIn
+	tools, signIn, toolErrors := t.tools, t.signIn, t.toolErrors
 	t.mu.Unlock()
 	files := make([]core.File, len(d.files))
 	for i, f := range d.files {
 		files[i] = core.File{Path: f.Path, Name: f.Name, MIME: mimeOf(f.Name)}
 	}
-	res.Answer = stripHarnessTag(res.Answer, d.harness)
-	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Identity: d.identity, Notes: d.notes, Files: files, Tools: tools, SignIn: signIn})
+	// Structured checkpoint state is persisted too; apply the same existing
+	// secret/callback redaction before the scheduler parses any result fields.
+	res.Answer = c.r.scrub(stripHarnessTag(res.Answer, d.harness))
+	e := c.r.opt.Jobs.End(scheduler.Outcome{Turn: t.job, TurnID: t.id, Harness: d.harness, Result: res, Stopped: t.stopped.Load(), Refused: d.refused, Identity: d.identity, Notes: d.notes, Files: files, Tools: tools, ToolErrors: toolErrors, SignIn: signIn})
 	e.Harness, e.Session, e.Clean = d.harness, res.SessionID, e.State == store.TurnDone && !res.Unclean
 	if e.Reply != nil {
 		e.Reply.Text = c.r.scrub(e.Reply.Text)

@@ -65,7 +65,7 @@ One JSON object, used by `!job add`, `!job edit` and model drafts (§5). The sam
 | `schedule` | `{"cron": [...]}`: one or more 5-field specs, unioned. `{"every": "15m"}`: fixed duration from creation, UTC arithmetic; minimum 1 min owner, 1 h employee. `{"every": "2w", "at": "12:15", "from": "2026-11-14"}`: N days or weeks, wall-clock stable in `tz`. `{"at": "2026-12-05T08:00"}`: one-off, local time in `tz`. |
 | `tz` | IANA zone name. Default `scheduler.default_tz`. |
 | `to` | Delivery target (§2.3). Default `here`. |
-| `harness` | Empty: the default order, falling back only before the ready signal. A name: that harness only, no fallback (AGENTS.md "Harness choice"). |
+| `harness` | Empty: the creator-bound source conversation's current `!use` selection at turn start, or the default order when unset; fallback only before the ready signal. A name: that harness only, no fallback (AGENTS.md "Harness choice"). |
 | `quiet` | If the answer is exactly `NO_UPDATE`, nothing is sent and the run is `quiet`. |
 | `grace` | How late a slot may start. Defaults: 2 h recurring, 24 h one-off. |
 | `until` | Expiry date or duration. Optional for jobs, required for watches. |
@@ -76,6 +76,7 @@ One JSON object, used by `!job add`, `!job edit` and model drafts (§5). The sam
 | `history_ctx` | Deferred (§17): the key is refused for now. Planned: the job's last 3 delivered chat replies (≤8 KB) as untrusted context, for deduplication. |
 | `requires` | Hint only, e.g. `["mellanni"]`, `["google"]`. Picks the sign-in notice text (§4). Heimdall never reads credential stores. |
 | `timeout` | Turn timeout. Default `harness.run_timeout_seconds`; owner maximum 2 h. |
+| `summary` | Optional purpose for private request/status notices: at most 160 characters on one line, no control/format characters. Presentation only; never authority or instructions. Legacy jobs use a fixed purpose from their kind. |
 | `paused` | Creation only (`!job add` or a draft): the job is created paused, by its creator (§7.5). Never stored; edits refuse it. |
 
 ### 2.3 Delivery targets
@@ -244,7 +245,7 @@ States: `pending`, `running`, `ok`, `quiet`, `failed`, `unverified`, `skipped`, 
   - Heimdall never inspects credential stores and never falls back to another identity.
 - **Visibility.**
   - The owner sees all jobs (`!jobs all`); everyone else sees their own.
-  - In shared chats, lists show names only. Prompts are shown only in private chats; there only a draft's card previews one (§5.3).
+  - Normal shared status/request notices use a fixed task label and no purpose or prompt. Operator details retain existing private-content restrictions (§5.3).
 - **`PI_RESTRICTED_EXTERNAL_USER`** stays `0` for owner turns and `1` for every other turn (`docs/hub-parity.md`). Its only scheduler effect was in Pi's scheduler tools, which §11 switches off for Heimdall turns.
 
 ## 5. Natural-language drafts
@@ -255,19 +256,16 @@ People ask in plain language ("remind me every Monday at 9 to …"). The harness
    ```` ```heimdall-job ```` then a job definition (§2.2), or `{"edit": "<job id>", …changed fields}`, or `{"remove":"<job id>"}`, then ```` ``` ````.
    At most one block per answer. This is a directive with no file path, like the `[react: …]` lines, so the outbox rule that Heimdall never sends a path the model names still holds.
 2. **Strip and validate.** Heimdall removes the block from the delivered answer and validates it with the same validator as `!job add`, under the caller's role rules. Removal checks the same job authority as `!job rm`; unknown or unauthorized IDs produce an error and change nothing.
-3. **Apply or ask.** On direct owner person turns (not scheduled, MCP control or ambient), valid new jobs and edits without `rerun_on_timeout` apply through the same confirmation checks and `confirmDraft`, atomically with the reply. No draft remains. A signed one-line notice gives the job ID, active/paused state, name, schedule and zone, target when elsewhere, next run and `!job rm` command; edits name changed fields. The running scheduler is woken immediately. Existing cap rules remain: owners uncapped, employees at most ten active/paused jobs.
+3. **Apply or ask.** On direct owner person turns (not scheduled, MCP control or ambient), valid new jobs and edits without `rerun_on_timeout` apply through the same confirmation checks and `confirmDraft`, atomically with the reply. No draft remains. A signed formatted notice shows purpose, human schedule and timezone, destination, and resulting active/paused state. Edits show concise material before/after values; saved instructions are only marked changed. No IDs, raw prompt, cron, engine selection, or operator commands appear in normal notices. The scheduler wakes immediately. Existing cap rules remain: owners uncapped, employees at most ten active/paused jobs.
 
-   For non-owners, removal, or any resulting definition with `rerun_on_timeout` enabled, Heimdall stores a `draft` that expires after 24 h, and posts a card showing:
-   - the schedule in words (intervals such as `every 5m`, cron expressions retained, plain dates for one-offs), its timezone, and only the next run in local time and UTC;
-   - the target, and the conversation the draft was made in;
-   - the harness and kind;
-   - the prompt or notification text: at most a 200-character preview everywhere, followed by `Full prompt: !job show <id>`; private `!job show` keeps showing the full content, shared-chat privacy is unchanged;
-   - for an edit, a field-by-field diff;
-   - `!job confirm <id>` and `!job discard <id>`.
-   The short card fits one Slack message and ends `— heimdall`.
-4. **Confirm.** Only the same verified caller can confirm, in the same conversation, within 24 h; confirm from anyone or anywhere else is rejected. Confirming makes a new job `active`, applies an edit, or removes the named job. Removal cards show the target job ID, name, schedule and next run. Confirmation rechecks current removal authority and uses the same running-run stop and retry fencing as `!job rm`. Discard leaves the target untouched. Removal drafts use the existing 24-hour expiry and caller/conversation binding.
-   - A whole reply of `yes`, `ok`, `confirm`, `да` or `так` (surrounding whitespace and trailing Unicode punctuation ignored, any case; e.g. `yes.`, `Yes!`, `ok.`, `да.`, `no.`) from that caller in that conversation confirms when exactly one of their drafts waits there; `no`, `cancel`, `нет` or `ні` discards it. Longer replies such as "yes, but maybe in a separate folder" never confirm. With two or more, Heimdall asks for the ID. Heimdall matches these words itself; the model never confirms. In shared chats the reply needs addressing like any message.
-5. **Invalid block, multiple blocks or cap exceeded.** One line names the error; nothing is stored.
+   For non-owners, removal, or any resulting definition with `rerun_on_timeout` enabled, Heimdall stores a request that expires after 24 h. Its fixed formatted card shows the action, purpose, exact human schedule, timezone, human destination category, and effects. It asks for **Yes** or **No**, with **Details** for full settings. Optional `summary` supplies only bounded private presentation; legacy jobs use an honest fixed fallback. Shared cards omit names, summaries, and saved content. Destination categories derive from the resolved platform target; they never invent a chat name.
+
+   Simple cron forms with the same weekday set are expanded into exact daily check times. For example, weekday half-hours from 12:00 through 20:30 plus 20:45 render exactly that union, not an approximation ending at 21:00. Unsupported cron forms say **Custom schedule**; active tasks still show their actual next scheduled check. Exact cron stays in operator Details. Intervals and one-off dates render in words.
+
+   Paused tasks never show a projected next check. Approval establishes the requested configuration, not a successful test. A paused creation stays paused. Repeat-safe timeout reruns retain their explicit whole-work repeat disclosure and genuine human confirmation.
+4. **Confirm.** Only the same verified caller can confirm, in the same conversation, within 24 h; confirm from anyone or anywhere else is rejected. Confirming makes a new job `active`, applies an edit, or removes the named job. Removal cards state that future checks and pending retries stop, current work is stopped, and already delivered messages remain. Confirmation rechecks current removal authority and uses the same running-run stop and retry fencing as `!job rm`. Discard leaves the target untouched. Removal drafts use the existing 24-hour expiry and caller/conversation binding.
+   - A whole reply of `yes`, `ok`, `confirm`, `да` or `так` (surrounding whitespace and trailing Unicode punctuation ignored, any case; e.g. `yes.`, `Yes!`, `ok.`, `да.`, `no.`) from that caller in that conversation confirms when exactly one of their drafts waits there; `no`, `cancel`, `нет` or `ні` discards it. Longer replies such as "yes, but maybe in a separate folder" never confirm. An exact `Details` reply opens the one pending request through the existing show path (full content only in private). With no pending request, Details is ordinary text. With two or more, no word reply changes anything; `!jobs details` lists operator controls to choose explicitly. Questions such as `Yes?` never confirm. Heimdall matches these words itself; the model never confirms. In shared chats the reply needs addressing like any message.
+5. **Invalid block, multiple blocks or cap exceeded.** A short fixed notice names the validation error; nothing is stored.
 6. **Blocks from scheduled turns are ignored**, so scheduled jobs never propose creating, editing or removing jobs. `[job: done]` still works.
 7. **Telling the model.** A role-specific note goes into the frame of the first message of each native session (not into scheduled turns). It describes the block format. Owners are told to propose only when asked, that new jobs and edits apply at once, and that removal and `rerun_on_timeout` still ask. Non-owners retain the confirmation wording.
 
@@ -726,7 +724,7 @@ Built on `main` 4f3f7e8, rebased onto `main` fe58149 (employee Google sign-in, `
 - `"paused": true` creates a job paused in one step (§7.5); a draft may carry it. The job's reason is `paused by <creator> at creation`, so `sched health` does not count it.
 - A tool result with `details.status` `auth_needed` (the employee Google runtime returns one, as an ordinary result, `isError` false, so the model explains it in a normal answer) fails a scheduled run: cause `sign-in needed: <service>` (`details.service`, else `google` for `google_` tools). It is not retried and counts towards `pause_after`. Failure and pause notices name the sign-in: `google login` for Google, `mcp login` for anything else; `requires` picks it when the cause is a sign-in category or `needs_human`. Read from Pi's `tool_execution_end` (`result.details`, Pi 1.5.0 RPC; the hub's employee Pi version is unchecked). Live turns are unchanged.
 - The idempotent re-run is recorded in `job_runs.replayed` (schema step 15), not in the cause, so a crash before ready in between allows no second post-ready re-run.
-- In shared chats `!job show`, `!job add` and `!job edit` carry no prompt or text (an edit's diff says only that it changed); only a draft's card previews 200 characters.
+- In shared chats `!job show`, `!job add` and `!job edit` carry no prompt or text (an edit's diff says only that it changed); normal cards never preview content.
 - `history_ctx` is deferred: the key is refused as unknown, the history block and its query are gone.
 - Environment rule, as built: Heimdall's own `HEIMDALL_*` variables (bot tokens, the Google client ID and secret) are stripped from every harness environment (`harness/launch.go`), and employee turns also drop `GOOGLE_*`, `PI_GOOGLE_*`, `HEIMDALL_GOOGLE_*` and `INFISICAL_*`. Heimdall then sets only non-secret `HEIMDALL_*` values: `HEIMDALL_TURN_DIR` (employee turns), `HEIMDALL_CALLER_CAPABILITIES` (employee turns), and for employee Pi the paths `HEIMDALL_GOOGLE_ACCESS_FILE` (the per-turn access-only token file) and `HEIMDALL_MCP_SCOPE_ROOT`. No Heimdall secret or Infisical credential is among them.
 - Rollback (HANDOFF): A, `scheduler.enabled=false` on this binary; B, the previous binary only with the database backup taken right before the deploy (the schema-13 binary refuses schema 15) and the previous config (it refuses the `scheduler` section).
@@ -823,3 +821,35 @@ Unverified, to confirm during the build:
 - Tool-name telemetry on scheduled turns for each harness.
 - The T3 CLI on the hub.
 - The ChatGPT Tasks page (fetch returned 403).
+
+## Owner control and checkpoint workflows
+
+The optional local control socket, shared stdio tool adapter, atomic workflow
+checkpoints, delivery windows and prepared owner Slack monitor are documented in
+[scheduler-control.md](scheduler-control.md). They extend the existing scheduler;
+native connector capability and production activation require the bounded live
+probe described there.
+
+### Concise notices and native failures (2026-11-06)
+
+Chat command replies, model proposal cards/results and owner-control cards carry
+`Outbound.Formatted`; Slack and Telegram use their existing Markdown adapters.
+Literal names and presentation fields are escaped. Telegram keeps its existing
+plain retry. Slack uses visible lookalikes for explicitly escaped literal `*`,
+`_`, `~` and backticks because Slack does not backslash-escape those markers; angle
+brackets and ampersands are escaped once. No buttons, callback protocol or web UI.
+`!jobs all`, `!jobs details`, `!job show`, `!job history` and CLI/control read paths
+remain operator surfaces with IDs and exact settings where appropriate.
+
+A completed failed native MCP/tool event can supply a sanitized tool name and
+error summary. Only error/message fields and failed tool text blocks are read;
+structured JSON text is reduced to its error field. Shell output/stderr and
+successful results are not copied. Existing callback/token/environment/URL/echo
+scrubbing runs before first-line, rune and byte limits. At most two failed steps
+are retained per turn, with an aggregate bounded durable cause. Private failure
+notices and history expose that detail; shared destinations keep the fixed cause.
+Any native tool error still invalidates a checkpoint, even if the agent corrected
+it and completed later calls. No checkpoint acceptance, retry or sign-in rule is
+relaxed. Notices distinguish `Automatic retry: no` from `Automatic retry: queued
+for …`, and label the next scheduled run separately. Retry notices still commit
+atomically with their eligible run and remain subject to existing commit fences.

@@ -1,0 +1,15 @@
+{
+  "name": "Scheduled agent capability probe",
+  "schedule": {
+    "every": "30m"
+  },
+  "tz": "Europe/Kyiv",
+  "to": "here",
+  "quiet": true,
+  "checkpoint": true,
+  "session": "fresh",
+  "overlap": "skip",
+  "timeout": "5m",
+  "paused": true,
+  "prompt": "Owner-approved capability probe for the agent selected in this job creator's source conversation when the run starts. Read only the owner-authorized Slack thread <THREAD_REFERENCE> through existing authorized tools. Verify authenticated owner/workspace from platform data; never assume identity from this prompt. Deliberately recall owner/professional memory for <RELEVANT_PROFESSIONAL_QUERY>; use at most one relevant result, no memory writes. Automatic capture stays off (MEMENTO_PROCESSING=1); native policy hooks and the selected agent's normal approvals remain enabled. If this agent lacks a needed tool, it may delegate the narrowly scoped work to an existing capable agent, including Codex; Heimdall does not choose that delegation. Preserve the verified caller and scope. Do not inspect credentials, sign in, change configs, install anything, or use another identity. Missing tools, denied approval, failed reads or ambiguous identity: report the exact blocker, never success. Do not post via Slack tools or reveal private source contents. On successful reads and capture-off verification, return the heimdall-checkpoint block from the job note with its current version, complete=true, through=the supplied scan upper bound, minimal state {slack_read:true,memory_recall:true,capture_off:true}, alerts=[{key:\"capability-probe\",revision:\"v1\",text:\"Scheduler capability probe passed: Slack read and owner recall succeeded; automatic memory capture off.\"}]. Use valid JSON with double quotes. Same alert text/key/revision on a second run. Heimdall alone delivers once to the captured owner private bot DM. Tool visibility alone does not count as success."
+}

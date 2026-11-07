@@ -27,6 +27,7 @@ const (
 	RunRunning     = "running" // handed to the router
 	RunOK          = "ok"
 	RunQuiet       = "quiet"
+	RunPartial     = "partial"
 	RunFailed      = "failed"
 	RunUnverified  = "unverified"
 	RunSkipped     = "skipped"
@@ -102,6 +103,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, j.ID, j.Name, j.Kind, j.Creator.
 // command's answer in one transaction (AnswerCommand), so a crash between
 // the two can neither lose the answer nor replay the change.
 type JobChange struct {
+	Acknowledge          *AlertAcknowledgement
 	Add                  *Job   // a new job or draft
 	Update               string // a job Set changes
 	Confirm              *Job   // a draft Set confirms (a new job, or an edit of its job)
@@ -131,6 +133,16 @@ func (ch *JobChange) apply(tx *sql.Tx) error {
 	}
 	switch {
 	case ch == nil:
+	case ch.Acknowledge != nil:
+		a := ch.Acknowledge
+		res, err := tx.Exec(`UPDATE job_alerts SET acknowledged_at=? WHERE job_id=? AND creator=? AND key=? AND revision=? AND outbound_id=? AND acknowledged_at=0 AND EXISTS(SELECT 1 FROM outbound o WHERE o.id=outbound_id AND o.state=?)`, now(), a.Job, a.Creator, a.Key, a.Revision, a.Outbound, OutFailed)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return errors.New("receipt is not an unacknowledged failed delivery")
+		}
+		return nil
 	case ch.Add != nil:
 		return insertJob(tx, *ch.Add)
 	case ch.Update != "":
@@ -453,6 +465,7 @@ type RunEnd struct {
 	Inbound   int64     // set: its message, still pending, is cancelled (with Retry: dropped)
 	JobState  string    // set: the job becomes paused or done
 	JobReason string
+	Progress  bool // validated partial scan made actual reader/finding progress
 }
 
 func endRun(tx *sql.Tx, e RunEnd) error {
@@ -489,6 +502,12 @@ func endRun(tx *sql.Tx, e RunEnd) error {
 		return err
 	}
 	fails := map[string]string{RunFailed: `fails+1`, RunUnverified: `fails+1`, RunOK: `0`, RunQuiet: `0`}[e.State]
+	if e.State == RunPartial {
+		fails = `fails+1`
+		if e.Progress {
+			fails = `0`
+		}
+	}
 	if fails != "" {
 		if _, err := tx.Exec(`UPDATE jobs SET fails=`+fails+` WHERE id=?`, e.Job); err != nil {
 			return err
@@ -512,7 +531,7 @@ func (s *Store) EndRun(e RunEnd, outs ...core.Outbound) error {
 		if err := endRun(tx, e); err != nil {
 			return err
 		}
-		return enqueueAll(tx, outs)
+		return enqueueRunNotices(tx, e, outs)
 	})
 }
 
@@ -533,9 +552,26 @@ func (s *Store) EndRunUnlessHeld(holdKey string, now time.Time, e RunEnd, outs .
 		if err := endRun(tx, e); err != nil {
 			return err
 		}
-		return enqueueAll(tx, outs)
+		return enqueueRunNotices(tx, e, outs)
 	})
 	return held, err
+}
+
+// enqueueRunNotices runs after endRun in the same transaction. A stop,
+// edit or restart fence may have vetoed the proposed retry; never announce
+// one unless that same-slot retry was actually queued. No retry rules change.
+func enqueueRunNotices(tx *sql.Tx, e RunEnd, outs []core.Outbound) error {
+	if !e.Retry.IsZero() && !e.Held {
+		var state string
+		var at int64
+		if err := tx.QueryRow(`SELECT state,not_before FROM job_runs WHERE id=?`, e.ID).Scan(&state, &at); err != nil {
+			return err
+		}
+		if state != RunPending || at != e.Retry.UnixMilli() {
+			return nil
+		}
+	}
+	return enqueueAll(tx, outs)
 }
 
 // HeldRun is a running run at startup, with its message's state and whether
@@ -626,7 +662,7 @@ func (s *Store) Busy() (turns, replies int, err error) {
 	if err = s.db.QueryRow(`SELECT (SELECT count(*) FROM turns WHERE state=?)+(SELECT count(*) FROM job_runs WHERE state=?)`, TurnRunning, RunRunning).Scan(&turns); err != nil {
 		return 0, 0, err
 	}
-	replies, err = s.Undelivered()
+	replies, err = s.drainReplies(time.Now())
 	return turns, replies, err
 }
 
@@ -652,7 +688,7 @@ func enqueueAll(tx *sql.Tx, outs []core.Outbound) error {
 }
 
 // RunStates are the states a run ends in, for display.
-var RunStates = []string{RunOK, RunQuiet, RunFailed, RunUnverified, RunSkipped, RunMissed, RunInterrupted, RunCancelled}
+var RunStates = []string{RunOK, RunQuiet, RunPartial, RunFailed, RunUnverified, RunSkipped, RunMissed, RunInterrupted, RunCancelled}
 
 // Ended reports a terminal run state.
 func Ended(state string) bool { return slices.Contains(RunStates, state) }

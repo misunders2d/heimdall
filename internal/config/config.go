@@ -49,13 +49,21 @@ type Config struct {
 // Scheduler configures scheduled jobs (docs/scheduler.md §10). Jobs are
 // kept in the store whether it is enabled or not.
 type Scheduler struct {
-	Enabled               bool   `json:"enabled"`
-	DefaultTZ             string `json:"default_tz"`                        // IANA zone; required when enabled
-	MaxConcurrent         int    `json:"max_concurrent,omitempty"`          // scheduled turns at once; default 2, at most max_parallel-1
-	PerCreator            int    `json:"per_creator,omitempty"`             // running runs per creator; default 1
-	GraceRecurringSeconds int    `json:"grace_recurring_seconds,omitempty"` // default 7200
-	GraceOneOffSeconds    int    `json:"grace_oneoff_seconds,omitempty"`    // default 86400
-	PauseAfter            int    `json:"pause_after,omitempty"`             // failed or unverified runs in a row; default 3
+	Control               *SchedulerControl `json:"control,omitempty"`
+	Enabled               bool              `json:"enabled"`
+	DefaultTZ             string            `json:"default_tz"`                        // IANA zone; required when enabled
+	MaxConcurrent         int               `json:"max_concurrent,omitempty"`          // scheduled turns at once; default 2, at most max_parallel-1
+	PerCreator            int               `json:"per_creator,omitempty"`             // running runs per creator; default 1
+	GraceRecurringSeconds int               `json:"grace_recurring_seconds,omitempty"` // default 7200
+	GraceOneOffSeconds    int               `json:"grace_oneoff_seconds,omitempty"`    // default 86400
+	PauseAfter            int               `json:"pause_after,omitempty"`             // failed or unverified runs in a row; default 3
+}
+
+// SchedulerControl binds local owner tools to one existing platform identity.
+// OS authorization always derives from run_as.owner, never from this selector.
+type SchedulerControl struct {
+	Owner  string        `json:"owner"`
+	Source *core.ConvKey `json:"source,omitempty"` // protected source conversation, never tool arguments
 }
 
 // On reports whether the scheduler runs.
@@ -284,6 +292,15 @@ func (c *Config) fill(staged bool) error {
 		return errors.New("max_parallel must be at least 1")
 	}
 	if s := c.Scheduler; s != nil {
+		if s.Control != nil {
+			p, err := core.ParsePrincipalKey(s.Control.Owner)
+			if !s.Enabled || err != nil || (p.Platform != core.PlatformTelegram && p.Platform != core.PlatformSlack) {
+				return errors.New("scheduler.control requires enabled scheduler and a platform owner binding")
+			}
+			if k := s.Control.Source; k != nil && (k.Interface != p.Platform || k.Chat == "" || strings.ContainsAny(k.Chat+k.Thread, "\r\n")) {
+				return errors.New("scheduler.control.source must name an owner platform conversation")
+			}
+		}
 		for _, d := range []struct {
 			v   *int
 			def int

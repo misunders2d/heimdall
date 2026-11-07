@@ -237,11 +237,11 @@ config, Heimdall runs jobs as the person who created them, at every fire
 with their current role (design: [docs/scheduler.md](docs/scheduler.md)).
 
 ```
-!jobs [all]                   your jobs (owner: everyone's)
+!jobs [all|details]                   your jobs (owner: everyone's)
 !job add <json>               create a job (active, or "paused":true)
 !job edit <id> <json>         change fields from its next run
 !job show|history <id>        schedule, next 3 runs, options; last runs
-!job confirm|discard <id>     accept or drop a draft (or reply yes / no)
+!job confirm|discard <id>     approve or cancel a pending request (or reply Yes / No; Details shows settings)
 !job pause|resume|run|stop|rm <id>
 !job renew <id> [30d]         extend its expiry
 ```

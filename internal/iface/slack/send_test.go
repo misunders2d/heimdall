@@ -113,6 +113,57 @@ func TestFinalPostReconcilesLandedResponseAndRetry(t *testing.T) {
 		}
 	}
 }
+
+type windowTransport struct {
+	base  http.RoundTripper
+	end   time.Time
+	bad   atomic.Bool
+	posts atomic.Int32
+}
+
+func (w *windowTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(r.URL.Path, "/chat.postMessage") {
+		w.posts.Add(1)
+		if deadline, ok := r.Context().Deadline(); !ok || deadline.After(w.end) {
+			w.bad.Store(true)
+		}
+	}
+	return w.base.RoundTrip(r)
+}
+
+func TestDeliveryWindowBoundsInternalSlackRetries(t *testing.T) {
+	f := newSlackFake(t)
+	s, _ := readySlack(t, f)
+	w := &core.DeliveryWindow{TZ: "UTC", Days: []time.Weekday{0, 1, 2, 3, 4, 5, 6}, Start: "00:00", End: "23:59"}
+	at := time.Now()
+	if w.Next(at).After(at) {
+		t.Skip("daily test window closed for its last minute")
+	}
+	base := s.bot.http.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport := &windowTransport{base: base, end: w.EndAt(at)}
+	s.bot.http.Transport = transport
+	s.bot.timeout = 24 * time.Hour
+	var first atomic.Bool
+	f.mu.Lock()
+	f.hook = func(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
+		if r.URL.Path == "/chat.postMessage" && !first.Swap(true) {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(429)
+			return true
+		}
+		return false
+	}
+	f.mu.Unlock()
+	if err := s.Send(context.Background(), core.Outbound{ID: 71, Conv: core.ConvKey{Interface: "slack", Chat: "C1"}, Text: "synthetic", Window: w}); err != nil {
+		t.Fatal(err)
+	}
+	if transport.bad.Load() || transport.posts.Load() != 2 {
+		t.Fatal("internal retry escaped delivery window deadline", transport.bad.Load(), transport.posts.Load())
+	}
+}
 func TestChunkedRetrySkipsEarlierParts(t *testing.T) {
 	f := newSlackFake(t)
 	s, _ := readySlack(t, f)

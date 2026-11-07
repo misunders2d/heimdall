@@ -33,21 +33,23 @@ var (
 )
 
 type rig struct {
-	t    *testing.T
-	s    *Scheduler
-	st   *store.Store
-	now  time.Time
-	rows []store.InboundRow // dispatched run messages
+	dbPath string
+	t      *testing.T
+	s      *Scheduler
+	st     *store.Store
+	now    time.Time
+	rows   []store.InboundRow // dispatched run messages
 }
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "h.db"))
+	dbPath := filepath.Join(t.TempDir(), "h.db")
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	r := &rig{t: t, st: st, now: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
+	r := &rig{t: t, st: st, dbPath: dbPath, now: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
 	access := core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{boss.Key(): true}}
 	r.s = New(Config{DefaultTZ: "Europe/Kyiv", MaxConcurrent: 2, PerCreator: 1, GraceRecurring: 2 * time.Hour, GraceOneOff: 24 * time.Hour, PauseAfter: 3,
 		EmployeeHarnesses: []string{"pi"}, Interfaces: []string{core.PlatformTelegram}}, st, access, log.New(io.Discard, "", 0))
@@ -78,16 +80,19 @@ func (r *rig) apply(change *store.JobChange) {
 	if err := r.st.AnswerCommand(0, core.ConvKey{}, store.CommandEnd{Detail: "job", Job: change}); err != nil {
 		r.t.Fatal(err)
 	}
+	if change != nil && change.StopJob != "" {
+		r.s.stopRun(change.StopJob)
+	}
 }
 
 func (r *rig) add(c Caller, def string) string {
 	r.t.Helper()
-	out := r.cmd(c, "job add "+def)
-	id := idRE.FindString(out)
-	if !strings.Contains(out, "created") || id == "" {
+	out, change := r.s.Command(c, "job add "+def)
+	if change == nil || change.Add == nil {
 		r.t.Fatalf("not created: %s", out)
 	}
-	return id
+	r.apply(change)
+	return change.Add.ID
 }
 
 func (r *rig) tick() { r.s.tick(context.Background()) }
@@ -416,7 +421,7 @@ func TestEndOutcomes(t *testing.T) {
 	if e := r.finish("  ", Outcome{Harness: "pi", Tools: []string{"web_search"}}); e.Run.State != store.RunFailed || e.Run.Cause != "empty answer" || e.Reply != nil {
 		t.Fatalf("empty: %+v", e.Run)
 	}
-	// Stopped by command; native failures get a fixed category only.
+	// Stopped by command; native failure details are sanitized.
 	r.run(ck)
 	if e := r.finish("", Outcome{Stopped: true}); e.Run.State != store.RunCancelled || e.Reply != nil {
 		t.Fatalf("stopped: %+v", e.Run)
@@ -474,7 +479,7 @@ func TestRoleRulesAndCommands(t *testing.T) {
 	if out := r.cmd(asBoss, "jobs all"); !strings.Contains(out, "worker job") || !strings.Contains(out, "by telegram:2") {
 		t.Fatalf("owner list: %s", out)
 	}
-	if out := r.cmd(inGroup, "jobs"); strings.Contains(out, "next") || !strings.Contains(out, "boss job") {
+	if out := r.cmd(inGroup, "jobs"); strings.Contains(out, "next") || !strings.Contains(out, "Scheduled task") {
 		t.Fatalf("shared list shows more than names: %s", out)
 	}
 	if out := r.cmd(asBoss, "job show "+boss); !strings.Contains(out, "2026-11-09 09:00 EET (07:00 UTC)") || !strings.Contains(out, "secret plan") {
@@ -482,22 +487,22 @@ func TestRoleRulesAndCommands(t *testing.T) {
 	}
 	// An edit applies from the next run, with its diff.
 	out := r.cmd(asWork, "job edit "+mine+` {"prompt":"q"}`)
-	if !strings.Contains(out, `prompt: "p" → "q"`) || r.job(mine).Version != 2 {
+	if !strings.Contains(out, `Instructions updated.`) || r.job(mine).Version != 2 {
 		t.Fatalf("edit: %s %+v", out, r.job(mine))
 	}
-	if out := r.cmd(asWork, "job pause "+mine); !strings.Contains(out, "paused") || r.job(mine).State != store.JobPaused {
+	if out := r.cmd(asWork, "job pause "+mine); !strings.Contains(out, "Paused") || r.job(mine).State != store.JobPaused {
 		t.Fatal(out)
 	}
-	if out := r.cmd(asWork, "job resume "+mine); !strings.Contains(out, "resumed") {
+	if out := r.cmd(asWork, "job resume "+mine); !strings.Contains(out, "Scheduled task resumed") {
 		t.Fatal(out)
 	}
-	if out := r.cmd(asWork, "job renew "+mine+" 30d"); !strings.Contains(out, "renewed until 2026-12-03") {
+	if out := r.cmd(asWork, "job renew "+mine+" 30d"); !strings.Contains(out, "3 Dec 2026") {
 		t.Fatal(out)
 	}
 	if out := r.cmd(asWork, "job frobnicate"); !strings.Contains(out, "Job commands") {
 		t.Fatal(out)
 	}
-	if out := r.cmd(asWork, "job rm "+mine); !strings.Contains(out, "deleted") || r.job(mine).State != store.JobDeleted {
+	if out := r.cmd(asWork, "job rm "+mine); !strings.Contains(out, "Removed") || r.job(mine).State != store.JobDeleted {
 		t.Fatal(out)
 	}
 	// Expiry ends a job with a notice.
@@ -505,7 +510,14 @@ func TestRoleRulesAndCommands(t *testing.T) {
 	r.sent()
 	r.now = r.now.Add(2 * time.Hour)
 	r.tick()
-	if r.job(exp).State != store.JobDone || !strings.Contains(texts(r.sent()), "expired") {
+	notices := ""
+	for _, o := range r.sent() {
+		if strings.Contains(o.Text, "\n\n*short*\n\n") {
+			notices = o.Text
+			break
+		}
+	}
+	if r.job(exp).State != store.JobDone || !strings.Contains(notices, "✅ Scheduled task expired") || !strings.Contains(notices, "*✅ Finished*") || strings.Contains(notices, "*🟢 Active*") {
 		t.Fatalf("expiry: %+v", r.job(exp))
 	}
 }
@@ -514,7 +526,7 @@ func TestDrafts(t *testing.T) {
 	r := newRig(t)
 	block := "ok\n```heimdall-job\n{\"name\":\"standup\",\"schedule\":{\"cron\":[\"0 9 * * MON-FRI\"]},\"prompt\":\"summarize\"}\n```"
 	clean, draft, card := r.s.Draft(asBoss, []string{block})
-	if clean[0] != "ok" || draft == nil || !strings.Contains(card, "Confirm: !job confirm "+draft.ID) || !strings.HasSuffix(card, "— heimdall") {
+	if clean[0] != "ok" || draft == nil || !strings.Contains(card, "Reply *Yes*") || !strings.HasSuffix(card, "— heimdall") {
 		t.Fatalf("draft %q %q", clean, card)
 	}
 	r.apply(&store.JobChange{Add: draft})
@@ -537,19 +549,19 @@ func TestDrafts(t *testing.T) {
 	// Two drafts: a bare yes asks which.
 	_, second, _ := r.s.Draft(asBoss, []string{block})
 	r.apply(&store.JobChange{Add: second})
-	if out, _ := r.answer(asBoss, " YES! "); !strings.Contains(out, "Several job drafts") {
+	if out, _ := r.answer(asBoss, " YES! "); !strings.Contains(out, "Several requests") {
 		t.Fatalf("two drafts: %s", out)
 	}
 	if out, _ := r.answer(asBoss, "ні…"); !strings.Contains(out, "Several") {
 		t.Fatal(out)
 	}
 	r.cmd(asBoss, "job discard "+second.ID)
-	if out, ok := r.answer(asBoss, "так"); !ok || !strings.Contains(out, "is active") || r.job(draft.ID).State != store.JobActive {
+	if out, ok := r.answer(asBoss, "так"); !ok || !strings.Contains(out, "*🟢 Active*.\n*Next scheduled check:*") || r.job(draft.ID).State != store.JobActive {
 		t.Fatalf("confirm: %s", out)
 	}
 	// An edit draft shows its diff; an expired draft cannot be confirmed.
 	_, edit, card := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"edit\":\"" + draft.ID + "\",\"prompt\":\"shorter\"}\n```"})
-	if edit == nil || !strings.Contains(card, `prompt: "summarize" → "shorter"`) {
+	if edit == nil || !strings.Contains(card, `Instructions updated.`) {
 		t.Fatalf("edit card %q", card)
 	}
 	r.apply(&store.JobChange{Add: edit})
@@ -673,9 +685,10 @@ func TestDueOneOffStarts(t *testing.T) {
 // !job add, or by a draft that carries it. It fires only once resumed.
 func TestCreatePaused(t *testing.T) {
 	r := newRig(t)
-	out := r.cmd(asBoss, `job add {"name":"cutover","schedule":{"every":"1h"},"paused":true,"prompt":"p"}`)
-	id := idRE.FindString(out)
-	if j := r.job(id); !strings.Contains(out, "created paused") || !strings.Contains(out, "Next:") || j.State != store.JobPaused || strings.Contains(j.Def, "paused") {
+	out, change := r.s.Command(asBoss, `job add {"name":"cutover","schedule":{"every":"1h"},"paused":true,"prompt":"p"}`)
+	r.apply(change)
+	id := change.Add.ID
+	if j := r.job(id); !strings.Contains(out, "Paused") || strings.Contains(out, "Next") || j.State != store.JobPaused || strings.Contains(j.Def, "Paused") {
 		t.Fatalf("add paused: %q %+v", out, j)
 	}
 	r.now = r.now.Add(3 * time.Hour)
@@ -697,7 +710,7 @@ func TestCreatePaused(t *testing.T) {
 		t.Fatalf("paused draft: %q", card)
 	}
 	r.apply(&store.JobChange{Add: d})
-	if out := r.cmd(asBoss, "job confirm "+d.ID); !strings.Contains(out, "paused") || r.job(d.ID).State != store.JobPaused {
+	if out := r.cmd(asBoss, "job confirm "+d.ID); !strings.Contains(out, "Paused") || r.job(d.ID).State != store.JobPaused {
 		t.Fatalf("confirm paused draft: %q %+v", out, r.job(d.ID))
 	}
 	if out := r.cmd(asBoss, "job edit "+id+` {"paused":true}`); !strings.Contains(out, "not changed") {
@@ -713,14 +726,14 @@ func TestSharedRepliesHidePrompt(t *testing.T) {
 	if out := r.cmd(inGroup, "job show "+id); strings.Contains(out, "secret") || !strings.Contains(out, "private plan") {
 		t.Fatalf("shared show: %q", out)
 	}
-	if out := r.cmd(inGroup, "job edit "+id+` {"prompt":"another secret"}`); strings.Contains(out, "secret") || !strings.Contains(out, "prompt") {
+	if out := r.cmd(inGroup, "job edit "+id+` {"prompt":"another secret"}`); strings.Contains(out, "secret") || !strings.Contains(out, "Instructions updated.") {
 		t.Fatalf("shared edit: %q", out)
 	}
 	if out := r.cmd(asBoss, "job show "+id); !strings.Contains(out, "another secret") {
 		t.Fatalf("private show: %q", out)
 	}
 	long := strings.Repeat("a", 300)
-	if _, d, card := r.s.Draft(inGroup, []string{"```heimdall-job\n{\"name\":\"x\",\"schedule\":{\"every\":\"1h\"},\"prompt\":\"" + long + "\"}\n```"}); d == nil || !strings.Contains(card, long[:200]+"…") || strings.Contains(card, long) {
+	if _, d, card := r.s.Draft(inGroup, []string{"```heimdall-job\n{\"name\":\"x\",\"schedule\":{\"every\":\"1h\"},\"prompt\":\"" + long + "\"}\n```"}); d == nil || strings.Contains(card, long[:200]) || strings.Contains(card, "Prompt:") {
 		t.Fatalf("shared card: %q", card)
 	}
 }
@@ -1032,10 +1045,13 @@ func TestTimeoutRetryCardShowsOwnerAssertion(t *testing.T) {
 		t.Fatal(err)
 	}
 	card := r.s.card(asBoss, j)
-	for _, want := range []string{"Repeat-safe timeout rerun: ENABLED", "safe to repeat", "idempotent", "timeout 1m", "One rerun"} {
+	for _, want := range []string{"Repeat-safe rerun:", "safe to repeat", "timeout (1m)", "One full rerun"} {
 		if !strings.Contains(card, want) {
 			t.Fatal(card)
 		}
+	}
+	if !strings.Contains(card, "\n\n*⚠️ Repeat-safe rerun:*") || !strings.Contains(card, "\n\n👉 Reply *Yes* to apply or *No* to cancel.") {
+		t.Fatal("repeat-safe approval lost paragraph hierarchy", card)
 	}
 }
 
@@ -1056,7 +1072,7 @@ func TestDisablingTimeoutRetryCancelsPendingReplay(t *testing.T) {
 		t.Fatal("no retry")
 	}
 	text := r.cmd(asBoss, `job edit `+id+` {"rerun_on_timeout":false}`)
-	if !strings.Contains(text, "changed") {
+	if !strings.Contains(text, "Scheduled task updated") {
 		t.Fatal(text)
 	}
 	r.rows = nil
@@ -1111,6 +1127,7 @@ func TestTimeoutRetryRunningRestartHasNotice(t *testing.T) {
 	r, _ := timeoutJob(t)
 	r.now = r.now.Add(time.Minute)
 	r.finish("", Outcome{Harness: "pi", Result: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}})
+	r.sent() // the retry notice preceded the restart
 	r.rows = nil
 	r.s.start(context.Background(), r.now)
 	row := r.rows[0]
@@ -1178,7 +1195,7 @@ func TestRemovalDrafts(t *testing.T) {
 				if d == nil || clean[0] != "Sure." {
 					t.Fatalf("draft: %v %s", d, card)
 				}
-				for _, want := range []string{"remove job " + id, "standup", "Schedule: every 1h in Europe/Kyiv", "Next:", "Confirm: !job confirm " + d.ID, "Discard: !job discard " + d.ID} {
+				for _, want := range []string{"Remove scheduled task?", "When:", "Every 1 hour", "Europe/Kyiv", "Future checks and pending retries", "Yes", "No", "Details"} {
 					if !strings.Contains(card, want) {
 						t.Fatalf("missing %q: %s", want, card)
 					}
@@ -1200,14 +1217,14 @@ func TestRemovalDrafts(t *testing.T) {
 			if out := r.cmd(elsewhere, "job confirm "+d.ID); !strings.Contains(out, "No draft") {
 				t.Fatal(out)
 			}
-			if out, ok := r.answer(tc.proposer, "no"); !ok || !strings.Contains(out, "discarded") {
+			if out, ok := r.answer(tc.proposer, "no"); !ok || !strings.Contains(out, "cancelled") {
 				t.Fatal(out)
 			}
 			if r.job(id).State != store.JobActive || stops != 0 {
 				t.Fatal("discard changed target")
 			}
 			d = propose()
-			if out, ok := r.answer(tc.proposer, "yes"); !ok || !strings.Contains(out, "deleted") || !strings.Contains(out, "being stopped") {
+			if out, ok := r.answer(tc.proposer, "yes"); !ok || !strings.Contains(out, "Removed") {
 				t.Fatal(out)
 			}
 			if r.job(id).State != store.JobDeleted || stops != 1 {
@@ -1313,7 +1330,7 @@ func TestShortDraftCards(t *testing.T) {
 					t.Fatal(card)
 				}
 				preview := string([]rune(body)[:200]) + "…"
-				for _, want := range []string{preview, "Full prompt: !job show " + draft.ID, "Schedule: every 5m in Europe/Kyiv"} {
+				for _, want := range []string{"Details", "When:", "Every 5 minutes", "Europe/Kyiv"} {
 					if !strings.Contains(card, want) {
 						t.Fatalf("missing %q: %s", want, card)
 					}
@@ -1323,7 +1340,7 @@ func TestShortDraftCards(t *testing.T) {
 				if len([]rune(escaped)) > 3000 || strings.Contains(card, body) {
 					t.Fatalf("card exceeds one Slack message: %d runes", len([]rune(escaped)))
 				}
-				if strings.Count(card, " UTC)") != 1 {
+				if strings.Contains(card, " UTC)") || strings.Contains(card, preview) || strings.Contains(card, draft.ID) {
 					t.Fatalf("card must show only one next run: %s", card)
 				}
 				r.apply(&store.JobChange{Add: draft})
@@ -1345,10 +1362,10 @@ func TestScheduleWords(t *testing.T) {
 		spec schedule.Spec
 		want string
 	}{
-		{schedule.Spec{Every: "5m"}, "every 5m"},
-		{schedule.Spec{Every: "2d", At: "09:00", From: "2026-11-05"}, "every 2d at 09:00 from 2026-11-05"},
-		{schedule.Spec{Cron: []string{"0 9 * * MON", "0 17 * * FRI"}}, "cron 0 9 * * MON; 0 17 * * FRI"},
-		{schedule.Spec{At: "2026-11-05T09:00"}, "at 2026-11-05 09:00"},
+		{schedule.Spec{Every: "5m"}, "Every 5 minutes"},
+		{schedule.Spec{Every: "2d", At: "09:00", From: "2026-11-05"}, "Every 2 days at 09:00, starting 5 Nov 2026"},
+		{schedule.Spec{Cron: []string{"0 9 * * MON", "0 17 * * FRI"}}, "Custom schedule"},
+		{schedule.Spec{At: "2026-11-05T09:00"}, "Once, 5 Nov 2026 at 09:00"},
 	} {
 		if got := scheduleWords(tc.spec); got != tc.want {
 			t.Errorf("got %q, want %q", got, tc.want)
@@ -1375,7 +1392,7 @@ func TestPrepareOwnerAndConfirmationExceptions(t *testing.T) {
 				t.Fatalf("draft=%+v change=%+v notice=%s", draft, change, notice)
 			}
 			if tc.apply {
-				if strings.Contains(notice, "\n") || strings.Contains(notice, "confirm") {
+				if !Formatted(notice) || strings.Contains(notice, "Reply *Yes*") {
 					t.Fatal(notice)
 				}
 				if _, err := r.st.EndTurn(0, tc.caller.Conv, tc.caller.Principal.Key(), store.TurnEnd{Draft: draft, Job: change, Reply: &core.Outbound{Conv: tc.caller.Conv, Text: notice}}); err != nil {
@@ -1397,7 +1414,7 @@ func TestPrepareOwnerAndConfirmationExceptions(t *testing.T) {
 					}
 				}
 
-			} else if !strings.Contains(notice, "Confirm:") {
+			} else if !strings.Contains(notice, "Reply *Yes*") {
 				t.Fatal(notice)
 			}
 		})

@@ -261,7 +261,8 @@ func (in Inbound) Validate() error {
 
 // Outbound is one reply to deliver.
 type Outbound struct {
-	CreatedAt time.Time // durable queue creation time, bounds reconciliation
+	Window    *DeliveryWindow // optional schedule for delivery attempts, including retries
+	CreatedAt time.Time       // durable queue creation time, bounds reconciliation
 
 	ID      int64 // stable outbound row ID, set by delivery
 	TurnID  int64 // originating turn, zero for commands

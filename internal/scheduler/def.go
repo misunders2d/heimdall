@@ -32,25 +32,28 @@ const QuietToken = "NO_UPDATE"
 // Def is a job definition (docs/scheduler.md §2.2): what !job add, !job
 // edit and model drafts carry, checked by one validator.
 type Def struct {
-	Name           string        `json:"name"`
-	Kind           string        `json:"kind"`
-	Schedule       schedule.Spec `json:"schedule"`
-	TZ             string        `json:"tz"`
-	To             string        `json:"to"`
-	Prompt         string        `json:"prompt,omitempty"`
-	Text           string        `json:"text,omitempty"`
-	Harness        string        `json:"harness,omitempty"`
-	Quiet          bool          `json:"quiet,omitempty"`
-	Grace          string        `json:"grace,omitempty"`
-	Until          string        `json:"until,omitempty"` // normalized: RFC 3339 UTC
-	Expect         Expect        `json:"expect,omitzero"`
-	Overlap        string        `json:"overlap"`
-	Session        string        `json:"session"`
-	RerunOnTimeout bool          `json:"rerun_on_timeout,omitempty"`
-	Idempotent     bool          `json:"idempotent,omitempty"`
-	Requires       []string      `json:"requires,omitempty"`
-	Timeout        string        `json:"timeout,omitempty"`
-	Paused         bool          `json:"paused,omitempty"` // creation only: the job starts paused (§7.5); never stored
+	Summary        string               `json:"summary,omitempty"` // bounded presentation only; never execution authority
+	Checkpoint     bool                 `json:"checkpoint,omitempty"`
+	DeliveryWindow *core.DeliveryWindow `json:"delivery_window,omitempty"`
+	Name           string               `json:"name"`
+	Kind           string               `json:"kind"`
+	Schedule       schedule.Spec        `json:"schedule"`
+	TZ             string               `json:"tz"`
+	To             string               `json:"to"`
+	Prompt         string               `json:"prompt,omitempty"`
+	Text           string               `json:"text,omitempty"`
+	Harness        string               `json:"harness,omitempty"`
+	Quiet          bool                 `json:"quiet,omitempty"`
+	Grace          string               `json:"grace,omitempty"`
+	Until          string               `json:"until,omitempty"` // normalized: RFC 3339 UTC
+	Expect         Expect               `json:"expect,omitzero"`
+	Overlap        string               `json:"overlap"`
+	Session        string               `json:"session"`
+	RerunOnTimeout bool                 `json:"rerun_on_timeout,omitempty"`
+	Idempotent     bool                 `json:"idempotent,omitempty"`
+	Requires       []string             `json:"requires,omitempty"`
+	Timeout        string               `json:"timeout,omitempty"`
+	Paused         bool                 `json:"paused,omitempty"` // creation only: the job starts paused (§7.5); never stored
 }
 
 // Expect are deterministic result checks (§3.8).
@@ -165,6 +168,12 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	if d.Name = strings.TrimSpace(d.Name); d.Name == "" || utf8.RuneCountInString(d.Name) > 80 || strings.ContainsFunc(d.Name, unicode.IsControl) {
 		return fail("name: 1-80 characters on one line")
 	}
+	d.Summary = strings.TrimSpace(d.Summary)
+	if utf8.RuneCountInString(d.Summary) > 160 || strings.ContainsFunc(d.Summary, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029'
+	}) {
+		return fail("summary: at most 160 characters on one line")
+	}
 	switch d.Kind {
 	case "", KindAgent:
 		d.Kind = KindAgent
@@ -200,6 +209,12 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 	t, err := s.resolve(d.To, c)
 	if err != nil {
 		return fail("%v", err)
+	}
+	if err := d.DeliveryWindow.Validate(); err != nil {
+		return fail("%v", err)
+	}
+	if d.Checkpoint && (!owner || d.Kind != KindAgent || !t.Private || t.AgentNet != "" || !d.Quiet || d.Session != "" && d.Session != "fresh") {
+		return fail("checkpoint: owner agent jobs only; quiet, fresh session and creator's private target required")
 	}
 	if !owner && (d.To != "here" && !t.Private || t.AgentNet != "") {
 		return fail("to: employee jobs deliver here or to your own private chat")
