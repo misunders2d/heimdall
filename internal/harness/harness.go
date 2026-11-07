@@ -124,6 +124,8 @@ type Session struct {
 
 // Spec is one turn.
 type Spec struct {
+	SchedulerControl bool // trusted live person input only; never scheduled/MCP work
+
 	freshWarning string
 
 	// Continuation receives native work emitted without a new person input.
@@ -208,6 +210,9 @@ type Result struct {
 
 // Run is one started native turn.
 type Run struct {
+	schedulerControl bool
+	controlProcess   *os.File // spawn-time pidfd, control authority only
+
 	startWarning string
 
 	continuation func(Continuation) bool
@@ -421,7 +426,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
-	r := &Run{startWarning: spec.freshWarning, contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
+	r := &Run{schedulerControl: spec.SchedulerControl, startWarning: spec.freshWarning, contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
 	r.stderr.max = 4 << 10
 	cmd.Stderr = &r.stderr
 	expected := ""
@@ -485,6 +490,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		cancel()
 		return nil, fmt.Errorf("%s did not start: %w", spec.Harness, err)
 	}
+	r.bindControlProcess()
 	employeeStarted = r.exited
 	contextStarted = true
 	if r.worker != nil {
@@ -498,6 +504,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 }
 
 func (r *Run) wait() {
+	defer r.closeControlProcess()
 	go r.early()
 	runErr := r.cmd.Wait()
 	r.finishExit(runErr)

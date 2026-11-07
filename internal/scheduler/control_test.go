@@ -29,10 +29,10 @@ func TestControlAuthorityAndCanonicalDrafts(t *testing.T) {
 	r, c := controlRig(t)
 	ctx := context.Background()
 	request := ControlRequest{Action: "create", RequestID: "create-1", Definition: json.RawMessage(`{"name":"monitor","schedule":{"every":"30m"},"prompt":"synthetic","harness":"codex","quiet":true,"checkpoint":true,"paused":true}`)}
-	if got := c.execute(ctx, 9999, request); got.Error == "" {
+	if got := c.executeBound(ctx, 9999, request); got.Error == "" {
 		t.Fatal("untrusted OS caller admitted")
 	}
-	got := c.execute(ctx, 1234, request)
+	got := c.executeBound(ctx, 1234, request)
 	if got.Error != "" || got.DraftID == "" || !got.Changed {
 		t.Fatal(got)
 	}
@@ -40,7 +40,7 @@ func TestControlAuthorityAndCanonicalDrafts(t *testing.T) {
 	if j.State != store.JobDraft || j.Creator.Key() != boss.Key() {
 		t.Fatal(j)
 	}
-	if second := c.execute(ctx, 1234, request); second != got {
+	if second := c.executeBound(ctx, 1234, request); second != got {
 		t.Fatal("uncertain response replay changed result", second, got)
 	}
 	if outs := r.sent(); len(outs) != 1 || outs[0].Conv != bossDM {
@@ -49,10 +49,10 @@ func TestControlAuthorityAndCanonicalDrafts(t *testing.T) {
 	spoof := request
 	spoof.Definition = json.RawMessage(`{"name":"spoof","creator":"telegram:2","role":"owner","schedule":{"every":"30m"},"prompt":"p"}`)
 	spoof.RequestID = "spoof"
-	if got := c.execute(ctx, 1234, spoof); got.Error == "" {
+	if got := c.executeBound(ctx, 1234, spoof); got.Error == "" {
 		t.Fatal("model-selected identity accepted")
 	}
-	if got := c.execute(ctx, 1234, ControlRequest{Action: "confirm", ID: j.ID, RequestID: "confirm"}); got.Error == "" {
+	if got := c.executeBound(ctx, 1234, ControlRequest{Action: "confirm", ID: j.ID, RequestID: "confirm"}); got.Error == "" {
 		t.Fatal("operator synthesized human consent")
 	}
 	if out, ok := r.answer(asWork, "yes"); ok {
@@ -67,22 +67,22 @@ func TestControlAuthorityAndCanonicalDrafts(t *testing.T) {
 	if r.job(j.ID).State != store.JobPaused {
 		t.Fatal("paused creation lost")
 	}
-	if got := c.execute(ctx, 1234, ControlRequest{Action: "resume", ID: j.ID, RequestID: "resume"}); got.Error != "" || !got.Changed {
+	if got := c.executeBound(ctx, 1234, ControlRequest{Action: "resume", ID: j.ID, RequestID: "resume"}); got.Error != "" || !got.Changed {
 		t.Fatal(got)
 	}
 	bad := request
 	bad.Definition = json.RawMessage(`{"name":"different"}`)
-	if got := c.execute(ctx, 1234, bad); got.Error == "" {
+	if got := c.executeBound(ctx, 1234, bad); got.Error == "" {
 		t.Fatal("idempotency key rebound")
 	}
 	employee := r.add(asWork, `{"name":"private","schedule":{"every":"1h"},"prompt":"employee prompt"}`)
 	for _, action := range []string{"show", "history", "checkpoint", "run", "edit", "remove"} {
-		if got := c.execute(ctx, 1234, ControlRequest{Action: action, ID: employee, RequestID: action, Definition: json.RawMessage(`{"name":"x"}`)}); got.Error == "" || strings.Contains(got.Reply, "employee prompt") {
+		if got := c.executeBound(ctx, 1234, ControlRequest{Action: action, ID: employee, RequestID: action, Definition: json.RawMessage(`{"name":"x"}`)}); got.Error == "" || strings.Contains(got.Reply, "employee prompt") {
 			t.Fatal("cross-creator access", action, got)
 		}
 	}
 	r.s.access.Owners = map[string]bool{}
-	if got := c.execute(ctx, 1234, request); got.Error == "" {
+	if got := c.executeBound(ctx, 1234, request); got.Error == "" {
 		t.Fatal("revoked owner replay admitted")
 	}
 }
@@ -90,11 +90,11 @@ func TestControlAuthorityAndCanonicalDrafts(t *testing.T) {
 func TestControlBindingFailsClosed(t *testing.T) {
 	r := newRig(t)
 	c := &Control{s: r.s, owner: boss.Key(), uid: 1234}
-	if got := c.execute(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
+	if got := c.executeBound(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
 		t.Fatal("unregistered identity accepted")
 	}
 	_, _, _ = r.st.AddInbound(core.Inbound{Conv: bossDM, From: boss, Origin: core.OriginLive, Private: true, MCPControl: true, MsgID: "mcp", Text: "synthetic"})
-	if got := c.execute(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
+	if got := c.executeBound(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
 		t.Fatal("MCP control established human binding")
 	}
 	p := core.SlackPrincipal("owner@example.test", "Ttest", "")
@@ -102,19 +102,19 @@ func TestControlBindingFailsClosed(t *testing.T) {
 	_, _, _ = r.st.AddInbound(core.Inbound{Conv: k, From: p, Origin: core.OriginLive, Private: true, MsgID: "slack-binding", Text: "synthetic"})
 	r.s.access.Owners[p.Key()] = true
 	c.owner = p.Key()
-	if got := c.execute(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
+	if got := c.executeBound(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
 		t.Fatal("cached Slack identity counted as live")
 	}
 	r.s.Reverify = func(context.Context, core.Principal) (Verified, bool, error) {
 		return Verified{Principal: p}, true, nil
 	}
-	if got := c.execute(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error != "" {
+	if got := c.executeBound(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error != "" {
 		t.Fatal(got)
 	}
 	r.s.Reverify = func(context.Context, core.Principal) (Verified, bool, error) {
 		return Verified{Principal: core.SlackPrincipal("other@example.test", "Ttest", "")}, true, nil
 	}
-	if got := c.execute(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
+	if got := c.executeBound(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
 		t.Fatal("different live principal rebound")
 	}
 }
@@ -132,13 +132,14 @@ func TestControlFileAdminNeverBecomesOwner(t *testing.T) {
 	}
 	t.Setenv("ADMIN_USER_IDS", "999")
 	r.s.access.Dir = dir // configured owners fallback must be ignored with Pi authority
-	if got := c.execute(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
+	if got := c.executeBound(context.Background(), 1234, ControlRequest{Action: "list"}); got.Error == "" {
 		t.Fatal("file admin or fallback owner elevated", got)
 	}
 }
 
 func TestControlSocketMCPAndSpoofedArguments(t *testing.T) {
 	r, _ := controlRig(t)
+	r.s.ResolveControl = func(int) (Caller, func() bool, error) { return asBoss, func() bool { return true }, nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := filepath.Join(t.TempDir(), "ctl")
@@ -229,4 +230,14 @@ func TestControlReadsMaximumCheckpointSnapshot(t *testing.T) {
 	if err := <-served; err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Legacy control unit cases explicitly supply a trusted origin. Production never
+// resolves it from these historical bindings; socket tests exercise the resolver.
+func (c *Control) executeBound(ctx context.Context, uid uint32, req ControlRequest) ControlResult {
+	p, k, err := c.s.st.ControlBinding(c.owner, c.source)
+	if err != nil {
+		return ControlResult{Error: err.Error()}
+	}
+	return c.execute(ctx, uid, req, Caller{Principal: p, Conv: k, Role: core.RoleOwner, Private: true})
 }

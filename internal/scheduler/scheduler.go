@@ -56,6 +56,9 @@ type Verified struct {
 
 // Scheduler is the due loop and the job logic the router calls.
 type Scheduler struct {
+	// ResolveControl maps kernel peer PID to a currently active trusted person turn.
+	ResolveControl func(int) (Caller, func() bool, error)
+
 	cfg    Config
 	st     *store.Store
 	access core.Access

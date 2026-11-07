@@ -10,16 +10,28 @@ separate owner-approved live window.
 Opt in in the existing private config:
 
 ```json
-{"scheduler":{"enabled":true,"default_tz":"Europe/Kyiv","control":{"owner":"slack:OWNER_EMAIL","source":{"interface":"slack","chat":"PRIVATE_DM_ID","thread":"ROOT_THREAD_TS"}}}}
+{"scheduler":{"enabled":true,"default_tz":"Europe/Kyiv","control":{"owner":"slack:OWNER_EMAIL"}}}
 ```
 
-Merge this fragment with the existing scheduler section; preserve its other
-settings. The selector must identify an actual owner with a recorded real private
-platform conversation. It is not authority. The server uses the kernel Unix peer
-UID (root or the existing `run_as.owner` UID), loads the stored platform binding
-without message text, re-verifies Slack live, then re-evaluates existing access
-authority (`ADMIN_USER_IDS` on hub) on **every call**, including replayed calls.
-Unknown/employee/revoked/unbound callers fail closed. No new admission list.
+Merge this fragment with the existing scheduler section; preserve other settings.
+The owner selector remains accepted for configuration compatibility; it grants no
+request identity. On every call, the server checks kernel Unix peer UID (root or
+`run_as.owner`), walks kernel PID ancestry to a registered harness process, and
+resolves that worker's **current active person turn**. Its verified principal and
+exact conversation (including thread) supply the origin. Slack is re-verified
+live and current owner admission is checked, including on idempotent replays.
+A request captures the native input generation before waiting for other control
+operations and validates the same generation after live identity checks and before
+commit. Kernel pidfds bind both socket peer and harness process lifetime, preventing
+PID reuse from selecting another conversation. Linux SO_PEERPIDFD support (6.5+)
+is required; unsupported/restricted kernels disable controls by failing closed.
+
+Unknown, employee, revoked, idle, scheduled and passive continuation callers fail
+closed. No model argument, environment identity, or result destination supplies
+origin. Warm MCP servers resolve anew on every call; accepted steers share the
+same verified caller/conversation. Ambiguous background/foreground overlap is
+refused. Detached or reparented MCP servers also fail closed. Shared contexts cannot read
+raw checkpoints, show or history; list uses the existing shared-chat renderer.
 
 Endpoint: `<data_dir>/scheduler-control/control.sock`, private directory 0700,
 socket 0600. Only the existing Heimdall process hosts it. Startup refuses non-sockets, symlinks and foreign owners. Under the validated
@@ -29,25 +41,17 @@ or other error never permits removal. Control errors are logged as unavailable;
 the otherwise-functional router continues.
 Keep parent data/config directories protected too; no employee traversal rights.
 
-The optional protected `source` pins the exact source conversation (interface,
-chat, thread). Heimdall requires a recorded real private message from the selected
-owner in that exact conversation. Missing/mismatched bindings fail closed, without
-falling back to a newer conversation. Omit `thread` for an unthreaded source.
-The source is not a tool argument and grants no caller or destination authority.
-The pending request and new job keep this source for confirmation and harness
-selection. Direct platform requests keep their originating conversation.
+Legacy `scheduler.control.source` remains parseable but is no longer used to
+route or authorize control requests. There is no latest-conversation fallback.
+Create/edit/remove cards go to the originating conversation, independently from
+`to`; only real platform human input can consume their confirmation. Shared
+conversation privacy rules still apply. A request ID reused from another origin
+is rejected, rather than replaying a card from another chat.
 
-For backwards compatibility, omitting `source` retains the owner's latest
-recorded private conversation, which can be an unrelated topic. Operators must
-set `scheduler.control.source` in the protected deployment config to prevent that
-selection, then arrange the separately approved drain/restart. This source change
-does not edit live config, redirect already confirmed jobs, or claim the binding
-has been deployed. Existing jobs with a wrong source need operator review and a separately approved
-replacement; editing their definition does not change their stored source. The
-control endpoint cannot list/read/manage another creator's jobs, even though
-the bound owner has owner role. There are no caller, email, role, conversation,
-shell, token, confirmation or approval arguments. Rebinding is private deployment
-configuration, followed by an approved restart.
+Existing jobs/drafts are not moved, recreated or reconfirmed. Their correction
+requires a separate explicit operator decision. Standalone CLI calls outside an
+active harness process now fail closed; direct ingress job commands remain
+available. No caller, role, source, confirmation or approval tool fields exist.
 
 ## CLI and shared tool catalog
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -620,6 +621,82 @@ func TestEmployeeOMPTurnDirectoryResume(t *testing.T) {
 			}
 			cancel()
 			<-next.Exited()
+		})
+	}
+}
+
+func TestWarmSchedulerOriginUsesCurrentTurn(t *testing.T) {
+	for _, name := range []string{"pi", "omp", "claude", "codex"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s, state := warmSpec(t, name)
+			s.SchedulerControl = true
+			s.Caller.Private = true
+			p := harness.NewPool(harness.WarmConfig{})
+			first := pooledTurn(t, p, ctx, s)
+			defer func() { cancel(); <-first.Exited() }()
+			data, err := os.ReadFile(filepath.Join(state, "pids"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid, err := strconv.Atoi(strings.Fields(string(data))[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			ancestors := harness.ProcessAncestors(pid)
+			if _, ok := first.ControlCaller(ancestors); ok {
+				t.Fatal("idle worker retained authority")
+			}
+			s.Session = harness.Session{ID: first.Result().SessionID, Resume: true}
+			for _, eligible := range []bool{false, true} {
+				s.SchedulerControl = eligible
+				s.Prompt = "SCHEDULER_HOLD"
+				_ = os.Remove(filepath.Join(state, "scheduler-release"))
+				run, err := p.Start(ctx, s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if run.Process() != first.Process() {
+					t.Fatal("expected same warm MCP parent")
+				}
+				select {
+				case <-run.Ready():
+				case <-time.After(5 * time.Second):
+					t.Fatal("not ready")
+				}
+				// Claude's native replay, rather than startup timing, selects current turn.
+				deadline := time.Now().Add(time.Second)
+				for {
+					c, ok := first.ControlCaller(ancestors)
+					if ok == eligible {
+						if ok && c.Conv != s.Caller.Conv {
+							t.Fatal("wrong current caller")
+						}
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("stale turn authority", eligible)
+					}
+					time.Sleep(time.Millisecond)
+				}
+				if _, ok := first.ControlCaller(harness.ProcessAncestors(os.Getpid())); ok {
+					t.Fatal("unrelated peer admitted")
+				}
+				if err := os.WriteFile(filepath.Join(state, "scheduler-release"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-run.Done():
+				case <-time.After(5 * time.Second):
+					t.Fatal("not done")
+				}
+				run.Warm()
+				if _, ok := first.ControlCaller(ancestors); ok {
+					t.Fatal("completed turn retained authority")
+				}
+				s.Session = harness.Session{ID: run.Result().SessionID, Resume: true}
+			}
 		})
 	}
 }

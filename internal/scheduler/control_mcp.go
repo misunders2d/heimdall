@@ -12,7 +12,7 @@ import (
 // every operation independently of the catalog or model.
 var ControlTool = map[string]any{
 	"name":        "heimdall_scheduler",
-	"description": "Manage the existing Heimdall scheduler as the deployment-bound owner. Discover/list/show/history/checkpoint; propose create/edit/remove for real human confirmation in the bound private chat; run/pause/resume/stop existing jobs. Acknowledge an exact failed receipt after destination reconciliation, without replaying or hiding history. No identity or confirmation arguments. For a mutation generate one stable request_id; reuse it after an uncertain response, never create another retry id.",
+	"description": "Manage the existing Heimdall scheduler as the active interface-verified owner. Discover/list/show/history/checkpoint; propose create/edit/remove for real human confirmation in the originating conversation; run/pause/resume/stop existing jobs. Acknowledge an exact failed receipt after destination reconciliation, without replaying or hiding history. No identity or confirmation arguments. For a mutation generate one stable request_id; reuse it after an uncertain response, never create another retry id.",
 	"inputSchema": map[string]any{
 		"type": "object", "additionalProperties": false, "required": []string{"action"},
 		"properties": map[string]any{

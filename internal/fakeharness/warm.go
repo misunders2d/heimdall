@@ -104,6 +104,14 @@ func (f *fake) warm() {
 			reply(map[string]any{"turn": map[string]any{"id": id}})
 			f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": session, "turn": map[string]any{"id": id}}})
 		}
+		if strings.Contains(text, "SCHEDULER_HOLD") {
+			for {
+				if _, err := os.Stat(filepath.Join(f.state, "scheduler-release")); err == nil {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
 		if strings.Contains(text, "HANG") {
 			continue
 		}

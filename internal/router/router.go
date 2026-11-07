@@ -126,6 +126,9 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 		opt.GuardLogMax = DefaultGuardLogMax
 	}
 	r := &Router{warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	if opt.Jobs != nil {
+		opt.Jobs.ResolveControl = r.schedulerCaller
+	}
 	if opt.GuardLog != "" {
 		r.guardLog = &guardLog{path: opt.GuardLog, max: opt.GuardLogMax}
 	}
@@ -1499,7 +1502,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				}
 			}
 		}
-		spec := harness.Spec{StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
+		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
 		if t.job == nil {
 			spec.Continuation = func(ev harness.Continuation) bool {
 				e := continuationEvent{source: t, harness: h, native: ev}

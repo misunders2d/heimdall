@@ -253,3 +253,17 @@ func (s *Store) ControlResponse(creator, requestID, digest string) (string, bool
 	}
 	return response, true, nil
 }
+
+// ControlOrigin verifies an exact trusted live ingress without choosing a source.
+// The caller and conversation come from the active harness turn, never arguments.
+func (s *Store) ControlOrigin(p core.Principal, k core.ConvKey, private bool) error {
+	if k.Interface != p.Platform || (p.Platform != core.PlatformTelegram && p.Platform != core.PlatformSlack) {
+		return errors.New("invalid platform request origin")
+	}
+	var found int
+	err := s.db.QueryRow(`SELECT 1 FROM inbound WHERE platform=? AND user_id=? AND iface=? AND chat=? AND thread=? AND private=? AND user_team=? AND origin=? AND coalesce(json_extract(nullif(extra,''),'$.mcp_control'),0)=0 LIMIT 1`, p.Platform, p.ID, k.Interface, k.Chat, k.Thread, private, p.Team, core.OriginLive).Scan(&found)
+	if err != nil {
+		return errors.New("request origin has no matching live ingress")
+	}
+	return nil
+}

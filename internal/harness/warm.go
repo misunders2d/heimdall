@@ -157,6 +157,7 @@ func (o *workerOutput) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 func (w *worker) wait() {
+	defer w.root.closeControlProcess()
 	err := w.cmd.Wait()
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -231,7 +232,7 @@ func (w *worker) next(spec Spec, deadline time.Time) (*Run, error) {
 		return nil, err
 	}
 	cmd := &exec.Cmd{Env: []string{"HD_CONTEXT_DIR=" + w.root.contextDir}, Dir: spec.Launch.Dir, Stdin: &warmInput{WriteCloser: input.WriteCloser, thread: spec.Session.ID, gate: gate, start: spec.StartContext}}
-	r := &Run{contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress}
+	r := &Run{schedulerControl: spec.SchedulerControl, contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress}
 	var err error
 	switch spec.Harness {
 	case "pi", "omp":

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"os"
@@ -136,10 +137,10 @@ func recoverControlSocket(ctx context.Context, path string, uid uint32) error {
 	return os.Remove(path)
 }
 
-func peerUID(c *net.UnixConn) (uint32, error) {
+func peerCredentials(c *net.UnixConn) (*syscall.Ucred, error) {
 	raw, err := c.SyscallConn()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	var cred *syscall.Ucred
 	var inner error
@@ -147,30 +148,44 @@ func peerUID(c *net.UnixConn) (uint32, error) {
 		cred, inner = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if inner != nil {
-		return 0, inner
+		return nil, inner
 	}
 	if cred == nil {
-		return 0, errors.New("missing peer credentials")
+		return nil, errors.New("missing peer credentials")
 	}
-	return cred.Uid, nil
+	return cred, nil
 }
 
 func (c *Control) serve(ctx context.Context, conn *net.UnixConn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
-	uid, err := peerUID(conn)
+	cred, err := peerCredentials(conn)
 	result := ControlResult{Error: "operator not authorized"}
-	if err == nil && (uid == 0 || uid == c.uid) {
+	if err == nil && (cred.Uid == 0 || cred.Uid == c.uid) {
+		// SO_PEERPIDFD binds the original connecting process, including after
+		// exit/reaping. Never reopen a numeric PID to establish peer lifetime.
+		fd, lifeErr := peerPIDFD(conn)
+		if lifeErr != nil {
+			_ = json.NewEncoder(conn).Encode(ControlResult{Error: "kernel peer lifetime unavailable"})
+			return
+		}
+		defer unix.Close(fd)
+		alive := func() bool { return peerAlive(fd) }
+		who, valid, originErr := c.resolvePeer(int(cred.Pid), alive)
 		var req ControlRequest
 		scan := bufio.NewScanner(conn)
 		scan.Buffer(make([]byte, 4096), ControlMaxBytes)
 		if !scan.Scan() || strictJSON(scan.Bytes(), &req) != nil {
 			result.Error = "invalid control request"
 		} else {
-			result = c.execute(ctx, uid, req)
+			if originErr != nil {
+				result.Error = "trusted active request origin unavailable"
+			} else {
+				result = c.executePeer(ctx, cred, req, who, valid)
+			}
 		}
 	}
 	_ = json.NewEncoder(conn).Encode(result)
@@ -188,9 +203,13 @@ func strictJSON(raw []byte, out any) error {
 	return nil
 }
 
-func (c *Control) caller(ctx context.Context) (Caller, error) {
-	p, k, err := c.s.st.ControlBinding(c.owner, c.source)
-	if err != nil {
+func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
+	if len(origin) != 1 || origin[0].Role != core.RoleOwner {
+		return Caller{}, errors.New("trusted active request origin required")
+	}
+	who := origin[0]
+	p, k := who.Principal, who.Conv
+	if err := c.s.st.ControlOrigin(p, k, who.Private); err != nil {
 		return Caller{}, err
 	}
 	if p.Platform == core.PlatformSlack {
@@ -207,19 +226,70 @@ func (c *Control) caller(ctx context.Context) (Caller, error) {
 	if !ok || r != core.RoleOwner {
 		return Caller{}, errors.New("bound caller is not a current owner")
 	}
-	return Caller{Principal: p, Role: r, Conv: k, Private: true}, nil
+	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private}, nil
 }
 
-func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) ControlResult {
+// peerPIDFD requires Linux SO_PEERPIDFD; unsupported kernels fail closed.
+func peerPIDFD(conn *net.UnixConn) (int, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return -1, err
+	}
+	fd := -1
+	var inner error
+	err = raw.Control(func(socket uintptr) { fd, inner = unix.GetsockoptInt(int(socket), unix.SOL_SOCKET, unix.SO_PEERPIDFD) })
+	if err != nil {
+		return -1, err
+	}
+	return fd, inner
+}
+func peerAlive(fd int) bool {
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	n, err := unix.Poll(fds, 0)
+	return err == nil && n == 0
+}
+func (c *Control) resolvePeer(pid int, alive func() bool) (Caller, func() bool, error) {
+	if c.s.ResolveControl == nil || !alive() {
+		return Caller{}, nil, errors.New("no active peer")
+	}
+	who, current, err := c.s.ResolveControl(pid)
+	if err != nil || current == nil || !alive() || !current() {
+		return Caller{}, nil, errors.New("no active origin")
+	}
+	return who, func() bool { return alive() && current() }, nil
+}
+
+// Capture an eligible native input before waiting; never upgrade a queued idle
+// request to a later turn. Recheck that same generation after live verification.
+func (c *Control) executePeer(ctx context.Context, cred *syscall.Ucred, req ControlRequest, who Caller, valid func() bool) ControlResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if valid == nil || !valid() {
+		return ControlResult{Error: "request origin is no longer active"}
+	}
+	return c.executeLocked(ctx, cred.Uid, req, []Caller{who}, valid)
+}
+
+func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest, origin ...Caller) ControlResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.executeLocked(ctx, uid, req, origin)
+}
+
+func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequest, origin []Caller, valid ...func() bool) ControlResult {
 	fail := func(err error) ControlResult { return ControlResult{Error: err.Error()} }
 	if uid != 0 && uid != c.uid {
 		return fail(errors.New("operator not authorized"))
 	}
-	who, err := c.caller(ctx)
+	who, err := c.caller(ctx, origin)
 	if err != nil {
 		return fail(err)
+	}
+	if len(valid) > 0 && !valid[0]() {
+		return fail(errors.New("request origin expired during verification"))
+	}
+	if !who.Private && (req.Action == "checkpoint" || req.Action == "show" || req.Action == "history") {
+		return fail(errors.New("job details require a private originating conversation"))
 	}
 	read := req.Action == "list" || req.Action == "show" || req.Action == "history" || req.Action == "checkpoint" || req.Action == "discover"
 	if !read && (req.RequestID == "" || len(req.RequestID) > 128 || strings.ContainsAny(req.RequestID, "\r\n")) {
@@ -246,7 +316,7 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) C
 		return fail(errors.New("receipt fields require acknowledge"))
 	}
 	if req.Action == "discover" {
-		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge. acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the bound private chat; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and deployment configuration."}
+		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge. acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
 	}
 	if req.ID != "" {
 		j, ok, err := c.s.st.Job(req.ID)
@@ -272,7 +342,10 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) C
 		data, _ := json.Marshal(cp)
 		return ControlResult{Reply: string(data)}
 	}
-	raw, _ := json.Marshal(req)
+	raw, _ := json.Marshal(struct {
+		Request ControlRequest
+		Source  core.ConvKey
+	}{req, who.Conv})
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
 	if saved, ok, err := c.s.st.ControlResponse(who.Principal.Key(), req.RequestID, digest); err != nil {
@@ -337,6 +410,9 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest) C
 		return fail(errors.New("unsupported action; confirmation is accepted only from real platform human input"))
 	}
 	response, _ := json.Marshal(result)
+	if len(valid) > 0 && !valid[0]() {
+		return fail(errors.New("request origin expired before commit"))
+	}
 	if err := c.s.st.ControlCommit(who.Principal.Key(), req.RequestID, digest, req.Action, req.ID, string(response), uid, change, outs); err != nil {
 		return fail(err)
 	}

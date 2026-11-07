@@ -154,30 +154,30 @@ func TestLostControlReplyReopenAndCachedStopCannotKillNewRun(t *testing.T) {
 	id := r.add(asBoss, `{"name":"ordinary","schedule":{"every":"1h"},"prompt":"synthetic"}`)
 	ctx := context.Background()
 	run := ControlRequest{Action: "run", ID: id, RequestID: "stable-run"}
-	first := c.execute(ctx, 1234, run)
+	first := c.execute(ctx, 1234, run, asBoss)
 	if first.Error != "" {
 		t.Fatal(first)
 	}
 	reopenRig(t, r)
-	if got := c.execute(ctx, 1234, run); got != first || len(r.runs(id)) != 1 {
+	if got := c.execute(ctx, 1234, run, asBoss); got != first || len(r.runs(id)) != 1 {
 		t.Fatal("lost reply duplicated admitted run", got, r.runs(id))
 	}
 	r.tick()
 	stops := 0
 	r.s.Attach(func(row store.InboundRow) { r.rows = append(r.rows, row) }, func(string) {}, func(string) bool { stops++; return true })
 	stop := ControlRequest{Action: "stop", ID: id, RequestID: "stable-stop"}
-	first = c.execute(ctx, 1234, stop)
+	first = c.execute(ctx, 1234, stop, asBoss)
 	if first.Error != "" || stops != 1 {
 		t.Fatal(first, stops)
 	}
 	r.now = r.now.Add(time.Second)
 	run.RequestID = "new-run"
-	if got := c.execute(ctx, 1234, run); got.Error != "" {
+	if got := c.execute(ctx, 1234, run, asBoss); got.Error != "" {
 		t.Fatal(got)
 	}
 	r.tick()
 	reopenRig(t, r)
-	if got := c.execute(ctx, 1234, stop); got != first || stops != 1 || r.runs(id)[0].State != store.RunRunning {
+	if got := c.execute(ctx, 1234, stop, asBoss); got != first || stops != 1 || r.runs(id)[0].State != store.RunRunning {
 		t.Fatal("cached stop affected newer run", got, stops, r.runs(id))
 	}
 }
@@ -255,7 +255,7 @@ func TestFailedReceiptNoticeAndExactAcknowledgement(t *testing.T) {
 	r.finish(checkpointAnswer(0, true, r.now.Format(time.RFC3339Nano), []store.Alert{{Key: "request", Revision: "v1", Text: "original alert"}}), Outcome{Harness: "codex"})
 	cp, _ := r.st.Checkpoint(id, boss.Key())
 	a := cp.Receipts[0]
-	if got := c.execute(context.Background(), 1234, ControlRequest{Action: "acknowledge", ID: id, Key: a.Key, Revision: a.Revision, Outbound: a.Outbound, RequestID: "pending"}); got.Error == "" {
+	if got := c.execute(context.Background(), 1234, ControlRequest{Action: "acknowledge", ID: id, Key: a.Key, Revision: a.Revision, Outbound: a.Outbound, RequestID: "pending"}, asBoss); got.Error == "" {
 		t.Fatal("pending acknowledged", got)
 	}
 	for i := 0; i < 2; i++ {
@@ -277,15 +277,15 @@ func TestFailedReceiptNoticeAndExactAcknowledgement(t *testing.T) {
 	wrong := ack
 	wrong.Outbound++
 	wrong.RequestID = "wrong"
-	if got := c.execute(context.Background(), 1234, wrong); got.Error == "" {
+	if got := c.execute(context.Background(), 1234, wrong, asBoss); got.Error == "" {
 		t.Fatal("wrong receipt acknowledged", got)
 	}
-	got := c.execute(context.Background(), 1234, ack)
+	got := c.execute(context.Background(), 1234, ack, asBoss)
 	if got.Error != "" || !got.Changed {
 		t.Fatal(got)
 	}
 	reopenRig(t, r)
-	if again := c.execute(context.Background(), 1234, ack); again != got {
+	if again := c.execute(context.Background(), 1234, ack, asBoss); again != got {
 		t.Fatal("ack reply changed", again)
 	}
 	cp, _ = r.st.Checkpoint(id, boss.Key())

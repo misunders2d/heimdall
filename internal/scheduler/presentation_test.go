@@ -229,7 +229,7 @@ func TestControlSourceIsProtectedRealIngressBinding(t *testing.T) {
 	other.Thread = "20"
 	_, _, _ = r.st.AddInbound(core.Inbound{Conv: other, From: boss, Origin: core.OriginLive, Private: true, MsgID: "unrelated-newer"})
 	c.source = &source
-	got := c.execute(context.Background(), 1234, ControlRequest{Action: "create", RequestID: "bound", Definition: json.RawMessage(`{"name":"monitor","schedule":{"every":"1h"},"prompt":"synthetic","paused":true}`)})
+	got := c.executeBound(context.Background(), 1234, ControlRequest{Action: "create", RequestID: "bound", Definition: json.RawMessage(`{"name":"monitor","schedule":{"every":"1h"},"prompt":"synthetic","paused":true}`)})
 	if got.Error != "" || r.job(got.DraftID).CreatedIn != source {
 		t.Fatal(got)
 	}
@@ -243,7 +243,7 @@ func TestControlSourceIsProtectedRealIngressBinding(t *testing.T) {
 	missing := source
 	missing.Thread = "unknown"
 	c.source = &missing
-	if _, err := c.caller(context.Background()); err == nil {
+	if _, err := c.caller(context.Background(), []Caller{{Principal: boss, Role: core.RoleOwner, Conv: missing, Private: true}}); err == nil {
 		t.Fatal("missing source fell back")
 	}
 	c.source = &source
