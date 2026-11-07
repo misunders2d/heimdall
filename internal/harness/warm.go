@@ -379,9 +379,12 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 			p.watch(e.run, key, e.fingerprint, e.born, epoch, 0)
 			return nil, s.StartContext.Err()
 		}
-		// Every failed claim/reuse is a fresh session. Retirement may already
-		// have consumed background flags, so those flags are not a safe gate.
-		freshAfterWorkerLoss(&s)
+		// Only the intentional clean restricted OMP cwd rotation may retain
+		// its native session. Actual worker loss and all other mismatches
+		// remain fresh, independent of consumed background bookkeeping.
+		if !p.cleanEmployeeOMPRotation(e, s, epoch) {
+			freshAfterWorkerLoss(&s)
+		}
 		e.run.Stop("launch changed or expired")
 		select {
 		case <-e.run.Exited():
@@ -648,4 +651,45 @@ func freshAfterWorkerLoss(s *Spec) {
 		s.freshWarning = "The native worker ended or changed; this input started a fresh session. Existing work was not re-run."
 	}
 	s.Session = Session{ID: NewSessionID(s.Harness)}
+}
+
+// cleanEmployeeOMPRotation preserves the employee's own clean native session
+// while replacing the process for a new confined turn cwd. It is never a
+// fallback after worker loss or a general fingerprint-mismatch exception.
+func (p *Pool) cleanEmployeeOMPRotation(e *warmEntry, s Spec, epoch uint64) bool {
+	if s.Harness != "omp" || s.Caller.Role != core.RoleEmployee || s.LiveWorkerOnly != e.run || !s.Session.Resume || s.Launch.Dir == e.run.cmd.Dir {
+		return false
+	}
+	base := filepath.Join(s.Launch.Home, TurnsDir)
+	for _, dir := range []string{e.run.cmd.Dir, s.Launch.Dir} {
+		if !filepath.IsAbs(dir) || filepath.Dir(filepath.Clean(dir)) != base {
+			return false
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".omp", "settings.json")); !os.IsNotExist(err) {
+			return false
+		}
+	}
+	normalized := s
+	normalized.Launch.Dir = e.run.cmd.Dir
+	if launchFingerprint(normalized) != e.fingerprint {
+		return false
+	}
+	w := e.run.worker
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	e.run.endMu.Lock()
+	defer e.run.endMu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	res := e.run.Result()
+	if p.epochs[e.key.Conv] != epoch || w.current != e.run || w.dead || w.retiring || e.run.cancelled.Load() || s.StartContext.Err() != nil || res.Cancelled || res.Unclean || res.Failure != "" || res.NeedsHuman != "" || res.SessionID != s.Session.ID || len(w.tasks) > 0 || len(w.continuing) > 0 || w.background != nil || len(w.frames) > 0 || time.Since(e.idle) >= time.Duration(p.cfg.IdleTimeoutSeconds)*time.Second || time.Since(e.born)+p.runLimit(s.Timeout) >= time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second {
+		return false
+	}
+	// A queued external stop wins this atomic fence; a successful claim marks
+	// intentional retirement before another stdout frame can be dispatched.
+	if !e.run.stopRequested.CompareAndSwap(false, true) {
+		return false
+	}
+	w.retiring = true
+	return true
 }

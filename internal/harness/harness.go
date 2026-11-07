@@ -213,6 +213,8 @@ type Run struct {
 	continuation func(Continuation) bool
 	progress     func(Progress)
 
+	stopRequested atomic.Bool
+
 	pooled       chan struct{}
 	retained     atomic.Bool
 	worker       *worker
@@ -596,6 +598,7 @@ func (r *Run) early() {
 // answer"). For a turn that has answered, and for every turn at shutdown;
 // Cancel also marks an active turn as cancelled.
 func (r *Run) Stop(why string) {
+	r.stopRequested.Store(true)
 	r.stop.Do(func() { go r.terminate(why) })
 }
 
@@ -630,7 +633,9 @@ func (r *Run) logf(format string, args ...any) {
 }
 
 func (r *Run) finalize(res Result) {
-	res.Warning = joinWarnings(res.Warning, r.startWarning)
+	if r.startWarning != "" {
+		res.Warning = joinWarnings(res.Warning, r.startWarning)
+	}
 	r.settle.Do(func() {
 		switch {
 		case res.Answer == "":

@@ -106,3 +106,18 @@ func TestWarmClaudeEmptyResultUsesOnlyFinalAssistantText(t *testing.T) {
 		})
 	}
 }
+
+func TestFinalizationStartWarning(t *testing.T) {
+	for _, c := range []struct{ name, existing, start, want string }{
+		{"empty", "", "", ""}, {"existing-only", "existing warning", "", "existing warning"},
+		{"both", "existing warning", "fresh session", "existing warning; fresh session"}, {"start-only", "", "fresh session", "fresh session"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := &Run{done: make(chan struct{}), startWarning: c.start}
+			r.finalize(Result{Warning: c.existing})
+			if got := r.Result().Warning; got != c.want {
+				t.Fatalf("warning got %q want %q", got, c.want)
+			}
+		})
+	}
+}

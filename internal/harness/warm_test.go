@@ -2,6 +2,7 @@ package harness_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -540,6 +541,82 @@ func TestFailedGenericWaitWithoutLeaseAlwaysStartsFresh(t *testing.T) {
 			}
 			if next.Result().SessionID == previous {
 				t.Fatal("failed no-lease reuse cold-resumed interrupted session")
+			}
+			cancel()
+			<-next.Exited()
+		})
+	}
+}
+
+// A restricted OMP turn intentionally gets a new confined cwd/process while
+// continuing only that employee's clean native session. Real lease loss and
+// other scope/settings changes must retain the fresh-session fence.
+func TestEmployeeOMPTurnDirectoryResume(t *testing.T) {
+	for _, change := range []string{"cwd-only", "scope", "local-settings", "lost", "mismatched-lease"} {
+		t.Run(change, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s, _ := warmSpec(t, "omp")
+			s.Caller.Role = core.RoleEmployee
+			capture := filepath.Join(t.TempDir(), "launch.json")
+			s.Launch.Env = append(s.Launch.Env, "FAKE_CAPTURE_LAUNCH="+capture)
+			firstDir, err := harness.NewTurnDir(s.Launch, "restricted-one")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Launch.Dir = firstDir.Path()
+			p := harness.NewPool(harness.WarmConfig{})
+			first := pooledTurn(t, p, ctx, s)
+			id, lease := p.RetainedSession(s.Caller.Conv, s.Caller.Principal.Key(), "omp")
+			if lease != first || id == "" {
+				t.Fatal("no exact retained employee worker")
+			}
+			nextDir, err := harness.NewTurnDir(s.Launch, "restricted-two")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Launch.Dir = nextDir.Path()
+			s.Session = harness.Session{ID: id, Resume: true}
+			s.LiveWorkerOnly = lease
+			s.Prompt = "employee next"
+			switch change {
+			case "scope":
+				s.Caller.Private = !s.Caller.Private
+			case "local-settings":
+				if err = os.MkdirAll(filepath.Join(s.Launch.Dir, ".omp"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(filepath.Join(s.Launch.Dir, ".omp", "settings.json"), []byte(`{}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "lost":
+				first.Stop("synthetic lost employee worker")
+				<-first.Exited()
+			case "mismatched-lease":
+				s.LiveWorkerOnly = &harness.Run{}
+			}
+			next := pooledTurn(t, p, ctx, s)
+			if next.Process() == first.Process() {
+				t.Fatal("restricted employee process reused across turn directories")
+			}
+			if got := next.Result().SessionID; (got == id) != (change == "cwd-only") {
+				t.Fatalf("unsafe resume distinction %s: previous=%q next=%q", change, id, got)
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var actual struct {
+				TurnDir            string `json:"turn_dir"`
+				Memory, Restricted string
+				Args               []string
+			}
+			if err = json.Unmarshal(data, &actual); err != nil {
+				t.Fatal(err)
+			}
+			args := strings.Join(actual.Args, " ")
+			if actual.TurnDir != nextDir.Path() || actual.Memory != "1" || actual.Restricted != "1" || !strings.Contains(args, "--no-mcp") || !strings.Contains(args, "--tools read") || !strings.Contains(args, "--no-extensions") {
+				t.Fatalf("employee restrictions changed: %+v", actual)
 			}
 			cancel()
 			<-next.Exited()
