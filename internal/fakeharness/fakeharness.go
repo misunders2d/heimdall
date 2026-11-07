@@ -61,6 +61,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -141,6 +142,8 @@ func Install(t testing.TB, names ...string) (bin, state string) {
 }
 
 type fake struct {
+	emitMu sync.Mutex
+
 	name, state  string
 	in           *bufio.Scanner
 	out          *json.Encoder
@@ -152,7 +155,7 @@ type fake struct {
 	steers       []string
 }
 
-func (f *fake) emit(v any) { _ = f.out.Encode(v) }
+func (f *fake) emit(v any) { f.emitMu.Lock(); defer f.emitMu.Unlock(); _ = f.out.Encode(v) }
 
 // record appends one input the harness received (kind "prompt" or "steer")
 // to STATE/inputs.jsonl, for tests that check the whole text.

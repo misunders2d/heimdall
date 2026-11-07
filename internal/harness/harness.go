@@ -124,6 +124,13 @@ type Session struct {
 
 // Spec is one turn.
 type Spec struct {
+	freshWarning string
+
+	// Continuation receives native work emitted without a new person input.
+	// The callback stays bound to this exact caller, conversation and outbox.
+	// A start returns true only after durable acceptance; false stops its process.
+	Continuation func(Continuation) bool
+
 	Google     *googleoauth.Broker
 	warm       bool
 	MCPNotify  func(string)
@@ -141,7 +148,11 @@ type Spec struct {
 	// OneShot runs the turn in a process of its own that is never retained
 	// or reused (scheduled runs), so it never displaces a chat's warm one.
 	OneShot bool
-	Timeout time.Duration // the turn's limit instead of run_timeout_seconds, if set
+	// LiveWorkerOnly makes resume conditional on claiming this exact retained
+	// process. A failed claim starts a fresh native session.
+	LiveWorkerOnly *Run
+	StartContext   context.Context // cancels a pending request, never its retained process lifetime
+	Timeout        time.Duration   // the turn's limit instead of run_timeout_seconds, if set
 	// Log, if set, gets one metadata line (never native output) when the
 	// process is stopped after its answer.
 	Log func(string)
@@ -197,6 +208,11 @@ type Result struct {
 
 // Run is one started native turn.
 type Run struct {
+	startWarning string
+
+	continuation func(Continuation) bool
+	progress     func(Progress)
+
 	pooled       chan struct{}
 	retained     atomic.Bool
 	worker       *worker
@@ -273,6 +289,9 @@ func sessionArgs(name string, s Session, home string) ([]string, error) {
 
 // Start launches one turn. A returned error means nothing ran.
 func Start(ctx context.Context, spec Spec) (*Run, error) {
+	if spec.StartContext != nil && spec.StartContext.Err() != nil {
+		return nil, spec.StartContext.Err()
+	}
 	var employeeStarted <-chan struct{}
 	d, ok := defs[spec.Harness]
 	if !ok {
@@ -400,7 +419,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
-	r := &Run{contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
+	r := &Run{startWarning: spec.freshWarning, contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
 	r.stderr.max = 4 << 10
 	cmd.Stderr = &r.stderr
 	expected := ""
@@ -415,7 +434,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 			return nil, e
 		}
 		nativeStdin = cmd.Stdin
-		cmd.Stdin = &warmInput{WriteCloser: input}
+		cmd.Stdin = &warmInput{WriteCloser: input, start: spec.StartContext}
 	}
 	bridgeCtx := runCtx
 	if spec.warm {
@@ -446,12 +465,18 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	case *codexBridge:
 		b.progress = spec.Progress
 	}
+	r.continuation, r.progress = spec.Continuation, spec.Progress
 	cmd.Stdout = r.bridge
 	if spec.warm {
 		cmd.Stdin = nativeStdin
 		w := &worker{current: r, root: r, cmd: cmd, input: bridgeStdin(r.bridge), exited: r.exited}
 		r.worker = w
 		cmd.Stdout = &workerOutput{w: w}
+	}
+	if spec.StartContext != nil && spec.StartContext.Err() != nil {
+		r.bridge.close()
+		cancel()
+		return nil, spec.StartContext.Err()
 	}
 	if err := cmd.Start(); err != nil {
 		r.bridge.close()
@@ -575,6 +600,12 @@ func (r *Run) Stop(why string) {
 }
 
 func (r *Run) terminate(why string) {
+	if r.worker != nil {
+		r.worker.mu.Lock()
+		r.worker.retiring = true
+		r.worker.lossLocked(why)
+		r.worker.mu.Unlock()
+	}
 	select {
 	case <-r.exited:
 		return
@@ -599,6 +630,7 @@ func (r *Run) logf(format string, args ...any) {
 }
 
 func (r *Run) finalize(res Result) {
+	res.Warning = joinWarnings(res.Warning, r.startWarning)
 	r.settle.Do(func() {
 		switch {
 		case res.Answer == "":

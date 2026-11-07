@@ -2,6 +2,7 @@ package harness
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -30,6 +32,9 @@ const TurnRetention = 7 * 24 * time.Hour
 // read it. Heimdall works on the user's home only through os.Root, so a
 // symbolic link the user made can never send it outside that home.
 type TurnDir struct {
+	collectMu sync.Mutex
+	collected map[string][32]byte
+
 	home string
 	rel  string // relative to home, slash-separated
 	uid  int    // -1: Heimdall's own user, nothing to hand over
@@ -114,6 +119,11 @@ type OutFile struct {
 // Dot files are ignored; every other file not taken is listed in skipped
 // as "name: reason".
 func (d *TurnDir) Collect(dst string, max int, limit int64) (files []OutFile, skipped []string) {
+	d.collectMu.Lock()
+	defer d.collectMu.Unlock()
+	if d.collected == nil {
+		d.collected = map[string][32]byte{}
+	}
 	root, err := os.OpenRoot(d.home)
 	if err != nil {
 		return nil, []string{"outbox: " + err.Error()}
@@ -147,6 +157,30 @@ func (d *TurnDir) Collect(dst string, max int, limit int64) (files []OutFile, sk
 			skipped = append(skipped, name+": "+err.Error())
 			continue
 		}
+		copy, err := os.Open(f.Path)
+		if err != nil {
+			os.Remove(f.Path)
+			skipped = append(skipped, name+": cannot check copied file")
+			continue
+		}
+		hash := sha256.New()
+		_, err = io.Copy(hash, copy)
+		copy.Close()
+		if err != nil {
+			os.Remove(f.Path)
+			skipped = append(skipped, name+": cannot check copied file")
+			continue
+		}
+		var sum [32]byte
+		copySum := hash.Sum(nil)
+		for i := range sum {
+			sum[i] = copySum[i]
+		}
+		if previous, ok := d.collected[name]; ok && previous == sum {
+			os.Remove(f.Path)
+			continue
+		}
+		d.collected[name] = sum
 		files = append(files, f)
 	}
 	return files, skipped

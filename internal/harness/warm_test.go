@@ -353,3 +353,196 @@ func TestWarmRequiresLifetimeHeadroom(t *testing.T) {
 		t.Fatal("reused worker without lifetime headroom")
 	}
 }
+
+func TestUncleanLiveWorkerLeaseCannotColdResume(t *testing.T) {
+	for _, retire := range []string{"invalidate", "lru", "exit"} {
+		t.Run(retire, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s, _ := warmSpec(t, "claude")
+			s.Prompt = "BACKGROUND_NEVER"
+			p := harness.NewPool(harness.WarmConfig{MaxWarm: 1})
+			first := pooledTurn(t, p, ctx, s)
+			oldID, lease := p.NativeSession(s.Caller.Conv, s.Caller.Principal.Key(), s.Harness)
+			if lease != first || oldID == "" {
+				t.Fatal("missing exact live-worker lease")
+			}
+			switch retire {
+			case "invalidate":
+				p.Invalidate(s.Caller.Conv, s.Caller.Principal.Key())
+			case "lru":
+				other := s
+				other.Prompt = "other"
+				other.Caller.Conv.Chat = "4343"
+				other.Session = harness.Session{ID: harness.NewSessionID("claude")}
+				pooledTurn(t, p, ctx, other)
+			case "exit":
+				first.Stop("synthetic exit between lookup and claim")
+			}
+			<-first.Exited() // retirement consumes background bookkeeping before claim
+			s.Prompt = "after lease lost"
+			s.Session = harness.Session{ID: oldID, Resume: true}
+			s.LiveWorkerOnly = lease
+			next := pooledTurn(t, p, ctx, s)
+			if next.Result().SessionID == oldID {
+				t.Fatalf("cold launch resumed unclean session after %s: %q", retire, oldID)
+			}
+			cancel()
+			<-next.Exited()
+		})
+	}
+}
+
+func TestGenericAutonomousTurnGatesNewInput(t *testing.T) {
+	for _, name := range []string{"pi", "codex"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s, state := warmSpec(t, name)
+			s.Prompt = "AUTONOMOUS"
+			events := make(chan harness.Continuation, 16)
+			s.Continuation = func(e harness.Continuation) bool { events <- e; return true }
+			p := harness.NewPool(harness.WarmConfig{})
+			first := pooledTurn(t, p, ctx, s)
+			select {
+			case e := <-events:
+				if e.Phase != "start" {
+					t.Fatalf("unexpected event: %+v", e)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("native autonomous start missing")
+			}
+			s.Session = harness.Session{ID: first.Result().SessionID, Resume: true}
+			s.Prompt = "SECOND_PERSON_INPUT"
+			result := make(chan *harness.Run, 1)
+			failure := make(chan error, 1)
+			go func() {
+				r, err := p.Start(ctx, s)
+				if err != nil {
+					failure <- err
+				} else {
+					result <- r
+				}
+			}()
+			select {
+			case <-result:
+				t.Fatal("new input handed over before passive result")
+			case err := <-failure:
+				t.Fatal(err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			recorded, _ := os.ReadFile(filepath.Join(state, "inputs.jsonl"))
+			if strings.Contains(string(recorded), "SECOND_PERSON_INPUT") {
+				t.Fatal("person input reached unfinished native turn")
+			}
+			if err := os.WriteFile(filepath.Join(state, "release-autonomous"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case e := <-events:
+				if e.Phase != "result" || e.Result.Answer != "AUTONOMOUS_ANSWER" {
+					t.Fatalf("mixed passive result: %+v", e)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("autonomous result missing")
+			}
+			var next *harness.Run
+			select {
+			case next = <-result:
+			case err := <-failure:
+				t.Fatal(err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("queued user input stayed blocked")
+			}
+			select {
+			case <-next.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("person result missing")
+			}
+			if answer := next.Result().Answer; !strings.Contains(answer, "SECOND_PERSON_INPUT") || strings.Contains(answer, "AUTONOMOUS_ANSWER") {
+				t.Fatalf("mixed person answer: %q", answer)
+			}
+			cancel()
+			<-next.Exited()
+		})
+	}
+}
+
+func TestGenericWaitCancellationCannotLaunchPersonInput(t *testing.T) {
+	for _, name := range []string{"pi", "codex"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s, state := warmSpec(t, name)
+			s.Prompt = "AUTONOMOUS"
+			events := make(chan harness.Continuation, 16)
+			s.Continuation = func(e harness.Continuation) bool { events <- e; return true }
+			p := harness.NewPool(harness.WarmConfig{})
+			first := pooledTurn(t, p, ctx, s)
+			<-events
+			request, stopRequest := context.WithCancel(context.Background())
+			s.StartContext = request
+			s.Session = harness.Session{ID: first.Result().SessionID, Resume: true}
+			s.Prompt = "MUST_NOT_START"
+			finished := make(chan error, 1)
+			go func() { _, err := p.Start(ctx, s); finished <- err }()
+			deadline := time.Now().Add(5 * time.Second)
+			for len(p.Status(s.Caller.Conv)) != 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("pending request did not claim warm worker")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			stopRequest()
+			os.WriteFile(filepath.Join(state, "release-autonomous"), nil, 0600)
+			select {
+			case err := <-finished:
+				if err != context.Canceled {
+					t.Fatalf("cancelled request launched: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("request cancellation did not release warm wait")
+			}
+			recorded, _ := os.ReadFile(filepath.Join(state, "inputs.jsonl"))
+			if strings.Contains(string(recorded), "MUST_NOT_START") {
+				t.Fatal("cancelled input reached native stdin")
+			}
+			pids, _ := os.ReadFile(filepath.Join(state, "pids"))
+			if len(strings.Fields(string(pids))) != 1 {
+				t.Fatalf("cancelled request cold-launched a process: %s", pids)
+			}
+			cancel()
+			<-first.Exited()
+		})
+	}
+}
+
+func TestFailedGenericWaitWithoutLeaseAlwaysStartsFresh(t *testing.T) {
+	for _, name := range []string{"pi", "codex"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s, _ := warmSpec(t, name)
+			s.Prompt = "AUTONOMOUS"
+			events := make(chan harness.Continuation, 16)
+			s.Continuation = func(e harness.Continuation) bool { events <- e; return true }
+			p := harness.NewPool(harness.WarmConfig{})
+			first := pooledTurn(t, p, ctx, s)
+			<-events
+			previous := first.Result().SessionID
+			s.Session = harness.Session{ID: previous, Resume: true}
+			s.Prompt = "AFTER_WAIT_LIMIT"
+			s.Timeout = 200 * time.Millisecond
+			s.LiveWorkerOnly = nil
+			next := pooledTurn(t, p, ctx, s)
+			if !strings.Contains(next.Result().Warning, "fresh session") {
+				t.Fatal("fresh session was not reported")
+			}
+			if next.Result().SessionID == previous {
+				t.Fatal("failed no-lease reuse cold-resumed interrupted session")
+			}
+			cancel()
+			<-next.Exited()
+		})
+	}
+}

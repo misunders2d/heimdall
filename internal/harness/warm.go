@@ -4,6 +4,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -55,14 +56,29 @@ func (c WarmConfig) Validate() error {
 type warmInput struct {
 	io.WriteCloser
 	thread  string
+	start   context.Context
 	gate    <-chan struct{}
 	retired atomic.Bool
 }
 
 func (p *warmInput) Read([]byte) (int, error) { return 0, io.EOF }
 func (p *warmInput) Write(b []byte) (int, error) {
+	if p.start != nil && p.start.Err() != nil {
+		return 0, p.start.Err()
+	}
 	if p.gate != nil {
-		<-p.gate
+		if p.start == nil {
+			<-p.gate
+		} else {
+			select {
+			case <-p.gate:
+			case <-p.start.Done():
+				return 0, p.start.Err()
+			}
+		}
+	}
+	if p.start != nil && p.start.Err() != nil {
+		return 0, p.start.Err()
 	}
 	return p.WriteCloser.Write(b)
 }
@@ -93,40 +109,103 @@ func bridgeStdin(b bridge) io.WriteCloser {
 }
 
 type worker struct {
-	mu      sync.Mutex
-	current *Run
-	root    *Run
-	cmd     *exec.Cmd
-	input   io.WriteCloser
-	exited  chan struct{}
-	dead    bool
+	mu          sync.Mutex
+	current     *Run
+	root        *Run
+	cmd         *exec.Cmd
+	input       io.WriteCloser
+	exited      chan struct{}
+	dead        bool
+	buf         []byte
+	frames      [][]byte
+	frameBytes  int
+	pending     *Run
+	background  *passiveTurn
+	continuing  map[string]*passiveTurn
+	tasks       map[string]*Run
+	notified    map[string]bool
+	seq         uint64
+	retiring    bool
+	telemetry   progressTracker
+	seenResults map[string]bool
+	resultIDs   []string
 }
 type workerOutput struct{ w *worker }
 
 func (o *workerOutput) Write(p []byte) (int, error) {
 	o.w.mu.Lock()
 	defer o.w.mu.Unlock()
-	return o.w.current.bridge.Write(p)
+	for rest := p; len(rest) > 0; {
+		i := bytes.IndexByte(rest, '\n')
+		if i < 0 {
+			i = len(rest)
+		}
+		if len(o.w.buf)+i > lineMax {
+			o.w.lossLocked("native protocol line exceeded the size bound")
+			o.w.current.Stop("oversized native output")
+			o.w.buf = nil
+			return len(p), nil
+		}
+		o.w.buf = append(o.w.buf, rest[:i]...)
+		if i == len(rest) {
+			break
+		}
+		o.w.lineLocked(bytes.TrimSuffix(o.w.buf, []byte{'\r'}))
+		o.w.buf = nil
+		rest = rest[i+1:]
+	}
+	return len(p), nil
 }
 func (w *worker) wait() {
 	err := w.cmd.Wait()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.dead = true
+	defer w.input.(*warmInput).WriteCloser.Close()
+	w.lossLocked("native process exited before background work was delivered")
+	if w.pending != nil {
+		w.pending.finishExit(err)
+		w.pending = nil
+		return
+	}
 	w.current.finishExit(err)
 	if p, ok := w.input.(*warmInput); ok {
 		_ = p.WriteCloser.Close()
 	}
 }
-func (w *worker) next(spec Spec) (*Run, error) {
-	w.mu.Lock()
+func (w *worker) next(spec Spec, deadline time.Time) (*Run, error) {
+	for {
+		w.mu.Lock()
+		if w.current.harness == "claude" || w.background == nil {
+			break
+		}
+		done := w.background.done
+		w.mu.Unlock()
+		timer := time.NewTimer(max(time.Nanosecond, time.Until(deadline)))
+		select {
+		case <-done:
+			timer.Stop()
+		case <-spec.StartContext.Done():
+			timer.Stop()
+			return nil, spec.StartContext.Err()
+		case <-w.root.ctx.Done():
+			timer.Stop()
+			return nil, errors.New("worker ended while background turn was running")
+		case <-timer.C:
+			w.root.Stop("background turn reached its native wait limit")
+			return nil, errors.New("background turn did not settle before the native wait limit")
+		}
+	}
 	defer w.mu.Unlock()
-	if w.dead {
+	if spec.StartContext.Err() != nil {
+		return nil, spec.StartContext.Err()
+	}
+	if w.dead || w.retiring || w.current.cancelled.Load() {
 		return nil, errors.New("worker exited")
 	}
 	old := w.current
 	bridgeStdin(old.bridge).(*warmInput).retired.Store(true)
-	if old.bridgeCancel != nil {
+	if old.harness != "claude" && old.bridgeCancel != nil {
 		old.bridgeCancel()
 	}
 	ctx, cancel := context.WithCancel(old.ctx)
@@ -151,8 +230,8 @@ func (w *worker) next(spec Spec) (*Run, error) {
 		cancel()
 		return nil, err
 	}
-	cmd := &exec.Cmd{Env: []string{"HD_CONTEXT_DIR=" + w.root.contextDir}, Dir: spec.Launch.Dir, Stdin: &warmInput{WriteCloser: input.WriteCloser, thread: spec.Session.ID, gate: gate}}
-	r := &Run{contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log}
+	cmd := &exec.Cmd{Env: []string{"HD_CONTEXT_DIR=" + w.root.contextDir}, Dir: spec.Launch.Dir, Stdin: &warmInput{WriteCloser: input.WriteCloser, thread: spec.Session.ID, gate: gate, start: spec.StartContext}}
+	r := &Run{contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress}
 	var err error
 	switch spec.Harness {
 	case "pi", "omp":
@@ -178,7 +257,11 @@ func (w *worker) next(spec Spec) (*Run, error) {
 	case *codexBridge:
 		b.progress = spec.Progress
 	}
-	w.current = r
+	if spec.Harness == "claude" {
+		w.pending = r // exact native replay chooses the new decoder, never timing
+	} else {
+		w.current = r
+	}
 	close(gate)
 	go r.early()
 	return r, nil
@@ -237,6 +320,12 @@ func launchFingerprint(s Spec) [32]byte {
 	return sha256.Sum256(b)
 }
 func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
+	if s.StartContext == nil {
+		s.StartContext = ctx
+	}
+	if err := s.StartContext.Err(); err != nil {
+		return nil, err
+	}
 	key := warmKey{s.Caller.Conv, s.Caller.Principal.Key(), s.Harness}
 	fp := launchFingerprint(s)
 	if s.OneShot {
@@ -250,6 +339,7 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 	epoch := p.epochs[key.Conv]
 	retiring := p.retiring[key]
 	e := p.entries[key]
+	claimed := e != nil
 	if e != nil {
 		delete(p.entries, key)
 		e.run.retained.Store(false)
@@ -262,18 +352,45 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 	}
 	p.mu.Unlock()
 	if retiring != nil {
-		<-retiring.Exited()
+		select {
+		case <-retiring.Exited():
+		case <-s.StartContext.Done():
+			return nil, s.StartContext.Err()
+		}
+		if s.Session.Resume && s.Session.ID == retiring.SessionID() {
+			freshAfterWorkerLoss(&s)
+		}
+	}
+	if claimed && e == nil || s.LiveWorkerOnly != nil && (e == nil || e.run != s.LiveWorkerOnly) {
+		freshAfterWorkerLoss(&s)
 	}
 	if e != nil {
 		if !e.run.cancelled.Load() && s.Session.Resume && s.Session.ID == e.run.Result().SessionID && e.fingerprint == fp && time.Since(e.born)+p.runLimit(s.Timeout) < time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second {
-			r, err := e.run.worker.next(s)
+			deadline := minTime(e.born.Add(time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second), time.Now().Add(p.runLimit(s.Timeout)))
+			r, err := e.run.worker.next(s, deadline)
 			if err == nil {
 				p.watch(r, key, fp, e.born, epoch, s.Timeout)
 				return r, nil
 			}
 		}
+		if s.StartContext.Err() != nil {
+			// The new input never reached native stdin. Keep the original
+			// process supervised; cancellation of this request is not a rerun.
+			p.watch(e.run, key, e.fingerprint, e.born, epoch, 0)
+			return nil, s.StartContext.Err()
+		}
+		// Every failed claim/reuse is a fresh session. Retirement may already
+		// have consumed background flags, so those flags are not a safe gate.
+		freshAfterWorkerLoss(&s)
 		e.run.Stop("launch changed or expired")
-		<-e.run.Exited()
+		select {
+		case <-e.run.Exited():
+		case <-s.StartContext.Done():
+			return nil, s.StartContext.Err()
+		}
+	}
+	if err := s.StartContext.Err(); err != nil {
+		return nil, err
 	}
 	// Employee Pi gets a new access-only handoff and confined cwd every turn.
 	s.warm = s.Harness != "agy" && !(s.Harness == "pi" && s.Caller.Role == core.RoleEmployee)
@@ -291,13 +408,16 @@ func (p *Pool) runLimit(limit time.Duration) time.Duration {
 }
 
 func (p *Pool) watch(r *Run, key warmKey, fp [32]byte, born time.Time, epoch uint64, limit time.Duration) {
-	r.pooled = make(chan struct{})
+	pooled := make(chan struct{})
+	if r.pooled == nil {
+		r.pooled = pooled
+	}
 	go func() {
 		defer func() {
 			select {
-			case <-r.pooled:
+			case <-pooled:
 			default:
-				close(r.pooled)
+				close(pooled)
 			}
 		}()
 		if limit <= 0 {
@@ -354,7 +474,7 @@ func (p *Pool) watch(r *Run, key warmKey, fp [32]byte, born time.Time, epoch uin
 			p.retire(oldest, "warm LRU eviction")
 		}
 		p.mu.Unlock()
-		close(r.pooled)
+		close(pooled)
 		idle := time.NewTimer(time.Duration(p.cfg.IdleTimeoutSeconds) * time.Second)
 		defer idle.Stop()
 		select {
@@ -475,4 +595,57 @@ func nativeSettings(s Spec) string {
 		h.Write([]byte(info.ModTime().String()))
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// NativeSession is usable only while its already-owned warm process exists.
+// The durable binding stays unclean while native background work is outstanding,
+// so a restart can never mistake it for a clean resumable session.
+func (p *Pool) NativeSession(conv core.ConvKey, who, name string) (string, *Run) {
+	return p.retainedSession(conv, who, name, true)
+}
+
+// RetainedSession captures the exact process before a clean-binding snapshot.
+// Losing that process after the snapshot cannot turn into a cold dirty resume.
+func (p *Pool) RetainedSession(conv core.ConvKey, who, name string) (string, *Run) {
+	return p.retainedSession(conv, who, name, false)
+}
+func (p *Pool) retainedSession(conv core.ConvKey, who, name string, requireBackground bool) (string, *Run) {
+	key := warmKey{conv, who, name}
+	p.mu.Lock()
+	e := p.entries[key]
+	p.mu.Unlock()
+	if e == nil || e.run.worker == nil || e.run.cancelled.Load() || !e.run.worker.available(requireBackground) {
+		return "", nil
+	}
+	select {
+	case <-e.run.Exited():
+		return "", nil
+	default:
+	}
+	id := e.run.SessionID()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.entries[key] != e || e.run.cancelled.Load() {
+		return "", nil
+	}
+	return id, e.run
+}
+func (w *worker) available(requireBackground bool) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return !w.dead && !w.retiring && (!requireBackground || len(w.tasks) > 0 || w.background != nil || len(w.frames) > 0 || len(w.continuing) > 0)
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+func freshAfterWorkerLoss(s *Spec) {
+	if s.Session.Resume {
+		s.freshWarning = "The native worker ended or changed; this input started a fresh session. Existing work was not re-run."
+	}
+	s.Session = Session{ID: NewSessionID(s.Harness)}
 }

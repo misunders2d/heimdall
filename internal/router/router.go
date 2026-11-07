@@ -254,6 +254,8 @@ func (r *Router) stopRuns(kill context.CancelFunc) {
 	r.runsMu.Lock()
 	r.stopping = true
 	r.runsMu.Unlock()
+	// Run cancels the router context first; every pending StartContext is
+	// already cancelled before this wait, even though process contexts survive.
 	r.starting.Wait()
 	r.runsMu.Lock()
 	runs := slices.Collect(maps.Keys(r.runs))
@@ -478,6 +480,11 @@ type item struct {
 // conv serializes one conversation. Only its loop goroutine touches its
 // state; turns and steers report back through events.
 type conv struct {
+	generation map[string]uint64
+
+	continuations []continuationEvent
+	nativeTurns   map[continuationKey]*turn
+
 	r      *Router
 	key    core.ConvKey
 	busy   atomic.Bool
@@ -512,6 +519,14 @@ type albumEvent struct {
 }
 
 type turn struct {
+	generation    uint64
+	nativeInvalid bool
+	startCtx      context.Context
+	startCancel   context.CancelFunc
+
+	detached  bool // native continuation: no inbound batch or parallelism reservation
+	published bool // loop-owned: original reply has entered the durable outbox
+
 	id         int64
 	role       core.Role
 	from       core.Principal // verified caller, passed to the harness process
@@ -603,6 +618,8 @@ func (c *conv) loop(ctx context.Context) {
 			}
 		case ev := <-c.events:
 			switch ev := ev.(type) {
+			case continuationEvent:
+				c.continuation(ctx, ev)
 			case albumEvent:
 				if a := c.albums[ev.key]; a != nil && a.gen == ev.gen {
 					delete(c.albums, ev.key)
@@ -662,7 +679,7 @@ func (c *conv) loop(ctx context.Context) {
 			}()
 		}
 		c.mu.Lock()
-		c.busy.Store(c.turn != nil || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0)
+		c.busy.Store(c.turn != nil || len(c.nativeTurns) > 0 || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0)
 		c.mu.Unlock()
 	}
 }
@@ -798,6 +815,13 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		c.answer(row, store.CommandEnd{Detail: "which"}, c.which(role, row.From.Key()))
 		return false
 	case cmdUse:
+		if c.turn != nil {
+			c.turn.nativeInvalid = true
+		}
+		c.cancelNative(c.r.ctx, "", true, false)
+		for who := range c.generation {
+			c.generation[who]++
+		}
 		c.r.warm.Invalidate(c.key, "")
 		text := "This conversation now uses " + cmd.Harness + " (no fallback) until !use default."
 		if cmd.Harness == "" {
@@ -854,27 +878,43 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 // everyone's), as the hub's stop does.
 func (c *conv) stop(role core.Role, who string) string {
 	t := c.turn
-	if t == nil || t.done != nil || t.stopped.Load() {
-		text := "No active run to stop."
-		if n := c.cancelQueued(role, who, "cancelled by stop"); n > 0 {
-			return fmt.Sprintf("%s Cleared %d queued message(s).", text, n)
-		}
-		return text
+	active := t != nil && t.done == nil && !t.stopped.Load()
+	authorized := active && (role == core.RoleOwner || who == t.who)
+	// Cancel the pending person request BEFORE stopping a background worker:
+	// process exit must not release a gate into a new, already-stopped launch.
+	if authorized {
+		c.cancelTurn(t)
 	}
-	if role != core.RoleOwner && who != t.who {
+	backgrounds := c.cancelNative(c.r.ctx, who, role == core.RoleOwner, true)
+	if active && !authorized {
+		if backgrounds > 0 {
+			return "Stopping your background work."
+		}
 		return "Only the person who started this turn, or the owner, can stop it."
 	}
 	n := c.cancelQueued(role, who, "cancelled by stop")
-	c.cancelTurn(t)
-	if n > 0 {
-		return fmt.Sprintf("Stopping current run. Cleared %d queued item(s).", n)
+	if authorized {
+		if n > 0 {
+			return fmt.Sprintf("Stopping current run. Cleared %d queued item(s).", n)
+		}
+		return "Stopping current run."
 	}
-	return "Stopping current run."
+	text := "No active run to stop."
+	if backgrounds > 0 {
+		text = "Stopping background work."
+	}
+	if n > 0 {
+		return fmt.Sprintf("%s Cleared %d queued message(s).", text, n)
+	}
+	return text
 }
 
 func (c *conv) cancelTurn(t *turn) {
 	if !t.stopped.CompareAndSwap(false, true) {
 		return
+	}
+	if t.startCancel != nil {
+		t.startCancel()
 	}
 	c.observe(c.r.ctx, t, "cancelled", harness.Progress{})
 	t.mu.Lock()
@@ -937,6 +977,14 @@ func albumItems(a *album) []item {
 // touched; the caller's own running turn is stopped and its session is not
 // kept either. Native session files are left in place.
 func (c *conv) reset(who string) string {
+	if c.turn != nil && c.turn.who == who {
+		c.cancelTurn(c.turn)
+	}
+	c.cancelNative(c.r.ctx, who, false, true)
+	if c.generation == nil {
+		c.generation = map[string]uint64{}
+	}
+	c.generation[who]++
 	c.r.warm.Invalidate(c.key, who)
 	text := "Session reset. Your next message in this conversation starts a fresh session."
 	if t := c.turn; t != nil && t.who == who {
@@ -990,7 +1038,11 @@ func (c *conv) status() string {
 		}
 		b.WriteString("\n")
 	} else {
-		b.WriteString("Running: nothing\n")
+		if len(c.nativeTurns) > 0 {
+			fmt.Fprintf(&b, "Running: %d native background turn(s)\n", len(c.nativeTurns))
+		} else {
+			b.WriteString("Running: nothing\n")
+		}
 	}
 
 	for _, w := range c.r.warm.Status(c.key) {
@@ -1108,7 +1160,12 @@ func (c *conv) start(ctx context.Context) {
 		return
 	}
 	c.queue = c.queue[n:]
-	t := &turn{id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, job: job}
+	if c.generation == nil {
+		c.generation = map[string]uint64{}
+	}
+	c.generation[who] = c.generation[who]
+	startCtx, startCancel := context.WithCancel(ctx)
+	t := &turn{startCtx: startCtx, startCancel: startCancel, generation: c.generation[who], id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, job: job}
 	switch sticky, _ := c.r.store.ChatHarness(c.key); {
 	case job != nil && job.Def.Harness != "":
 		t.candidates, t.explicit = []string{job.Def.Harness}, true
@@ -1303,14 +1360,26 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			launch.Dir = dir.Path()
 		}
 		sess := harness.Session{}
+		// Capture a retained process BEFORE reading clean state. A native
+		// start after the snapshot cannot silently turn into a cold resume.
+		retainedID, retainedWorker := c.r.warm.RetainedSession(c.key, t.who, h)
 		prev, clean, err := c.r.store.Session(c.key, t.who, h)
+		liveID := ""
+		var liveWorker *harness.Run
+		if err == nil && prev != "" {
+			if clean && retainedID == prev {
+				liveID, liveWorker = retainedID, retainedWorker
+			} else if !clean {
+				liveID, liveWorker = c.r.warm.NativeSession(c.key, t.who, h)
+			}
+		}
 		switch {
 		case err != nil:
 			notes = append(notes, h+": session lookup failed: "+err.Error())
 			continue
 		case t.job != nil && t.job.Def.Session != "job":
 			sess.ID = harness.NewSessionID(h)
-		case prev != "" && clean:
+		case prev != "" && (clean || liveID == prev):
 			sess = harness.Session{ID: prev, Resume: true}
 		default:
 			sess.ID = harness.NewSessionID(h)
@@ -1386,7 +1455,25 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				}
 			}
 		}
-		spec := harness.Spec{MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
+		spec := harness.Spec{StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
+		if t.job == nil {
+			spec.Continuation = func(ev harness.Continuation) bool {
+				e := continuationEvent{source: t, harness: h, native: ev}
+				if ev.Phase == "start" {
+					e.accepted = make(chan bool, 1)
+				}
+				c.send(ctx, e)
+				if e.accepted != nil {
+					select {
+					case accepted := <-e.accepted:
+						return accepted
+					case <-ctx.Done():
+						return false
+					}
+				}
+				return ctx.Err() == nil
+			}
+		}
 		if t.job != nil {
 			spec.OneShot, spec.Timeout = true, t.job.Timeout
 			if t.job.Def.RerunOnTimeout {
@@ -1410,6 +1497,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		run, err := c.startCandidate(ctx, t, spec)
 		if err != nil {
 			c.unbind(t, h, prev, clean)
+			if t.stopped.Load() || t.startCtx != nil && t.startCtx.Err() != nil {
+				break
+			}
 			notes = append(notes, err.Error())
 			continue
 		}
@@ -1651,15 +1741,20 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	t.mu.Lock()
 	run := t.run
 	t.mu.Unlock()
-	if run != nil {
+	if run != nil && !t.detached {
 		c.exited = run.Exited()
 		if run.Warm() {
 			c.exited = nil
 		}
 	}
-	c.requeue(t.steerQ...)
-	t.steerQ = nil
+	if !t.detached {
+		c.requeue(t.steerQ...)
+		t.steerQ = nil
+	}
 	res := d.res
+	if t.nativeInvalid {
+		res.Unclean = true
+	}
 	if t.stopped.Load() {
 		res.Cancelled = true
 	}
@@ -1689,7 +1784,13 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	var draft *store.Job
 	var jobChange *store.JobChange
 	var card string
-	if j := c.r.opt.Jobs; j != nil && d.harness != "" && res.Failure == "" && res.NeedsHuman == "" && !res.Cancelled {
+	if t.detached {
+		res.Answer = scheduler.WithoutProposals(res.Answer)
+		for i, a := range res.Answers {
+			res.Answers[i] = scheduler.WithoutProposals(a)
+		}
+	}
+	if j := c.r.opt.Jobs; j != nil && !t.detached && d.harness != "" && res.Failure == "" && res.NeedsHuman == "" && !res.Cancelled {
 		// Direct owner requests apply with the notice; other proposals ask.
 		// The block itself is never sent.
 		answers := res.Answers
@@ -1788,11 +1889,19 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 // settle records a turn's end, with its reply, files and notices, and
 // frees its slot.
 func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
+	if t.detached {
+		e.PreserveSession = true
+	} // never overwrite a newer running session binding
 	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
 		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
 	}
-	for _, it := range t.batch {
-		c.r.release(it.row.Inbound)
+	if t.startCancel != nil {
+		t.startCancel()
+	}
+	if !t.detached {
+		for _, it := range t.batch {
+			c.r.release(it.row.Inbound)
+		}
 	}
 	if !(e.State == store.TurnCancelled && t.stopped.Load()) {
 		c.observe(ctx, t, e.State, harness.Progress{})
@@ -1814,9 +1923,14 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 		c.r.mu.Unlock()
 		c.r.opt.Jobs.Wake()
 	}
+	t.published = true
+	if t.detached {
+		return
+	}
 	c.turn = nil
 	// A native result ends the running turn; idle/cleanup processes hold no slot.
 	<-c.r.sem
+	c.flushContinuations(ctx)
 }
 
 // jobEnd is a scheduled turn's end as its job decides it: the reply and
@@ -1921,6 +2035,9 @@ func interruptedNotice(t store.Interrupted) core.Outbound {
 	if h == "" {
 		h = "the harness"
 	}
+	if t.Messages == 0 {
+		return core.Outbound{Conv: t.Conv, ReplyTo: t.ReplyTo, Text: fmt.Sprintf("⚠ Heimdall restarted while %s background work was outstanding. It was interrupted and was not re-run; check existing results before resending.\n— heimdall", h)}
+	}
 	return core.Outbound{Conv: t.Conv, ReplyTo: t.ReplyTo, Text: fmt.Sprintf("⚠ Heimdall restarted while %s was working on this (%d message(s)). The turn was not re-run; resend if still needed.\n— heimdall", h, t.Messages)}
 }
 
@@ -1968,6 +2085,9 @@ func (r *Router) stopJob(job string) bool {
 	r.mu.Unlock()
 	if t == nil || !t.stopped.CompareAndSwap(false, true) {
 		return false
+	}
+	if t.startCancel != nil {
+		t.startCancel()
 	}
 	t.mu.Lock()
 	run := t.run

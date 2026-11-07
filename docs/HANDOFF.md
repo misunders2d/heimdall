@@ -1,3 +1,7 @@
+> Between-turn delivery update (2026-11-07): see
+> [native continuation evidence and proposed deployment](between-turn-delivery.md).
+> Isolated work clone only; no live bot, deployment or restart.
+
 > Employee Pi update: see [employee-pi.md](employee-pi.md). Caller-owned Mellanni/Linear
 > OAuth is the supported employee route; the older signed-token prerequisite
 > below is superseded for that route. Enable only Pi after its native probes.

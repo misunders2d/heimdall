@@ -46,6 +46,10 @@ func cutBlocks(text string) (string, []string) {
 	return strings.TrimSpace(blockRE.ReplaceAllString(text, "")), blocks
 }
 
+// WithoutProposals strips control blocks from autonomous native output.
+// Only a person request may propose scheduler changes.
+func WithoutProposals(text string) string { clean, _ := cutBlocks(text); return clean }
+
 // yes and no are whole replies that confirm or discard the caller's one
 // draft in this conversation (whole reply, any case, trailing punctuation ignored).
 var (

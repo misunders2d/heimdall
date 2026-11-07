@@ -429,6 +429,8 @@ func (s *Store) Unsteer(item int64) error {
 
 // TurnEnd is how a turn ended.
 type TurnEnd struct {
+	PreserveSession bool // autonomous output must not overwrite a newer turn binding
+
 	State     string // a Turn* state
 	Detail    string
 	ItemState string // state for the turn's running and steered messages
@@ -463,7 +465,7 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 			e.Run = &RunEnd{ID: e.Run.ID, Job: e.Run.Job, State: RunCancelled, Cause: "stopped by command"}
 		}
 	}
-	if _, err = tx.Exec(`UPDATE turns SET state=?,detail=?,ended_at=? WHERE id=? AND state=?`, e.State, e.Detail, now(), turn, TurnRunning); err != nil {
+	if _, err = tx.Exec(`UPDATE turns SET state=?,detail=?,ended_at=?,harness=CASE WHEN ? != '' THEN ? ELSE harness END WHERE id=? AND state=?`, e.State, e.Detail, now(), e.Harness, e.Harness, turn, TurnRunning); err != nil {
 		return 0, err
 	}
 	if _, err = tx.Exec(`UPDATE inbound SET state=? WHERE turn_id=? AND state IN (?,?)`, e.ItemState, turn, InRunning, InSteered); err != nil {
@@ -475,7 +477,17 @@ func (s *Store) EndTurn(turn int64, conv core.ConvKey, who string, e TurnEnd) (r
 			return 0, err
 		}
 	case e.Harness != "":
-		if err = saveSession(tx, conv, who, e.Harness, e.Session, e.Clean && e.Session != ""); err != nil {
+		var running int
+		if err = tx.QueryRow(`SELECT count(*) FROM turns WHERE iface=? AND chat=? AND thread=? AND principal=? AND harness=? AND state=?`, conv.Interface, conv.Chat, conv.Thread, who, e.Harness, TurnRunning).Scan(&running); err != nil {
+			return 0, err
+		}
+		clean := e.Clean && e.Session != "" && running == 0
+		if e.PreserveSession {
+			_, err = tx.Exec(`UPDATE sessions SET clean=? WHERE iface=? AND chat=? AND thread=? AND principal=? AND harness=? AND native_id=?`, clean, conv.Interface, conv.Chat, conv.Thread, who, e.Harness, e.Session)
+		} else {
+			err = saveSession(tx, conv, who, e.Harness, e.Session, clean)
+		}
+		if err != nil {
 			return 0, err
 		}
 	}
@@ -984,4 +996,34 @@ func (s *Store) NotifyCallerOwner(p core.Principal, owner string, out core.Outbo
 		return err
 	}
 	return tx.Commit()
+}
+
+// InvalidateNativeSession never recreates a reset binding or changes another
+// native session. A retiring process can have incomplete autonomous work even
+// though its last person turn ended cleanly.
+func (s *Store) InvalidateNativeSession(conv core.ConvKey, who, harness, session string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET clean=0 WHERE iface=? AND chat=? AND thread=? AND principal=? AND harness=? AND native_id=?`, conv.Interface, conv.Chat, conv.Thread, who, harness, session)
+	return err
+}
+
+// StartContinuation records the native turn, its harness and matching dirty
+// session together. Failure leaves no half-bound running row to recover.
+func (s *Store) StartContinuation(conv core.ConvKey, role core.Role, who, replyTo, harness, session string) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT INTO turns(iface,chat,thread,role,principal,reply_to,started_at,state,harness) VALUES(?,?,?,?,?,?,?,?,?)`, conv.Interface, conv.Chat, conv.Thread, string(role), who, replyTo, now(), TurnRunning, harness)
+	if err != nil {
+		return 0, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.Exec(`UPDATE sessions SET clean=0 WHERE iface=? AND chat=? AND thread=? AND principal=? AND harness=? AND native_id=?`, conv.Interface, conv.Chat, conv.Thread, who, harness, session); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
