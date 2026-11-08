@@ -192,6 +192,19 @@ denied, failed, or ended with anything else may already have acted, so it
 is never replayed under a new key: the commitment holds with the key, turn
 and reason until the owner checks its effects and sends `!work retry`.
 
+Admission without typing `!work add`: during a live owner request, the
+assistant can call the existing `heimdall_scheduler` control with
+`task_add` (Linear issue id, one-line title, stable `request_id`),
+`task_list` or `task_show`. The control binds the caller as for jobs
+(kernel peer, the active turn's generation, matching stored live ingress,
+owner now, Slack re-verified): creator, conversation, privacy and OAuth
+actor are that turn's, never arguments. The same `request_id` is answered
+once from the existing control record (turn dedupe, not exactly-once of
+arbitrary effects); a changed request under it is refused. A title cannot
+carry a worker, resource, gate or next step, and verdicts, retries,
+pauses and closes stay owner `!work` commands. Scheduled, employee,
+review and wake turns cannot admit (wakes have no scheduler control).
+
 ## Dispatch (`t3_dispatch`)
 
 Each attempt is dispatched by one server-initiated turn of the creator's

@@ -55,6 +55,28 @@ Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into rep
 !work pause ISSUE | !work resume ISSUE   (owner pause never expires)
 !work close ISSUE [note…]`
 
+// Task is the durable-task surface of the scheduler control for a bound
+// live owner turn: "add" (a plain title only: no worker, resource, gate or
+// next step can come from a tool call), "list" and "show". It is the same
+// path as !work, with the same live-owner rule; admitted reports a new
+// commitment.
+func (r *Runtime) Task(c Caller, action, issue, title string) (reply string, admitted bool) {
+	switch action {
+	case "list":
+		return r.Command(c, "list"), false
+	case "show":
+		return r.Command(c, "show "+issue), false
+	case "add":
+		f := strings.Fields(title)
+		if len(f) == 0 || strings.Contains(f[0], "=") || strings.Contains(title, "| next:") || strings.ContainsAny(issue, " \t\r\n") {
+			return "A task needs a plain title: no worker, resource, gate or next step from a tool call.", false
+		}
+		reply = r.Command(c, "add "+issue+" "+title)
+		return reply, strings.HasPrefix(reply, "Tracking ")
+	}
+	return "Unsupported task action.", false
+}
+
 // Command answers one !work command. Only live owner messages act.
 func (r *Runtime) Command(c Caller, text string) string {
 	if !c.Live || c.Role != core.RoleOwner {

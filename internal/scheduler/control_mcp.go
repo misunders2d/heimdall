@@ -12,17 +12,18 @@ import (
 // every operation independently of the catalog or model.
 var ControlTool = map[string]any{
 	"name":        "heimdall_scheduler",
-	"description": "Manage the existing Heimdall scheduler as the active interface-verified owner. Discover/list/show/history/checkpoint; propose create/edit/remove for real human confirmation in the originating conversation; run/pause/resume/stop existing jobs. Acknowledge an exact failed receipt after destination reconciliation, without replaying or hiding history. No identity or confirmation arguments. For a mutation generate one stable request_id; reuse it after an uncertain response, never create another retry id.",
+	"description": "Manage the existing Heimdall scheduler as the active interface-verified owner. Discover/list/show/history/checkpoint; propose create/edit/remove for real human confirmation in the originating conversation; run/pause/resume/stop existing jobs. Acknowledge an exact failed receipt after destination reconciliation, without replaying or hiding history. task_add/task_list/task_show track a durable task of this owner request (id = Linear issue, one-line title): it is worked by the owner's own assistant and stays unaccepted until verified; nothing else (no verdict, worker or permission) is set here. No identity or confirmation arguments. For a mutation generate one stable request_id; reuse it after an uncertain response, never create another retry id.",
 	"inputSchema": map[string]any{
 		"type": "object", "additionalProperties": false, "required": []string{"action"},
 		"properties": map[string]any{
-			"action":      map[string]any{"type": "string", "enum": []string{"discover", "list", "show", "history", "checkpoint", "create", "edit", "remove", "run", "pause", "resume", "stop", "acknowledge"}},
+			"action":      map[string]any{"type": "string", "enum": []string{"discover", "list", "show", "history", "checkpoint", "create", "edit", "remove", "run", "pause", "resume", "stop", "acknowledge", "task_add", "task_list", "task_show"}},
 			"key":         map[string]any{"type": "string", "maxLength": 128},
 			"revision":    map[string]any{"type": "string", "maxLength": 128},
 			"outbound_id": map[string]any{"type": "integer", "minimum": 1},
 			"id":          map[string]any{"type": "string", "maxLength": 64},
 			"definition":  map[string]any{"type": "object", "description": "Existing canonical job definition, or changed fields for edit. Never a creator/role; unknown fields rejected by scheduler."},
 			"request_id":  map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
+			"title":       map[string]any{"type": "string", "maxLength": 500, "description": "task_add only: the task's plain one-line title."},
 		},
 	},
 	"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},

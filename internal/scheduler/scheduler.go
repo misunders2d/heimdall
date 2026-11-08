@@ -58,6 +58,10 @@ type Verified struct {
 type Scheduler struct {
 	// ResolveControl maps kernel peer PID to a currently active trusted person turn.
 	ResolveControl func(int) (Caller, func() bool, error)
+	// Tasks admits (action "add") or reads ("list", "show") durable tasks
+	// for a bound live owner caller; nil: durable tasks are off. admitted
+	// reports a new commitment.
+	Tasks func(who Caller, action, issue, title string) (reply string, admitted bool)
 
 	cfg    Config
 	st     *store.Store

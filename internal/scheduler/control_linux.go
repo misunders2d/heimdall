@@ -35,6 +35,7 @@ type ControlRequest struct {
 	ID         string          `json:"id,omitempty"`
 	Definition json.RawMessage `json:"definition,omitempty"`
 	RequestID  string          `json:"request_id,omitempty"`
+	Title      string          `json:"title,omitempty"` // task_add only: the task's plain title
 }
 
 type ControlResult struct {
@@ -229,7 +230,7 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 	if !ok || r != core.RoleOwner {
 		return Caller{}, errors.New("bound caller is not a current owner")
 	}
-	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private}, nil
+	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, nil
 }
 
 // scheduledCaller binds a router-started scheduled run. The router already
@@ -336,6 +337,12 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	if len(valid) > 0 && !valid[0]() {
 		return fail(errors.New("request origin expired during verification"))
 	}
+	if strings.HasPrefix(req.Action, "task_") {
+		return c.task(uid, req, who, valid)
+	}
+	if req.Title != "" {
+		return fail(errors.New("title is only valid for task_add"))
+	}
 	read := req.Action == "list" || req.Action == "show" || req.Action == "history" || req.Action == "checkpoint" || req.Action == "discover"
 	if who.Job != "" && !read {
 		return fail(errors.New("scheduled runs may only read the scheduler; drafts, changes and confirmations need a live human request"))
@@ -367,7 +374,7 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		return fail(errors.New("receipt fields require acknowledge"))
 	}
 	if req.Action == "discover" {
-		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge. acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
+		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
 	}
 	var job store.Job
 	if req.ID != "" {
@@ -479,6 +486,75 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 }
 
 // CallControl is shared by the CLI and stdio adapter. It never opens the store.
+// task admits or reads durable tasks for a bound live owner turn only:
+// add/list/show, nothing else (no verdicts, retries, pauses or worker).
+// The creator, conversation, privacy and OAuth actor are the bound
+// caller's; task_add needs a stable request_id and is answered once per
+// request (the existing control response record); a changed request under
+// the same id is refused.
+func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func() bool) ControlResult {
+	fail := func(msg string) ControlResult { return ControlResult{Error: msg} }
+	if c.s.Tasks == nil {
+		return fail("durable tasks are not enabled here")
+	}
+	if who.Job != "" {
+		return fail("scheduled runs cannot admit or read durable tasks; a live human request is required")
+	}
+	if req.Key != "" || req.Revision != "" || req.Outbound != 0 || len(req.Definition) > 0 {
+		return fail("task actions take only id, title and request_id")
+	}
+	bad := func(s string, n int) bool { return len(s) > n || strings.ContainsAny(s, "\r\n") }
+	switch req.Action {
+	case "task_list":
+		if req.ID != "" || req.Title != "" || req.RequestID != "" {
+			return fail("task_list takes no arguments")
+		}
+		reply, _ := c.s.Tasks(who, "list", "", "")
+		return ControlResult{Reply: reply}
+	case "task_show":
+		if req.ID == "" || bad(req.ID, 64) || strings.ContainsAny(req.ID, " \t") || req.Title != "" || req.RequestID != "" {
+			return fail("task_show takes only an issue id")
+		}
+		reply, _ := c.s.Tasks(who, "show", req.ID, "")
+		return ControlResult{Reply: reply}
+	case "task_add":
+	default:
+		return fail("unsupported task action (task_add, task_list, task_show only)")
+	}
+	if req.ID == "" || bad(req.ID, 64) || strings.ContainsAny(req.ID, " \t") || strings.TrimSpace(req.Title) == "" || bad(req.Title, 500) {
+		return fail("task_add needs an issue id and a one-line title (up to 500 bytes)")
+	}
+	if req.RequestID == "" || bad(req.RequestID, 128) {
+		return fail("mutation requires a stable request_id (1-128 bytes); reuse only for the same request")
+	}
+	raw, _ := json.Marshal(struct {
+		Request ControlRequest
+		Source  core.ConvKey
+	}{req, who.Conv})
+	sum := sha256.Sum256(raw)
+	digest := hex.EncodeToString(sum[:])
+	if saved, ok, err := c.s.st.ControlResponse(who.Principal.Key(), req.RequestID, digest); err != nil {
+		return fail(err.Error())
+	} else if ok {
+		var result ControlResult
+		_ = json.Unmarshal([]byte(saved), &result)
+		return result
+	}
+	if len(valid) > 0 && !valid[0]() {
+		return fail("request origin expired before admission")
+	}
+	// Admission is idempotent by issue: a crash before the record below
+	// leaves a retry of the same request answering "already tracked".
+	reply, admitted := c.s.Tasks(who, "add", req.ID, req.Title)
+	result := ControlResult{Reply: reply, Changed: admitted}
+	response, _ := json.Marshal(result)
+	if err := c.s.st.ControlCommit(who.Principal.Key(), req.RequestID, digest, req.Action, req.ID, string(response), uid, nil, nil); err != nil {
+		return fail(err.Error())
+	}
+	c.s.log.Printf("scheduler control: operator uid %d, action %s, changed %t", uid, req.Action, admitted)
+	return result
+}
+
 func CallControl(ctx context.Context, socket string, req ControlRequest) (ControlResult, error) {
 	var out ControlResult
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)

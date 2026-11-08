@@ -190,6 +190,13 @@ func run(args []string) error {
 	}
 	if work != nil {
 		defer work.Close()
+		if jobs != nil {
+			// The scheduler control's task actions: only a bound live owner
+			// person turn reaches here (scheduled runs are refused there).
+			jobs.Tasks = func(who scheduler.Caller, action, issue, title string) (string, bool) {
+				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title)
+			}
+		}
 	}
 	r := router.New(router.Options{Work: work, Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
 	if cfg.Scheduler.On() && cfg.Scheduler.Control != nil {
