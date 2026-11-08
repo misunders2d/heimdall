@@ -262,13 +262,15 @@ func (c *Control) scheduledCaller(ctx context.Context, who Caller) (Caller, erro
 	return Caller{Principal: v.Principal, Role: core.RoleOwner, Conv: tgt.Conv, Private: tgt.Private && tgt.AgentNet == "", Job: j.ID, Run: run.ID}, nil
 }
 
-// readable is a job the bound caller may read: its own, or (read actions
-// only) one created by the same person's identity alias that is an owner now.
+// readable is a job the bound caller may read: its own (exact creator), or,
+// for a trusted scheduled run's read actions only, one created by the same
+// person's identity alias that is an owner now. Live person turns keep exact
+// creator reads.
 func (c *Control) readable(j store.Job, who Caller, read bool) bool {
 	if j.Creator.Key() == who.Principal.Key() {
 		return true
 	}
-	if !read || !c.s.access.SamePerson(j.Creator, who.Principal) {
+	if !read || who.Job == "" || !c.s.access.SamePerson(j.Creator, who.Principal) {
 		return false
 	}
 	r, ok := c.s.access.Role(j.Creator)

@@ -131,3 +131,31 @@ func TestScheduledControlPrivacyFromStoredTarget(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// Alias reads are a scheduled-run-only extension: a live person turn keeps
+// exact-creator reads, while the trusted scheduled run of the same person may
+// read the alias's job (reads only).
+func TestAliasReadsOnlyForScheduledOrigin(t *testing.T) {
+	ctx := context.Background()
+	r, id, self, _ := destRig(t)
+	c := &Control{s: r.s, owner: boss.Key(), uid: 1234}
+	slackDM := core.ConvKey{Interface: "slack", Chat: "DSELF", Thread: "1000.3"}
+	aliasJob := r.add(Caller{Principal: self, Role: core.RoleOwner, Conv: slackDM, Private: true}, `{"name":"alias job","schedule":{"every":"1h"},"prompt":"p"}`)
+	ingress(t, r, bossDM, boss, true, core.OriginLive)
+	live := asBoss
+	if got := c.execute(ctx, 1234, ControlRequest{Action: "show", ID: id}, live); got.Error != "" {
+		t.Fatal("live exact-creator read refused", got)
+	}
+	for _, a := range []string{"show", "history", "checkpoint"} {
+		if got := c.execute(ctx, 1234, ControlRequest{Action: a, ID: aliasJob}, live); !strings.Contains(got.Error, "no job of the bound creator") {
+			t.Fatalf("live alias %s admitted: %+v", a, got)
+		}
+	}
+	scheduled := running(t, r, id)
+	if got := c.execute(ctx, 1234, ControlRequest{Action: "show", ID: aliasJob}, scheduled); got.Error != "" || got.Reply == "" {
+		t.Fatal("scheduled alias read refused", got)
+	}
+	if got := c.execute(ctx, 1234, ControlRequest{Action: "pause", ID: aliasJob, RequestID: "ap"}, scheduled); !strings.Contains(got.Error, "scheduled runs may only read") {
+		t.Fatal("scheduled alias mutation admitted", got)
+	}
+}

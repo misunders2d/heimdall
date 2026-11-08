@@ -32,8 +32,9 @@ router-started run, bound by the same pidfd/ancestry/generation to its harness
 process. Per call the store must show that exact run still `running` at the
 job's current version, created by that principal, re-verified (Slack live) and
 an owner now for the job's target; conversation and privacy come from the stored
-job. It may discover/list/show/history/checkpoint its creator's jobs (reads also
-cover the same person's current-owner identity alias). Create/edit/remove drafts,
+job. It may discover/list/show/history/checkpoint its creator's jobs (its reads
+also cover the same person's current-owner identity alias; live person turns keep
+exact-creator reads). Create/edit/remove drafts,
 run/pause/resume/stop and acknowledge are refused: they stay with live humans.
 No model argument, environment identity, or result destination supplies
 origin. Warm MCP servers resolve anew on every call; accepted steers share the
