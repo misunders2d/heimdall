@@ -207,6 +207,24 @@ func (a Access) OwnerKeys() []string {
 	return keys
 }
 
+// SamePerson reports whether two verified principals are the same person: the
+// same key, or principals linked by the access snapshot's identity aliases (the
+// expansion Decide already uses). Without access files only equal keys match.
+func (a Access) SamePerson(x, y Principal) bool {
+	if x.Key() == y.Key() {
+		return true
+	}
+	px, py := platformID(x), platformID(y)
+	if a.Dir == "" || px == "" || py == "" {
+		return false
+	}
+	f, ok := a.files()
+	if !ok {
+		return false
+	}
+	return overlap(f.ids(px, x.ID), f.ids(py, y.ID))
+}
+
 // ValidateAuthority checks startup authority without reading credentials or requiring
 // the staged Pi access files to exist. The files themselves fail closed per turn.
 func (a Access) ValidateAuthority() ([]string, error) {

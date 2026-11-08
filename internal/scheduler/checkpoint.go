@@ -76,7 +76,26 @@ func (s *Scheduler) checkpointResult(t *Turn, text string, files []core.File, to
 			return nil, errors.New("only confirmed resolved receipts may retire")
 		}
 	}
-	for _, a := range u.Alerts {
+	var senders []string
+	for i, a := range u.Alerts {
+		if a.To != "" && senders == nil {
+			if senders = s.senders(t.Job); len(senders) == 0 {
+				return nil, errors.New("alert destination: job creator is not a current owner")
+			}
+		}
+		if a.To != "" {
+			if a.To == "here" || strings.HasPrefix(a.To, "agentnet:") {
+				return nil, errors.New("alert to: tg:<chat>[/<topic>] or slack:<channel>[/<thread ts>] only")
+			}
+			tgt, err := s.resolve(a.To, Caller{})
+			if err != nil {
+				return nil, errors.New("invalid alert destination")
+			}
+			if err := s.st.OwnerIngress(tgt.Conv, senders); err != nil {
+				return nil, err
+			}
+			u.Alerts[i].Conv = tgt.Conv
+		}
 		if a.Key == "" || len(a.Key) > 128 || a.Revision == "" || len(a.Revision) > 128 || strings.ContainsAny(a.Key+a.Revision, "\x00\r\n") || strings.TrimSpace(a.Text) == "" || len(a.Text) > 4000 || keys[a.Key] {
 			return nil, errors.New("invalid or duplicate alert")
 		}
@@ -124,6 +143,25 @@ func (s *Scheduler) checkpointResult(t *Turn, text string, files []core.File, to
 	} else {
 		u.Cause = ""
 	}
-	u.Target, u.Window = t.Target.Conv, t.Def.DeliveryWindow
+	u.Target, u.Window, u.Senders = t.Target.Conv, t.Def.DeliveryWindow, senders
 	return &u, nil
+}
+
+// senders are the job creator's own current owner identities: the creator and
+// its identity aliases that are owners now. Other owners are other people.
+func (s *Scheduler) senders(job string) []string {
+	j, ok, err := s.st.Job(job)
+	if err != nil || !ok {
+		return nil
+	}
+	if role, admitted := s.access.Role(j.Creator); !admitted || role != core.RoleOwner {
+		return nil
+	}
+	out := []string{j.Creator.Key()}
+	for _, key := range s.access.OwnerKeys() {
+		if p, err := core.ParsePrincipalKey(key); err == nil && key != j.Creator.Key() && s.access.SamePerson(p, j.Creator) {
+			out = append(out, key)
+		}
+	}
+	return out
 }

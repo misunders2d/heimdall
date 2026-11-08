@@ -30,12 +30,18 @@ type AlertReceipt struct {
 	Revision     string `json:"revision"`
 	Outbound     int64  `json:"outbound_id"`
 	Status       string `json:"status"` // pending/sending/sent/failed; sending is not confirmation
+	To           string `json:"to"`     // the conversation this receipt's row delivers to
 }
 
 type Alert struct {
 	Key      string `json:"key"`
 	Revision string `json:"revision"`
 	Text     string `json:"text"`
+	// To optionally names the original conversation (tg:/slack: syntax) of a
+	// supervised request. Conv is its resolved key; the store admits it only
+	// where a current owner had live verified ingress (see saveCheckpoint).
+	To   string       `json:"to,omitempty"`
+	Conv core.ConvKey `json:"-"`
 }
 
 // Acknowledgement never changes the outbox state or replays an effect. The
@@ -57,6 +63,7 @@ type CheckpointUpdate struct {
 	Retire      []string             `json:"retire,omitempty"` // resolved keys, only after confirmed delivery
 	Target      core.ConvKey         `json:"-"`
 	Window      *core.DeliveryWindow `json:"-"`
+	Senders     []string             `json:"-"` // the creator's current owner identities, for per-alert destinations
 }
 
 func (s *Store) Checkpoint(job, creator string) (Checkpoint, error) {
@@ -69,7 +76,7 @@ func (s *Store) Checkpoint(job, creator string) (Checkpoint, error) {
 	if state != "" {
 		c.State = json.RawMessage(state)
 	}
-	rows, err := s.db.Query(`SELECT a.key,a.revision,a.outbound_id,o.state,o.text,a.acknowledged_at>0 FROM job_alerts a JOIN outbound o ON o.id=a.outbound_id WHERE a.job_id=? AND a.creator=? AND a.retired=0 ORDER BY a.key,a.outbound_id`, job, creator)
+	rows, err := s.db.Query(`SELECT a.key,a.revision,a.outbound_id,o.state,o.text,a.acknowledged_at>0,o.iface,o.chat,o.thread FROM job_alerts a JOIN outbound o ON o.id=a.outbound_id WHERE a.job_id=? AND a.creator=? AND a.retired=0 ORDER BY a.key,a.outbound_id`, job, creator)
 	if err != nil {
 		return c, err
 	}
@@ -77,9 +84,11 @@ func (s *Store) Checkpoint(job, creator string) (Checkpoint, error) {
 	for rows.Next() {
 		var r AlertReceipt
 		var body string
-		if err := rows.Scan(&r.Key, &r.Revision, &r.Outbound, &r.Status, &body, &r.Acknowledged); err != nil {
+		var k core.ConvKey
+		if err := rows.Scan(&r.Key, &r.Revision, &r.Outbound, &r.Status, &body, &r.Acknowledged, &k.Interface, &k.Chat, &k.Thread); err != nil {
 			return c, err
 		}
+		r.To = ConvTarget(k)
 		r.ContentHash = fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
 		c.Receipts = append(c.Receipts, r)
 	}
@@ -152,7 +161,14 @@ func saveCheckpoint(tx *sql.Tx, turn int64, who string, run *RunEnd, u Checkpoin
 		if exists != 0 {
 			continue
 		}
-		id, err := enqueue(tx, core.Outbound{TurnID: turn, Conv: u.Target, Text: alert.Text, Formatted: true, Window: u.Window})
+		dest := u.Target
+		if alert.To != "" {
+			if err := ownerIngress(tx, alert.Conv, u.Senders); err != nil {
+				return err
+			}
+			dest = alert.Conv
+		}
+		id, err := enqueue(tx, core.Outbound{TurnID: turn, Conv: dest, Text: alert.Text, Formatted: true, Window: u.Window})
 		if err != nil {
 			return err
 		}
@@ -196,6 +212,51 @@ func saveCheckpoint(tx *sql.Tx, turn int64, who string, run *RunEnd, u Checkpoin
 	}
 	_, err = tx.Exec(`INSERT INTO job_checkpoints(job_id,creator,version,through_at,state,run_id,scan_through,partial,cause) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET version=excluded.version,through_at=excluded.through_at,state=excluded.state,run_id=excluded.run_id,scan_through=excluded.scan_through,partial=excluded.partial,cause=excluded.cause WHERE creator=excluded.creator`, run.Job, who, version+1, u.Through, string(u.State), run.ID, u.ScanThrough, !u.Complete, u.Cause)
 	return err
+}
+
+// ConvTarget renders a conversation in job target syntax (tg:/slack:).
+func ConvTarget(k core.ConvKey) string {
+	prefix := k.Interface
+	if prefix == core.PlatformTelegram {
+		prefix = "tg"
+	}
+	if k.Thread == "" {
+		return prefix + ":" + k.Chat
+	}
+	return prefix + ":" + k.Chat + "/" + k.Thread
+}
+
+// ownerIngress admits a per-alert destination only when one of senders (the
+// job creator's own current owner identities) sent real live verified input in
+// that exact private conversation. A destination is never authority: model or
+// tracker text naming another person's, a group's or a public chat fails.
+func ownerIngress(tx interface {
+	QueryRow(string, ...any) *sql.Row
+}, k core.ConvKey, senders []string) error {
+	if k.Interface == "" || k.Chat == "" {
+		return errors.New("invalid alert destination")
+	}
+	for _, key := range senders {
+		p, err := core.ParsePrincipalKey(key)
+		if err != nil {
+			continue
+		}
+		var found int
+		err = tx.QueryRow(`SELECT 1 FROM inbound WHERE iface=? AND chat=? AND thread=? AND platform=? AND user_id=? AND private=1 AND origin=? AND coalesce(json_extract(nullif(extra,''),'$.mcp_control'),0)=0 LIMIT 1`, k.Interface, k.Chat, k.Thread, p.Platform, p.ID, core.OriginLive).Scan(&found)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	return errors.New("alert destination is not the job creator's live private conversation; scan not committed")
+}
+
+// OwnerIngress is the same check, read before a run's commit so a refused
+// destination fails the scan visibly; the commit transaction checks again.
+func (s *Store) OwnerIngress(k core.ConvKey, senders []string) error {
+	return ownerIngress(s.db, k, senders)
 }
 
 // ControlBinding reads a real private platform ingress, without reading its text.
