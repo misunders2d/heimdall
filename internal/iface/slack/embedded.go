@@ -160,6 +160,7 @@ func (x *extractor) message(v any, depth int, control string) string {
 		}
 		am, _ := a.(map[string]any)
 		var fragments []string
+		var shared []any
 		mb, _ := am["message_blocks"].([]any)
 		for _, entry := range mb {
 			if !x.node(depth + 2) {
@@ -167,12 +168,42 @@ func (x *extractor) message(v any, depth int, control string) string {
 			}
 			em, _ := entry.(map[string]any)
 			fragments = append(fragments, x.message(em["message"], depth+3, ""))
+			if nested, _ := em["message"].(map[string]any); nested != nil {
+				shared = append(shared, list(nested["files"])...)
+			}
 		}
 		fragments = append(fragments, x.renderBlocks(am["blocks"], depth+2), x.field(am["text"]), x.field(am["fallback"]))
+		// Shared files: the top-level event files are the sender's own upload
+		// and handled as attachments; these only ever become labels.
+		fragments = append(fragments, x.files(append(shared, list(am["files"])...), depth+2))
 		attachments = append(attachments, joinDistinct(fragments))
 	}
 	// Equal contents in distinct forwarded attachments stay distinct.
 	return strings.TrimSpace(joinDistinct(parts) + "\n\n" + strings.Join(attachments, "\n\n"))
+}
+
+func list(v any) []any { items, _ := v.([]any); return items }
+
+// files labels a shared message's files as metadata only: they are someone's
+// historical upload, never downloaded or attached as the current sender's.
+func (x *extractor) files(items []any, depth int) string {
+	var labels []string
+	seen := map[string]bool{}
+	for _, f := range items {
+		if !x.node(depth) {
+			break
+		}
+		fm, _ := f.(map[string]any)
+		label := "[shared file: " + first(x.field(fm["name"]), x.field(fm["title"]), "file")
+		if mime := x.field(fm["mimetype"]); mime != "" {
+			label += " (" + mime + ")"
+		}
+		if label += " — not downloaded]"; !seen[label] {
+			seen[label] = true
+			labels = append(labels, label)
+		}
+	}
+	return strings.Join(labels, "\n")
 }
 func embeddedContent(m eventMessage) string {
 	x := extractor{}
