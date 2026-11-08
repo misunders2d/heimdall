@@ -42,6 +42,7 @@ type slackFake struct {
 	hook      func(http.ResponseWriter, *http.Request, map[string]any) bool
 	users     map[string]User
 	file      []byte
+	uploads   []string // "content-type=body" of each upload endpoint POST
 }
 
 func newSlackFake(t *testing.T) *slackFake {
@@ -93,7 +94,10 @@ func (f *slackFake) serve(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
 			f.t.Error("bearer sent to upload endpoint")
 		}
-		_, _ = io.Copy(io.Discard, r.Body)
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.uploads = append(f.uploads, r.Header.Get("Content-Type")+"="+string(body))
+		f.mu.Unlock()
 		return
 	}
 	args := map[string]any{}
