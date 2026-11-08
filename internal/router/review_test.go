@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,7 +15,7 @@ import (
 )
 
 // workEnv is the router with durable commitments and supervisor review on.
-func workEnv(t *testing.T) (*env, *durable.Runtime) {
+func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 	t.Helper()
 	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
 	e.stop()
@@ -32,6 +33,9 @@ func workEnv(t *testing.T) (*env, *durable.Runtime) {
 	e.r = r
 	rt.SetWake(r.Wake)
 	rt.SetReviewer(r)
+	if len(dispatch) > 0 && dispatch[0] {
+		rt.SetDispatcher(r, r.OwnsRoute)
+	}
 	if err := rt.Launch(); err != nil {
 		t.Fatal(err)
 	}
@@ -317,4 +321,63 @@ func TestOwnsRouteRevalidatesCreator(t *testing.T) {
 			t.Fatalf("%s: accepted", name)
 		}
 	}
+}
+
+// A dispatch is one server-initiated turn of the creator's harness, in the
+// commitment's own conversation, asked to call its native t3_thread_send
+// once with the stable clientRequestId; the receipt it returns binds the
+// attempt to its run. A repeated key reconciles to the stored turn, never
+// a second one, and nothing reaches any chat.
+func TestCommitmentDispatchReceipt(t *testing.T) {
+	e, rt := workEnv(t, true)
+	answer := "RECEIPT\n```json\n" + `{"threadId":"thread-X","link":"<t3-thread://v2/env-L/thread-X>","messageId":"message:mcp:client%3As1:thread-send:string%3AMEL-80%2F1%2Fdispatch","runId":"run:thread:thread-X:ordinal:2","status":"starting","delivery":"queued"}` + "\n```"
+	e.send(owner, "c8", "!work add MEL-80 worker=t3:thread-X@env-L Ship it "+say(answer))
+	e.replyIn("c8", "MEL-80")
+	st := phase(t, rt, "MEL-80", durable.PhaseWorking)
+	if st.Dispatched != "run:thread:thread-X:ordinal:2" {
+		t.Fatalf("%+v", st)
+	}
+	conv := core.ConvKey{Interface: "fake", Chat: core.ReviewChat("MEL-80")}
+	key := "MEL-80/1/dispatch"
+	if n := count(t, e.dbPath, `SELECT count(*) FROM inbound WHERE chat=? AND msg_id=? AND text LIKE '%threadId: thread-X%environmentId: env-L%mode: queue%clientRequestId: MEL-80/1/dispatch%BEGIN MESSAGE%[heimdall MEL-80/1/dispatch]%MEL-80: Ship it%'`, conv.Chat, key); n != 1 {
+		t.Fatalf("dispatch prompt not bound: %d", n)
+	}
+	q := durable.DispatchRequest{Key: key, Issue: "MEL-80", Attempt: 1, Owner: core.Principal{Platform: "fake", ID: "owner"}, Route: core.ConvKey{Interface: "fake", Chat: "c8"}, Worker: "t3:thread-X@env-L"}
+	rc, found, err := e.r.Reconcile(context.Background(), q)
+	if err != nil || !found || rc != (durable.Receipt{Thread: "thread-X", Run: "run:thread:thread-X:ordinal:2", Message: "message:mcp:client%3As1:thread-send:string%3AMEL-80%2F1%2Fdispatch", Delivery: "queued"}) {
+		t.Fatalf("reconciled %+v %v %v", rc, found, err)
+	}
+	if again, err := e.r.Dispatch(context.Background(), q); err != nil || again != rc {
+		t.Fatalf("repeated key %+v %v", again, err)
+	}
+	if n := count(t, e.dbPath, `SELECT count(*) FROM turns WHERE chat=?`, conv.Chat); n != 1 {
+		t.Fatalf("dispatch turns %d", n)
+	}
+	e.noReply(300 * time.Millisecond)
+}
+
+// Without a native send, a native approval request, or with a receipt that
+// is not well-formed for the selected thread, the commitment holds on the
+// stored turn: one turn, never replayed, nothing sent to the chat.
+func TestCommitmentDispatchHeld(t *testing.T) {
+	e, rt := workEnv(t, true)
+	for i, c := range []struct{ text, why string }{
+		{say("UNAVAILABLE\nno t3_thread_send tool in this session"), "native send unavailable: no t3_thread_send tool"},
+		{"ASK_HUMAN", "native approval or input"},
+		{say(`RECEIPT` + "\n" + `{"threadId":"other","messageId":"message:mcp:c:thread-send:k","runId":"run:2"}`), "the send may have happened"},
+	} {
+		issue := fmt.Sprintf("MEL-8%d", i+1)
+		chat := fmt.Sprintf("d%d", i)
+		e.send(owner, chat, "!work add "+issue+" worker=t3:thread-Y Hold me "+c.text)
+		e.replyIn(chat, issue)
+		st := phase(t, rt, issue, durable.PhaseHeld)
+		if !strings.Contains(st.Blocked, c.why) || !strings.Contains(st.Blocked, "not replayed") {
+			t.Fatalf("%s: %+v", issue, st)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if n := count(t, e.dbPath, `SELECT count(*) FROM turns WHERE chat=?`, core.ReviewChat(issue)); n != 1 {
+			t.Fatalf("%s: dispatch turns %d", issue, n)
+		}
+	}
+	e.noReply(300 * time.Millisecond)
 }

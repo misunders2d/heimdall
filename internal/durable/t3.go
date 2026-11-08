@@ -47,7 +47,7 @@ type T3 struct {
 
 func (t T3) Observable(worker string) bool {
 	id, ok := strings.CutPrefix(worker, "t3:")
-	return ok && id != "" && len(t.Command) > 0
+	return ok && id != "" && !strings.Contains(id, "@") && len(t.Command) > 0
 }
 
 func (t T3) Observe(ctx context.Context, worker string) (Observation, error) {

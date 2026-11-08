@@ -25,6 +25,9 @@ type Caller struct {
 	MsgID     string
 	Live      bool // core.OriginLive: a real person's message, not a scheduled run
 	Private   bool // the stored ingress is the caller's private chat with the bot
+	// The interface-verified native OAuth actor of the stored message: the
+	// creator's own native sign-ins (as for !job runs); never role authority.
+	OAuthActor, OAuthInstallation string
 }
 
 // sees reports whether c may see cm. As for !job: in the creator's private
@@ -126,7 +129,7 @@ func (r *Runtime) Command(c Caller, text string) string {
 }
 
 func parseAdd(c Caller, issue string, args []string) (Commitment, error) {
-	cm := Commitment{Issue: issue, Creator: c.Principal.Key(), Owner: c.Principal, Route: c.Conv, Private: c.Private, ReplyTo: c.MsgID, Resource: defaultRes}
+	cm := Commitment{Issue: issue, Creator: c.Principal.Key(), Owner: c.Principal, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Route: c.Conv, Private: c.Private, ReplyTo: c.MsgID, Resource: defaultRes}
 	var title []string
 	for i, a := range args {
 		k, v, ok := strings.Cut(a, "=")

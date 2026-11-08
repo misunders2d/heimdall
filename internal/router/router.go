@@ -833,7 +833,7 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		text := "Durable commitments are not enabled here."
 		if w := c.r.opt.Work; w != nil {
 			// The same verified ingress caller as !job; scheduled runs are not live.
-			text = w.Command(durable.Caller{Principal: row.From, Role: role, Conv: c.key, MsgID: row.MsgID, Live: row.Origin == core.OriginLive, Private: row.Private}, cmd.Text)
+			text = w.Command(durable.Caller{Principal: row.From, Role: role, Conv: c.key, MsgID: row.MsgID, Live: row.Origin == core.OriginLive, Private: row.Private, OAuthActor: row.OAuthActor, OAuthInstallation: row.OAuthInstallation}, cmd.Text)
 		}
 		c.answer(row, store.CommandEnd{Detail: "work"}, text)
 		return false
@@ -1181,7 +1181,7 @@ func (c *conv) start(ctx context.Context) {
 		c.queue[0] = first
 	}
 	review := first.row.Review
-	if review != nil && (first.role != core.RoleOwner || c.r.opt.Work == nil || !c.r.opt.Work.Reviewable(review.Issue, review.Attempt)) {
+	if review != nil && (first.role != core.RoleOwner || c.r.opt.Work == nil || !current(c.r.opt.Work, review)) {
 		// Revalidated as the turn actually starts: the creator is still an
 		// admitted owner on the route and the attempt still waits.
 		_ = c.r.store.SetInbound(first.row.ID, store.InCancelled, "held: review refused at launch: creator no longer an admitted owner on the route, or the commitment is paused, cancelled or no longer waits for this attempt's verdict")

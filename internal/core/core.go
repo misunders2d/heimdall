@@ -230,6 +230,10 @@ type Review struct {
 	Key     string  `json:"key"` // the durable effect identity; also the MsgID
 	Target  ConvKey `json:"target"`
 	Private bool    `json:"private,omitempty"`
+	// Worker is set for a dispatch turn: the creator's harness sends the
+	// attempt's brief to this owner-selected T3 thread with its own native
+	// T3 tool, and answers with the tool's receipt.
+	Worker string `json:"worker,omitempty"`
 }
 
 // ReviewChat is the chat of issue's own review conversation.

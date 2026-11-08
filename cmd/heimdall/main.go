@@ -216,7 +216,7 @@ func run(args []string) error {
 			work.SetReviewer(r)
 		}
 		if cfg.Durable.Dispatch {
-			work.SetDispatcher(durable.T3{Command: cfg.Durable.T3Command}, r.OwnsRoute)
+			work.SetDispatcher(r, r.OwnsRoute)
 		}
 		if err := work.Launch(); err != nil {
 			return fmt.Errorf("durable commitments: %w", err)
@@ -240,9 +240,6 @@ func openDurable(cfg *config.Config, st *store.Store, logger *log.Logger) (*dura
 		res[name] = durable.Resource{Concurrency: r.Concurrency, PerWorker: r.PerWorker, RateLimit: r.RateLimit, RatePeriod: time.Duration(r.RatePeriodSeconds) * time.Second}
 	}
 	var obs durable.Observer
-	if d.Dispatch && len(d.T3Command) == 0 {
-		return nil, errors.New("durable.t3_dispatch needs durable.t3_command")
-	}
 	if len(d.T3Command) > 0 {
 		if !filepath.IsAbs(d.T3Command[0]) {
 			return nil, errors.New("durable.t3_command must start with an absolute path")

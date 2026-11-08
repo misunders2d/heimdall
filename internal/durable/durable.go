@@ -80,9 +80,16 @@ type DispatchRequest struct {
 	Attempt int
 	Owner   core.Principal // the commitment's creator; revalidated before sending
 	Route   core.ConvKey
-	Worker  string // owner-selected at admission
-	Marker  string // first line of Message: "[heimdall KEY]"
-	Message string // Marker, then the brief (or repair feedback / next step)
+	Private bool
+	// The creator's verified native OAuth actor from admission.
+	OAuthActor, OAuthInstallation string
+	// ClientRequestID is the native idempotency key: ISSUE/attempt/dispatch,
+	// the same for !work retry turns, so a retry within the same native
+	// namespace returns the first send's work.
+	ClientRequestID string
+	Worker          string // owner-selected at admission
+	Marker          string // first line of Message: "[heimdall KEY]"
+	Message         string // Marker, then the brief (or repair feedback / next step)
 }
 
 // Receipt is the worker host's own record of a dispatch: the thread, the
@@ -267,6 +274,12 @@ func (r *Runtime) Reviewable(issue string, attempt int) bool {
 	return r.current(issue, attempt, PhaseReported)
 }
 
+// Dispatchable reports whether issue still dispatches attempt; the router
+// checks it as a dispatch turn starts and ends.
+func (r *Runtime) Dispatchable(issue string, attempt int) bool {
+	return r.current(issue, attempt, PhaseDispatching)
+}
+
 // current reports whether issue's workflow is running (not paused,
 // cancelled or ended) with attempt in phase.
 func (r *Runtime) current(issue string, attempt int, phase string) bool {
@@ -295,18 +308,22 @@ func (r *Runtime) Close() {
 // Commitment is the workflow input. Creator and Route come from the
 // verified live owner message that admitted it, never from arguments.
 type Commitment struct {
-	Issue    string         `json:"issue"` // Linear identifier; the workflow ID
-	Title    string         `json:"title"`
-	Creator  string         `json:"creator"`           // principal key
-	Owner    core.Principal `json:"owner"`             // the creator as verified at admission
-	Route    core.ConvKey   `json:"route"`             // replies go only here
-	Private  bool           `json:"private,omitempty"` // admitted in the creator's private chat
-	ReplyTo  string         `json:"reply_to"`
-	Resource string         `json:"resource"`
-	Worker   string         `json:"worker"`          // owner-selected worker reference; also the partition
-	Brief    string         `json:"brief,omitempty"` // dispatched when a Dispatcher is configured
-	Gates    []string       `json:"gates,omitempty"` // evidence prechecks, e.g. git:/repo
-	Next     string         `json:"next,omitempty"`  // authorized work left after acceptance; "" = single step
+	Issue   string         `json:"issue"` // Linear identifier; the workflow ID
+	Title   string         `json:"title"`
+	Creator string         `json:"creator"` // principal key
+	Owner   core.Principal `json:"owner"`   // the creator as verified at admission
+	// The admitting message's verified native OAuth actor: a dispatch turn
+	// runs with the creator's own native sign-ins, as a !job run does.
+	OAuthActor        string       `json:"oauth_actor,omitempty"`
+	OAuthInstallation string       `json:"oauth_installation,omitempty"`
+	Route             core.ConvKey `json:"route"`             // replies go only here
+	Private           bool         `json:"private,omitempty"` // admitted in the creator's private chat
+	ReplyTo           string       `json:"reply_to"`
+	Resource          string       `json:"resource"`
+	Worker            string       `json:"worker"`          // owner-selected worker reference; also the partition
+	Brief             string       `json:"brief,omitempty"` // dispatched when a Dispatcher is configured
+	Gates             []string     `json:"gates,omitempty"` // evidence prechecks, e.g. git:/repo
+	Next              string       `json:"next,omitempty"`  // authorized work left after acceptance; "" = single step
 }
 
 // Event is an attributed signal to a commitment. By is the verified
@@ -398,7 +415,8 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 					key = fmt.Sprintf("%s#retry%d", key, n)
 				}
 				marker := "[heimdall " + key + "]"
-				req := DispatchRequest{Key: key, Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Worker: c.Worker, Marker: marker, Message: marker + "\n" + brief(w)}
+				req := DispatchRequest{Key: key, Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Private: c.Private, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation,
+					ClientRequestID: effectKey(c.Issue, w.st.Attempt, "dispatch"), Worker: c.Worker, Marker: marker, Message: marker + "\n" + brief(w)}
 				// Only the dispatch occupies the resource queue.
 				h, err := dbos.RunWorkflow(ctx, r.dispatch, dispatchInput{Req: req}, dbos.WithWorkflowID(key), dbos.WithQueue(r.queues[c.Resource]), dbos.WithQueuePartitionKey(c.Worker))
 				if err != nil {
