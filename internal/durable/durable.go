@@ -13,6 +13,7 @@ package durable
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -51,16 +52,57 @@ type Outbox interface {
 	OutboundReceipt(id int64) (store.Receipt, bool, error)
 }
 
-// Dispatcher hands a brief to the owner-selected worker. It must use key as
-// a native idempotency key: a repeated key returns the first receipt and
-// causes no second effect. A denial, or an effect whose outcome cannot be
-// reconciled, must be returned as Permanent: it is held, never replayed. It never chooses a provider or model; the worker
-// reference already names an existing native session. No production
-// dispatcher is qualified yet (docs/durable.md); without one, commitments
-// are dispatched by the owner and Heimdall supervises them.
+// Dispatcher hands one attempt's brief to the owner-selected worker. The
+// runtime owns idempotency: before Dispatch it durably claims req.Key
+// (dispatch_claims), so a key is sent at most once by Heimdall, whatever the
+// native route dedupes. Dispatch returns the native receipt, or:
+//   - NotSent: nothing was sent (the host was not reachable at all); the
+//     claim is released and the dispatch retried.
+//   - Permanent: refused before or by the host (stale creator, invalid
+//     worker, native denial) with no effect; held, never replayed.
+//   - any other error: the outcome is unknown. The claim stays and the next
+//     try calls Reconcile instead of sending again.
+//
+// Reconcile reads the worker (read-only) for the exact message carrying
+// req.Marker; not found is held visibly, never resent. A dispatcher never
+// chooses a provider or model: the worker reference names an existing
+// native thread.
 type Dispatcher interface {
-	Dispatch(ctx context.Context, worker, key, brief string) (receipt string, err error)
+	Dispatch(ctx context.Context, req DispatchRequest) (Receipt, error)
+	Reconcile(ctx context.Context, req DispatchRequest) (rcpt Receipt, found bool, err error)
 }
+
+// DispatchRequest is one attempt's dispatch, built by the runtime from the
+// admitted commitment only.
+type DispatchRequest struct {
+	Key     string // ISSUE/attempt/dispatch[#retryN]: the claim and the marker
+	Issue   string
+	Attempt int
+	Owner   core.Principal // the commitment's creator; revalidated before sending
+	Route   core.ConvKey
+	Worker  string // owner-selected at admission
+	Marker  string // first line of Message: "[heimdall KEY]"
+	Message string // Marker, then the brief (or repair feedback / next step)
+}
+
+// Receipt is the worker host's own record of a dispatch: the thread, the
+// run it started or joined, and the message id when the host returned one.
+type Receipt struct {
+	Thread   string `json:"thread"`
+	Run      string `json:"run"`
+	Message  string `json:"message,omitempty"`
+	Delivery string `json:"delivery,omitempty"` // host's delivery, or "reconciled"
+}
+
+// NotSent marks a dispatch that certainly had no effect; it is retried.
+type NotSent struct{ Err error }
+
+func (n NotSent) Error() string { return n.Err.Error() }
+func (n NotSent) Unwrap() error { return n.Err }
+
+// Authorizer revalidates the commitment's creator on its original route
+// immediately before a dispatch: still an admitted owner there.
+type Authorizer func(owner core.Principal, route core.ConvKey) bool
 
 // Reviewer runs the supervisor's acceptance review of one reported attempt
 // as a server-initiated turn of the owner-selected harness (the router).
@@ -123,6 +165,7 @@ type Options struct {
 	Path       string // durable.db, beside heimdall.db
 	Outbox     Outbox
 	Dispatcher Dispatcher    // nil: owner-dispatched commitments only
+	Authorize  Authorizer    // required with a Dispatcher
 	Reviewer   Reviewer      // nil: verdicts come from the live owner (!work accept|reject)
 	Observer   Observer      // nil: reports come only from attributed events
 	Observe    time.Duration // first observation interval; doubles to 10 minutes
@@ -174,6 +217,12 @@ func Open(opt Options) (*Runtime, error) {
 		return nil, err
 	}
 	r := &Runtime{opt: opt, ctx: ctx, db: db, queues: map[string]dbos.Queue{}}
+	// The dispatch claim ledger: written before any send, outside DBOS's
+	// step records (a step is checkpointed only when it returns).
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS heimdall_dispatch_claims(key TEXT PRIMARY KEY, state TEXT NOT NULL, receipt TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL)`); err != nil {
+		r.Close()
+		return nil, fmt.Errorf("durable: dispatch claims: %w", err)
+	}
 	for name, res := range opt.Resources {
 		per := res.PerWorker
 		if per <= 0 {
@@ -201,6 +250,12 @@ func Open(opt Options) (*Runtime, error) {
 // SetWake connects delivery to the router; call before Launch.
 func (r *Runtime) SetWake(f func(iface string)) { r.opt.Wake = f }
 
+// SetDispatcher connects autonomous dispatch; authorize revalidates the
+// creator before each send. Call before Launch.
+func (r *Runtime) SetDispatcher(d Dispatcher, authorize Authorizer) {
+	r.opt.Dispatcher, r.opt.Authorize = d, authorize
+}
+
 // SetReviewer connects supervisor reviews to the router; call before Launch.
 func (r *Runtime) SetReviewer(v Reviewer) { r.opt.Reviewer = v }
 
@@ -209,16 +264,27 @@ func (r *Runtime) SetReviewer(v Reviewer) { r.opt.Reviewer = v }
 // attempt is in the reported phase. The router checks it as a review turn
 // starts and again as it ends, before recording a verdict.
 func (r *Runtime) Reviewable(issue string, attempt int) bool {
+	return r.current(issue, attempt, PhaseReported)
+}
+
+// current reports whether issue's workflow is running (not paused,
+// cancelled or ended) with attempt in phase.
+func (r *Runtime) current(issue string, attempt int, phase string) bool {
 	ws, err := dbos.ListWorkflows(r.ctx, dbos.WithFilterWorkflowIDs(issue), dbos.WithFilterName(workflowName))
 	if err != nil || len(ws) != 1 || ws[0].Status != dbos.WorkflowStatusPending {
 		return false
 	}
 	st, err := r.State(issue)
-	return err == nil && st.Phase == PhaseReported && st.Attempt == attempt
+	return err == nil && st.Phase == phase && st.Attempt == attempt
 }
 
 // Launch starts queues and recovers every pending commitment.
-func (r *Runtime) Launch() error { return dbos.Launch(r.ctx) }
+func (r *Runtime) Launch() error {
+	if r.opt.Dispatcher != nil && r.opt.Authorize == nil {
+		return errors.New("durable: a dispatcher needs creator revalidation (Authorize)")
+	}
+	return dbos.Launch(r.ctx)
+}
 
 // Close stops the runtime; pending commitments resume at the next Launch.
 func (r *Runtime) Close() {
@@ -266,6 +332,10 @@ type State struct {
 	Note     string    `json:"note,omitempty"`     // observer or technical-retry state
 	Runs     []string  `json:"runs,omitempty"`     // worker runs already used as evidence
 	Seen     int       `json:"seen,omitempty"`     // the worker host's run count at the last read
+	// Dispatched is the worker run the current attempt's dispatch receipt
+	// names; its report is that run's result, never another run's.
+	Dispatched string `json:"dispatched,omitempty"`
+	Stage      string `json:"stage,omitempty"` // "next": the pre-authorized next step is the work
 }
 
 // Phases. Only closed is terminal.
@@ -293,6 +363,7 @@ type run struct {
 	floor    int
 	floorOK  bool
 	floorRun string
+	feedback string // the last rejection, sent as bounded repair feedback
 }
 
 // closed carries the owner's close event out of any wait.
@@ -320,13 +391,16 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 			if err := r.publish(ctx, w, PhaseDispatching, "dispatch attempt to "+c.Worker+" (queued for "+c.Resource+" capacity)"); err != nil {
 				return err
 			}
+			w.st.Dispatched = ""
 			for n := 0; ; n++ {
 				key := effectKey(c.Issue, w.st.Attempt, "dispatch")
 				if n > 0 {
 					key = fmt.Sprintf("%s#retry%d", key, n)
 				}
+				marker := "[heimdall " + key + "]"
+				req := DispatchRequest{Key: key, Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Worker: c.Worker, Marker: marker, Message: marker + "\n" + brief(w)}
 				// Only the dispatch occupies the resource queue.
-				h, err := dbos.RunWorkflow(ctx, r.dispatch, dispatchInput{Worker: c.Worker, Key: key, Brief: c.Brief}, dbos.WithWorkflowID(key), dbos.WithQueue(r.queues[c.Resource]), dbos.WithQueuePartitionKey(c.Worker))
+				h, err := dbos.RunWorkflow(ctx, r.dispatch, dispatchInput{Req: req}, dbos.WithWorkflowID(key), dbos.WithQueue(r.queues[c.Resource]), dbos.WithQueuePartitionKey(c.Worker))
 				if err != nil {
 					return err
 				}
@@ -335,6 +409,7 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 					return err
 				}
 				if res.Held == "" {
+					w.st.Dispatched = res.Receipt.Run
 					break
 				}
 				if err := r.hold(ctx, w, "dispatch "+key+": "+res.Held); err != nil {
@@ -401,10 +476,19 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), fmt.Sprintf("%s accepted (attempt %d, %s). Evidence: %s", c.Issue, w.st.Attempt, w.st.Verdict, w.st.Evidence), true); err != nil {
 			return err
 		}
-		if c.Next == "" {
+		if c.Next == "" || w.st.Stage == "next" {
 			return r.publish(ctx, w, PhaseClosed, "none: delivered and retired")
 		}
-		// Work remains: the commitment stays open until the owner closes it.
+		if r.opt.Dispatcher != nil && c.Worker != "" {
+			// Advance exactly the step the owner pre-authorized at
+			// admission, once, as a new attempt; then retire.
+			w.st.Stage, w.feedback = "next", ""
+			w.st.Attempt++
+			w.st.Evidence, w.st.Verdict = "", ""
+			continue
+		}
+		// Work remains and nothing can dispatch it: the commitment stays
+		// open, an owned visible dependency, until the owner closes it.
 		if err := r.publish(ctx, w, PhaseOpen, "authorized next action: "+c.Next+" (owner authority; !work close when done)"); err != nil {
 			return err
 		}
@@ -526,6 +610,8 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 			dbos.WithStepName("observe"), dbos.WithStepMaxRetries(2), dbos.WithStepBaseInterval(time.Second))
 	}
 	floor, known, startRun, unresolved := w.floor, w.floorOK, w.floorRun, ""
+	run := w.st.Dispatched // bound by the dispatch receipt: only this run reports
+	known = known || run != ""
 	poll, quiet, noticed := r.opt.Observe, time.Duration(0), r.opt.Silence < 0
 	for {
 		ev, ok, err := r.next(ctx, w, poll)
@@ -552,8 +638,15 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 					unresolved = fmt.Sprintf("observation unresolved: %s run %s (%s) may predate attempt %d (no read before it); waiting for a newer run", w.c.Worker, obs.LatestRun, obs.Status, w.st.Attempt)
 				}
 			}
-			if obs.RunCount > floor {
+			if obs.RunCount > floor && run == "" {
 				unresolved = ""
+			}
+			if run != "" {
+				_, replied := obs.Replies[run]
+				unresolved = ""
+				if !replied && obs.ActiveRun == "" && obs.LatestRun != "" && obs.LatestRun != run {
+					unresolved = fmt.Sprintf("observation unresolved: dispatched run %s has no reply among %s's latest messages (latest run %s); waiting, never attributing another run", run, w.c.Worker, obs.LatestRun)
+				}
 			}
 		}
 		note := unresolved
@@ -584,12 +677,19 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 			}
 			continue
 		}
+		done, reply, status := obs.LatestRun, obs.Reply, obs.Status
 		finished := obs.LatestRun != "" && obs.ActiveRun == "" && obs.Pending == 0 && !slices.Contains(w.st.Runs, obs.LatestRun) &&
 			(obs.RunCount > floor || startRun != "" && obs.LatestRun == startRun)
+		if run != "" {
+			var replied bool
+			done, status = run, "finished"
+			reply, replied = obs.Replies[run]
+			finished = replied && obs.ActiveRun != run && obs.Pending == 0 && !slices.Contains(w.st.Runs, run)
+		}
 		if finished {
-			w.st.Runs = append(w.st.Runs, obs.LatestRun)
+			w.st.Runs = append(w.st.Runs, done)
 			return Event{Kind: "report", Attempt: w.st.Attempt, By: "observer:" + w.c.Worker,
-				Evidence: fmt.Sprintf("%s run %s %s: %s", w.c.Worker, obs.LatestRun, obs.Status, or(obs.Reply, "(no reply text)"))}, nil
+				Evidence: fmt.Sprintf("%s run %s %s: %s", w.c.Worker, done, status, or(reply, "(no reply text)"))}, nil
 		}
 		if !noticed && r.opt.Silence > 0 && quiet >= r.opt.Silence {
 			noticed = true
@@ -618,7 +718,7 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 		if n > 0 {
 			key = fmt.Sprintf("%s#retry%d", key, n)
 		}
-		req := ReviewRequest{Key: key, Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Private: c.Private, Prompt: reviewPrompt(c, w.st)}
+		req := ReviewRequest{Key: key, Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Private: c.Private, Prompt: reviewPrompt(w)}
 		res, err := step(r, ctx, w, "review", func(sctx context.Context) (ReviewResult, error) { return r.opt.Reviewer.Review(sctx, req) })
 		var perm Permanent
 		switch {
@@ -691,13 +791,29 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 	}
 }
 
+// brief is the current attempt's dispatched work: the admitted brief, or
+// the pre-authorized next step, plus bounded repair feedback after a
+// rejection. Nothing here widens the admitted scope.
+func brief(w *run) string {
+	c := w.c
+	b := c.Brief
+	if w.st.Stage == "next" {
+		b = fmt.Sprintf("%s (authorized next step, after the accepted first stage): %s", c.Issue, c.Next)
+	}
+	if w.feedback != "" {
+		b += fmt.Sprintf("\n\nRepair, attempt %d: the previous attempt's result was not accepted: %s\nFix only that, within the work above; do not widen its scope.", w.st.Attempt, w.feedback)
+	}
+	return b
+}
+
 // reviewPrompt is the supervisor's brief. Authority stays with the
 // runtime: the verdict cannot deploy, send or change anything.
-func reviewPrompt(c Commitment, st State) string {
+func reviewPrompt(w *run) string {
+	c, st := w.c, w.st
 	var b strings.Builder
 	fmt.Fprintf(&b, "Supervisor review: %s %q, attempt %d.\n", c.Issue, c.Title, st.Attempt)
-	if c.Brief != "" {
-		fmt.Fprintf(&b, "Brief: %s\n", c.Brief)
+	if work := brief(w); work != "" {
+		fmt.Fprintf(&b, "Brief: %s\n", work)
 	}
 	if c.Worker != "" {
 		fmt.Fprintf(&b, "Worker: %s\n", c.Worker)
@@ -715,6 +831,7 @@ func reviewPrompt(c Commitment, st State) string {
 // route (manual mode); under automated review it stays in execution state.
 func (r *Runtime) reject(ctx dbos.Context, w *run, why string, notify bool) error {
 	w.st.Verdict = why
+	w.feedback = clip(why, 1000)
 	if notify {
 		text := fmt.Sprintf("%s attempt %d %s. Next: attempt %d", w.c.Issue, w.st.Attempt, why, w.st.Attempt+1)
 		if err := r.deliver(ctx, w, fmt.Sprintf("rejected/%d", w.st.Attempt), text, true); err != nil {
@@ -892,25 +1009,25 @@ func step[R any](r *Runtime, ctx dbos.Context, w *run, name string, fn func(cont
 }
 
 type dispatchInput struct {
-	Worker string `json:"worker"`
-	Key    string `json:"key"`
-	Brief  string `json:"brief"`
+	Req DispatchRequest `json:"req"`
 }
 
 type dispatchResult struct {
-	Receipt string `json:"receipt,omitempty"`
-	Held    string `json:"held,omitempty"` // permanent: never replayed
+	Receipt Receipt `json:"receipt"`
+	Held    string  `json:"held,omitempty"` // permanent: never replayed
 }
 
+// reconcileGrace is how long an unknown dispatch outcome is re-read before
+// it holds (a variable for tests).
+var reconcileGrace = 2 * time.Minute
+
 // dispatch is the child workflow that occupies the resource queue: one
-// native-keyed dispatch. Technical errors retry durably (visible as the
+// claimed dispatch. Technical errors retry durably (visible as the
 // parent's dispatching phase); a Permanent error comes back as Held.
 func (r *Runtime) dispatch(ctx dbos.Context, in dispatchInput) (dispatchResult, error) {
 	pause := 10 * time.Minute
 	for {
-		rcpt, err := attempt(ctx, "dispatch", func(sctx context.Context) (string, error) {
-			return r.opt.Dispatcher.Dispatch(sctx, in.Worker, in.Key, in.Brief)
-		})
+		rcpt, err := attempt(ctx, "dispatch", func(sctx context.Context) (Receipt, error) { return r.dispatchOnce(sctx, in.Req) })
 		var p Permanent
 		if errors.As(err, &p) {
 			return dispatchResult{Held: p.Error()}, nil
@@ -918,12 +1035,86 @@ func (r *Runtime) dispatch(ctx dbos.Context, in dispatchInput) (dispatchResult, 
 		if err == nil || ctx.Err() != nil {
 			return dispatchResult{Receipt: rcpt}, err
 		}
-		r.opt.Log.Printf("durable: dispatch %s: %v; retrying in %s", in.Key, err, pause)
+		r.opt.Log.Printf("durable: dispatch %s: %v; retrying in %s", in.Req.Key, err, pause)
 		if _, err := dbos.Sleep(ctx, pause); err != nil {
 			return dispatchResult{}, err
 		}
 		pause = min(pause*2, time.Hour)
 	}
+}
+
+// dispatchOnce sends q at most once. The claim is durable before the send,
+// so a send whose step never checkpointed (crash, lost response, timeout)
+// is reconciled from the worker's own record, never resent.
+func (r *Runtime) dispatchOnce(ctx context.Context, q DispatchRequest) (Receipt, error) {
+	state, saved, at, err := r.claim(q.Key)
+	if err != nil {
+		return Receipt{}, err
+	}
+	switch state {
+	case "sent":
+		var rc Receipt
+		return rc, json.Unmarshal([]byte(saved), &rc)
+	case "sending":
+		rc, found, err := r.opt.Dispatcher.Reconcile(ctx, q)
+		if err != nil {
+			return Receipt{}, fmt.Errorf("reconcile %s: %w", q.Key, err)
+		}
+		if found {
+			return rc, r.settle(q.Key, rc)
+		}
+		if time.Since(time.UnixMilli(at)) < reconcileGrace {
+			return Receipt{}, fmt.Errorf("reconcile %s: no message marked %s yet", q.Key, q.Marker)
+		}
+		return Receipt{}, Permanent{fmt.Errorf("outcome unknown: an earlier send of %s was interrupted and %s shows no message marked %s; not resent (check the worker, then !work retry sends under a new key)", q.Key, q.Worker, q.Marker)}
+	}
+	if r.opt.Authorize == nil || !r.opt.Authorize(q.Owner, q.Route) || !r.current(q.Issue, q.Attempt, PhaseDispatching) {
+		return Receipt{}, errors.Join(r.release(q.Key), Permanent{errors.New("refused before sending: the creator is no longer an admitted owner on the route, or the commitment is paused, cancelled or no longer dispatching this attempt")})
+	}
+	rc, err := r.opt.Dispatcher.Dispatch(ctx, q)
+	var ns NotSent
+	var p Permanent
+	switch {
+	case err == nil:
+		return rc, r.settle(q.Key, rc)
+	case errors.As(err, &ns), errors.As(err, &p):
+		// Certainly no effect: release the claim.
+		if rerr := r.release(q.Key); rerr != nil {
+			return Receipt{}, rerr
+		}
+		return Receipt{}, err
+	default:
+		return Receipt{}, fmt.Errorf("dispatch %s outcome unknown (reconciling, not resending): %w", q.Key, err)
+	}
+}
+
+// claim records key as sending unless it is already claimed; it returns
+// the earlier claim's state ("" when this call claimed it).
+func (r *Runtime) claim(key string) (state, receipt string, at int64, err error) {
+	now := time.Now().UnixMilli()
+	res, err := r.db.Exec(`INSERT INTO heimdall_dispatch_claims(key,state,at) VALUES(?,'sending',?) ON CONFLICT(key) DO NOTHING`, key, now)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 1 {
+		return "", "", now, err
+	}
+	err = r.db.QueryRow(`SELECT state,receipt,at FROM heimdall_dispatch_claims WHERE key=?`, key).Scan(&state, &receipt, &at)
+	return state, receipt, at, err
+}
+
+func (r *Runtime) settle(key string, rc Receipt) error {
+	b, err := json.Marshal(rc)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(`UPDATE heimdall_dispatch_claims SET state='sent',receipt=? WHERE key=?`, string(b), key)
+	return err
+}
+
+func (r *Runtime) release(key string) error {
+	_, err := r.db.Exec(`DELETE FROM heimdall_dispatch_claims WHERE key=? AND state='sending'`, key)
+	return err
 }
 
 func effectKey(issue string, attempt int, effect string) string {

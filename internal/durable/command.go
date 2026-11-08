@@ -42,7 +42,7 @@ func (c Caller) sees(cm Commitment) bool {
 func (c Caller) controls(cm Commitment) bool { return c.sees(cm) && cm.Creator == c.Principal.Key() }
 
 const usage = `!work — durable commitments (owner only; Linear is canonical).
-Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into reports; with supervisor_review a server-initiated review turn gives the verdict, otherwise verdicts come from you; there is no qualified dispatcher (docs/durable.md).
+Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into reports; with supervisor_review a server-initiated review turn gives the verdict, otherwise verdicts come from you; with t3_dispatch each attempt is sent to its t3: worker, never resent (laptop tests only; docs/durable.md).
 !work [list]
 !work show ISSUE
 !work add ISSUE [worker=REF] [resource=NAME] [gate=git:/repo]... title [| next: authorized work left after acceptance]
@@ -306,7 +306,7 @@ func (r *Runtime) show(issue string) string {
 	for _, v := range vs {
 		if v.Issue == issue {
 			s := v.State
-			return fmt.Sprintf("%s %s\n%s\nLinear: %s\nworker: %s\nattempt: %d\nevidence: %s\nverdict: %s\nreceipts: %v", v.Issue, v.Title, v.line(), r.linearURL(v.Issue), or(v.Worker, "owner-dispatched"), s.Attempt, or(s.Evidence, "none"), or(s.Verdict, "none"), s.Receipts)
+			return fmt.Sprintf("%s %s\n%s\nLinear: %s\nworker: %s\nattempt: %d%s\ndispatched run: %s\nevidence: %s\nverdict: %s\nreceipts: %v", v.Issue, v.Title, v.line(), r.linearURL(v.Issue), or(v.Worker, "owner-dispatched"), s.Attempt, map[bool]string{true: " (authorized next step)"}[s.Stage == "next"], or(s.Dispatched, "none"), or(s.Evidence, "none"), or(s.Verdict, "none"), s.Receipts)
 		}
 	}
 	return issue + " is not tracked."

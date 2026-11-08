@@ -296,3 +296,25 @@ func TestParseVerdict(t *testing.T) {
 		}
 	}
 }
+
+// A dispatch revalidates the creator on the commitment's original route as
+// it happens: an owner there, on an interface this router serves.
+func TestOwnsRouteRevalidatesCreator(t *testing.T) {
+	e, _ := workEnv(t)
+	route := core.ConvKey{Interface: "fake", Chat: "c1"}
+	if !e.r.OwnsRoute(core.Principal{Platform: "fake", ID: "owner"}, route) {
+		t.Fatal("owner refused")
+	}
+	for name, c := range map[string]struct {
+		p core.Principal
+		r core.ConvKey
+	}{
+		"not an owner":      {core.Principal{Platform: "fake", ID: "someone"}, route},
+		"unserved route":    {core.Principal{Platform: "fake", ID: "owner"}, core.ConvKey{Interface: "gone", Chat: "c1"}},
+		"unverified caller": {core.Principal{}, route},
+	} {
+		if e.r.OwnsRoute(c.p, c.r) {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+}

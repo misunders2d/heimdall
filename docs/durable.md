@@ -5,7 +5,9 @@ or live-accepted. Slice 1 is **partial**:
 - worker results are observed without the owner (T3 observer);
 - with `supervisor_review`, the verdict comes from a server-initiated
   review turn of the creator's harness (see Verdict);
-- dispatch is not autonomous yet.
+- with `t3_dispatch`, each attempt's brief is sent to its
+  `worker=t3:<thread>` through the T3 host CLI, claimed before sending and
+  reconciled, never resent (see "Dispatch").
 
 This is not complete MEL-763. See "Not qualified" below.
 
@@ -29,12 +31,10 @@ Steps, each checkpointed:
    (WAL, `synchronous(FULL)`) before `!work add` answers. The commitment
    workflow itself is not queued (see Capacity). A repeated issue returns the
    existing commitment.
-2. **Dispatch.** Runs only when a `Dispatcher` is configured, as a child
-   workflow on the resource queue (the only queued part). None is qualified
-   yet (see below), so every commitment today is dispatched natively by the
-   owner-selected harness. A `Permanent` dispatch error (a native denial) is
-   held, never replayed, until `!work retry`, which dispatches under a new
-   key.
+2. **Dispatch.** Runs only with `t3_dispatch` (a `Dispatcher`), as a child
+   workflow on the resource queue (the only queued part). Without it the
+   owner-selected harness dispatches natively. See "Dispatch". A held
+   dispatch is never replayed; `!work retry` dispatches under a new key.
 3. **Wait** for a report on the current attempt. With `t3_command`
    configured, a `worker=t3:<thread>` is observed read-only
    (`thread show --json`), backing off from 30 s to 10 min.
@@ -44,6 +44,11 @@ Steps, each checkpointed:
      dispatch (so a run that completes before the first post-dispatch read
      still counts), else the last read of an earlier attempt. It becomes the
      report, attributed to the observer, still unaccepted.
+   - A dispatched attempt is bound tighter: only the run named by its
+     dispatch receipt reports, with that run's own reply. A later run of
+     the same thread (its latest) is never attributed; if the worker is
+     idle and the receipt's run has no reply in its latest messages, that
+     is a visible unresolved note.
    - With no such read (the very first read of attempt 1 failed), the first
      healthy read sets the floor; the run it shows stays **unresolved**
      (visible note), never reported, until a newer run finishes.
@@ -59,7 +64,9 @@ Steps, each checkpointed:
    - empty evidence fails;
    - a `gate=git:/repo` needs a full commit SHA that exists in that repo.
 
-   A rejection opens the next attempt.
+   A rejection opens the next attempt. With a dispatcher, that attempt is
+   dispatched with bounded repair feedback (the rejection reason, at most
+   1000 bytes) inside the admitted brief, which it may not widen.
 5. **Verdict.** Without `supervisor_review`, the report is delivered as an
    **UNACCEPTED worker report**, and only a verified live owner's
    `!work accept` accepts it. With `supervisor_review`, nothing is sent
@@ -67,9 +74,12 @@ Steps, each checkpointed:
    execution state (`!work show`). A reject opens the next attempt. See
    "Supervisor review".
 6. **Deliver** the accepted result to the original route.
-7. **Next authorized action.** If declared (`| next: …`), the commitment
-   stays **open** after acceptance until the owner closes it. With no next
-   action it retires.
+7. **Next authorized action.** If declared at admission (`| next: …`):
+   with a dispatcher, it is dispatched once, as the next attempt, after the
+   first stage is accepted; once that is accepted the commitment retires.
+   Nothing else is chained. Without a dispatcher, the commitment stays
+   **open** after acceptance, an owned visible dependency, until the owner
+   closes it. With no next action it retires.
 
 Every delivery uses the existing outbox under a structured effect key
 (`ISSUE/effect/attempt`). The key is kept in outbound `extra`, which needs
@@ -159,10 +169,52 @@ router turn machinery. It is not a scheduler job and not owner ingress.
 - A live owner's `!work accept`, `reject` or `close` always ends the wait
   and wins over a review that finishes later.
 
+## Dispatch (`t3_dispatch`)
+
+The route is the existing T3 host CLI, the same one the observer reads
+(`t3_command`): `thread send <thread> - --json`, the brief on stdin. It
+queues behind any active work (the CLI's only mode) and prints T3's own
+receipt: thread, message id, run id, delivery.
+
+T3 dedupes nothing on this route (T3 server source, app 0.1.7): each CLI
+call signs in as a fresh short-lived MCP client (`client:<session>`
+namespace) and calls `t3_thread_send` with no `clientRequestId`. MCP
+`clientRequestId` dedupes only within one credential's namespace, a T3
+provider session or an outside OAuth client. Heimdall has neither: its
+harness turns are not T3-launched sessions, and no daemon sign-in is added.
+So Heimdall owns the at-most-once send:
+- **Bound.** The runtime builds the request from the admitted commitment
+  only: issue, attempt, key `ISSUE/attempt/dispatch[#retryN]`, the
+  owner-selected worker, and the brief. The message's first line is the
+  marker `[heimdall KEY]`.
+- **Fences.** Immediately before sending, the creator must still be an
+  admitted owner on the original route (`Router.OwnsRoute`), and the
+  workflow must still be running and dispatching this attempt (actual
+  workflow status). Otherwise it is held, and nothing is sent.
+- **Claim before the effect.** The key is claimed in
+  `heimdall_dispatch_claims` (in `durable.db`, `synchronous(FULL)`) before
+  the CLI runs; a DBOS step is checkpointed only when it returns. The
+  receipt is stored with the claim.
+- **Outcomes.** A receipt binds the attempt to its run. A server that is
+  not running is certainly unsent: the claim is released and retried. Any
+  other failure (timeout, kill, lost response, an error text) is an
+  **unknown outcome**: it is never sent again. The next try reads the
+  thread's latest 50 messages for the user message starting with the
+  marker and adopts the run T3 recorded it in. Not found within 2 minutes:
+  held ("outcome unknown … not resent") until `!work retry`, which sends
+  under a new key after the owner checked the worker.
+- A restart re-executes an unfinished step; the claim makes that the
+  reconcile path, never a second send (`TestCrashAtEverySeam/dispatch`,
+  with a worker host that dedupes nothing).
+
+The CLI reaches only its own host's T3 environment: a worker in a linked
+environment cannot be dispatched this way.
+
 ## Configuration
 
 ```json
 {"durable": {"enabled": true, "linear_workspace": "mellanni", "supervisor_review": true,
+  "t3_command": ["/absolute/path/to/t3"], "t3_dispatch": true,
   "resources": {"default": {"per_worker": 1}, "contabo": {"concurrency": 3, "rate_limit": 2, "rate_period_seconds": 60}}}}
 ```
 
@@ -205,20 +257,20 @@ version.
      the same user.
 
    Neither is verified on the hub. Never configure an ephemeral mount path.
-2. **Dispatch (not qualified).** `t3 thread send` (CLI 0.1.7:
-   `send [--wait] [--json] <thread> <message>`) has no client request id,
-   so a sent brief cannot be reconciled exactly after a crash.
-   - MCP `delegate_task` needs T3 thread credentials.
-   - Main reports that MCP `t3_thread_send` with a stable
-     `clientRequestId` works from the owner's authenticated external MCP
-     client. That was not verified in this branch. The daemon has no such
-     client, and no daemon login is added.
+2. **Dispatch (implemented, synthetic tests only).** The CLI `send` path
+   was read from T3's bundled source, not exercised: no real message was
+   sent. It shares the observer's host requirements (item 1). Native
+   boundaries, not Heimdall workarounds:
+   - no `clientRequestId` on the host CLI `send`, so T3 dedupes nothing;
+     at-most-once sending rests on Heimdall's claim and reconcile;
+   - no `environmentId`: only the local environment's threads;
+   - reconcile reads only the latest 50 messages, and a server error
+     text (for example a missing thread) is an unknown outcome, so both
+     hold rather than resend.
 
-   Today the owner-selected harness (Bezos) dispatches natively, and the
-   commitment is admitted with `worker=t3:<thread>`. The smallest supported
-   alternative needs T3 to add a client request id to the host CLI `send`,
-   or a daemon-scoped T3 credential. That is upstream, not a Heimdall
-   workaround.
+   The smallest native integration that would remove the first two is a
+   `--client-request-id` (and environment) flag on `t3 thread send` that
+   uses one stable namespace for the caller, upstream in T3.
 3. **Acceptance verdict (implemented, laptop tests only).** See "Supervisor
    review". Its tests use the fake harness, so it is not qualified against
    a live engine or route.

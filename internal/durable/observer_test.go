@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -158,11 +159,11 @@ J
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != (Observation{Status: "completed", LatestRun: "run2", Pending: 0, RunCount: 2, Reply: "pushed 0123"}) {
+	if !reflect.DeepEqual(got, Observation{Status: "completed", LatestRun: "run2", Pending: 0, RunCount: 2, Reply: "pushed 0123", Replies: map[string]string{"run2": "pushed 0123"}}) {
 		t.Fatalf("%+v", got)
 	}
 	a, _ := os.ReadFile(argv)
-	if string(a) != "thread\nshow\nT\n--json\n--messages\n1\n" {
+	if string(a) != "thread\nshow\nT\n--json\n--messages\n20\n" {
 		t.Fatalf("argv %q", a)
 	}
 	if _, err := o.Observe(context.Background(), "t3:--help"); err == nil {

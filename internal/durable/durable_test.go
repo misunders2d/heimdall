@@ -51,6 +51,9 @@ func open(t *testing.T, dir string, opt Options) *env {
 	if opt.Silence == 0 {
 		opt.Silence = time.Hour
 	}
+	if opt.Dispatcher != nil && opt.Authorize == nil {
+		opt.Authorize = func(core.Principal, core.ConvKey) bool { return true }
+	}
 	rt, err := Open(opt)
 	if err != nil {
 		t.Fatal(err)
@@ -530,17 +533,24 @@ func newMem() *memDispatcher {
 	return &memDispatcher{at: map[string]time.Time{}, calls: map[string]int{}, deny: map[string]bool{}}
 }
 
-func (m *memDispatcher) Dispatch(_ context.Context, worker, key, _ string) (string, error) {
+func (m *memDispatcher) Dispatch(_ context.Context, q DispatchRequest) (Receipt, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls[key]++
-	if m.deny[key] {
-		return "", Permanent{fmt.Errorf("native denial for %s", key)}
+	m.calls[q.Key]++
+	if m.deny[q.Key] {
+		return Receipt{}, Permanent{fmt.Errorf("native denial for %s", q.Key)}
 	}
-	if _, ok := m.at[key]; !ok {
-		m.at[key] = time.Now()
+	if _, ok := m.at[q.Key]; !ok {
+		m.at[q.Key] = time.Now()
 	}
-	return "rcpt-" + key, nil
+	return Receipt{Thread: q.Worker, Run: "run-" + q.Key}, nil
+}
+
+func (m *memDispatcher) Reconcile(_ context.Context, q DispatchRequest) (Receipt, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.at[q.Key]
+	return Receipt{Thread: q.Worker, Run: "run-" + q.Key, Delivery: "reconciled"}, ok, nil
 }
 
 func (m *memDispatcher) count(key string) int {
@@ -713,30 +723,37 @@ func must[T any](v T, err error) T {
 	return v
 }
 
-// fileDispatcher is a worker with a native idempotency key, backed by a file
-// so it survives the crashed process. It records the worker it was given.
+// fileDispatcher is a worker host WITHOUT native dedupe (like the T3 CLI),
+// backed by a file so it survives the crashed process: every Dispatch call
+// is a new effect. It records the worker and message it was given.
 type fileDispatcher struct {
 	path  string
 	crash bool
 }
 
-func (f *fileDispatcher) Dispatch(_ context.Context, worker, key, brief string) (string, error) {
-	for _, l := range lines(f.path) {
-		if p := strings.Split(l, "\t"); p[0] == key {
-			return p[2], nil
-		}
-	}
+func (f *fileDispatcher) Dispatch(_ context.Context, q DispatchRequest) (Receipt, error) {
 	fh, err := os.OpenFile(f.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", err
+		return Receipt{}, err
 	}
-	fmt.Fprintf(fh, "%s\t%s\trcpt-%s\t%s\n", key, worker, key, brief)
+	first, _, _ := strings.Cut(q.Message, "\n")
+	fmt.Fprintf(fh, "%s\t%s\trun-%s\t%s\n", q.Key, q.Worker, q.Key, first)
 	fh.Sync()
 	fh.Close()
 	if f.crash {
 		os.Exit(3) // the effect happened; DBOS never saw the step finish
 	}
-	return "rcpt-" + key, nil
+	return Receipt{Thread: q.Worker, Run: "run-" + q.Key}, nil
+}
+
+// Reconcile finds the message by its marker, as the worker host records it.
+func (f *fileDispatcher) Reconcile(_ context.Context, q DispatchRequest) (Receipt, bool, error) {
+	for _, l := range lines(f.path) {
+		if p := strings.Split(l, "\t"); len(p) == 4 && p[3] == q.Marker {
+			return Receipt{Thread: q.Worker, Run: p[2], Delivery: "reconciled"}, true, nil
+		}
+	}
+	return Receipt{}, false, nil
 }
 
 func lines(path string) []string {

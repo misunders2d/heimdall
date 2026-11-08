@@ -57,6 +57,7 @@ type Durable struct {
 	ObserveSeconds int                        `json:"observe_seconds,omitempty"`   // first observation interval; default 30, doubling to 600
 	Resources      map[string]DurableResource `json:"resources,omitempty"`         // admission queues; "default" always exists
 	Review         bool                       `json:"supervisor_review,omitempty"` // verdicts by a server-initiated review turn of the creator's harness; default off (live owner verdicts)
+	Dispatch       bool                       `json:"t3_dispatch,omitempty"`       // send each attempt's brief to its t3:<thread> worker through t3_command; default off (owner-dispatched)
 }
 
 // DurableResource is one capacity class (a host or provider).

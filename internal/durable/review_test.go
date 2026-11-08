@@ -159,7 +159,7 @@ func TestObserverFloorBeforeDispatch(t *testing.T) {
 	defer e.close()
 	e.cmd("add MEL-53 worker=t3:thread-D Instant run")
 	e.phase("MEL-53", PhaseReported, 1)
-	if st, _ := e.rt.State("MEL-53"); !strings.Contains(st.Evidence, "run r2 completed: instant") {
+	if st, _ := e.rt.State("MEL-53"); !strings.Contains(st.Evidence, "run r2 finished: instant") {
 		t.Fatalf("%+v", st)
 	}
 }
@@ -167,7 +167,11 @@ func TestObserverFloorBeforeDispatch(t *testing.T) {
 // instantDispatcher's dispatched run completes at once.
 type instantDispatcher struct{ o *fakeObserver }
 
-func (d instantDispatcher) Dispatch(_ context.Context, _, key, _ string) (string, error) {
-	d.o.set(Observation{Status: "completed", LatestRun: "r2", RunCount: 2, Reply: "instant"}, nil)
-	return "rcpt-" + key, nil
+func (d instantDispatcher) Dispatch(_ context.Context, q DispatchRequest) (Receipt, error) {
+	d.o.set(Observation{Status: "completed", LatestRun: "r2", RunCount: 2, Reply: "instant", Replies: map[string]string{"r2": "instant"}}, nil)
+	return Receipt{Thread: q.Worker, Run: "r2"}, nil
+}
+
+func (d instantDispatcher) Reconcile(context.Context, DispatchRequest) (Receipt, bool, error) {
+	return Receipt{}, false, nil
 }

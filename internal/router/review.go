@@ -63,6 +63,17 @@ func (r *Router) Review(ctx context.Context, q durable.ReviewRequest) (durable.R
 	}
 }
 
+// OwnsRoute revalidates a durable commitment's creator before a dispatch:
+// still an admitted owner on the commitment's original route, on an
+// interface this router serves. It is durable.Authorizer.
+func (r *Router) OwnsRoute(p core.Principal, route core.ConvKey) bool {
+	if _, ok := r.ifaces[route.Interface]; !ok || p.Platform == "" || p.ID == "" {
+		return false
+	}
+	role, _, ok := r.opt.Access.Decide(p, route)
+	return ok && role == core.RoleOwner
+}
+
 const (
 	verdictAccept = "verdict accept: "
 	verdictReject = "verdict reject: "
