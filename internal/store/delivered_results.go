@@ -19,7 +19,9 @@ type DeliveredResult struct {
 }
 
 // SentScheduledResults reads only confirmed text deliveries to this exact target,
-// created by this principal and OAuth account. No job prompt or caller authority
+// created by this principal/account or a currently authorized owner alias.
+// Aliased results require a matching private source-account binding; its OAuth
+// scope stays on its own platform. No job prompt or caller authority
 // is selected. The person input's receipt time fences concurrently arriving sends.
 func (s *Store) SentScheduledResults(in core.Inbound, after DeliveryCursor, owners ...func(core.Principal) bool) ([]DeliveredResult, DeliveryCursor, error) {
 	rows, err := s.db.Query(`SELECT o.id,o.sent_at,o.text,i.platform,i.user_id,i.user_email,i.user_team,i.user_key_id,
@@ -61,6 +63,9 @@ func (s *Store) SentScheduledResults(in core.Inbound, after DeliveryCursor, owne
 		if err := rows.Scan(&d.ID, &at, &d.Text, &source.Platform, &source.ID, &source.Email, &source.Team, &source.KeyID, &actor, &installation, &team, &key, &bActor, &bInstallation, &bound); err != nil {
 			return nil, after, err
 		}
+		if len(owners) > 1 || len(owners) == 1 && (owners[0] == nil || !owners[0](source)) {
+			continue
+		}
 		exact := source.Key() == in.From.Key()
 		if exact {
 			if source.Team != in.From.Team || source.KeyID != in.From.KeyID || actor != in.OAuthActor || installation != in.OAuthInstallation {
@@ -70,7 +75,7 @@ func (s *Store) SentScheduledResults(in core.Inbound, after DeliveryCursor, owne
 			// Cross-platform equivalence is server-owned policy, never a
 			// claim in result text. Source account scope is checked on its
 			// original platform, never compared with another platform's IDs.
-			if !in.Private || len(owners) != 1 || owners[0] == nil || !owners[0](source) ||
+			if !in.Private || len(owners) != 1 || owners[0] == nil ||
 				source.Platform == in.From.Platform || !bound || source.Team != team || source.KeyID != key || actor != bActor || installation != bInstallation {
 				continue
 			}
