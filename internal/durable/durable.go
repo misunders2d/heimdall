@@ -71,7 +71,9 @@ type Resource struct {
 type Options struct {
 	Path       string // durable.db, beside heimdall.db
 	Outbox     Outbox
-	Dispatcher Dispatcher // nil: owner-dispatched commitments only
+	Dispatcher Dispatcher    // nil: owner-dispatched commitments only
+	Observer   Observer      // nil: reports come only from attributed events
+	Observe    time.Duration // first observation interval; doubles to 10 minutes
 	Resources  map[string]Resource
 	Silence    time.Duration // one no-signal notice per attempt and phase after this; <0 = none
 	Wake       func(iface string)
@@ -93,6 +95,9 @@ func Open(opt Options) (*Runtime, error) {
 	}
 	if opt.Silence == 0 {
 		opt.Silence = 24 * time.Hour
+	}
+	if opt.Observe <= 0 {
+		opt.Observe = 30 * time.Second
 	}
 	if opt.Log == nil {
 		opt.Log = log.Default()
@@ -187,12 +192,15 @@ type State struct {
 	Since    time.Time `json:"since"`
 	Receipts []int64   `json:"receipts,omitempty"` // outbound ids delivered
 	Blocked  string    `json:"blocked,omitempty"`  // last permanently failed delivery
+	Note     string    `json:"note,omitempty"`     // observer state, e.g. unavailable
+	Runs     []string  `json:"runs,omitempty"`     // worker runs already used as evidence
 }
 
 // Phases. Only closed is terminal.
 const (
 	PhaseDispatching = "dispatching"
 	PhaseWorking     = "working"
+	PhaseWaiting     = "worker_waiting" // the worker asked a question in its own host
 	PhaseReported    = "reported"
 	PhaseAccepted    = "accepted"
 	PhaseOpen        = "open"
@@ -241,7 +249,7 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		if err := r.publish(ctx, w, PhaseWorking, "wait for the attempt's report"); err != nil {
 			return err
 		}
-		ev, err := r.await(ctx, w, "report")
+		ev, err := r.awaitReport(ctx, w)
 		if err != nil {
 			return err
 		}
@@ -355,6 +363,90 @@ func (r *Runtime) await(ctx dbos.Context, w *run, kinds ...string) (Event, error
 }
 
 const maxWait = 7 * 24 * time.Hour
+
+// awaitReport waits for the current attempt's report. With an observer for
+// the worker it also reads the worker's own state, backing off from
+// Options.Observe to 10 minutes: a run that finished after the attempt
+// began becomes the report (attributed to the observer, still UNACCEPTED).
+// A run already used as evidence, or finished before the attempt, never
+// counts. A worker question is shown as worker_waiting; an unavailable
+// observer is a visible technical note, never terminal.
+func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
+	o := r.opt.Observer
+	if o == nil || !o.Observable(w.c.Worker) {
+		return r.await(ctx, w, "report")
+	}
+	observe := func() (Observation, error) {
+		return dbos.RunAsStep(ctx, func(sctx context.Context) (Observation, error) { return o.Observe(sctx, w.c.Worker) },
+			dbos.WithStepName("observe"), dbos.WithStepMaxRetries(2), dbos.WithStepBaseInterval(time.Second))
+	}
+	base, baseErr := observe()
+	poll, quiet, noticed := r.opt.Observe, time.Duration(0), r.opt.Silence < 0
+	for {
+		ev, ok, err := r.next(ctx, w, poll)
+		if err != nil {
+			return Event{}, err
+		}
+		if ok {
+			if ev.Kind == "close" {
+				return ev, closed{ev}
+			}
+			if ev.Kind == "report" && ev.Attempt == w.st.Attempt {
+				return ev, nil
+			}
+			continue
+		}
+		quiet += poll
+		poll = min(poll*2, 10*time.Minute)
+		obs, err := observe()
+		note := ""
+		if err != nil {
+			note = "observer unavailable: " + err.Error()
+		}
+		if note != w.st.Note {
+			w.st.Note = note
+			if err := r.publish(ctx, w, w.st.Phase, w.st.Next); err != nil {
+				return Event{}, err
+			}
+		}
+		if err != nil {
+			continue
+		}
+		if baseErr != nil { // first good read is the attempt's baseline
+			base, baseErr = obs, nil
+			continue
+		}
+		if (obs.Pending > 0) != (w.st.Phase == PhaseWaiting) {
+			phase, next := PhaseWorking, "wait for the attempt's report"
+			if obs.Pending > 0 {
+				phase, next = PhaseWaiting, "the worker asked for input in "+w.c.Worker
+			}
+			if err := r.publish(ctx, w, phase, next); err != nil {
+				return Event{}, err
+			}
+			if obs.Pending > 0 {
+				if err := r.deliver(ctx, w, fmt.Sprintf("waiting/%d/%s", w.st.Attempt, obs.LatestRun), fmt.Sprintf("%s attempt %d: the worker (%s) is waiting for an answer.", w.c.Issue, w.st.Attempt, w.c.Worker), false); err != nil {
+					return Event{}, err
+				}
+			}
+			continue
+		}
+		fresh := obs.LatestRun != "" && obs.ActiveRun == "" && obs.Pending == 0 &&
+			(obs.LatestRun != base.LatestRun || base.ActiveRun != "") && !slices.Contains(w.st.Runs, obs.LatestRun)
+		if fresh {
+			w.st.Runs = append(w.st.Runs, obs.LatestRun)
+			return Event{Kind: "report", Attempt: w.st.Attempt, By: "observer:" + w.c.Worker,
+				Evidence: fmt.Sprintf("%s run %s %s: %s", w.c.Worker, obs.LatestRun, obs.Status, or(obs.Reply, "(no reply text)"))}, nil
+		}
+		if !noticed && r.opt.Silence > 0 && quiet >= r.opt.Silence {
+			noticed = true
+			text := fmt.Sprintf("%s attempt %d: no worker result for %s (%s). Still open; observing %s. No further notice until it changes.", w.c.Issue, w.st.Attempt, quiet, w.st.Phase, w.c.Worker)
+			if err := r.deliver(ctx, w, fmt.Sprintf("silence/%d/%s", w.st.Attempt, w.st.Phase), text, false); err != nil {
+				return Event{}, err
+			}
+		}
+	}
+}
 
 func (r *Runtime) reject(ctx dbos.Context, w *run, why string) error {
 	w.st.Verdict = why

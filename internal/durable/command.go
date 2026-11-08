@@ -27,7 +27,7 @@ type Caller struct {
 }
 
 const usage = `!work — durable commitments (owner only; Linear is canonical).
-Slice 1 is a MANUAL SCAFFOLD: no worker adapter or verifier is qualified, so reports and verdicts come from you (docs/durable.md).
+Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into reports; there is no qualified dispatcher or verifier, so verdicts come from you (docs/durable.md).
 !work [list]
 !work show ISSUE
 !work add ISSUE [worker=REF] [resource=NAME] [gate=git:/repo]... title [| next: authorized work left after acceptance]
@@ -293,7 +293,11 @@ func (v View) line() string {
 	case v.Status == string(dbos.WorkflowStatusError) || v.Status == string(dbos.WorkflowStatusMaxRecoveryAttemptsExceeded):
 		return "execution failed (" + v.Status + "); commitment still open in Linear; recovery: !work resume"
 	}
-	return fmt.Sprintf("%s since %s; next: %s", v.State.Phase, v.State.Since.Format(time.RFC3339), v.State.Next)
+	line := fmt.Sprintf("%s since %s; next: %s", v.State.Phase, v.State.Since.Format(time.RFC3339), v.State.Next)
+	if v.State.Note != "" {
+		line += " (" + v.State.Note + ")"
+	}
+	return line
 }
 
 // decodeInput reads a listed workflow's input: DBOS returns it encoded.

@@ -1,8 +1,11 @@
-# Durable commitments (MEL-763, slice 1: manual scaffold)
+# Durable commitments (MEL-763, slice 1: partial)
 
 Status: opt-in and **disabled by default**. Laptop-tested only; not deployed
-or live-accepted. Slice 1 is a **manual scaffold**, not autonomous Bezos
-supervision. See "Not qualified" below.
+or live-accepted. Slice 1 is **partial**:
+- worker results are observed without the owner (T3 observer);
+- dispatch and the acceptance verdict are not autonomous yet.
+
+This is not complete MEL-763. See "Not qualified" below.
 
 ## What it is
 
@@ -26,7 +29,16 @@ Steps, each checkpointed:
 2. **Dispatch.** Runs only when a `Dispatcher` is configured. None is
    qualified yet (see below), so every commitment today is dispatched by the
    owner.
-3. **Wait** for a report on the current attempt. Silence is never terminal.
+3. **Wait** for a report on the current attempt. With `t3_command`
+   configured, a `worker=t3:<thread>` is observed read-only
+   (`thread show --json`), backing off from 30 s to 10 min.
+   - A run that finished after the attempt began becomes the report. It is
+     attributed to the observer and is still unaccepted.
+   - Runs from before the attempt, or already used as evidence, never count.
+   - A worker question shows as `worker_waiting`, with one notice.
+   - An unreachable observer is a visible note, never terminal.
+
+   Owner `!work report` remains as a fallback. Silence is never terminal.
    After `silence_seconds` (default 86400; a negative value disables
    notices), there is one notice per attempt and phase, then a quiet
    durable wait. `!work` shows how long it has been.
@@ -108,31 +120,48 @@ version.
   (see the test).
 - Run only one Heimdall process per data dir.
 
-## Not qualified (blockers for autonomous follow-through)
+## Not qualified (what still blocks autonomous follow-through)
 
-Slice 1 needs the owner for report, verdict, retry and close. That is a
-scaffold, not the target. Each blocker is a genuine interface or authority
-boundary:
+1. **Observation (implemented, qualified on the laptop only).** The T3
+   observer was checked against real `t3 thread show --json` output from
+   the same OS user on the laptop, through the app's temporary AppImage
+   mount. The installed `~/.t3/bin/t3` shim is stale (its target is
+   missing).
 
-1. **Dispatch.** `t3 thread send` (T3 CLI 0.1.7) has no client request id,
-   so a sent brief cannot be reconciled exactly; it would mean text
-   matching. MCP `delegate_task` and `t3_thread_send` have request ids, but
-   they are bound to a T3 provider session that the Heimdall daemon does
-   not have. There is no supported, authenticated hub-to-laptop context.
-2. **Observation.** `t3 thread show --json` worked only from the same OS
-   user on the laptop, through a temporary AppImage mount. The installed
-   `t3` shim is stale. There is no restart-stable executable or API, and
-   status is thread-level, not task-level.
-3. **Reports and verdicts from Bezos.** The supported caller-bound path is
-   the scheduler control socket. It admits mutations only from a live
-   person turn. Continuation turns (worker callbacks between turns) and
-   scheduled runs fail closed, by design. Letting Bezos progress a
-   commitment on its own needs a commitment-scoped capability for those
-   origins. That is an authority decision for main and the owner, not
-   something to work around.
-4. **Verifier.** No deterministic acceptance verifier exists beyond the
-   prechecks. A harness acceptance turn needs the structured verdict
-   channel from item 3.
+   Production needs:
+   - a restart-stable installed CLI path on the host where Heimdall runs;
+   - that CLI must reach the T3 server that owns the worker's thread, as
+     the same user.
+
+   Neither is verified on the hub. Never configure an ephemeral mount path.
+2. **Dispatch (blocked by the interface).** `t3 thread send` (CLI 0.1.7:
+   `send [--wait] [--json] <thread> <message>`) has no client request id,
+   so a sent brief cannot be reconciled exactly after a crash. MCP
+   `delegate_task` and `t3_thread_send` do take request ids, but they live
+   inside a T3 provider session the daemon does not have.
+
+   Today the owner-selected harness (Bezos) dispatches natively, and the
+   commitment is admitted with `worker=t3:<thread>`. The smallest supported
+   alternative needs T3 to add a client request id to the host CLI `send`,
+   or a daemon-scoped T3 credential. That is upstream, not a Heimdall
+   workaround.
+3. **Acceptance verdict (interface boundary in Heimdall).** Prechecks
+   reject only. A real verifier would be a normal acceptance turn of the
+   owner-selected harness in the origin conversation, with a structured
+   verdict back to the workflow.
+
+   The only existing server-initiated turn path is the scheduler, and its
+   runs are tied to stored jobs. Per-task jobs are ruled out. The smallest
+   alternative is a router turn origin "commitment verification", bound
+   to the stored commitment, attempt and route:
+   - one turn per reported attempt, not per wake;
+   - read-only control, like scheduled runs;
+   - the verdict taken from the whole-answer exact form
+     `ACCEPT <evidence>` or `REJECT <reason>`, like NO_UPDATE.
+
+   It would use the origin conversation's chat slot once per reported
+   attempt. Until then, `!work accept` and `!work reject` from the live
+   owner are the verdict.
 
 Later slices:
 - automatic admission of accepted natural-language requests;
