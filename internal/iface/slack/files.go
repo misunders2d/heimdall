@@ -29,6 +29,8 @@ type slackFile struct {
 	Tombstoned            bool   `json:"is_tombstoned"`
 	Deleted               bool   `json:"is_deleted"`
 	DeletedAt             int64  `json:"deleted_timestamp"`
+	Permalink             string `json:"permalink"`
+	ExternalURL           string `json:"external_url"`
 }
 
 func (f slackFile) deleted() bool {
@@ -81,7 +83,13 @@ func (s *Slack) download(ctx context.Context, f slackFile) core.Attachment {
 			}
 		}
 	}
-	fail := func(note string) core.Attachment { a.Note = "Slack file download failed: " + note; return a }
+	fail := func(note string) core.Attachment {
+		a.Note = "Slack file download failed: " + note
+		if url := first(f.Permalink, f.ExternalURL); url != "" {
+			a.Note += " [URL: " + clip(hideOAuth(url), 4096) + "]"
+		}
+		return a
+	}
 	if f.External || f.Mode == "external" || f.FileType == "remote" || f.deleted() {
 		return fail("external or unavailable file skipped")
 	}

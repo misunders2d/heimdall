@@ -39,8 +39,7 @@ func stickerShape(emoji string) map[string]any {
 	return map[string]any{"file_id": "STICKER_FILE", "file_unique_id": "U1", "type": "regular", "width": 512, "height": 512, "is_animated": false, "is_video": true, "emoji": emoji, "set_name": "SyntheticSet"}
 }
 
-// A sticker is a person's message on its own: it runs as a labelled turn,
-// like a contact or location, without downloading the sticker file.
+// A sticker is a person's message on its own, with a label and a file.
 func TestTelegramBareStickerIsLabelledTurn(t *testing.T) {
 	m := msg(10, 42, "private", 42, "")
 	m["sticker"] = stickerShape("👍")
@@ -51,8 +50,8 @@ func TestTelegramBareStickerIsLabelledTurn(t *testing.T) {
 	var parsed update
 	raw, _ := json.Marshal(upd(1, m))
 	_ = json.Unmarshal(raw, &parsed)
-	if a := detect(parsed.Message); a == nil || a.FileID != "" || a.Kind != "sticker" {
-		t.Fatal("sticker must be a label, never a downloaded file", a)
+	if a := detect(parsed.Message); a == nil || a.FileID != "STICKER_FILE" || a.Kind != "sticker" || a.Name != "sticker.webm" {
+		t.Fatal("sticker file missing", a)
 	}
 	// A replied-to sticker appears in the parent preview.
 	reply := msg(11, 42, "private", 42, "what does this mean?")

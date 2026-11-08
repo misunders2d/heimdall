@@ -11,6 +11,7 @@ import (
 type extractor struct {
 	nodes, blocks, attachments int
 	truncated, halted          bool
+	shared                     []slackFile
 }
 
 func (x *extractor) node(depth int) bool {
@@ -49,7 +50,11 @@ func (x *extractor) rich(v any, depth int) string {
 	case "text":
 		return x.field(m["text"])
 	case "link":
-		return first(x.field(m["text"]), x.field(m["url"]))
+		label, url := x.field(m["text"]), x.field(m["url"])
+		if label != "" && url != "" && label != url {
+			return label + " (" + url + ")"
+		}
+		return first(url, label)
 	case "user":
 		if s := x.field(m["user_id"]); s != "" {
 			return "<@" + s + ">"
@@ -107,6 +112,29 @@ func (x *extractor) renderBlocks(v any, depth int) string {
 		}
 		m, _ := v.(map[string]any)
 		if m["type"] != "rich_text" {
+			var fields []string
+			for _, key := range []string{"text", "title", "description"} {
+				if field, ok := m[key].(map[string]any); ok {
+					fields = append(fields, x.field(field["text"]))
+				} else {
+					fields = append(fields, x.field(m[key]))
+				}
+			}
+			for _, key := range []string{"image_url", "video_url", "title_url", "alt_text"} {
+				fields = append(fields, x.field(m[key]))
+			}
+			for _, key := range []string{"fields", "elements"} {
+				for _, f := range list(m[key]) {
+					if !x.node(depth + 1) {
+						break
+					}
+					fm, _ := f.(map[string]any)
+					fields = append(fields, x.field(fm["text"]), x.field(fm["image_url"]), x.field(fm["alt_text"]))
+				}
+			}
+			if content := joinDistinct(fields); content != "" {
+				parts = append(parts, "[Slack block: "+content+"]")
+			}
 			continue
 		}
 		children, _ := m["elements"].([]any)
@@ -173,8 +201,20 @@ func (x *extractor) message(v any, depth int, control string) string {
 			}
 		}
 		fragments = append(fragments, x.renderBlocks(am["blocks"], depth+2), x.field(am["text"]), x.field(am["fallback"]))
-		// Shared files: the top-level event files are the sender's own upload
-		// and handled as attachments; these only ever become labels.
+		for _, key := range []string{"pretext", "title", "title_link", "from_url", "original_url", "image_url", "thumb_url", "video_url"} {
+			if field := x.field(am[key]); field != "" {
+				fragments = append(fragments, "["+key+": "+field+"]")
+			}
+		}
+		for _, field := range list(am["fields"]) {
+			if !x.node(depth + 2) {
+				break
+			}
+			fm, _ := field.(map[string]any)
+			fragments = append(fragments, joinDistinct([]string{x.field(fm["title"]), x.field(fm["value"])}))
+		}
+		// Shared files stay historical cargo; downloadable ones retain a
+		// separate attachment source, never the original author's identity.
 		fragments = append(fragments, x.files(append(shared, list(am["files"])...), depth+2))
 		attachments = append(attachments, joinDistinct(fragments))
 	}
@@ -184,8 +224,7 @@ func (x *extractor) message(v any, depth int, control string) string {
 
 func list(v any) []any { items, _ := v.([]any); return items }
 
-// files labels a shared message's files as metadata only: they are someone's
-// historical upload, never downloaded or attached as the current sender's.
+// files labels shared files and collects them for the existing safe downloader.
 func (x *extractor) files(items []any, depth int) string {
 	var labels []string
 	seen := map[string]bool{}
@@ -194,16 +233,42 @@ func (x *extractor) files(items []any, depth int) string {
 			break
 		}
 		fm, _ := f.(map[string]any)
+		var file slackFile
+		if raw, err := json.Marshal(fm); err == nil && json.Unmarshal(raw, &file) == nil {
+			x.shared = append(x.shared, file)
+		}
 		label := "[shared file: " + first(x.field(fm["name"]), x.field(fm["title"]), "file")
 		if mime := x.field(fm["mimetype"]); mime != "" {
 			label += " (" + mime + ")"
 		}
-		if label += " — not downloaded]"; !seen[label] {
+		if url := first(x.field(fm["permalink"]), x.field(fm["external_url"])); url != "" {
+			label += " — " + url
+		}
+		if label += "]"; !seen[label] {
 			seen[label] = true
 			labels = append(labels, label)
 		}
 	}
 	return strings.Join(labels, "\n")
+}
+
+func embeddedFiles(m eventMessage) []slackFile {
+	x := extractor{}
+	x.message(map[string]any{"attachments": m.Attachments}, 0, "")
+	seen := map[string]bool{}
+	for _, f := range m.Files {
+		seen[first(f.ID, f.URLDownload, f.URL, f.Permalink, f.Name)] = true
+	}
+	var shared []slackFile
+	for _, f := range x.shared {
+		key := first(f.ID, f.URLDownload, f.URL, f.Permalink, f.Name)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		shared = append(shared, f)
+	}
+	return shared
 }
 func embeddedContent(m eventMessage) string {
 	x := extractor{}

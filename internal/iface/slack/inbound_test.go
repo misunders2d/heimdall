@@ -129,6 +129,13 @@ func TestEmbeddedBoundsAndTypes(t *testing.T) {
 	if got := x.rich(list, 0); !strings.Contains(got, "1. https://example.test:wave:") {
 		t.Fatalf("rich list %q", got)
 	}
+	var preview eventMessage
+	if err := json.Unmarshal([]byte(`{"text":"look","blocks":[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[{"type":"link","text":"GIF","url":"https://example.test/preview.gif"}]}]}],"attachments":[{"title":"Preview","title_link":"https://example.test/page","image_url":"https://example.test/image.gif","fields":[{"title":"Summary","value":"Useful content"}]}]}`), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if got := embeddedContent(preview); !strings.Contains(got, "GIF (https://example.test/preview.gif)") || !strings.Contains(got, "https://example.test/page") || !strings.Contains(got, "https://example.test/image.gif") || !strings.Contains(got, "Useful content") {
+		t.Fatalf("links or unfurl content lost: %s", got)
+	}
 	recursive := map[string]any{"type": "rich_text_section"}
 	recursive["elements"] = []any{recursive}
 	x = extractor{}

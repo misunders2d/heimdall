@@ -273,15 +273,18 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		in.Context += "\n" + router.Untrusted("Slack embedded/forwarded message content", embedded)
 	}
 	if in.InterfaceReply == "" {
-		files := append([]slackFile(nil), m.Files...)
+		files := append(append([]slackFile(nil), m.Files...), embeddedFiles(m)...)
+		sharedEnd := len(files)
 		if historicalImage.MatchString(text) {
 			files = append(files, prior...)
 		}
 		in.Attachments = nil
 		for i, f := range files {
 			source := "message"
-			if i >= len(m.Files) {
+			if i >= sharedEnd {
 				source = "thread"
+			} else if i >= len(m.Files) {
+				source = "shared_message"
 			}
 			a := s.download(ctx, f)
 			a.Source = source
