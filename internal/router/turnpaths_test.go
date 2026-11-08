@@ -17,6 +17,8 @@ func TestCleanTurnPathsExactCurrentTurnOnly(t *testing.T) {
 		{"neighboring turn", "/home/u/.local/state/heimdall/turns/7-ab123/out/x.png", "/home/u/.local/state/heimdall/turns/7-ab123/out/x.png"},
 		{"similarly named dir", out + "2/x.png " + out + "-old/y", out + "2/x.png " + out + "-old/y"},
 		{"prefix inside longer path", "/backup" + out + "/x.png", "/backup" + out + "/x.png"},
+		{"repeated prefix inside longer path", "/backup" + out + out + "/x.png", "/backup" + out + out + "/x.png"},
+		{"longer path then real one", "/backup" + out + "/x.png and " + out + "/y.png", "/backup" + out + "/x.png and y.png"},
 		{"unaffected fence kept", "```\n```\nplain", "```\n```\nplain"},
 		{"no prefix supplied", "keep " + out + "/x", "keep " + out + "/x"},
 	} {

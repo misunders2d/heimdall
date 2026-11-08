@@ -146,27 +146,33 @@ func pathByte(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || strings.IndexByte("._~-/", b) >= 0
 }
 
+// cutPrefix scans offsets into the unchanged text, so each occurrence's
+// boundaries are judged against the original neighbouring bytes.
 func cutPrefix(text, prefix string) string {
 	var b strings.Builder
-	for {
-		i := strings.Index(text, prefix)
-		if i < 0 {
-			b.WriteString(text)
+	done := 0 // text[:done] is written
+	for from := 0; ; {
+		k := strings.Index(text[from:], prefix)
+		if k < 0 {
+			b.WriteString(text[done:])
 			return b.String()
 		}
+		i := from + k
 		end := i + len(prefix)
 		switch {
 		case i > 0 && pathByte(text[i-1]):
-			b.WriteString(text[:end]) // inside a longer path
+			// inside a longer path
 		case end < len(text) && text[end] == '/':
-			b.WriteString(text[:i])
+			b.WriteString(text[done:i])
 			end++
+			done = end
 		case end == len(text) || !pathByte(text[end]):
-			b.WriteString(text[:i] + path.Base(prefix))
+			b.WriteString(text[done:i] + path.Base(prefix))
+			done = end
 		default:
-			b.WriteString(text[:end]) // a similarly named directory
+			// a similarly named directory
 		}
-		text = text[end:]
+		from = end
 	}
 }
 
