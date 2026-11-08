@@ -9,8 +9,6 @@ package harness
 import (
 	"encoding/json"
 	"strings"
-
-	"github.com/misunders2d/heimdall/internal/core"
 )
 
 // Continuation is native output from the same owned process, without a fresh
@@ -201,7 +199,6 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		Parent  json.RawMessage `json:"parent_tool_use_id"`
 		Task    string          `json:"task_id"`
 		RunID   string          `json:"run_id"`
-		Summary string          `json:"summary"`
 		Patch   struct {
 			Status string `json:"status"`
 		} `json:"patch"`
@@ -355,10 +352,8 @@ func (w *worker) claudeLineLocked(raw []byte) {
 				if w.continuing[nativeKey] == nil {
 					w.continuing[nativeKey] = w.passiveLocked(source)
 				}
-				if e.Summary != "" {
-					w.seq++
-					w.emitLocked(source, Continuation{ID: w.seq, Phase: "notice", Notice: core.RedactMCPCallbacks(e.Summary)})
-				}
+				// Native task summaries may repeat tool inputs/descriptions.
+				// Only assistant text and its result are chat output.
 			}
 		}
 		return

@@ -107,6 +107,41 @@ func TestWarmClaudeEmptyResultUsesOnlyFinalAssistantText(t *testing.T) {
 	}
 }
 
+func TestClaudeToolSummaryIsNotChatOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream []string
+	}{
+		{"tool description and late summary", []string{
+			`{"type":"assistant","session_id":"owned","message":{"id":"tool","role":"assistant","content":[{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"true","description":"Copy candidate binary from Zenbook and verify"}}]}}`,
+			`{"type":"system","subtype":"task_started","session_id":"owned","task_id":"bash","run_id":"run"}`,
+			`{"type":"tool_use_summary","session_id":"owned","summary":"Copy candidate binary from Zenbook and verify","preceding_tool_use_ids":["bash"]}`,
+			`{"type":"assistant","session_id":"owned","message":{"id":"final","role":"assistant","content":[{"type":"text","text":"Real final answer"}]}}`,
+			`{"type":"result","subtype":"success","session_id":"owned","uuid":"final-result","result":"Real final answer"}`,
+			`{"type":"system","subtype":"task_notification","session_id":"owned","task_id":"bash","run_id":"run","status":"completed","summary":"Copy candidate binary from Zenbook and verify"}`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, b, events := asyncFixture(t)
+			out := &workerOutput{w}
+			for _, line := range tc.stream {
+				_, _ = out.Write([]byte(line + "\n"))
+			}
+			if result := b.outcome(); result.answer != "Real final answer" || len(result.answers) != 1 || result.failure != "" {
+				t.Fatalf("final answer changed: %+v", result)
+			}
+			for _, event := range *events {
+				if event.Phase == "notice" || event.Result.Answer != "" {
+					t.Fatalf("metadata created extra chat output: %+v", event)
+				}
+			}
+			if w.tasks["run\x00bash"] != w.current {
+				t.Fatal("summary filtering lost task ownership")
+			}
+		})
+	}
+}
+
 func TestFinalizationStartWarning(t *testing.T) {
 	for _, c := range []struct{ name, existing, start, want string }{
 		{"empty", "", "", ""}, {"existing-only", "existing warning", "", "existing warning"},
