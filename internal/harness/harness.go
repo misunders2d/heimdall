@@ -124,7 +124,11 @@ type Session struct {
 
 // Spec is one turn.
 type Spec struct {
-	SchedulerControl bool // trusted live person input only; never scheduled/MCP work
+	SchedulerControl bool // trusted live person input, or a router-started owner scheduled run; never MCP work
+	// ScheduledJob/ScheduledRun name the scheduled run this turn executes. Only
+	// the router sets them, from the scheduler's own run handover; never input.
+	ScheduledJob string
+	ScheduledRun int64
 
 	freshWarning string
 
@@ -216,6 +220,8 @@ type Run struct {
 	contextTaken     func()
 	contextOnce      sync.Once
 	schedulerControl bool
+	scheduledJob     string // trusted scheduled origin; see Spec.ScheduledJob
+	scheduledRun     int64
 	controlProcess   *os.File // spawn-time pidfd, control authority only
 
 	startWarning string
@@ -431,7 +437,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
-	r := &Run{schedulerControl: spec.SchedulerControl, startWarning: spec.freshWarning, contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
+	r := &Run{schedulerControl: spec.SchedulerControl, scheduledJob: spec.ScheduledJob, scheduledRun: spec.ScheduledRun, startWarning: spec.freshWarning, contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
 	r.stderr.max = 4 << 10
 	cmd.Stderr = &r.stderr
 	expected := ""

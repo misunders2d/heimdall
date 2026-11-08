@@ -1505,7 +1505,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				}
 			}
 		}
-		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
+		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive || t.job != nil && t.role == core.RoleOwner, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
 		if t.job == nil {
 			spec.Continuation = func(ev harness.Continuation) bool {
 				e := continuationEvent{source: t, harness: h, native: ev}
@@ -1526,6 +1526,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		spec.WarmContext = c.deliveredContext(t, h, batch[0].row.Inbound)
 		if t.job != nil {
+			// Read-only scheduler control, bound to this exact run; the
+			// scheduler re-verifies the run, creator and owner per call.
+			spec.ScheduledJob, spec.ScheduledRun = t.job.Job, t.job.Run
 			spec.OneShot, spec.Timeout = true, t.job.Timeout
 			if t.job.Def.RerunOnTimeout {
 				// All candidates share this execution's limit. A rerun additionally

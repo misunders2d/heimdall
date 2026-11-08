@@ -12,7 +12,8 @@ func (r *Router) schedulerCaller(pid int) (scheduler.Caller, func() bool, error)
 	defer r.runsMu.Unlock()
 	for run := range r.runs {
 		if c, generation := run.ControlGeneration(ancestors); generation != nil {
-			return scheduler.Caller{Principal: c.Principal, Role: c.Role, Conv: c.Conv, Private: c.Private}, func() bool {
+			job, id := generation.ControlScheduled()
+			return scheduler.Caller{Principal: c.Principal, Role: c.Role, Conv: c.Conv, Private: c.Private, Job: job, Run: id}, func() bool {
 				_, current := run.ControlGeneration(harness.ProcessAncestors(pid))
 				return current == generation
 			}, nil

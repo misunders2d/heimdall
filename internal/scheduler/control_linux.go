@@ -208,6 +208,9 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 		return Caller{}, errors.New("trusted active request origin required")
 	}
 	who := origin[0]
+	if who.Job != "" {
+		return c.scheduledCaller(ctx, who)
+	}
 	p, k := who.Principal, who.Conv
 	if err := c.s.st.ControlOrigin(p, k, who.Private); err != nil {
 		return Caller{}, err
@@ -227,6 +230,49 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 		return Caller{}, errors.New("bound caller is not a current owner")
 	}
 	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private}, nil
+}
+
+// scheduledCaller binds a router-started scheduled run. The router already
+// tied the socket peer to that run's harness process (kernel pidfd, ancestry,
+// live generation). Here the store must still show that exact run running at
+// the job's current version, created by this principal, who is re-verified
+// (Slack live) and is an owner now for the job's target. Conversation and
+// privacy come from the stored job, never from the harness or request.
+func (c *Control) scheduledCaller(ctx context.Context, who Caller) (Caller, error) {
+	refused := errors.New("scheduled origin is not a current owner run")
+	j, ok, err := c.s.st.Job(who.Job)
+	if err != nil || !ok || j.Creator.Key() != who.Principal.Key() || (j.State != store.JobActive && j.State != store.JobPaused) {
+		return Caller{}, refused
+	}
+	run, err := c.s.st.Run(who.Run)
+	if err != nil || run.Job != j.ID || run.State != store.RunRunning || run.Version != j.Version {
+		return Caller{}, refused
+	}
+	d, _, err := parse(j)
+	if err != nil || d.Kind != KindAgent {
+		return Caller{}, refused
+	}
+	v, tgt, err := c.s.verify(ctx, j, d, c.s.now())
+	if err != nil || v.Principal.Key() != j.Creator.Key() {
+		return Caller{}, refused
+	}
+	if r, _, ok := c.s.access.Decide(v.Principal, tgt.Conv); !ok || r != core.RoleOwner {
+		return Caller{}, refused
+	}
+	return Caller{Principal: v.Principal, Role: core.RoleOwner, Conv: tgt.Conv, Private: tgt.Private && tgt.AgentNet == "", Job: j.ID, Run: run.ID}, nil
+}
+
+// readable is a job the bound caller may read: its own, or (read actions
+// only) one created by the same person's identity alias that is an owner now.
+func (c *Control) readable(j store.Job, who Caller, read bool) bool {
+	if j.Creator.Key() == who.Principal.Key() {
+		return true
+	}
+	if !read || !c.s.access.SamePerson(j.Creator, who.Principal) {
+		return false
+	}
+	r, ok := c.s.access.Role(j.Creator)
+	return ok && r == core.RoleOwner
 }
 
 // peerPIDFD requires Linux SO_PEERPIDFD; unsupported kernels fail closed.
@@ -288,10 +334,13 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	if len(valid) > 0 && !valid[0]() {
 		return fail(errors.New("request origin expired during verification"))
 	}
+	read := req.Action == "list" || req.Action == "show" || req.Action == "history" || req.Action == "checkpoint" || req.Action == "discover"
+	if who.Job != "" && !read {
+		return fail(errors.New("scheduled runs may only read the scheduler; drafts, changes and confirmations need a live human request"))
+	}
 	if !who.Private && (req.Action == "checkpoint" || req.Action == "show" || req.Action == "history") {
 		return fail(errors.New("job details require a private originating conversation"))
 	}
-	read := req.Action == "list" || req.Action == "show" || req.Action == "history" || req.Action == "checkpoint" || req.Action == "discover"
 	if !read && (req.RequestID == "" || len(req.RequestID) > 128 || strings.ContainsAny(req.RequestID, "\r\n")) {
 		return fail(errors.New("mutation requires a stable request_id (1-128 bytes); reuse only for the same request"))
 	}
@@ -318,14 +367,16 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	if req.Action == "discover" {
 		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge. acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
 	}
+	var job store.Job
 	if req.ID != "" {
 		j, ok, err := c.s.st.Job(req.ID)
 		if err != nil {
 			return fail(err)
 		}
-		if !ok || j.Creator.Key() != who.Principal.Key() {
+		if !ok || !c.readable(j, who, read) {
 			return fail(errors.New("no job of the bound creator"))
 		}
+		job = j
 	}
 	if req.Action == "list" {
 		return ControlResult{Reply: c.s.list(who, false)}
@@ -335,7 +386,7 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		return ControlResult{Reply: text}
 	}
 	if req.Action == "checkpoint" {
-		cp, err := c.s.st.Checkpoint(req.ID, who.Principal.Key())
+		cp, err := c.s.st.Checkpoint(req.ID, job.Creator.Key())
 		if err != nil {
 			return fail(err)
 		}

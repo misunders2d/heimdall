@@ -33,6 +33,14 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if socket := os.Getenv("FAKE_CONTROL_MCP"); socket != "" {
+		// The shared stdio MCP adapter, started by a fake harness as its own
+		// child process, exactly as a native harness starts MCP servers.
+		if scheduler.ServeControlMCP(context.Background(), socket, os.Stdin, os.Stdout) != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	fakeharness.Main()
 	os.Exit(m.Run())
 }

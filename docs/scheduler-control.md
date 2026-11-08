@@ -26,8 +26,16 @@ commit. Kernel pidfds bind both socket peer and harness process lifetime, preven
 PID reuse from selecting another conversation. Linux SO_PEERPIDFD support (6.5+)
 is required; unsupported/restricted kernels disable controls by failing closed.
 
-Unknown, employee, revoked, idle, scheduled and passive continuation callers fail
-closed. No model argument, environment identity, or result destination supplies
+Unknown, employee, revoked, idle and passive continuation callers fail closed.
+A scheduled run (2026-11-08) is a **read-only** origin: only the owner job's own
+router-started run, bound by the same pidfd/ancestry/generation to its harness
+process. Per call the store must show that exact run still `running` at the
+job's current version, created by that principal, re-verified (Slack live) and
+an owner now for the job's target; conversation and privacy come from the stored
+job. It may discover/list/show/history/checkpoint its creator's jobs (reads also
+cover the same person's current-owner identity alias). Create/edit/remove drafts,
+run/pause/resume/stop and acknowledge are refused: they stay with live humans.
+No model argument, environment identity, or result destination supplies
 origin. Warm MCP servers resolve anew on every call; accepted steers share the
 same verified caller/conversation. Ambiguous background/foreground overlap is
 refused. Detached or reparented MCP servers also fail closed. Shared contexts cannot read

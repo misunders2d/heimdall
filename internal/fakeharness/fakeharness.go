@@ -41,6 +41,10 @@
 //	               STATE/terminated and exits, unless NOTERM ignores it
 //
 //	SAY=BASE64     answer exactly the decoded text (standard encoding)
+//	CONTROL=BASE64 before answering, start this binary as a child stdio MCP
+//	               server (FAKE_CONTROL_MCP=$FAKE_CONTROL_SOCKET), call its
+//	               heimdall_scheduler tool with the decoded arguments and
+//	               append the tool's text to STATE/control.jsonl
 //
 // The answer reports: NAME#TURN resumed=BOOL steers=N mem=ENV head="FIRST LINE" frame="FIRST HEIMDALL FRAME LINE" last="LAST LINE" ext="IDENTITY" home="HOME"
 // where IDENTITY lists the PI_EXTERNAL_*, A2A_CALLER_*, PI_RESTRICTED_* and
@@ -369,7 +373,47 @@ func lastLine(s string) string {
 	return lines[len(lines)-1]
 }
 
+// control calls the scheduler tool through a child MCP server process.
+func (f *fake) control(enc string) {
+	args, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	call, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "heimdall_scheduler", "arguments": json.RawMessage(args)}})
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"fake","version":"1"}}}` + "\n" + string(call) + "\n"
+	cmd := exec.Command(self)
+	cmd.Env = append(os.Environ(), "FAKE_CONTROL_MCP="+os.Getenv("FAKE_CONTROL_SOCKET"))
+	cmd.Stdin = strings.NewReader(input)
+	out, _ := cmd.Output()
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var resp struct {
+		Result struct {
+			Content []struct{ Text string } `json:"content"`
+			IsError bool                    `json:"isError"`
+		} `json:"result"`
+	}
+	text := "no tool result"
+	if json.Unmarshal([]byte(lines[len(lines)-1]), &resp) == nil && len(resp.Result.Content) == 1 {
+		text = resp.Result.Content[0].Text
+	}
+	rec, _ := json.Marshal(map[string]any{"args": json.RawMessage(args), "text": text, "is_error": resp.Result.IsError})
+	file, err := os.OpenFile(filepath.Join(f.state, "control.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err == nil {
+		fmt.Fprintln(file, string(rec))
+		file.Close()
+	}
+}
+
 func (f *fake) answer() string {
+	for _, w := range strings.Fields(f.prompt) {
+		if enc, ok := strings.CutPrefix(w, "CONTROL="); ok {
+			f.control(enc)
+		}
+	}
 	for _, w := range strings.Fields(f.prompt) {
 		if enc, ok := strings.CutPrefix(w, "SAY="); ok {
 			if b, err := base64.StdEncoding.DecodeString(enc); err == nil {

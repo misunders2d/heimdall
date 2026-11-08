@@ -244,7 +244,7 @@ func (w *worker) next(spec Spec, deadline time.Time, born time.Time) (*Run, erro
 		return nil, err
 	}
 	cmd := &exec.Cmd{Env: []string{"HD_CONTEXT_DIR=" + w.root.contextDir}, Dir: spec.Launch.Dir, Stdin: &warmInput{WriteCloser: input.WriteCloser, thread: spec.Session.ID, gate: gate, start: spec.StartContext}}
-	r := &Run{contextTaken: consumed, schedulerControl: spec.SchedulerControl, contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress}
+	r := &Run{contextTaken: consumed, schedulerControl: spec.SchedulerControl, scheduledJob: spec.ScheduledJob, scheduledRun: spec.ScheduledRun, contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress}
 	var err error
 	switch spec.Harness {
 	case "pi", "omp":
@@ -604,6 +604,9 @@ func (p *Pool) retire(e *warmEntry, why string) {
 		}
 	}()
 }
+
+// ControlScheduled is the scheduled run this turn executes ("" for person turns).
+func (r *Run) ControlScheduled() (string, int64) { return r.scheduledJob, r.scheduledRun }
 
 func (r *Run) Process() *Run {
 	if r.worker != nil {

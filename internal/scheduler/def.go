@@ -70,6 +70,11 @@ type Caller struct {
 	Role      core.Role
 	Conv      core.ConvKey
 	Private   bool // Conv is the caller's private chat with the bot
+	// Job/Run: a router-started scheduled run executing this turn (control
+	// origin only; set from the harness run, never from a request). Empty for
+	// person turns.
+	Job string
+	Run int64
 }
 
 // Target is where a job delivers.
