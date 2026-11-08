@@ -157,6 +157,8 @@ type message struct {
 	ForwardOrigin      *origin  `json:"forward_origin"`
 	MediaGroupID       string   `json:"media_group_id"`
 	media
+
+	Quote json.RawMessage `json:"quote"` // optional cargo; malformed fields must not poison the update
 }
 
 // origin is a forwarded message's MessageOrigin.

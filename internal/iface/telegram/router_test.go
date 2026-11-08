@@ -20,6 +20,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 3 && os.Args[1] == "hook" && os.Args[2] == "input-context" {
+		if harness.ContextHook(os.Stdin, os.Stdout) != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	fakeharness.Main()
 	os.Exit(m.Run())
 }
