@@ -700,3 +700,83 @@ func TestWarmSchedulerOriginUsesCurrentTurn(t *testing.T) {
 		})
 	}
 }
+
+func TestWarmContextClaimAndAcknowledgement(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, state := warmSpec(t, "claude")
+	s.Context = ""
+	calls, consumed := 0, 0
+	s.WarmContext = func(process *harness.Run, born time.Time) (string, func()) {
+		calls++
+		if process == nil || born.IsZero() {
+			t.Fatal("missing exact warm claim")
+		}
+		return "historical delivered data", func() { consumed++ }
+	}
+	p := harness.NewPool(harness.WarmConfig{})
+	first := pooledTurn(t, p, ctx, s)
+	if calls != 0 {
+		t.Fatal("cold session imported historical delta")
+	}
+	s.Session = harness.Session{ID: first.Result().SessionID, Resume: true}
+	second := pooledTurn(t, p, ctx, s)
+	if calls != 1 || consumed != 0 {
+		t.Fatal("speculative cursor consumed")
+	}
+	second.AcceptContext()
+	second.AcceptContext()
+	if consumed != 1 {
+		t.Fatal("acknowledgement did not consume exactly once")
+	}
+	inputs := fakeharness.Inputs(state)
+	if inputs[1].Context != "historical delivered data" {
+		t.Fatal("warm context never handed over")
+	}
+	s.Launch.Env = append(s.Launch.Env, "CHANGED_ACCOUNT_SCOPE=1")
+	third := pooledTurn(t, p, ctx, s)
+	if third.Process() == first.Process() || calls != 1 {
+		t.Fatal("changed launch imported old process delta")
+	}
+	inputs = fakeharness.Inputs(state)
+	if inputs[len(inputs)-1].Context != "" {
+		t.Fatal("old context leaked into replacement process")
+	}
+	cancel()
+	<-third.Exited()
+}
+
+func TestWarmContextCancelledBeforeNativeInputDoesNotConsume(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, _ := warmSpec(t, "claude")
+	s.Prompt = "first"
+	start, stopStart := context.WithCancel(ctx)
+	defer stopStart()
+	consumed := 0
+	s.WarmContext = func(*harness.Run, time.Time) (string, func()) {
+		stopStart()
+		return "historical data", func() { consumed++ }
+	}
+	p := harness.NewPool(harness.WarmConfig{})
+	first := pooledTurn(t, p, ctx, s)
+	s.StartContext = start
+	s.Prompt = "must not enter native"
+	s.Session = harness.Session{ID: first.Result().SessionID, Resume: true}
+	run, err := p.Start(ctx, s)
+	if err == nil {
+		select {
+		case <-run.Done():
+		case <-time.After(3 * time.Second):
+			t.Fatal("cancelled launch did not settle")
+		}
+		if run.Result().Ready || run.Result().Answer != "" {
+			t.Fatal("cancelled input reached native")
+		}
+	}
+	if consumed != 0 {
+		t.Fatal("failed start consumed delivered cursor")
+	}
+	cancel()
+	<-first.Exited()
+}

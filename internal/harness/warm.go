@@ -177,7 +177,7 @@ func (w *worker) wait() {
 		_ = p.WriteCloser.Close()
 	}
 }
-func (w *worker) next(spec Spec, deadline time.Time) (*Run, error) {
+func (w *worker) next(spec Spec, deadline time.Time, born time.Time) (*Run, error) {
 	for {
 		w.mu.Lock()
 		if w.current.harness == "claude" || w.background == nil {
@@ -230,12 +230,21 @@ func (w *worker) next(spec Spec, deadline time.Time) (*Run, error) {
 			}
 		}
 	}
-	if _, err := stageContext(w.root.contextDir, spec.Prompt, spec.Context); err != nil {
+	nativeContext := spec.Context
+	var consumed func()
+	if spec.WarmContext != nil {
+		delta, accept := spec.WarmContext(w.root, born)
+		if delta != "" {
+			nativeContext = strings.TrimSpace(nativeContext + "\n\n" + delta)
+			consumed = accept
+		}
+	}
+	if _, err := stageContext(w.root.contextDir, spec.Prompt, nativeContext); err != nil {
 		cancel()
 		return nil, err
 	}
 	cmd := &exec.Cmd{Env: []string{"HD_CONTEXT_DIR=" + w.root.contextDir}, Dir: spec.Launch.Dir, Stdin: &warmInput{WriteCloser: input.WriteCloser, thread: spec.Session.ID, gate: gate, start: spec.StartContext}}
-	r := &Run{schedulerControl: spec.SchedulerControl, contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress}
+	r := &Run{contextTaken: consumed, schedulerControl: spec.SchedulerControl, contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress}
 	var err error
 	switch spec.Harness {
 	case "pi", "omp":
@@ -243,7 +252,7 @@ func (w *worker) next(spec Spec, deadline time.Time) (*Run, error) {
 	case "claude":
 		r.bridge, err = newClaudeStreamBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
 	case "codex":
-		r.bridge, err = newCodexBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session, spec.Instructions, spec.Context)
+		r.bridge, err = newCodexBridge(ctx, cmd, spec.Prompt, spec.Images, spec.Session, spec.Instructions, nativeContext)
 	}
 	if err != nil {
 		cancel()
@@ -320,7 +329,7 @@ func launchFingerprint(s Spec) [32]byte {
 		Session        string
 		Telemetry      bool
 		NativeSettings string
-	}{s.Harness, s.Instructions, s.Context != "" || s.Instructions != "", s.Launch, s.Caller, s.OwnerSlack, "", s.Progress != nil, nativeSettings(s)})
+	}{s.Harness, s.Instructions, s.Context != "" || s.Instructions != "" || s.WarmContext != nil, s.Launch, s.Caller, s.OwnerSlack, "", s.Progress != nil, nativeSettings(s)})
 	return sha256.Sum256(b)
 }
 func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
@@ -371,7 +380,7 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 	if e != nil {
 		if !e.run.cancelled.Load() && s.Session.Resume && s.Session.ID == e.run.Result().SessionID && e.fingerprint == fp && time.Since(e.born)+p.runLimit(s.Timeout) < time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second {
 			deadline := minTime(e.born.Add(time.Duration(p.cfg.MaxLifetimeSeconds)*time.Second), time.Now().Add(p.runLimit(s.Timeout)))
-			r, err := e.run.worker.next(s, deadline)
+			r, err := e.run.worker.next(s, deadline, e.born)
 			if err == nil {
 				p.watch(r, key, fp, e.born, epoch, s.Timeout)
 				return r, nil

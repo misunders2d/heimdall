@@ -1451,3 +1451,21 @@ func TestPrepareRefusesInvalidMultipleAndCap(t *testing.T) {
 		})
 	}
 }
+
+func TestQuietControlIsWholeAnswerOnly(t *testing.T) {
+	for _, text := range []string{"NO_UPDATE", "Marker exists → already reported.\n\nNO_UPDATE", "The user asked what NO_UPDATE means.", "NO_UPDATE\nUseful result"} {
+		t.Run(text, func(t *testing.T) {
+			r := newRig(t)
+			id := r.add(asBoss, `{"name":"q","schedule":{"every":"1h"},"quiet":true,"prompt":"p"}`)
+			r.run(id)
+			e := r.finish(text, Outcome{Harness: "claude"})
+			if text == "NO_UPDATE" {
+				if e.Run.State != store.RunQuiet || e.Reply != nil {
+					t.Fatal("quiet control leaked")
+				}
+			} else if e.Reply == nil || e.Reply.Text != text {
+				t.Fatal("legitimate mixed content suppressed")
+			}
+		})
+	}
+}

@@ -108,7 +108,7 @@ func prepareContext(s Spec, args []string) (string, []string, error) {
 	if s.Harness != "pi" && s.Harness != "claude" {
 		return "", args, nil
 	}
-	if s.Context == "" && s.Instructions == "" {
+	if s.Context == "" && s.Instructions == "" && s.WarmContext == nil {
 		return "", args, nil
 	}
 	parent := ""

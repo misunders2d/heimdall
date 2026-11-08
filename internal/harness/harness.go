@@ -132,6 +132,9 @@ type Spec struct {
 	// The callback stays bound to this exact caller, conversation and outbox.
 	// A start returns true only after durable acceptance; false stops its process.
 	Continuation func(Continuation) bool
+	// WarmContext supplies a process-scoped delta only after a valid warm claim.
+	// The callback is consumed explicitly at native acknowledgement.
+	WarmContext func(*Run, time.Time) (string, func())
 
 	Google     *googleoauth.Broker
 	warm       bool
@@ -210,6 +213,8 @@ type Result struct {
 
 // Run is one started native turn.
 type Run struct {
+	contextTaken     func()
+	contextOnce      sync.Once
 	schedulerControl bool
 	controlProcess   *os.File // spawn-time pidfd, control authority only
 
@@ -857,4 +862,13 @@ func (r *Run) RespondMCP(ctx context.Context, p core.Principal, conv core.ConvKe
 		return false
 	}
 	return b.respondMCP(ctx, value)
+}
+
+// AcceptContext commits only metadata already handed to an acknowledged input.
+func (r *Run) AcceptContext() {
+	r.contextOnce.Do(func() {
+		if r.contextTaken != nil {
+			r.contextTaken()
+		}
+	})
 }

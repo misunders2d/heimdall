@@ -488,6 +488,7 @@ type conv struct {
 	continuations []continuationEvent
 	nativeTurns   map[continuationKey]*turn
 	losses        map[lossKey]bool
+	delivered     map[string]deliveredState // c.mu; exact native process scoped cursors
 
 	r      *Router
 	key    core.ConvKey
@@ -1523,6 +1524,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				return ctx.Err() == nil
 			}
 		}
+		spec.WarmContext = c.deliveredContext(t, h, batch[0].row.Inbound)
 		if t.job != nil {
 			spec.OneShot, spec.Timeout = true, t.job.Timeout
 			if t.job.Def.RerunOnTimeout {
@@ -2119,10 +2121,14 @@ func (c *conv) startCandidate(ctx context.Context, t *turn, spec harness.Spec) (
 		}
 		select {
 		case <-run.Ready():
+			run.AcceptContext()
 			return run, nil
 		case <-run.Done():
 		}
 		res := run.Result()
+		if res.Answer != "" || res.NeedsHuman != "" {
+			run.AcceptContext()
+		}
 		if attempt == 0 && run.Process() != run && !res.Ready && res.Failure != "" && !res.Cancelled && !t.stopped.Load() && ctx.Err() == nil {
 			<-run.Exited()
 			continue

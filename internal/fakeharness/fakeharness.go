@@ -49,12 +49,14 @@ package fakeharness
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -144,15 +146,16 @@ func Install(t testing.TB, names ...string) (bin, state string) {
 type fake struct {
 	emitMu sync.Mutex
 
-	name, state  string
-	in           *bufio.Scanner
-	out          *json.Encoder
-	prompt       string
-	metadata     string
-	inputContext string
-	turn         int
-	resumed      bool
-	steers       []string
+	name, state          string
+	in                   *bufio.Scanner
+	out                  *json.Encoder
+	prompt               string
+	metadata             string
+	inputContext         string
+	hookContextDelivered bool
+	turn                 int
+	resumed              bool
+	steers               []string
 }
 
 func (f *fake) emit(v any) { f.emitMu.Lock(); defer f.emitMu.Unlock(); _ = f.out.Encode(v) }
@@ -163,7 +166,9 @@ func (f *fake) record(kind, text string, images int) {
 	if f.name == "pi" || f.name == "claude" {
 		f.inputContext = ""
 		dir := os.Getenv("HD_CONTEXT_DIR")
-		if dir != "" {
+		if f.name == "claude" && os.Getenv("FAKE_CONTEXT_HOOK") == "1" {
+			f.inputContext, f.hookContextDelivered = invokeContextHook(text)
+		} else if dir != "" {
 			entries, _ := os.ReadDir(dir)
 			for _, entry := range entries {
 				if !strings.HasSuffix(entry.Name(), ".json") {
@@ -195,16 +200,17 @@ func (f *fake) record(kind, text string, images int) {
 		return
 	}
 	defer file.Close()
-	_ = json.NewEncoder(file).Encode(Input{Harness: f.name, Kind: kind, Text: text, Images: images, Context: f.inputContext})
+	_ = json.NewEncoder(file).Encode(Input{Harness: f.name, Kind: kind, Text: text, Images: images, Context: f.inputContext, HookContext: f.hookContextDelivered})
 }
 
 // Input is one recorded harness input.
 type Input struct {
-	Harness string `json:"harness"`
-	Kind    string `json:"kind"`
-	Text    string `json:"text"`
-	Images  int    `json:"images"`
-	Context string `json:"context,omitempty"`
+	Harness     string `json:"harness"`
+	Kind        string `json:"kind"`
+	Text        string `json:"text"`
+	Images      int    `json:"images"`
+	Context     string `json:"context,omitempty"`
+	HookContext bool   `json:"hook_context,omitempty"`
 }
 
 // Inputs reads the inputs recorded in state, oldest first.
@@ -304,6 +310,51 @@ func (f *fake) waitForTerm(d time.Duration) {
 	case <-term:
 		_ = os.WriteFile(filepath.Join(f.state, "terminated"), nil, 0o600)
 	}
+}
+
+// Exercise the actual command hook configured by prepareContext, including
+// native JSON input and additionalContext output, instead of reading a file.
+func invokeContextHook(prompt string) (string, bool) {
+	for i, arg := range os.Args {
+		if arg != "--settings" || i+1 >= len(os.Args) {
+			continue
+		}
+		var settings struct {
+			Hooks map[string][]struct {
+				Hooks []struct {
+					Command string `json:"command"`
+				} `json:"hooks"`
+			} `json:"hooks"`
+		}
+		if json.Unmarshal([]byte(os.Args[i+1]), &settings) != nil {
+			continue
+		}
+		for _, group := range settings.Hooks["UserPromptSubmit"] {
+			for _, hook := range group.Hooks {
+				if !strings.Contains(hook.Command, " hook input-context") {
+					continue
+				}
+				data, _ := json.Marshal(map[string]string{"prompt": prompt})
+				cmd := exec.Command("/bin/sh", "-c", hook.Command)
+				cmd.Stdin = bytes.NewReader(data)
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					return fmt.Sprintf("synthetic hook failure: %v %s", err, output), false
+				}
+				var result struct {
+					Output struct {
+						Event   string `json:"hookEventName"`
+						Context string `json:"additionalContext"`
+					} `json:"hookSpecificOutput"`
+				}
+				if json.Unmarshal(output, &result) != nil {
+					return "synthetic hook invalid JSON: " + string(output), false
+				}
+				return result.Output.Context, result.Output.Event == "UserPromptSubmit"
+			}
+		}
+	}
+	return "", false
 }
 
 func lastLine(s string) string {
