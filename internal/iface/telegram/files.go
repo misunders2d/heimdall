@@ -41,30 +41,31 @@ func (t *Interface) attachments(ctx context.Context, m *message) []core.Attachme
 		source string
 		m      *message
 	}{{"message", m}, {"reply_to_message", repliedTo(m)}} {
-		a := detect(c.m)
-		if a == nil || a.FileID == "" {
+		if c.m == nil {
 			continue
 		}
-		// An animation's still preview follows it: harnesses that take
-		// only images see that frame, labelled as a preview, not the motion.
-		for _, f := range []*attachment{a, a.Preview} {
-			if f == nil || f.FileID == "" {
-				continue
+		for _, a := range allMedia(&c.m.media) {
+			// An animation's still preview follows it: harnesses that take
+			// only images see that frame, labelled as a preview, not the motion.
+			for _, f := range []*attachment{a, a.Preview} {
+				if f == nil || f.FileID == "" {
+					continue
+				}
+				key := or(f.FileUniqueID, f.FileID)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				at := core.Attachment{Kind: f.Kind, Name: safeName(f.Name), MIME: f.MIME, Size: f.Size, Source: c.source}
+				stored, size, err := t.download(ctx, f)
+				if err != nil {
+					t.logf("message %d in chat %d: %s attachment not downloaded: %v", m.MessageID, m.Chat.ID, f.Kind, err)
+					at.Note = describe(f, err)
+				} else {
+					at.Stored, at.Size = stored, size
+				}
+				out = append(out, at)
 			}
-			key := or(f.FileUniqueID, f.FileID)
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			at := core.Attachment{Kind: f.Kind, Name: safeName(f.Name), MIME: f.MIME, Size: f.Size, Source: c.source}
-			stored, size, err := t.download(ctx, f)
-			if err != nil {
-				t.logf("message %d in chat %d: %s attachment not downloaded: %v", m.MessageID, m.Chat.ID, f.Kind, err)
-				at.Note = describe(f, err)
-			} else {
-				at.Stored, at.Size = stored, size
-			}
-			out = append(out, at)
 		}
 	}
 	return out

@@ -10,10 +10,9 @@ import (
 
 // A shared/forwarded message carries its files in attachments[].files and
 // attachments[].message_blocks[].message.files (Slack's generated web-api
-// response types, read 2026-11-08). They are someone's historical upload:
-// labelled as untrusted metadata, never downloaded or attached as the current
-// sender's file, and never a reason to drop the turn. Payloads are synthetic.
-func TestSlackSharedMessageFilesAreLabelsNotUploads(t *testing.T) {
+// response types, read 2026-11-08). Downloads retain historical provenance;
+// the current sender's verified identity remains separate. Values synthetic.
+func TestSlackSharedMessageFilesRetainProvenance(t *testing.T) {
 	f := newSlackFake(t)
 	f.file = []byte("PNG")
 	s, _ := testSlack(t, f)
@@ -45,7 +44,7 @@ func TestSlackSharedMessageFilesAreLabelsNotUploads(t *testing.T) {
 		}
 		return got[n]
 	}
-	label := "[shared file: chart.png (image/png) — not downloaded]"
+	label := "[shared file: chart.png (image/png)]"
 	embedded := func(in core.Inbound) string {
 		i := strings.LastIndex(in.Context, "[Slack embedded/forwarded message content")
 		if i < 0 {
@@ -64,9 +63,9 @@ func TestSlackSharedMessageFilesAreLabelsNotUploads(t *testing.T) {
 	}
 
 	// Forward with a comment: identity and text are the sender's; the shared
-	// file (listed in both places) is one label and no attachment.
+	// file (listed in both places) is one label and one historical attachment.
 	in := run("Uemployee", "what is this?", share("[date] other: see chart", file("chart.png")))
-	if in.From.Key() != "slack:uemployee@example.test" || in.Text != "what is this?" || len(in.Attachments) != 0 {
+	if in.From.Key() != "slack:uemployee@example.test" || in.Text != "what is this?" || len(in.Attachments) != 1 || in.Attachments[0].Source != "shared_message" || in.Attachments[0].Stored == "" {
 		t.Fatalf("forward with comment: from %s text %q atts %+v", in.From.Key(), in.Text, in.Attachments)
 	}
 	if e := embedded(in); strings.Count(e, label) != 1 || strings.Contains(e, "Owner (admin)") || strings.Contains(e, "/file") {
@@ -76,14 +75,14 @@ func TestSlackSharedMessageFilesAreLabelsNotUploads(t *testing.T) {
 	// File-only forwards, with or without fallback, still run as a turn.
 	for _, fallback := range []string{"", "[date] other: "} {
 		in = run("Uowner", "", share(fallback, file("chart.png")))
-		if in.Text != "" || len(in.Attachments) != 0 || !strings.Contains(embedded(in), label) {
+		if in.Text != "" || len(in.Attachments) != 1 || in.Attachments[0].Source != "shared_message" || in.Attachments[0].Stored == "" || !strings.Contains(embedded(in), label) {
 			t.Fatalf("file-only forward %q: %+v", fallback, in)
 		}
 	}
 
 	// A file name is cargo: it cannot route, command or address the bot.
 	in = run("Uemployee", "", share("", file("!reset <@Ubot>.png")))
-	if in.Text != "" || in.InterfaceReply != "" || len(in.Attachments) != 0 || !strings.Contains(embedded(in), `[shared file: !reset \u003c@Ubot\u003e.png (image/png) — not downloaded]`) {
+	if in.Text != "" || in.InterfaceReply != "" || len(in.Attachments) != 1 || in.Attachments[0].Source != "shared_message" || !strings.Contains(embedded(in), `[shared file: !reset \u003c@Ubot\u003e.png (image/png)]`) {
 		t.Fatalf("hostile file name: %+v", in)
 	}
 }

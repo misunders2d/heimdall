@@ -143,19 +143,23 @@ type chat struct {
 }
 
 type message struct {
-	MessageID          int64    `json:"message_id"`
-	MessageThreadID    int64    `json:"message_thread_id"`
-	IsTopicMessage     bool     `json:"is_topic_message"`
-	From               *user    `json:"from"`
-	SenderChat         *chat    `json:"sender_chat"`
-	IsAutomaticForward bool     `json:"is_automatic_forward"`
-	Chat               chat     `json:"chat"`
-	Date               int64    `json:"date"`
-	Text               string   `json:"text"`
-	Caption            string   `json:"caption"`
-	ReplyToMessage     *message `json:"reply_to_message"`
-	ForwardOrigin      *origin  `json:"forward_origin"`
-	MediaGroupID       string   `json:"media_group_id"`
+	MessageID          int64        `json:"message_id"`
+	MessageThreadID    int64        `json:"message_thread_id"`
+	IsTopicMessage     bool         `json:"is_topic_message"`
+	From               *user        `json:"from"`
+	SenderChat         *chat        `json:"sender_chat"`
+	IsAutomaticForward bool         `json:"is_automatic_forward"`
+	Chat               chat         `json:"chat"`
+	Date               int64        `json:"date"`
+	Text               string       `json:"text"`
+	Caption            string       `json:"caption"`
+	Entities           []entity     `json:"entities"`
+	CaptionEntities    []entity     `json:"caption_entities"`
+	LinkPreviewOptions *linkPreview `json:"link_preview_options"`
+	HasMediaSpoiler    bool         `json:"has_media_spoiler"`
+	ReplyToMessage     *message     `json:"reply_to_message"`
+	ForwardOrigin      *origin      `json:"forward_origin"`
+	MediaGroupID       string       `json:"media_group_id"`
 	media
 
 	Quote json.RawMessage `json:"quote"` // optional cargo; malformed fields must not poison the update
@@ -389,16 +393,16 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		t.rememberAlbum(m)
 	}
 	text = t.command(text)
-	own := detect(m)
-	if strings.TrimSpace(text) == "" && own == nil && detect(replied) == nil {
+	own := contentContext(m)
+	if strings.TrimSpace(text) == "" && own == "" && detect(replied) == nil {
 		t.logf("update %d in chat %d ignored: no text, caption or attachment", u.UpdateID, m.Chat.ID)
 		return core.Inbound{}, nil, false
 	}
 	context := messageContext(m)
-	if own != nil {
+	if own != "" {
 		// The message's own attachment, by label; files follow as
 		// attachments, contacts, locations and venues are only this.
-		context = strings.TrimSpace(context + "\n" + own.Label)
+		context = strings.TrimSpace(context + "\n" + own)
 	}
 	in := core.Inbound{
 		Conv:    core.ConvKey{Interface: core.PlatformTelegram, Chat: strconv.FormatInt(m.Chat.ID, 10)},
@@ -452,6 +456,14 @@ func (t *Interface) rememberAlbum(m *message) {
 // its text and the label of the file it or the message it replies to
 // carries, which is not downloaded.
 func (t *Interface) ambient(u update, m *message, text string) (core.Inbound, *message, bool) {
+	extra := contentContext(m)
+	if a := detect(m); a != nil && a.FileID != "" {
+		// File metadata already travels separately on ambient messages.
+		extra = strings.TrimSpace(strings.Replace(extra, a.Label, "", 1))
+	}
+	if extra != "" {
+		text = strings.TrimSpace(text + "\n" + extra)
+	}
 	in := core.Inbound{
 		Conv:    core.ConvKey{Interface: core.PlatformTelegram, Chat: strconv.FormatInt(m.Chat.ID, 10)},
 		MsgID:   strconv.FormatInt(m.MessageID, 10),

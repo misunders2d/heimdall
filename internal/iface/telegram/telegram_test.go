@@ -902,11 +902,12 @@ func TestAttachmentLabels(t *testing.T) {
 
 // Files on a message and on the message it replies to are downloaded into
 // the private upload directory; a file Telegram will not hand over is
-// described instead; contacts, locations and stickers are labels.
+// described instead; contacts and locations are labels.
 func TestAttachmentsAreDownloaded(t *testing.T) {
 	api := newFakeAPI(t)
 	api.files["photos/f1.jpg"] = []byte("jpeg bytes")
 	api.files["docs/report.txt"] = []byte("report body")
+	api.files["stickers/s.webp"] = []byte("sticker bytes")
 	var logs syncBuffer
 	c := &collector{}
 	i := newIface(t, api.srv.URL, botName, &logs)
@@ -925,7 +926,7 @@ func TestAttachmentsAreDownloaded(t *testing.T) {
 	where := msg(6, 42, "private", 42, "")
 	where["location"] = map[string]any{"latitude": 1.5, "longitude": 2.5}
 	sticker := msg(7, 42, "private", 42, "")
-	sticker["sticker"] = map[string]any{"file_id": "s"}
+	sticker["sticker"] = map[string]any{"file_id": "id:stickers/s.webp"}
 	api.push(upd(1, photo), upd(2, replyToDoc), upd(3, big), upd(4, missing), upd(5, where), upd(6, sticker))
 	stop := run(t, i, c.accept)
 	eventually(t, "accepted", func() bool { return len(c.list()) == 6 })
@@ -953,8 +954,8 @@ func TestAttachmentsAreDownloaded(t *testing.T) {
 	if got[4].Attachments != nil || got[4].Context != "[Location: lat=1.5, lon=2.5]" {
 		t.Fatalf("location: %+v", got[4])
 	}
-	// A bare sticker is a labelled turn (2026-11-08); its file is never fetched.
-	if got[5].Attachments != nil || got[5].Context != "[Sticker: no emoji | static]" {
+	// A bare sticker is a labelled turn with a safely downloaded file.
+	if len(got[5].Attachments) != 1 || got[5].Attachments[0].Kind != "sticker" || read(got[5].Attachments[0]) != "sticker bytes" || got[5].Context != "[Sticker: no emoji | static]" {
 		t.Fatalf("sticker: %+v", got[5])
 	}
 	if strings.Contains(logs.String(), token) {
