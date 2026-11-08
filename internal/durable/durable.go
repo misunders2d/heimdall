@@ -38,6 +38,7 @@ const (
 	appName      = "heimdall"
 	workflowName = "heimdall.commitment"
 	dispatchName = "heimdall.dispatch"
+	workTurnName = "heimdall.work"
 	topic        = "event"
 	stateKey     = "state"
 	defaultRes   = "default"
@@ -157,6 +158,40 @@ type ReviewResult struct {
 	Failure string `json:"failure,omitempty"`
 }
 
+// Assistant runs one wake of a commitment as a server-initiated turn of
+// the creator's own selected assistant (the router), with its normal
+// native tools and permissions. Work is idempotent by req.Key, like
+// Review. The turn reports evidence (still unaccepted) or names the next
+// action and when to be woken for it; nothing else is decided by it.
+type Assistant interface {
+	Work(ctx context.Context, req WorkRequest) (WorkResult, error)
+}
+
+// WorkRequest binds a wake to its commitment, attempt, creator and route.
+type WorkRequest struct {
+	Key               string // ISSUE/attempt/work/N: the turn's identity
+	Issue             string
+	Attempt           int
+	Owner             core.Principal
+	Route             core.ConvKey
+	Private           bool
+	OAuthActor        string
+	OAuthInstallation string
+	Prompt            string
+}
+
+// WorkResult is a finished wake's persisted outcome: Report (evidence for
+// the verifier), or Wait plus Next (the owned next action). Held and
+// Failure are as in ReviewResult.
+type WorkResult struct {
+	Turn    int64         `json:"turn"`
+	Report  string        `json:"report,omitempty"`
+	Wait    time.Duration `json:"wait,omitempty"`
+	Next    string        `json:"next,omitempty"`
+	Held    string        `json:"held,omitempty"`
+	Failure string        `json:"failure,omitempty"`
+}
+
 // reviewRetries bounds automatic re-reviews after technical failures; the
 // commitment then holds.
 const reviewRetries = 3
@@ -186,6 +221,7 @@ type Options struct {
 	Dispatcher Dispatcher    // nil: owner-dispatched commitments only
 	Authorize  Authorizer    // required with a Dispatcher
 	Reviewer   Reviewer      // nil: verdicts come from the live owner (!work accept|reject)
+	Assistant  Assistant     // nil: a commitment without a worker waits for !work report
 	Observer   Observer      // nil: reports come only from attributed events
 	Observe    time.Duration // first observation interval; doubles to 10 minutes
 	Resources  map[string]Resource
@@ -263,6 +299,7 @@ func Open(opt Options) (*Runtime, error) {
 	}
 	dbos.RegisterWorkflow(ctx, r.commitment, dbos.WithWorkflowName(workflowName))
 	dbos.RegisterWorkflow(ctx, r.dispatch, dbos.WithWorkflowName(dispatchName))
+	dbos.RegisterWorkflow(ctx, r.workTurn, dbos.WithWorkflowName(workTurnName))
 	return r, nil
 }
 
@@ -274,6 +311,9 @@ func (r *Runtime) SetWake(f func(iface string)) { r.opt.Wake = f }
 func (r *Runtime) SetDispatcher(d Dispatcher, authorize Authorizer) {
 	r.opt.Dispatcher, r.opt.Authorize = d, authorize
 }
+
+// SetAssistant connects assistant wakes to the router; call before Launch.
+func (r *Runtime) SetAssistant(a Assistant) { r.opt.Assistant = a }
 
 // SetReviewer connects supervisor reviews to the router; call before Launch.
 func (r *Runtime) SetReviewer(v Reviewer) { r.opt.Reviewer = v }
@@ -455,7 +495,13 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		if err := r.publish(ctx, w, PhaseWorking, "wait for the attempt's report"); err != nil {
 			return err
 		}
-		ev, err := r.awaitReport(ctx, w)
+		var ev Event
+		var err error
+		if r.opt.Assistant != nil && c.Worker == "" {
+			ev, err = r.work(ctx, w)
+		} else {
+			ev, err = r.awaitReport(ctx, w)
+		}
 		if err != nil {
 			return err
 		}
@@ -811,6 +857,106 @@ func (r *Runtime) awaitRun(ctx dbos.Context, w *run, wt Waiter) (Event, error) {
 		}
 		poll = min(poll*2, 10*time.Minute)
 	}
+}
+
+// work wakes the creator's assistant for the attempt, one keyed turn at a
+// time (ISSUE/attempt/work/N), each queued on the commitment's resource
+// (compute is queued, never dropped). A turn reports evidence, still
+// unaccepted, or names its next action and wake time: the owned next
+// action is persisted and DBOS waits durably, holding no capacity, taking
+// owner events; a restart resumes the wait. A wake that was held, failed
+// or ended without a valid REPORT or WAIT may already have acted, so it is
+// never replayed under a new key: the commitment holds with the key, turn
+// and reason until the owner reconciles and sends !work retry.
+func (r *Runtime) work(ctx dbos.Context, w *run) (Event, error) {
+	c := w.c
+	action := ""
+	for n := 1; ; n++ {
+		req := WorkRequest{Key: effectKey(c.Issue, w.st.Attempt, fmt.Sprintf("work/%d", n)), Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route,
+			Private: c.Private, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Prompt: workPrompt(w, action)}
+		h, err := dbos.RunWorkflow(ctx, r.workTurn, req, dbos.WithWorkflowID(req.Key), dbos.WithQueue(r.queues[c.Resource]), dbos.WithQueuePartitionKey(c.Issue))
+		if err != nil {
+			return Event{}, err
+		}
+		res, err := h.GetResult()
+		if err != nil {
+			return Event{}, err
+		}
+		if strings.TrimSpace(res.Report) != "" && res.Held == "" && res.Failure == "" {
+			w.st.Note = ""
+			return Event{Kind: "report", Attempt: w.st.Attempt, By: fmt.Sprintf("assistant (turn %d)", res.Turn), Evidence: res.Report}, nil
+		}
+		if res.Held != "" || res.Failure != "" || res.Next == "" || res.Wait <= 0 {
+			// The wake may already have acted (sent, bought, posted) before
+			// it failed, was denied or ended without a valid answer: never
+			// replayed under a new key. Held until the owner reconciles;
+			// !work retry is the only next wake.
+			why := or(res.Held, or(res.Failure, "no report and no valid WAIT"))
+			if err := r.hold(ctx, w, fmt.Sprintf("work %s (turn %d): %s; it may have acted: check its effects before !work retry", req.Key, res.Turn, clip(why, 300))); err != nil {
+				return Event{}, err
+			}
+			continue
+		}
+		w.st.Note, action = "", clip(res.Next, 500)
+		wait := res.Wait
+		wake := fmt.Sprintf("next wake in %s: %s", wait, or(action, "the goal"))
+		if err := r.publish(ctx, w, PhaseWorking, wake); err != nil {
+			return Event{}, err
+		}
+		for waited := false; !waited; {
+			ev, ok, err := r.next(ctx, w, wait)
+			switch {
+			case err != nil:
+				return Event{}, err
+			case !ok:
+				waited = true
+			case ev.Kind == "close":
+				return ev, closed{ev}
+			case ev.Kind == "report" && ev.Attempt == w.st.Attempt:
+				return ev, nil
+			}
+		}
+	}
+}
+
+// workTurn is the queued child workflow of one assistant wake.
+func (r *Runtime) workTurn(ctx dbos.Context, req WorkRequest) (WorkResult, error) {
+	pause := 10 * time.Minute
+	for {
+		res, err := attempt(ctx, "work", func(sctx context.Context) (WorkResult, error) { return r.opt.Assistant.Work(sctx, req) })
+		var p Permanent
+		if errors.As(err, &p) {
+			return WorkResult{Held: p.Error()}, nil
+		}
+		if err == nil || ctx.Err() != nil {
+			return res, err
+		}
+		r.opt.Log.Printf("durable: work %s: %v; retrying in %s", req.Key, err, pause)
+		if _, err := dbos.Sleep(ctx, pause); err != nil {
+			return WorkResult{}, err
+		}
+		pause = min(pause*2, time.Hour)
+	}
+}
+
+// workPrompt wakes the assistant with the commitment's persisted goal,
+// state, evidence and next action. Authority stays with the runtime and
+// the assistant's own native permissions.
+func workPrompt(w *run, action string) string {
+	c, st := w.c, w.st
+	var b strings.Builder
+	fmt.Fprintf(&b, "Durable commitment %s %q, attempt %d (a wake from Heimdall's durable runtime, not a live message).\n", c.Issue, c.Title, st.Attempt)
+	fmt.Fprintf(&b, "Goal: %s\n", brief(w))
+	if action != "" {
+		fmt.Fprintf(&b, "Your persisted next action: %s\n", action)
+	}
+	if st.Note != "" {
+		fmt.Fprintf(&b, "State note: %s\n", st.Note)
+	}
+	b.WriteString("Do the next step now with your normal tools, within your own permissions. Then answer in one of two forms only:\n")
+	b.WriteString("REPORT on the first line, then the evidence that the goal is done (it will be verified; it is not accepted by you), or\n")
+	b.WriteString("WAIT <duration> on the first line (e.g. WAIT 30m, between 1m and 168h), then the next action you will take when woken.")
+	return b.String()
 }
 
 // review asks the supervisor for the attempt's verdict. The verdict is

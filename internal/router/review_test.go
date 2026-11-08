@@ -18,6 +18,7 @@ import (
 )
 
 // workEnv is the router with durable commitments and supervisor review on.
+// flags: [0] T3 dispatch, [1] assistant wakes.
 func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 	t.Helper()
 	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
@@ -38,6 +39,9 @@ func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 	rt.SetReviewer(r)
 	if len(dispatch) > 0 && dispatch[0] {
 		rt.SetDispatcher(r, r.OwnsRoute)
+	}
+	if len(dispatch) > 1 && dispatch[1] {
+		rt.SetAssistant(r)
 	}
 	if err := rt.Launch(); err != nil {
 		t.Fatal(err)
@@ -491,6 +495,38 @@ func TestNativeWaitBinding(t *testing.T) {
 	} {
 		if got := nativeWait(calls, b); !strings.HasPrefix(got, want) {
 			t.Fatalf("want %q, got %q", want, got)
+		}
+	}
+}
+
+// A commitment without a worker, with no T3 configured, is worked by a
+// wake turn of the creator's own assistant in the commitment's
+// conversation; its REPORT is evidence for the verifier, never accepted by
+// the wake itself, and nothing reaches the chat from the turn.
+func TestAssistantWakeReports(t *testing.T) {
+	e, rt := workEnv(t, false, true)
+	e.send(owner, "w1", "!work add MEL-95 Reply to the supplier "+say("REPORT\nReplied to supplier; PO 551 confirmed."))
+	e.replyIn("w1", "MEL-95")
+	st := phase(t, rt, "MEL-95", durable.PhaseReported)
+	if st.Evidence != "Replied to supplier; PO 551 confirmed." || st.Verdict != "" {
+		t.Fatalf("%+v", st)
+	}
+	conv := core.ConvKey{Interface: "fake", Chat: core.ReviewChat("MEL-95")}
+	if n := count(t, e.dbPath, `SELECT count(*) FROM inbound WHERE chat=? AND msg_id=? AND text LIKE '%Goal: MEL-95: Reply to the supplier%REPORT on the first line%WAIT <duration>%'`, conv.Chat, "MEL-95/1/work/1"); n != 1 {
+		t.Fatalf("wake prompt not bound: %d", n)
+	}
+}
+
+func TestParseWork(t *testing.T) {
+	for in, want := range map[string]string{
+		"REPORT\nDone: invoice sent.":   "work report: Done: invoice sent.",
+		"**WAIT 30m**\ncheck the inbox": "work wait 30m0s: check the inbox",
+		"WAIT 10s\ntoo soon":            "malformed answer: WAIT needs",
+		"REPORT":                        "malformed answer: no report",
+		"I think it's done":             "malformed answer: no report",
+	} {
+		if got := parseWork(in); !strings.HasPrefix(got, want) {
+			t.Fatalf("%q: want %q, got %q", in, want, got)
 		}
 	}
 }

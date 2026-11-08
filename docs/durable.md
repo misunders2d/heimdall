@@ -169,6 +169,29 @@ router turn machinery. It is not a scheduler job and not owner ingress.
 - A live owner's `!work accept`, `reject` or `close` always ends the wait
   and wins over a review that finishes later.
 
+## Assistant wakes (`assistant_work`)
+
+A commitment admitted without `worker=` (any task, coding or not; no T3
+needed) is worked by the creator's own assistant. Each wake is one keyed
+server-initiated turn (`ISSUE/attempt/work/N`) of the creator's harness
+choice, queued on the commitment's resource, in the commitment's own
+conversation, with the persisted goal, any repair feedback and the
+assistant's own last next action. It runs as the owner with the owner's
+ordinary memory decision and the creator's verified native OAuth actor
+from admission, so the native setup gives it its normal tools and
+permissions (business tools, AgentNet, T3 when coding). Limits of this
+slice: each wake is a fresh native session (not the live chat session),
+and has no scheduler or Heimdall MCP control. The creator and the
+attempt are revalidated as the turn starts and ends.
+
+The answer is either `REPORT` then the evidence, which goes through the
+gates, the supervisor review or the owner verdict (never accepted by the
+wake), or `WAIT <1m..168h>` then the next action: DBOS waits durably,
+holding no compute, and a restart resumes the wait. A wake that was
+denied, failed, or ended with anything else may already have acted, so it
+is never replayed under a new key: the commitment holds with the key, turn
+and reason until the owner checks its effects and sends `!work retry`.
+
 ## Dispatch (`t3_dispatch`)
 
 Each attempt is dispatched by one server-initiated turn of the creator's
@@ -214,7 +237,7 @@ asks for exactly one `t3_thread_send` to the owner-selected
 ## Configuration
 
 ```json
-{"durable": {"enabled": true, "linear_workspace": "mellanni", "supervisor_review": true,
+{"durable": {"enabled": true, "linear_workspace": "mellanni", "supervisor_review": true, "assistant_work": true,
   "t3_dispatch": true,
   "resources": {"default": {"per_worker": 1}, "contabo": {"concurrency": 3, "rate_limit": 2, "rate_period_seconds": 60}}}}
 ```

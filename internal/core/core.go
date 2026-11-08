@@ -244,6 +244,9 @@ type Review struct {
 	// Read (with Run) is a result turn: after a terminal wait the harness
 	// reads Run's own assistant result with its native t3_thread_read.
 	Read bool `json:"read,omitempty"`
+	// Work is an assistant wake: the creator's own assistant does the
+	// commitment's next step with its normal tools and reports or waits.
+	Work bool `json:"work,omitempty"`
 }
 
 // ReviewChat is the chat of issue's own review conversation.

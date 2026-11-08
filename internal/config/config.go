@@ -57,6 +57,7 @@ type Durable struct {
 	ObserveSeconds int                        `json:"observe_seconds,omitempty"`   // first observation interval; default 30, doubling to 600
 	Resources      map[string]DurableResource `json:"resources,omitempty"`         // admission queues; "default" always exists
 	Review         bool                       `json:"supervisor_review,omitempty"` // verdicts by a server-initiated review turn of the creator's harness; default off (live owner verdicts)
+	Assistant      bool                       `json:"assistant_work,omitempty"`    // a commitment without a worker is worked by server-initiated wakes of the creator's own assistant (normal native tools); default off (!work report)
 	Dispatch       bool                       `json:"t3_dispatch,omitempty"`       // each attempt's brief is sent by a server-initiated turn of the creator's harness with its native t3_thread_send; default off (owner-dispatched)
 }
 

@@ -1391,8 +1391,13 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 	}
 	if t.review != nil {
-		// Decided against, and run for, the commitment's route; no memory.
-		target, memory = t.review.Target, false
+		// Decided against, and run for, the commitment's route. A review,
+		// dispatch, wait or read captures no memory; an assistant wake
+		// keeps the owner's ordinary memory decision.
+		target = t.review.Target
+		if !t.review.Work {
+			memory = false
+		}
 	}
 	for _, h := range t.candidates {
 		if ctx.Err() != nil || t.stopped.Load() || identity != nil {

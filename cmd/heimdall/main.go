@@ -212,6 +212,9 @@ func run(args []string) error {
 	}
 	if work != nil {
 		work.SetWake(r.Wake)
+		if cfg.Durable.Assistant {
+			work.SetAssistant(r)
+		}
 		if cfg.Durable.Review {
 			work.SetReviewer(r)
 		}

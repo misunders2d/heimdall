@@ -47,6 +47,82 @@ func (r *Router) Review(ctx context.Context, q durable.ReviewRequest) (durable.R
 	return res, nil
 }
 
+// Work is durable.Assistant: one wake of a commitment as a server-initiated
+// turn of the creator's own harness choice, in the commitment's own
+// conversation, with the creator's verified native OAuth actor from
+// admission, so the assistant has its normal native tools and permissions,
+// unchanged (business tools, AgentNet, T3 when coding). Keyed by q.Key like
+// Review. Its answer is a report (verified later, never accepted here) or
+// a wait with the next action; anything else is a failure, a native
+// approval request or a refused creator holds.
+func (r *Router) Work(ctx context.Context, q durable.WorkRequest) (durable.WorkResult, error) {
+	select {
+	case <-r.ready:
+	case <-ctx.Done():
+		return durable.WorkResult{}, ctx.Err()
+	}
+	if _, ok := r.ifaces[q.Route.Interface]; !ok || q.Owner.Platform == "" || q.Owner.ID == "" {
+		return durable.WorkResult{}, durable.Permanent{Err: fmt.Errorf("work %s: no verified creator or route interface", q.Key)}
+	}
+	in := core.Inbound{Conv: core.ConvKey{Interface: q.Route.Interface, Chat: core.ReviewChat(q.Issue)}, MsgID: q.Key, From: q.Owner,
+		Origin: core.OriginCommitment, Text: q.Prompt, At: time.Now(), OAuthActor: q.OAuthActor, OAuthInstallation: q.OAuthInstallation,
+		Review: &core.Review{Issue: q.Issue, Attempt: q.Attempt, Key: q.Key, Target: q.Route, Private: q.Private, Work: true}}
+	o, err := r.commitmentTurn(ctx, in, true)
+	if err != nil {
+		return durable.WorkResult{}, err
+	}
+	res := durable.WorkResult{Turn: o.Turn}
+	switch d := o.TurnDetail; {
+	case o.TurnState == store.TurnDone && strings.HasPrefix(d, workReport):
+		res.Report = strings.TrimPrefix(d, workReport)
+	case o.TurnState == store.TurnDone && strings.HasPrefix(d, workWait):
+		dur, next, _ := strings.Cut(strings.TrimPrefix(d, workWait), ": ")
+		res.Wait, _ = time.ParseDuration(dur)
+		res.Next = next
+	case strings.HasPrefix(d, reviewHeld):
+		res.Held = strings.TrimPrefix(d, reviewHeld)
+	case o.TurnState == "" && strings.HasPrefix(o.Detail, reviewHeld):
+		res.Held = strings.TrimPrefix(o.Detail, reviewHeld)
+	default:
+		res.Failure = o.State + ": " + or(d, o.Detail)
+	}
+	return res, nil
+}
+
+const (
+	workReport = "work report: "
+	workWait   = "work wait "
+)
+
+// parseWork reads a wake's whole answer: REPORT then evidence, or
+// WAIT <duration> (1m to 168h) then the next action. Anything else, or an
+// empty body, is not an outcome.
+func parseWork(answer string) string {
+	first, rest, _ := strings.Cut(strings.TrimSpace(answer), "\n")
+	word, arg, _ := strings.Cut(strings.Trim(first, " \t*_`#"), " ")
+	rest = strings.TrimSpace(rest)
+	switch {
+	case rest == "":
+		return "malformed answer: no report or next action"
+	case word == "REPORT" && arg == "":
+		return workReport + clipText(rest, 8000)
+	case word == "WAIT":
+		d, err := time.ParseDuration(strings.TrimSpace(arg))
+		if err != nil || d < time.Minute || d > 168*time.Hour {
+			return "malformed answer: WAIT needs a duration from 1m to 168h"
+		}
+		return workWait + d.String() + ": " + clipText(strings.Join(strings.Fields(rest), " "), 1000)
+	}
+	return "malformed answer: no report or next action"
+}
+
+func clipText(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
+}
+
 // commitmentTurn stores in (once per key) and waits for its persisted
 // outcome. With start false it never stores: it only waits for a turn
 // already stored under the key (ok=false: there is none).
@@ -87,7 +163,7 @@ var errNoTurn = errors.New("commitment turn not stored")
 // current applies a commitment turn's fence: a review needs its attempt
 // reported, a dispatch its attempt dispatching, in a running workflow.
 func current(w *durable.Runtime, b *core.Review) bool {
-	if b.Run != "" {
+	if b.Run != "" || b.Work {
 		return w.Waitable(b.Issue, b.Attempt)
 	}
 	if b.Worker != "" {
@@ -569,7 +645,9 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, failureReason(c.r.scrub(res.Failure))
 	default:
 		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, !res.Unclean
-		if t.review.Worker != "" {
+		if t.review.Work {
+			e.Detail = parseWork(c.r.scrub(stripHarnessTag(res.Answer, d.harness)))
+		} else if t.review.Worker != "" {
 			t.mu.Lock()
 			calls := slices.Clone(t.native)
 			t.mu.Unlock()
