@@ -2,9 +2,12 @@ package router
 
 import (
 	"context"
+	"path"
+	"regexp"
+	"strings"
+
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/harness"
-	"strings"
 )
 
 // TurnObserver is optional; implementations enqueue updates without blocking
@@ -106,6 +109,65 @@ func NormalizeSlash(text, bot string) string {
 // text; it never selects files. Checked outbox collection remains generic.
 type AnswerCleaner interface {
 	CleanAnswer(text, inDir, outDir string) string
+}
+
+var emptyFence = regexp.MustCompile("```[A-Za-z0-9_-]*\\s*\\n\\s*```")
+
+// CleanTurnPaths is the AnswerCleaner contract shared by interfaces: a line
+// that is only a file directly in outDir (sent as a real attachment) goes;
+// elsewhere the exact inDir/outDir prefix goes, keeping the file name, and
+// the bare directory becomes its base name. Only whole path components
+// match, so other paths and similarly named directories stay. Fences left
+// empty by this cleanup go too.
+func CleanTurnPaths(text, inDir, outDir string) string {
+	original := text
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		bare := strings.Trim(strings.TrimSpace(line), "`'\".,;:")
+		if outDir != "" && strings.HasPrefix(bare, outDir+"/") && !strings.ContainsAny(strings.TrimPrefix(bare, outDir+"/"), "/\n") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	text = strings.Join(kept, "\n")
+	for _, prefix := range []string{inDir, outDir} {
+		if prefix != "" {
+			text = cutPrefix(text, prefix)
+		}
+	}
+	if text != original {
+		text = emptyFence.ReplaceAllString(text, "")
+	}
+	return strings.TrimSpace(text)
+}
+
+// pathByte reports whether b continues a path component.
+func pathByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || strings.IndexByte("._~-/", b) >= 0
+}
+
+func cutPrefix(text, prefix string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(text, prefix)
+		if i < 0 {
+			b.WriteString(text)
+			return b.String()
+		}
+		end := i + len(prefix)
+		switch {
+		case i > 0 && pathByte(text[i-1]):
+			b.WriteString(text[:end]) // inside a longer path
+		case end < len(text) && text[end] == '/':
+			b.WriteString(text[:i])
+			end++
+		case end == len(text) || !pathByte(text[end]):
+			b.WriteString(text[:i] + path.Base(prefix))
+		default:
+			b.WriteString(text[:end]) // a similarly named directory
+		}
+		text = text[end:]
+	}
 }
 
 // IsControl uses the same parser as router admission.

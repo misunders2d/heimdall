@@ -661,6 +661,12 @@ func (t *Interface) UploadDir() string { return t.opt.UploadDir }
 // turn's outbox.
 func (t *Interface) SendsFiles() bool { return true }
 
+// CleanAnswer removes this turn's directory paths from display text: files
+// go as real attachments, never as server paths (router.CleanTurnPaths).
+func (t *Interface) CleanAnswer(text, inDir, outDir string) string {
+	return router.CleanTurnPaths(text, inDir, outDir)
+}
+
 // sendFile uploads one file a harness left, as the hub's sendLocalArtifact:
 // a JPEG, PNG or WebP picture up to 10 MB as a photo, anything else as a
 // document, in the conversation's topic, replying to the turn's message.

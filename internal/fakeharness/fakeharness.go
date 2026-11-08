@@ -417,6 +417,10 @@ func (f *fake) answer() string {
 	for _, w := range strings.Fields(f.prompt) {
 		if enc, ok := strings.CutPrefix(w, "SAY="); ok {
 			if b, err := base64.StdEncoding.DecodeString(enc); err == nil {
+				// {OUTBOX} names the outbox the prompt gave, as a model might.
+				if m := outbox.FindStringSubmatch(f.metadata + "\n" + f.prompt); m != nil {
+					return strings.ReplaceAll(string(b), "{OUTBOX}", m[1])
+				}
 				return string(b)
 			}
 		}

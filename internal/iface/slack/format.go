@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/misunders2d/heimdall/internal/router"
 )
 
 func escapeText(s string) string {
@@ -154,25 +156,7 @@ func plainMrkdwn(s string) string {
 }
 
 func (s *Slack) CleanAnswer(text, inDir, outDir string) string {
-	original := text
-	var kept []string
-	for _, line := range strings.Split(text, "\n") {
-		bare := strings.Trim(strings.TrimSpace(line), "`'\".,;:")
-		if outDir != "" && strings.HasPrefix(bare, outDir+"/") && !strings.ContainsAny(strings.TrimPrefix(bare, outDir+"/"), "/\n") {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	text = strings.Join(kept, "\n")
-	for _, prefix := range []string{inDir, outDir} {
-		if prefix != "" {
-			text = strings.ReplaceAll(text, prefix+"/", "")
-		}
-	}
-	if text != original {
-		text = regexp.MustCompile("```[A-Za-z0-9_-]*\\s*\\n\\s*```").ReplaceAllString(text, "")
-	}
-	return strings.TrimSpace(text)
+	return router.CleanTurnPaths(text, inDir, outDir)
 }
 
 // Slack only decodes &amp;/&lt;/&gt;, and does not escape mrkdwn markers

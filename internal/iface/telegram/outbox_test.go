@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -92,6 +93,13 @@ func TestTelegramOutboxFilesReachTheTurnsTopicReply(t *testing.T) {
 			if strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("uploads:\n%s", strings.Join(got, "\n"))
 			}
+			// The answer keeps its prose but never this turn's local paths
+			// (the cold fake echoes its prompt head, which names the outbox).
+			answer := fmt.Sprint(api.sentBodies()[0]["text"])
+			if strings.Contains(answer, harness.TurnsDir) || !strings.Contains(answer, h+"#1") || h == "claude" && !strings.Contains(answer, "save them in out before your final answer") {
+				t.Fatalf("answer: %q", answer)
+			}
+
 			// The uploads carry only the file: no caption, no local path.
 			mu.Lock()
 			for _, b := range uploads {
@@ -103,16 +111,31 @@ func TestTelegramOutboxFilesReachTheTurnsTopicReply(t *testing.T) {
 			}
 			mu.Unlock()
 
+			// A path-only answer: the fenced outbox path goes, the file still
+			// arrives as a real attachment, labelled "Attachment".
+			say := "SAY=" + base64.StdEncoding.EncodeToString([]byte("```\n{OUTBOX}/only.txt\n```"))
+			sent := len(api.sentBodies())
+			api.push(upd(3, msg(33, 42, "private", 42, "WRITE=only.txt:only-bytes "+say)))
+			eventually(t, "path-only answer and file", func() bool { mu.Lock(); defer mu.Unlock(); return len(uploads) == 3 && len(api.sentBodies()) > sent })
+			if b := api.sentBodies()[sent]; b["text"] != "Attachment" || b["chat_id"] != float64(42) {
+				t.Fatalf("path-only answer: %v", b)
+			}
+			mu.Lock()
+			if u := uploads[2]; u["chat_id"] != "42" || fmt.Sprint(u["document"]) != "map[data:only-bytes name:only.txt type:text/plain]" {
+				t.Fatalf("path-only file: %v", u)
+			}
+			mu.Unlock()
+
 			// Another caller's later turn (private, so no group context the
 			// fake could act on) leaves no file: the first turn's files and
 			// copies never reach it.
-			sent := len(api.sentBodies())
-			api.push(upd(2, msg(32, 43, "private", 43, "plain question")))
+			sent = len(api.sentBodies())
+			api.push(upd(4, msg(34, 43, "private", 43, "plain question")))
 			eventually(t, "second answer", func() bool { return len(api.sentBodies()) > sent })
 			mu.Lock()
 			n := len(uploads)
 			mu.Unlock()
-			if n != 2 {
+			if n != 3 {
 				t.Fatalf("a file was sent to another caller's turn: %d uploads", n)
 			}
 			if entries, _ := os.ReadDir(outbox); len(entries) != 0 {
