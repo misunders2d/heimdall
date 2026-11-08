@@ -178,11 +178,12 @@ type inExtra struct {
 	Attachments       []core.Attachment  `json:"attachments,omitempty"`
 	Group             string             `json:"group,omitempty"`
 	Run               *core.ScheduledRun `json:"run,omitempty"`
+	Review            *core.Review       `json:"review,omitempty"`
 }
 
 func inExtraOf(in core.Inbound) (string, error) {
-	x := inExtra{MCPControl: in.MCPControl, SlackReadVerified: in.SlackReadVerified, OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInstallation, ControlIngress: in.ControlIngress, InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group, Run: in.Run}
-	if !x.MCPControl && !x.SlackReadVerified && x.OAuthActor == "" && x.OAuthInstallation == "" && x.ControlIngress == 0 && x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" && x.Run == nil {
+	x := inExtra{MCPControl: in.MCPControl, SlackReadVerified: in.SlackReadVerified, OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInstallation, ControlIngress: in.ControlIngress, InterfaceReply: in.InterfaceReply, Context: in.Context, Attachments: in.Attachments, Group: in.Group, Run: in.Run, Review: in.Review}
+	if !x.MCPControl && !x.SlackReadVerified && x.OAuthActor == "" && x.OAuthInstallation == "" && x.ControlIngress == 0 && x.InterfaceReply == "" && x.Context == "" && len(x.Attachments) == 0 && x.Group == "" && x.Run == nil && x.Review == nil {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -194,7 +195,7 @@ func (x inExtra) apply(in *core.Inbound) {
 	in.OAuthActor, in.OAuthInstallation = x.OAuthActor, x.OAuthInstallation
 	in.ControlIngress = x.ControlIngress
 	in.Context, in.Attachments, in.Group, in.InterfaceReply = x.Context, x.Attachments, x.Group, x.InterfaceReply
-	in.Run = x.Run
+	in.Run, in.Review = x.Run, x.Review
 }
 
 // outExtra is the outbound extra column: delivery details beyond the text.

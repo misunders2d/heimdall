@@ -3,7 +3,9 @@
 Status: opt-in and **disabled by default**. Laptop-tested only; not deployed
 or live-accepted. Slice 1 is **partial**:
 - worker results are observed without the owner (T3 observer);
-- dispatch and the acceptance verdict are not autonomous yet.
+- with `supervisor_review`, the verdict comes from a server-initiated
+  review turn of the creator's harness (see Verdict);
+- dispatch is not autonomous yet.
 
 This is not complete MEL-763. See "Not qualified" below.
 
@@ -38,9 +40,10 @@ Steps, each checkpointed:
    (`thread show --json`), backing off from 30 s to 10 min.
    - Chronology is the host's run order (`runCount`), never thread
      metadata such as `updatedAt` (a rename or organize changes it). A run
-     counts only if it started after a read taken before the attempt: the
-     attempt-start read (one try), else the last read of an earlier attempt.
-     It becomes the report, attributed to the observer, still unaccepted.
+     counts only if it started after the attempt's floor, read once *before*
+     dispatch (so a run that completes before the first post-dispatch read
+     still counts), else the last read of an earlier attempt. It becomes the
+     report, attributed to the observer, still unaccepted.
    - With no such read (the very first read of attempt 1 failed), the first
      healthy read sets the floor; the run it shows stays **unresolved**
      (visible note), never reported, until a newer run finishes.
@@ -57,9 +60,12 @@ Steps, each checkpointed:
    - a `gate=git:/repo` needs a full commit SHA that exists in that repo.
 
    A rejection opens the next attempt.
-5. **Verdict.** A worker report is delivered as an **UNACCEPTED worker
-   report**. Only an accept from a verified live owner (`!work accept`)
-   accepts it. A reject opens the next attempt.
+5. **Verdict.** Without `supervisor_review`, the report is delivered as an
+   **UNACCEPTED worker report**, and only a verified live owner's
+   `!work accept` accepts it. With `supervisor_review`, nothing is sent
+   before acceptance: the report, the review and its rejections stay in
+   execution state (`!work show`). A reject opens the next attempt. See
+   "Supervisor review".
 6. **Deliver** the accepted result to the original route.
 7. **Next authorized action.** If declared (`| next: …`), the commitment
    stays **open** after acceptance until the owner closes it. With no next
@@ -112,10 +118,51 @@ text. Visibility follows `!job`:
 resume it. `!work resume` resumes it. Ordinary queueing and failures are
 never shown as a pause.
 
+## Supervisor review (`supervisor_review`)
+
+A reported attempt is reviewed by one turn of the creator's harness choice
+(the route's sticky harness, else the default order), run by the existing
+router turn machinery. It is not a scheduler job and not owner ingress.
+- **Origin.** Only `Router.Review`, called by the runtime for an admitted
+  commitment, builds the `commitment` origin with its binding (issue,
+  attempt, key, creator route). Interfaces cannot: `accept` refuses the
+  origin, the binding, and any message in a review chat.
+- **Isolation.** The turn runs in the commitment's own conversation
+  (`work:<ISSUE>`), in a fresh native session. Scheduler control, MCP
+  notifications, typing, progress, reactions and continuations are off.
+  Nothing is sent to any chat.
+- **Fences.** The creator is decided against the route as the turn starts:
+  the creator must still be an admitted owner, and the workflow must still
+  be running with this attempt reported (`Reviewable`: actual workflow
+  status, not only the last published state). The check runs again as the
+  turn ends: a paused, cancelled or moved-on commitment's outcome is held,
+  never applied.
+- **Verdict.** The first line of the whole answer is exactly `ACCEPT` or
+  `REJECT`, followed by a reason. The runtime binds it to the issue and
+  attempt; the answer cannot name them. The verdict grants no deploy, send
+  or other authority.
+- **Persistence.** The outcome is recorded with the turn's end, in the same
+  transaction. The review key (`ISSUE/attempt/review[#retryN]`) is the
+  message identity, so a re-executed step after a restart returns the
+  recorded outcome and never starts a second turn. A restart during the
+  turn records it as interrupted, with no chat notice.
+- **Held, not retried.** These hold under the same key until an explicit
+  `!work retry`, accept, reject or close:
+  - a native approval or input request (nothing is approved, and no other
+    engine, key or session is tried);
+  - a refused creator;
+  - a stopped review;
+  - a commitment that is no longer current.
+- **Bounded retry.** Technical outcomes (a time limit of 30 min, a harness
+  failure, interruption by a restart, a malformed answer) are retried under
+  a new key with durable backoff from 10 min, at most 3 times, then held.
+- A live owner's `!work accept`, `reject` or `close` always ends the wait
+  and wins over a review that finishes later.
+
 ## Configuration
 
 ```json
-{"durable": {"enabled": true, "linear_workspace": "mellanni",
+{"durable": {"enabled": true, "linear_workspace": "mellanni", "supervisor_review": true,
   "resources": {"default": {"per_worker": 1}, "contabo": {"concurrency": 3, "rate_limit": 2, "rate_period_seconds": 60}}}}
 ```
 
@@ -158,38 +205,23 @@ version.
      the same user.
 
    Neither is verified on the hub. Never configure an ephemeral mount path.
-2. **Dispatch (blocked by the interface).** `t3 thread send` (CLI 0.1.7:
+2. **Dispatch (not qualified).** `t3 thread send` (CLI 0.1.7:
    `send [--wait] [--json] <thread> <message>`) has no client request id,
-   so a sent brief cannot be reconciled exactly after a crash. MCP
-   `delegate_task` and `t3_thread_send` do take request ids, but they live
-   inside a T3 provider session the daemon does not have.
+   so a sent brief cannot be reconciled exactly after a crash.
+   - MCP `delegate_task` needs T3 thread credentials.
+   - Main reports that MCP `t3_thread_send` with a stable
+     `clientRequestId` works from the owner's authenticated external MCP
+     client. That was not verified in this branch. The daemon has no such
+     client, and no daemon login is added.
 
    Today the owner-selected harness (Bezos) dispatches natively, and the
    commitment is admitted with `worker=t3:<thread>`. The smallest supported
    alternative needs T3 to add a client request id to the host CLI `send`,
    or a daemon-scoped T3 credential. That is upstream, not a Heimdall
    workaround.
-3. **Acceptance verdict (supervisor turn: not implemented).** Prechecks
-   reject only. The authorized design is a server-initiated supervisor turn
-   of the owner-selected harness through the existing router turn
-   machinery (not a scheduler job), bound to the stored commitment, attempt
-   and route, with the creator revalidated and read-only control.
-
-   Boundary: the router's server-initiated turn path is bound to scheduler
-   runs, not a thin hook.
-   - `core.Inbound.Validate` admits only `live` and `scheduled` origins.
-   - `conv.route` and `conv.start` admit a server-initiated turn only via
-     `row.Run` and `Jobs.Begin(row)`, which require a store run created by
-     `Store.StartRun` for a job.
-   - The turn's fences (scheduler control, session `sched:<job>`, harness
-     choice, end of run) key on `turn.job *scheduler.Turn`.
-
-   The smallest change is a third origin with its own binding
-   (`Inbound.Commitment{Issue, Attempt, Target}`), routed like `row.Run`,
-   with scheduler and MCP control off, whose final answer becomes a verdict
-   event (`ISSUE/attempt/verdict`). That is a new turn contract in core and
-   router with its own fence tests. Until then, `!work accept` and
-   `!work reject` from the live owner are the verdict.
+3. **Acceptance verdict (implemented, laptop tests only).** See "Supervisor
+   review". Its tests use the fake harness, so it is not qualified against
+   a live engine or route.
 
 Later slices:
 - automatic admission of accepted natural-language requests;

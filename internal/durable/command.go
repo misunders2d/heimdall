@@ -42,7 +42,7 @@ func (c Caller) sees(cm Commitment) bool {
 func (c Caller) controls(cm Commitment) bool { return c.sees(cm) && cm.Creator == c.Principal.Key() }
 
 const usage = `!work — durable commitments (owner only; Linear is canonical).
-Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into reports; there is no qualified dispatcher or verifier, so verdicts come from you (docs/durable.md).
+Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into reports; with supervisor_review a server-initiated review turn gives the verdict, otherwise verdicts come from you; there is no qualified dispatcher (docs/durable.md).
 !work [list]
 !work show ISSUE
 !work add ISSUE [worker=REF] [resource=NAME] [gate=git:/repo]... title [| next: authorized work left after acceptance]
@@ -126,7 +126,7 @@ func (r *Runtime) Command(c Caller, text string) string {
 }
 
 func parseAdd(c Caller, issue string, args []string) (Commitment, error) {
-	cm := Commitment{Issue: issue, Creator: c.Principal.Key(), Route: c.Conv, ReplyTo: c.MsgID, Resource: defaultRes}
+	cm := Commitment{Issue: issue, Creator: c.Principal.Key(), Owner: c.Principal, Route: c.Conv, Private: c.Private, ReplyTo: c.MsgID, Resource: defaultRes}
 	var title []string
 	for i, a := range args {
 		k, v, ok := strings.Cut(a, "=")

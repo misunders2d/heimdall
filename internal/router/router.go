@@ -99,6 +99,9 @@ type Router struct {
 	wakeOut map[string]chan struct{}
 	jobs    map[string]*turn // running scheduled turns by job
 
+	ready     chan struct{} // closed once Run replayed pending messages (Review waits)
+	readyOnce sync.Once
+
 	// Live harness processes, each until it exited. At shutdown they are
 	// stopped and waited for, so none outlives Heimdall.
 	starting sync.WaitGroup
@@ -127,7 +130,7 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.GuardLogMax <= 0 {
 		opt.GuardLogMax = DefaultGuardLogMax
 	}
-	r := &Router{warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	r := &Router{warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.Jobs != nil {
 		opt.Jobs.ResolveControl = r.schedulerCaller
 	}
@@ -198,6 +201,7 @@ func (r *Router) Run(parent context.Context) error {
 	for _, row := range pending {
 		r.dispatch(row)
 	}
+	r.readyOnce.Do(func() { close(r.ready) })
 	if r.opt.Jobs != nil {
 		wg.Add(1)
 		go func() { defer wg.Done(); r.opt.Jobs.Run(ctx) }()
@@ -313,6 +317,11 @@ func (r *Router) accept(ctx context.Context, in core.Inbound) error {
 	if err := in.Validate(); err != nil {
 		r.release(in)
 		return err
+	}
+	if in.Origin == core.OriginCommitment || in.Review != nil {
+		// Only Router.Review builds a commitment review.
+		r.release(in)
+		return errors.New("interface message claims a commitment review")
 	}
 	role, _, ok := r.opt.Access.Decide(in.From, in.Conv)
 	if !ok {
@@ -569,6 +578,7 @@ type turn struct {
 	refs         map[string]string // reaction ref → message ID, for messages the harness was given (t.mu)
 	batch        []item            // the messages the turn started with
 	job          *scheduler.Turn   // a scheduled run's job; nil for a chat turn
+	review       *core.Review      // a commitment review's binding; nil otherwise
 	tools        []string          // successful completed native tools, for expect (t.mu)
 	toolsStarted []string          // starts are progress only, never proof of success
 	toolErrors   []string
@@ -777,6 +787,13 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 // now, so a revoked principal (or, later, a scheduled job's creator) fails
 // closed.
 func (c *conv) route(row store.InboundRow, choice *command) bool {
+	if row.Review != nil {
+		// A commitment review: like a scheduled run, never a command or a
+		// steer; the creator is decided against the commitment's route.
+		role, _, _ := c.r.opt.Access.Decide(row.From, row.Review.Target)
+		c.queue = append(c.queue, item{row: row, role: role, next: true, text: row.Text})
+		return false
+	}
 	if row.Run != nil {
 		// A scheduled run: never a command, never a steer, one turn of its
 		// own. The creator's admission is decided against the job's target
@@ -1163,7 +1180,17 @@ func (c *conv) start(ctx context.Context) {
 		first.job = job.Name
 		c.queue[0] = first
 	}
-	for job == nil && n < len(c.queue) && !first.row.MCPControl && !c.queue[n].row.MCPControl && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
+	review := first.row.Review
+	if review != nil && (first.role != core.RoleOwner || c.r.opt.Work == nil || !c.r.opt.Work.Reviewable(review.Issue, review.Attempt)) {
+		// Revalidated as the turn actually starts: the creator is still an
+		// admitted owner on the route and the attempt still waits.
+		_ = c.r.store.SetInbound(first.row.ID, store.InCancelled, "held: review refused at launch: creator no longer an admitted owner on the route, or the commitment is paused, cancelled or no longer waits for this attempt's verdict")
+		c.queue = c.queue[1:]
+		c.r.release(first.row.Inbound)
+		<-c.r.sem
+		return
+	}
+	for job == nil && review == nil && n < len(c.queue) && !first.row.MCPControl && !c.queue[n].row.MCPControl && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
 		n++
 	}
 	batch := append([]item(nil), c.queue[:n]...)
@@ -1189,7 +1216,7 @@ func (c *conv) start(ctx context.Context) {
 				_ = c.r.store.SetInbound(it.row.ID, store.InFailed, "turn could not be recorded")
 			}
 			c.r.release(it.row.Inbound)
-			if !cancelled {
+			if !cancelled && review == nil {
 				c.reply(it.row, "Heimdall could not record this turn, so it did not run: "+err.Error()+"\n— heimdall")
 			}
 		}
@@ -1201,12 +1228,16 @@ func (c *conv) start(ctx context.Context) {
 	}
 	c.generation[who] = c.generation[who]
 	startCtx, startCancel := context.WithCancel(ctx)
-	t := &turn{startCtx: startCtx, startCancel: startCancel, generation: c.generation[who], id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, job: job}
+	t := &turn{startCtx: startCtx, startCancel: startCancel, generation: c.generation[who], id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, job: job, review: review}
 	// Scheduled sessions stay in sched:<job>, while their routing preference
 	// comes from the creator-bound source conversation at actual turn start.
 	route := c.key
 	if job != nil {
 		route = job.Source
+	}
+	if review != nil {
+		route = review.Target // the creator's harness choice there
+		t.private, t.replyTo = false, ""
 	}
 	switch sticky, _ := c.r.store.ChatHarness(route); {
 	case job != nil && job.Def.Harness != "":
@@ -1254,7 +1285,7 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 			t.instructions = note
 		}
 	}
-	if note := c.outboxNote(t); note != "" {
+	if note := c.outboxNote(t); note != "" && t.review == nil {
 		parts = append(parts, note)
 		contextParts = append(contextParts, note)
 	}
@@ -1262,7 +1293,7 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 		parts = append(parts, recent)
 		contextParts = append(contextParts, recent)
 	}
-	if t.job == nil {
+	if t.job == nil && t.review == nil {
 		c.react(t, batch)
 	}
 	for _, it := range batch {
@@ -1288,7 +1319,7 @@ func (c *conv) prompt(t *turn, batch []item) (string, []harness.Image) {
 // TypingEvery until the turn ends.
 func (c *conv) startTyping(ctx context.Context, t *turn) {
 	ty, ok := c.r.ifaces[c.key.Interface].(Typer)
-	if !ok || t.job != nil {
+	if !ok || t.job != nil || t.review != nil {
 		return
 	}
 	t.typing = make(chan struct{})
@@ -1358,6 +1389,10 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			from, actor, installation = v.Principal, v.OAuthActor, v.OAuthInstallation
 		}
 	}
+	if t.review != nil {
+		// Decided against, and run for, the commitment's route; no memory.
+		target, memory = t.review.Target, false
+	}
 	for _, h := range t.candidates {
 		if ctx.Err() != nil || t.stopped.Load() || identity != nil {
 			break
@@ -1421,7 +1456,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		case err != nil:
 			notes = append(notes, h+": session lookup failed: "+err.Error())
 			continue
-		case t.job != nil && t.job.Def.Session != "job":
+		case t.job != nil && t.job.Def.Session != "job", t.review != nil:
 			sess.ID = harness.NewSessionID(h)
 		case prev != "" && (clean || liveID == prev):
 			sess = harness.Session{ID: prev, Resume: true}
@@ -1443,7 +1478,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		caller.SlackRead = harness.SlackReadAllowed(c.r.opt.OwnerSlack, batch[0].row.Inbound, t.role, h, c.r.opt.SlackTeam)
 		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
 		var progress func(harness.Progress)
-		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok && t.job == nil {
+		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok && t.job == nil && t.review == nil {
 			progress = func(p harness.Progress) { c.observe(ctx, t, "progress", p) }
 		}
 		if t.job != nil {
@@ -1486,7 +1521,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				nativePrompt = prompt
 			}
 		}
-		if c.r.opt.Jobs != nil && t.job == nil && !sess.Resume && !batch[0].row.MCPControl {
+		if c.r.opt.Jobs != nil && t.job == nil && t.review == nil && !sess.Resume && !batch[0].row.MCPControl {
 			note := scheduler.Note
 			if t.role == core.RoleOwner {
 				note = scheduler.OwnerNote
@@ -1515,7 +1550,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			turnContext = strings.TrimSpace(ownerInputs + "\n\n" + turnContext)
 		}
 		var notify func(string)
-		if t.job == nil {
+		if t.job == nil && t.review == nil {
 			notify = func(text string) {
 				if iface := c.r.ifaces[c.key.Interface]; iface != nil {
 					_ = iface.Send(ctx, core.Outbound{Conv: c.key, ReplyTo: t.replyTo, Text: text})
@@ -1523,7 +1558,12 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			}
 		}
 		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive || t.job != nil && t.role == core.RoleOwner, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
-		if t.job == nil {
+		if t.review != nil {
+			// One bounded turn; no scheduler or MCP control, no progress,
+			// notifications or continuations (spec fields left off).
+			spec.OneShot, spec.Timeout = true, reviewTimeout
+		}
+		if t.job == nil && t.review == nil {
 			spec.Continuation = func(ev harness.Continuation) bool {
 				e := continuationEvent{source: t, harness: h, native: ev}
 				if ev.Phase == "start" {
@@ -1655,7 +1695,7 @@ func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, 
 // sessionPointer uses only existing bindings, before BindTurn overwrites them.
 func (c *conv) sessionPointer(t *turn, h string, sess harness.Session, launch harness.Launch, control bool) string {
 	sessionNote := ""
-	if t.role == core.RoleOwner && t.job == nil && !control {
+	if t.role == core.RoleOwner && t.job == nil && t.review == nil && !control {
 		earlierHarness, earlierID, err := c.r.store.EarlierSession(c.key, t.who, h, sess.Resume)
 		if err != nil {
 			c.r.log.Printf("earlier session lookup failed")
@@ -1842,6 +1882,10 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 			}
 			res.Answers = answers
 		}
+	}
+	if t.review != nil {
+		c.settle(ctx, t, c.reviewEnd(t, d, res))
+		return
 	}
 	if t.job != nil {
 		// A timeout rerun may be dispatched as soon as EndTurn commits. Reap
@@ -2044,6 +2088,9 @@ func frame(it item, files []string) string {
 	if it.row.Origin == core.OriginScheduled {
 		origin = fmt.Sprintf(" | scheduled job %q created by this caller", sanitizeName(it.job))
 	}
+	if r := it.row.Review; r != nil {
+		origin = fmt.Sprintf(" | supervisor review of commitment %s attempt %d created by this caller; internal, nothing is sent", r.Issue, r.Attempt)
+	}
 	context := ""
 	if c := strings.TrimSpace(it.row.Context); c != "" {
 		context = c + "\n"
@@ -2111,6 +2158,9 @@ func unconfirmedNotice(m store.InboundRow) core.Outbound {
 func interruptedNotice(t store.Interrupted) core.Outbound {
 	if t.Conv.IsSched() {
 		return core.Outbound{} // the scheduler tells the job's creator (Jobs.Recover)
+	}
+	if t.Conv.IsReview() {
+		return core.Outbound{} // the commitment reconciles its review (Router.Review)
 	}
 	h := t.Harness
 	if h == "" {

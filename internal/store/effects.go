@@ -73,3 +73,21 @@ func (s *Store) OutboundReceipt(id int64) (Receipt, bool, error) {
 	r.SentAt = sent.Int64
 	return r, err == nil, err
 }
+
+// InboundOutcome is a stored message's state and, once it ran, its turn's.
+type InboundOutcome struct {
+	State, Detail         string
+	Turn                  int64
+	TurnState, TurnDetail string
+}
+
+// InboundOutcome reads the message msgID of conv; ok=false when it was
+// never stored.
+func (s *Store) InboundOutcome(conv core.ConvKey, msgID string) (o InboundOutcome, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT i.state,i.detail,coalesce(i.turn_id,0),coalesce(t.state,''),coalesce(t.detail,'') FROM inbound i LEFT JOIN turns t ON t.id=i.turn_id WHERE i.iface=? AND i.chat=? AND i.msg_id=?`,
+		conv.Interface, conv.Chat, msgID).Scan(&o.State, &o.Detail, &o.Turn, &o.TurnState, &o.TurnDetail)
+	if errors.Is(err, sql.ErrNoRows) {
+		return o, false, nil
+	}
+	return o, err == nil, err
+}

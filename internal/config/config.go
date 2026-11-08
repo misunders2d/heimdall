@@ -53,9 +53,10 @@ type Durable struct {
 	Enabled        bool                       `json:"enabled"`
 	SilenceSeconds int                        `json:"silence_seconds,omitempty"` // one no-signal notice per attempt and phase after this; default 86400; negative = none
 	Linear         string                     `json:"linear_workspace,omitempty"`
-	T3Command      []string                   `json:"t3_command,omitempty"`      // installed T3 host CLI (absolute path first); enables read-only t3:<thread> observation
-	ObserveSeconds int                        `json:"observe_seconds,omitempty"` // first observation interval; default 30, doubling to 600
-	Resources      map[string]DurableResource `json:"resources,omitempty"`       // admission queues; "default" always exists
+	T3Command      []string                   `json:"t3_command,omitempty"`        // installed T3 host CLI (absolute path first); enables read-only t3:<thread> observation
+	ObserveSeconds int                        `json:"observe_seconds,omitempty"`   // first observation interval; default 30, doubling to 600
+	Resources      map[string]DurableResource `json:"resources,omitempty"`         // admission queues; "default" always exists
+	Review         bool                       `json:"supervisor_review,omitempty"` // verdicts by a server-initiated review turn of the creator's harness; default off (live owner verdicts)
 }
 
 // DurableResource is one capacity class (a host or provider).

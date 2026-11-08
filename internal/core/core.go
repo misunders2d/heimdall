@@ -162,10 +162,14 @@ func (k ConvKey) String() string {
 }
 
 // Message origins. A scheduled job carries its creator as From and is
-// authorized against the access list when it fires.
+// authorized against the access list when it fires. A commitment review is
+// built only by the router for the durable runtime (Router.Review), never
+// by an interface; it carries the commitment's creator, revalidated as its
+// turn starts.
 const (
-	OriginLive      = "live"
-	OriginScheduled = "scheduled"
+	OriginLive       = "live"
+	OriginScheduled  = "scheduled"
+	OriginCommitment = "commitment"
 )
 
 // Inbound is one message from an interface.
@@ -212,7 +216,27 @@ type Inbound struct {
 	// Run is set on a scheduled job's message (Origin scheduled): its run,
 	// and where the reply goes.
 	Run *ScheduledRun
+	// Review is set on a commitment review (Origin commitment): the
+	// admitted commitment and attempt it reviews, and the creator's route.
+	Review *Review
 }
+
+// Review binds a supervisor review turn to one durable commitment attempt.
+// Its conversation is the commitment's own (ReviewChat), isolated from the
+// creator's chats and from scheduled runs; nothing is sent there.
+type Review struct {
+	Issue   string  `json:"issue"`
+	Attempt int     `json:"attempt"`
+	Key     string  `json:"key"` // the durable effect identity; also the MsgID
+	Target  ConvKey `json:"target"`
+	Private bool    `json:"private,omitempty"`
+}
+
+// ReviewChat is the chat of issue's own review conversation.
+func ReviewChat(issue string) string { return "work:" + issue }
+
+// IsReview reports a commitment review's own conversation.
+func (k ConvKey) IsReview() bool { return strings.HasPrefix(k.Chat, "work:") }
 
 // ScheduledRun is the job run a scheduled message starts. Its conversation
 // is the job's own (SchedChat), so runs of one job never overlap; replies
@@ -253,8 +277,14 @@ func (in Inbound) Validate() error {
 		return errors.New("inbound message without message ID")
 	case in.From.Platform == "" || in.From.ID == "":
 		return errors.New("inbound message without verified sender")
-	case in.Origin != OriginLive && in.Origin != OriginScheduled:
+	case in.Origin != OriginLive && in.Origin != OriginScheduled && in.Origin != OriginCommitment:
 		return fmt.Errorf("inbound message with unknown origin %q", in.Origin)
+	case (in.Origin == OriginCommitment) != (in.Review != nil):
+		return errors.New("commitment review without its binding")
+	case in.Review != nil && (in.Run != nil || in.Conv.Chat != ReviewChat(in.Review.Issue) || in.MsgID != in.Review.Key || in.Conv.Interface != in.Review.Target.Interface):
+		return errors.New("commitment review outside its own conversation")
+	case in.Review == nil && in.Conv.IsReview():
+		return errors.New("message in a commitment review conversation")
 	}
 	return nil
 }

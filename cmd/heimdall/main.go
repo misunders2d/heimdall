@@ -212,6 +212,9 @@ func run(args []string) error {
 	}
 	if work != nil {
 		work.SetWake(r.Wake)
+		if cfg.Durable.Review {
+			work.SetReviewer(r)
+		}
 		if err := work.Launch(); err != nil {
 			return fmt.Errorf("durable commitments: %w", err)
 		}

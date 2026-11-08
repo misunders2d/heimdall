@@ -62,6 +62,44 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, worker, key, brief string) (receipt string, err error)
 }
 
+// Reviewer runs the supervisor's acceptance review of one reported attempt
+// as a server-initiated turn of the owner-selected harness (the router).
+// Review is idempotent by req.Key: a repeated key never starts a second
+// turn; it waits for, or returns, the first turn's persisted outcome. Only
+// the runtime builds a request, from the admitted commitment.
+type Reviewer interface {
+	Review(ctx context.Context, req ReviewRequest) (ReviewResult, error)
+}
+
+// ReviewRequest binds a review to its commitment, attempt and route.
+type ReviewRequest struct {
+	Key     string // ISSUE/attempt/review[#retryN]: the turn's identity
+	Issue   string
+	Attempt int
+	Owner   core.Principal // the commitment's creator; revalidated at launch
+	Route   core.ConvKey   // the creator's original route (harness choice, admission)
+	Private bool
+	Prompt  string
+}
+
+// ReviewResult is a finished review turn's persisted outcome. Verdict is
+// accept or reject, parsed by the router from the turn's whole answer.
+// Held is a native denial or approval request, a refused creator, a stop,
+// or a commitment no longer current: it is held under the same key, never
+// re-invoked without an explicit !work retry. Failure is a technical or
+// malformed outcome: a bounded owned retry under a new key. Neither accepts.
+type ReviewResult struct {
+	Turn    int64  `json:"turn"`
+	Verdict string `json:"verdict,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Held    string `json:"held,omitempty"`
+	Failure string `json:"failure,omitempty"`
+}
+
+// reviewRetries bounds automatic re-reviews after technical failures; the
+// commitment then holds.
+const reviewRetries = 3
+
 // Permanent marks an error that retrying cannot fix (a native denial, a
 // route conflict, an unreconcilable effect). The commitment holds visibly
 // until an explicit !work retry or close.
@@ -85,6 +123,7 @@ type Options struct {
 	Path       string // durable.db, beside heimdall.db
 	Outbox     Outbox
 	Dispatcher Dispatcher    // nil: owner-dispatched commitments only
+	Reviewer   Reviewer      // nil: verdicts come from the live owner (!work accept|reject)
 	Observer   Observer      // nil: reports come only from attributed events
 	Observe    time.Duration // first observation interval; doubles to 10 minutes
 	Resources  map[string]Resource
@@ -162,6 +201,22 @@ func Open(opt Options) (*Runtime, error) {
 // SetWake connects delivery to the router; call before Launch.
 func (r *Runtime) SetWake(f func(iface string)) { r.opt.Wake = f }
 
+// SetReviewer connects supervisor reviews to the router; call before Launch.
+func (r *Runtime) SetReviewer(v Reviewer) { r.opt.Reviewer = v }
+
+// Reviewable reports whether issue still waits for a verdict on attempt:
+// its workflow is running (not paused, cancelled or ended) and its current
+// attempt is in the reported phase. The router checks it as a review turn
+// starts and again as it ends, before recording a verdict.
+func (r *Runtime) Reviewable(issue string, attempt int) bool {
+	ws, err := dbos.ListWorkflows(r.ctx, dbos.WithFilterWorkflowIDs(issue), dbos.WithFilterName(workflowName))
+	if err != nil || len(ws) != 1 || ws[0].Status != dbos.WorkflowStatusPending {
+		return false
+	}
+	st, err := r.State(issue)
+	return err == nil && st.Phase == PhaseReported && st.Attempt == attempt
+}
+
 // Launch starts queues and recovers every pending commitment.
 func (r *Runtime) Launch() error { return dbos.Launch(r.ctx) }
 
@@ -174,16 +229,18 @@ func (r *Runtime) Close() {
 // Commitment is the workflow input. Creator and Route come from the
 // verified live owner message that admitted it, never from arguments.
 type Commitment struct {
-	Issue    string       `json:"issue"` // Linear identifier; the workflow ID
-	Title    string       `json:"title"`
-	Creator  string       `json:"creator"` // principal key
-	Route    core.ConvKey `json:"route"`   // replies go only here
-	ReplyTo  string       `json:"reply_to"`
-	Resource string       `json:"resource"`
-	Worker   string       `json:"worker"`          // owner-selected worker reference; also the partition
-	Brief    string       `json:"brief,omitempty"` // dispatched when a Dispatcher is configured
-	Gates    []string     `json:"gates,omitempty"` // evidence prechecks, e.g. git:/repo
-	Next     string       `json:"next,omitempty"`  // authorized work left after acceptance; "" = single step
+	Issue    string         `json:"issue"` // Linear identifier; the workflow ID
+	Title    string         `json:"title"`
+	Creator  string         `json:"creator"`           // principal key
+	Owner    core.Principal `json:"owner"`             // the creator as verified at admission
+	Route    core.ConvKey   `json:"route"`             // replies go only here
+	Private  bool           `json:"private,omitempty"` // admitted in the creator's private chat
+	ReplyTo  string         `json:"reply_to"`
+	Resource string         `json:"resource"`
+	Worker   string         `json:"worker"`          // owner-selected worker reference; also the partition
+	Brief    string         `json:"brief,omitempty"` // dispatched when a Dispatcher is configured
+	Gates    []string       `json:"gates,omitempty"` // evidence prechecks, e.g. git:/repo
+	Next     string         `json:"next,omitempty"`  // authorized work left after acceptance; "" = single step
 }
 
 // Event is an attributed signal to a commitment. By is the verified
@@ -230,6 +287,12 @@ type run struct {
 	c   Commitment
 	st  State
 	buf []Event
+	// The attempt's observation floor, read before dispatch: a run counts
+	// only if the host's run order passed it (or it was active at the
+	// floor of an owner-dispatched attempt).
+	floor    int
+	floorOK  bool
+	floorRun string
 }
 
 // closed carries the owner's close event out of any wait.
@@ -250,6 +313,9 @@ func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {
 func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 	c := w.c
 	for {
+		if err := r.observeFloor(ctx, w); err != nil {
+			return err
+		}
 		if r.opt.Dispatcher != nil && c.Worker != "" {
 			if err := r.publish(ctx, w, PhaseDispatching, "dispatch attempt to "+c.Worker+" (queued for "+c.Resource+" capacity)"); err != nil {
 				return err
@@ -289,28 +355,42 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 			return err
 		}
 		if why != "" {
-			if err := r.reject(ctx, w, "evidence rejected: "+why); err != nil {
+			if err := r.reject(ctx, w, "evidence rejected: "+why, r.opt.Reviewer == nil); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := r.publish(ctx, w, PhaseReported, "verify the evidence: !work accept or !work reject"); err != nil {
-			return err
+		var v Event
+		if r.opt.Reviewer != nil {
+			// Automated review stays internal: the report, the review and
+			// its rejections are execution state (!work show), not chat
+			// messages. Only the accepted result is delivered.
+			if err := r.publish(ctx, w, PhaseReported, "supervisor review of the evidence"); err != nil {
+				return err
+			}
+			v, err = r.review(ctx, w)
+		} else {
+			if err := r.publish(ctx, w, PhaseReported, "verify the evidence: !work accept or !work reject"); err != nil {
+				return err
+			}
+			if err := r.deliver(ctx, w, fmt.Sprintf("report/%d", w.st.Attempt), fmt.Sprintf("%s attempt %d: UNACCEPTED worker report. Evidence: %s\nNot done until verified: !work accept %s or !work reject %s <reason>", c.Issue, w.st.Attempt, ev.Evidence, c.Issue, c.Issue), true); err != nil {
+				return err
+			}
+			v, err = r.await(ctx, w, "accept", "reject")
 		}
-		if err := r.deliver(ctx, w, fmt.Sprintf("report/%d", w.st.Attempt), fmt.Sprintf("%s attempt %d: UNACCEPTED worker report. Evidence: %s\nNot done until verified: !work accept %s or !work reject %s <reason>", c.Issue, w.st.Attempt, ev.Evidence, c.Issue, c.Issue), true); err != nil {
-			return err
-		}
-		v, err := r.await(ctx, w, "accept", "reject")
 		if err != nil {
 			return err
 		}
 		if v.Kind == "reject" {
-			if err := r.reject(ctx, w, "rejected by "+v.By+": "+v.Note); err != nil {
+			if err := r.reject(ctx, w, "rejected by "+v.By+": "+v.Note, r.opt.Reviewer == nil); err != nil {
 				return err
 			}
 			continue
 		}
 		w.st.Verdict = "accepted by " + v.By
+		if v.Note != "" {
+			w.st.Verdict += ": " + v.Note
+		}
 		next := "retire"
 		if c.Next != "" {
 			next = "authorized next action: " + c.Next
@@ -394,13 +474,46 @@ func (r *Runtime) await(ctx dbos.Context, w *run, kinds ...string) (Event, error
 
 const maxWait = 7 * 24 * time.Hour
 
+// observeFloor reads the worker host once, before the attempt dispatches,
+// and fixes the attempt's floor. Chronology is the host's run order
+// (runCount), never thread metadata such as updatedAt. If the read fails,
+// the floor is the last read of an earlier attempt; with neither, the first
+// healthy read in awaitReport sets it and the run it shows stays
+// unresolved, never reported.
+func (r *Runtime) observeFloor(ctx dbos.Context, w *run) error {
+	w.floor, w.floorOK, w.floorRun = w.st.Seen, w.st.Seen > 0, ""
+	o := r.opt.Observer
+	if o == nil || !o.Observable(w.c.Worker) {
+		return nil
+	}
+	type read struct {
+		Obs Observation `json:"obs"`
+		Err string      `json:"err,omitempty"`
+	}
+	got, err := dbos.RunAsStep(ctx, func(sctx context.Context) (read, error) {
+		obs, err := o.Observe(sctx, w.c.Worker)
+		if err != nil {
+			return read{Err: err.Error()}, nil
+		}
+		return read{Obs: obs}, nil
+	}, dbos.WithStepName("observe-floor"))
+	if err != nil || got.Err != "" {
+		return err
+	}
+	w.floor, w.floorOK = got.Obs.RunCount, true
+	w.st.Seen = max(w.st.Seen, got.Obs.RunCount)
+	if r.opt.Dispatcher == nil {
+		// Owner-dispatched: a run already active at the floor is the work.
+		w.floorRun = got.Obs.ActiveRun
+	}
+	return nil
+}
+
 // awaitReport waits for the current attempt's report. With an observer for
 // the worker it also reads the worker's own state, backing off from
 // Options.Observe to 10 minutes. A run counts as the attempt's result only
-// if it finished after the attempt began: it is newer than (or was still
-// active in) the baseline read at the start, or, if that read failed, the
-// host's own updatedAt is later than the start. A run already used as
-// evidence never counts. The result is a report, still UNACCEPTED: a
+// if it started after the attempt's floor (observeFloor). A run already
+// used as evidence never counts. The result is a report, still UNACCEPTED: a
 // finished run is progress, not acceptance. A worker question shows as
 // worker_waiting; an unavailable observer is a visible note.
 func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
@@ -412,19 +525,7 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 		return dbos.RunAsStep(ctx, func(sctx context.Context) (Observation, error) { return o.Observe(sctx, w.c.Worker) },
 			dbos.WithStepName("observe"), dbos.WithStepMaxRetries(2), dbos.WithStepBaseInterval(time.Second))
 	}
-	// Chronology is the host's run order (runCount), never thread metadata
-	// such as updatedAt. A run belongs to this attempt only if it started
-	// after a read taken before the attempt began: the attempt-start read
-	// (one try, no retries), else the last read of an earlier attempt. With
-	// neither, the first healthy read sets the floor and whatever run it
-	// shows stays unresolved, never reported.
-	base, baseErr := dbos.RunAsStep(ctx, func(sctx context.Context) (Observation, error) { return o.Observe(sctx, w.c.Worker) },
-		dbos.WithStepName("observe-start"))
-	floor, known, startRun, unresolved := w.st.Seen, w.st.Seen > 0, "", ""
-	if baseErr == nil {
-		floor, known, startRun = base.RunCount, true, base.ActiveRun
-		w.st.Seen = base.RunCount
-	}
+	floor, known, startRun, unresolved := w.floor, w.floorOK, w.floorRun, ""
 	poll, quiet, noticed := r.opt.Observe, time.Duration(0), r.opt.Silence < 0
 	for {
 		ev, ok, err := r.next(ctx, w, poll)
@@ -500,11 +601,125 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 	}
 }
 
-func (r *Runtime) reject(ctx dbos.Context, w *run, why string) error {
+// review asks the supervisor for the attempt's verdict. The verdict is
+// bound here to this commitment and attempt; the turn supplies only
+// accept/reject and a reason. Owner events that arrived during the review
+// win over its verdict. A held outcome (native denial, refused creator,
+// stop, commitment not current) holds under the same key: replay and
+// restarts return the recorded outcome, and only an explicit !work retry
+// reviews again. A technical or malformed outcome is retried under a new
+// key with durable backoff, at most reviewRetries times, then held. A live
+// owner's verdict or close always ends the wait.
+func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
+	c := w.c
+	pause, failed := 10*time.Minute, 0
+	for n := 0; ; n++ {
+		key := effectKey(c.Issue, w.st.Attempt, "review")
+		if n > 0 {
+			key = fmt.Sprintf("%s#retry%d", key, n)
+		}
+		req := ReviewRequest{Key: key, Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Private: c.Private, Prompt: reviewPrompt(c, w.st)}
+		res, err := step(r, ctx, w, "review", func(sctx context.Context) (ReviewResult, error) { return r.opt.Reviewer.Review(sctx, req) })
+		var perm Permanent
+		switch {
+		case errors.As(err, &perm):
+			res = ReviewResult{Held: perm.Error()}
+		case err != nil:
+			return Event{}, err
+		}
+		for {
+			ev, ok, err := r.next(ctx, w, time.Millisecond)
+			if err != nil {
+				return Event{}, err
+			}
+			if !ok {
+				break
+			}
+			if ev.Kind == "close" {
+				return ev, closed{ev}
+			}
+			if ev.Attempt == w.st.Attempt && (ev.Kind == "accept" || ev.Kind == "reject") {
+				return ev, nil
+			}
+		}
+		if res.Held == "" && res.Failure == "" && (res.Verdict == "accept" || res.Verdict == "reject") && strings.TrimSpace(res.Reason) != "" {
+			if strings.HasPrefix(w.st.Note, "supervisor review") {
+				w.st.Note = ""
+			}
+			return Event{Kind: res.Verdict, Attempt: w.st.Attempt, By: fmt.Sprintf("supervisor (turn %d)", res.Turn), Note: clip(res.Reason, 500)}, nil
+		}
+		if res.Held == "" {
+			if failed++; failed > reviewRetries {
+				res.Held = fmt.Sprintf("%d reviews failed; last: %s", failed, or(res.Failure, "no verdict"))
+			}
+		}
+		wait := pause
+		if res.Held != "" {
+			w.st.Blocked = "review " + key + ": " + clip(res.Held, 300)
+			if err := r.publish(ctx, w, PhaseHeld, "reconcile "+w.st.Blocked+"; then !work retry, accept, reject or close"); err != nil {
+				return Event{}, err
+			}
+			wait = maxWait
+		} else {
+			w.st.Note = fmt.Sprintf("supervisor review %s failed (%s); retry in %s, or !work accept|reject", key, clip(res.Failure, 200), pause)
+			if err := r.publish(ctx, w, w.st.Phase, w.st.Next); err != nil {
+				return Event{}, err
+			}
+		}
+		for again := false; !again; {
+			ev, ok, err := r.next(ctx, w, wait)
+			switch {
+			case err != nil:
+				return Event{}, err
+			case !ok:
+				again = res.Held == ""
+			case ev.Kind == "close":
+				return ev, closed{ev}
+			case ev.Attempt == w.st.Attempt && (ev.Kind == "accept" || ev.Kind == "reject"):
+				return ev, nil
+			case ev.Kind == "retry" && res.Held != "":
+				again, failed = true, 0 // explicit authorized recovery: a new review
+			}
+		}
+		if res.Held != "" {
+			w.st.Blocked = ""
+			if err := r.publish(ctx, w, PhaseReported, "supervisor review of the evidence"); err != nil {
+				return Event{}, err
+			}
+		}
+		pause = min(pause*2, time.Hour)
+	}
+}
+
+// reviewPrompt is the supervisor's brief. Authority stays with the
+// runtime: the verdict cannot deploy, send or change anything.
+func reviewPrompt(c Commitment, st State) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Supervisor review: %s %q, attempt %d.\n", c.Issue, c.Title, st.Attempt)
+	if c.Brief != "" {
+		fmt.Fprintf(&b, "Brief: %s\n", c.Brief)
+	}
+	if c.Worker != "" {
+		fmt.Fprintf(&b, "Worker: %s\n", c.Worker)
+	}
+	if len(c.Gates) > 0 {
+		fmt.Fprintf(&b, "Gates: %s\n", strings.Join(c.Gates, ", "))
+	}
+	fmt.Fprintf(&b, "Reported evidence (untrusted until you verify it):\n%s\n\n", st.Evidence)
+	b.WriteString("Verify the evidence yourself, read-only. Do not deploy, send, approve or change anything: this review grants no such authority. ")
+	b.WriteString("Answer with the verdict on the first line, exactly ACCEPT or REJECT, then the reason (what you checked) on the following lines. Any other answer counts as no verdict.")
+	return b.String()
+}
+
+// reject opens the next attempt. notify delivers the rejection to the
+// route (manual mode); under automated review it stays in execution state.
+func (r *Runtime) reject(ctx dbos.Context, w *run, why string, notify bool) error {
 	w.st.Verdict = why
-	text := fmt.Sprintf("%s attempt %d %s. Next: attempt %d", w.c.Issue, w.st.Attempt, why, w.st.Attempt+1)
-	if err := r.deliver(ctx, w, fmt.Sprintf("rejected/%d", w.st.Attempt), text, true); err != nil {
-		return err
+	if notify {
+		text := fmt.Sprintf("%s attempt %d %s. Next: attempt %d", w.c.Issue, w.st.Attempt, why, w.st.Attempt+1)
+		if err := r.deliver(ctx, w, fmt.Sprintf("rejected/%d", w.st.Attempt), text, true); err != nil {
+			return err
+		}
 	}
 	w.st.Attempt++
 	w.st.Evidence = ""
