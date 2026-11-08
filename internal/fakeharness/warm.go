@@ -73,15 +73,16 @@ func (f *fake) warm() {
 		}
 		id := "turn-" + strconv.Itoa(turn)
 		text, _ := m["message"].(string)
+		images := 0
 		if typ == "user" {
 			msg, _ := m["message"].(map[string]any)
-			text, _ = claudeContent(msg["content"])
+			text, images = claudeContent(msg["content"])
 		}
 		if method == "turn/start" {
 			params, _ := m["params"].(map[string]any)
 			text, _ = codexInput(params["input"])
 		}
-		f.record("prompt", text, 0)
+		f.record("prompt", text, images)
 		if collision != nil {
 			call := collision
 			collision = nil

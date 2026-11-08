@@ -167,7 +167,14 @@ func (f *fake) record(kind, text string, images int) {
 		f.inputContext = ""
 		dir := os.Getenv("HD_CONTEXT_DIR")
 		if f.name == "claude" && os.Getenv("FAKE_CONTEXT_HOOK") == "1" {
-			f.inputContext, f.hookContextDelivered = invokeContextHook(text)
+			// Claude Code 2.1.319's bm(content) projects array text with
+			// ks(content, "\n").trim(); scalar text is unchanged. This
+			// fixture uses one text block, matching claudeUser.
+			prompt := text
+			if images > 0 && os.Getenv("FAKE_CLAUDE_NATIVE_PROMPT") == "1" {
+				prompt = strings.TrimSpace(prompt)
+			}
+			f.inputContext, f.hookContextDelivered = invokeContextHook(prompt)
 		} else if dir != "" {
 			entries, _ := os.ReadDir(dir)
 			for _, entry := range entries {

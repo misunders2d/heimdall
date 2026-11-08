@@ -54,3 +54,46 @@ func TestClaudeContextPreservesExistingGuards(t *testing.T) {
 		}
 	}
 }
+
+// The attachment fix must not relax strict hook lookup: a changed descriptor,
+// different text, another process/caller/session directory, and an already
+// consumed handover all fail without consuming the intended context.
+func TestPhotoContextStrictLookup(t *testing.T) {
+	dir := t.TempDir()
+	foreign := t.TempDir()
+	prompt := "[File saved]\nsource: message\npath: /tmp/synthetic/in/photo.png\nname: photo.png\nmime: image/png\nkind: photo\nbytes: 68\n[Image attached inline where the harness takes images; otherwise open the file at path.]"
+	if _, err := stageContext(dir, prompt, "current generation, verified caller A/session A"); err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(p string) (string, error) {
+		raw, _ := json.Marshal(map[string]string{"prompt": p})
+		var out bytes.Buffer
+		err := ContextHook(bytes.NewReader(raw), &out)
+		return out.String(), err
+	}
+	t.Setenv("HD_CONTEXT_DIR", dir)
+	for _, wrong := range []string{"\n" + prompt, prompt + "\n", strings.Replace(prompt, "photo.png", "other.png", 1), "caption\n" + prompt} {
+		if out, err := lookup(wrong); err == nil || out != "" {
+			t.Fatal("mismatched prompt accepted")
+		}
+	}
+	t.Setenv("HD_CONTEXT_DIR", foreign)
+	if out, err := lookup(prompt); err == nil || out != "" {
+		t.Fatal("context crossed process directory")
+	}
+	t.Setenv("HD_CONTEXT_DIR", dir)
+	out, err := lookup(prompt)
+	if err != nil || !strings.Contains(out, "current generation, verified caller A/session A") {
+		t.Fatal("correct handover lost")
+	}
+	if out, err := lookup(prompt); err == nil || out != "" {
+		t.Fatal("consumed context reused")
+	}
+	if _, err := stageContext(dir, prompt, "next generation"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = lookup(prompt)
+	if err != nil || !strings.Contains(out, "next generation") || strings.Contains(out, "caller A") {
+		t.Fatal("stale generation reused")
+	}
+}

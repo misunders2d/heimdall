@@ -2044,7 +2044,12 @@ func frame(it item, files []string) string {
 func humanText(it item, files []string) string {
 	text := it.text
 	if len(files) != 0 {
-		text += "\n" + strings.Join(files, "\n")
+		// Do not manufacture leading whitespace for attachment-only input:
+		// Claude projects array text with trim() before UserPromptSubmit.
+		if text != "" {
+			text += "\n"
+		}
+		text += strings.Join(files, "\n")
 	}
 	return text
 }
