@@ -78,6 +78,10 @@ type Dispatcher interface {
 // timeout or a run still going; a Permanent error holds.
 type Waiter interface {
 	Wait(ctx context.Context, req DispatchRequest, run string) (status string, finished bool, err error)
+	// Read returns a finished run's own result body, read natively; a
+	// Permanent error (no bound read, another run, no or incomplete body)
+	// holds.
+	Read(ctx context.Context, req DispatchRequest, run string) (body string, err error)
 }
 
 // DispatchRequest is one attempt's dispatch, built by the runtime from the
@@ -765,10 +769,26 @@ func (r *Runtime) awaitRun(ctx dbos.Context, w *run, wt Waiter) (Event, error) {
 			return Event{}, err
 		}
 		if res.Finished && !slices.Contains(w.st.Runs, run) {
-			w.st.Runs = append(w.st.Runs, run)
-			w.st.Note = ""
-			return Event{Kind: "report", Attempt: w.st.Attempt, By: "waiter:" + c.Worker,
-				Evidence: fmt.Sprintf("%s run %s %s (native t3_thread_wait; the run's own result is in the worker thread)", c.Worker, run, res.Status)}, nil
+			// The report is the run's own result, read natively; a read
+			// that cannot bind it holds (visible), never a substitute.
+			for m := 1; ; m++ {
+				rq := req
+				rq.Key = effectKey(c.Issue, w.st.Attempt, fmt.Sprintf("read/%d", m))
+				body, err := step(r, ctx, w, "read", func(sctx context.Context) (string, error) { return wt.Read(sctx, rq, run) })
+				if errors.As(err, &p) {
+					if err := r.hold(ctx, w, "read "+rq.Key+": "+p.Error()); err != nil {
+						return Event{}, err
+					}
+					continue
+				}
+				if err != nil {
+					return Event{}, err
+				}
+				w.st.Runs = append(w.st.Runs, run)
+				w.st.Note = ""
+				return Event{Kind: "report", Attempt: w.st.Attempt, By: "waiter:" + c.Worker,
+					Evidence: fmt.Sprintf("%s run %s %s: %s", c.Worker, run, res.Status, body)}, nil
+			}
 		}
 		if note := fmt.Sprintf("waiting on %s run %s through the creator's native T3 tools (%s)", c.Worker, run, or(res.Status, "not finished")); note != w.st.Note {
 			w.st.Note = note

@@ -202,8 +202,14 @@ asks for exactly one `t3_thread_send` to the owner-selected
   `observe_seconds`, doubling to 10 min) and takes owner events. Only T3's
   terminal run statuses (completed, failed, cancelled, interrupted,
   rolled_back) finish; preparing, queued, starting, running and waiting
-  keep waiting; anything else holds. The finished run is a report, still
-  unaccepted.
+  keep waiting; anything else holds. A finished run's result is then read
+  by a keyed read turn (`ISSUE/attempt/read/N`): native `t3_thread_read`
+  of the same thread and environment, paged to the timeline's end, cut-off
+  text read on by `itemId`/`textOffset`. The body is the last assistant
+  message whose `runId` is the dispatched run, in that thread; no such
+  message, another run's, an incomplete one or no bound read holds
+  (`!work retry` reads again). That body is the report's evidence for the
+  verifier, still unaccepted.
 
 ## Configuration
 

@@ -110,7 +110,7 @@ func current(w *durable.Runtime, b *core.Review) bool {
 // session). The receipt is the engine's decoded native tool result
 // (harness.NativeCalls), never the model's answer.
 func (r *Router) Dispatch(ctx context.Context, q durable.DispatchRequest) (durable.Receipt, error) {
-	in, thread, err := r.dispatchInbound(ctx, q, "")
+	in, thread, err := r.dispatchInbound(ctx, q, "", false)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
@@ -124,7 +124,7 @@ func (r *Router) Dispatch(ctx context.Context, q durable.DispatchRequest) (durab
 // Reconcile returns a dispatch turn's persisted outcome without starting
 // one: found=false when no turn was stored under the key.
 func (r *Router) Reconcile(ctx context.Context, q durable.DispatchRequest) (durable.Receipt, bool, error) {
-	in, thread, err := r.dispatchInbound(ctx, q, "")
+	in, thread, err := r.dispatchInbound(ctx, q, "", false)
 	if err != nil {
 		return durable.Receipt{}, false, err
 	}
@@ -147,7 +147,7 @@ func (r *Router) Wait(ctx context.Context, q durable.DispatchRequest, run string
 	if run == "" {
 		return "", false, durable.Permanent{Err: errors.New("wait " + q.Key + ": no dispatched run")}
 	}
-	in, _, err := r.dispatchInbound(ctx, q, run)
+	in, _, err := r.dispatchInbound(ctx, q, run, false)
 	if err != nil {
 		return "", false, err
 	}
@@ -165,7 +165,29 @@ func (r *Router) Wait(ctx context.Context, q durable.DispatchRequest, run string
 	return "", false, durable.Permanent{Err: fmt.Errorf("wait turn %d %s: %s; not replayed (!work retry waits again)", o.Turn, o.State, or(strings.TrimPrefix(or(o.TurnDetail, o.Detail), reviewHeld), "no result"))}
 }
 
-func (r *Router) dispatchInbound(ctx context.Context, q durable.DispatchRequest, run string) (core.Inbound, string, error) {
+// Read is durable.Waiter's result read: one server-initiated turn reads the
+// finished run's own assistant result with the native t3_thread_read,
+// under the same fences and binding. Only the engine's decoded tool
+// results count; no bound body holds.
+func (r *Router) Read(ctx context.Context, q durable.DispatchRequest, run string) (string, error) {
+	if run == "" {
+		return "", durable.Permanent{Err: errors.New("read " + q.Key + ": no dispatched run")}
+	}
+	in, _, err := r.dispatchInbound(ctx, q, run, true)
+	if err != nil {
+		return "", err
+	}
+	o, err := r.commitmentTurn(ctx, in, true)
+	if err != nil {
+		return "", err
+	}
+	if o.TurnState == store.TurnDone && strings.HasPrefix(o.TurnDetail, readResult) {
+		return strings.TrimPrefix(o.TurnDetail, readResult), nil
+	}
+	return "", durable.Permanent{Err: fmt.Errorf("read turn %d %s: %s; not replayed (!work retry reads again)", o.Turn, o.State, or(strings.TrimPrefix(or(o.TurnDetail, o.Detail), reviewHeld), "no result"))}
+}
+
+func (r *Router) dispatchInbound(ctx context.Context, q durable.DispatchRequest, run string, read bool) (core.Inbound, string, error) {
 	select {
 	case <-r.ready:
 	case <-ctx.Done():
@@ -184,6 +206,9 @@ func (r *Router) dispatchInbound(ctx context.Context, q durable.DispatchRequest,
 	}
 	if run != "" {
 		in.Text = waitPrompt(q, thread, env, run)
+	}
+	if read {
+		in.Review.Read, in.Text = true, readPrompt(q, thread, env, run)
 	}
 	return in, thread, nil
 }
@@ -220,6 +245,119 @@ func waitPrompt(q durable.DispatchRequest, thread, env, run string) string {
 	fmt.Fprintf(&b, "runId: %s\ntimeoutMs: %d\n", run, waitMs)
 	b.WriteString("Do nothing else: no other tool call or message. Then answer in one line. Heimdall reads the tool's own result, not your answer.")
 	return b.String()
+}
+
+const (
+	readResult = "result: "
+	t3ReadTool = "mcp__t3__t3_thread_read"
+	readChars  = 50000 // t3_thread_read's per-item maximum
+)
+
+// readPrompt asks for native, read-only reads of the thread to its end.
+func readPrompt(q durable.DispatchRequest, thread, env, run string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Result of %s, attempt %d. Call your native T3 tool t3_thread_read with:\nthreadId: %s\n", q.Issue, q.Attempt, thread)
+	if env != "" {
+		fmt.Fprintf(&b, "environmentId: %s\n", env)
+	}
+	fmt.Fprintf(&b, "view: messages\nlimit: 100\nmaxCharsPerItem: %d\n", readChars)
+	b.WriteString("While a result has hasMore true, call it again adding afterPosition: its nextPosition. ")
+	fmt.Fprintf(&b, "For an item of run %s with textTruncated true, call it again adding itemId: its itemId and textOffset: its nextTextOffset. ", run)
+	b.WriteString("Do nothing else: no other tool call or message. Then answer in one line. Heimdall reads the tool's own results, not your answer.")
+	return b.String()
+}
+
+// nativeRead is a read turn's outcome from the engine's decoded
+// t3_thread_read calls bound to the thread and environment: the last
+// assistant message of the dispatched run, in this thread, its text
+// complete (every cut-off page read on) and the timeline read to its end.
+// Anything else holds: no body is taken from the model or another run.
+func nativeRead(calls []harness.NativeCall, b *core.Review) string {
+	ref, _ := strings.CutPrefix(b.Worker, "t3:")
+	thread, env, _ := strings.Cut(ref, "@")
+	if len(calls) == 0 {
+		return reviewHeld + "no native " + t3ReadTool + " call in the read turn (its answer is not evidence)"
+	}
+	type item struct {
+		Position       int     `json:"position"`
+		SourceThreadID string  `json:"sourceThreadId"`
+		ItemID         string  `json:"itemId"`
+		RunID          string  `json:"runId"`
+		Type           string  `json:"type"`
+		Text           *string `json:"text"`
+		TextTruncated  bool    `json:"textTruncated"`
+		NextTextOffset *int    `json:"nextTextOffset"`
+	}
+	type chunk struct {
+		text string
+		next *int // T3's own offset of the rest; nil: complete
+	}
+	chunks := map[string]map[int]chunk{} // itemId → textOffset → page
+	last, ended := item{Position: -1}, false
+	for _, n := range calls {
+		var a struct {
+			ThreadID      string `json:"threadId"`
+			EnvironmentID string `json:"environmentId"`
+			View          string `json:"view"`
+			ItemID        string `json:"itemId"`
+			TextOffset    int    `json:"textOffset"`
+		}
+		if json.Unmarshal(n.Args, &a) != nil || a.ThreadID != thread || a.EnvironmentID != env || a.View != "" && a.View != "messages" {
+			return reviewHeld + "a native " + t3ReadTool + " call was not bound to this worker thread"
+		}
+		if n.Error {
+			return reviewHeld + "the native " + t3ReadTool + " call failed or was denied"
+		}
+		var v struct {
+			Items   []item `json:"items"`
+			HasMore *bool  `json:"hasMore"`
+		}
+		if json.Unmarshal(toolJSON(n.Result), &v) != nil || v.HasMore == nil {
+			return reviewHeld + "the native " + t3ReadTool + " result is not a thread read"
+		}
+		ended = ended || a.ItemID == "" && !*v.HasMore
+		for _, it := range v.Items {
+			if it.SourceThreadID != thread || it.RunID != b.Run || it.Type != "assistant_message" || it.Text == nil {
+				continue
+			}
+			if chunks[it.ItemID] == nil {
+				chunks[it.ItemID] = map[int]chunk{}
+			}
+			var next *int
+			if it.TextTruncated {
+				next = it.NextTextOffset
+				if next == nil || *next <= a.TextOffset {
+					return reviewHeld + "run " + b.Run + "'s result " + it.ItemID + " is cut off without a next offset; incomplete"
+				}
+			}
+			chunks[it.ItemID][a.TextOffset] = chunk{*it.Text, next}
+			if a.ItemID == "" && it.Position > last.Position {
+				last = it
+			}
+		}
+	}
+	if last.Position < 0 {
+		return reviewHeld + "no assistant result of run " + b.Run + " in the native " + t3ReadTool + " results; never another run's"
+	}
+	if !ended {
+		return reviewHeld + "the native " + t3ReadTool + " results did not reach the thread's end (hasMore); the run's last result is unknown"
+	}
+	var body strings.Builder
+	for off := 0; ; {
+		c, ok := chunks[last.ItemID][off]
+		if !ok {
+			return reviewHeld + "run " + b.Run + "'s result " + last.ItemID + " is cut off and its rest was not read; incomplete"
+		}
+		body.WriteString(c.text)
+		if c.next == nil {
+			break
+		}
+		off = *c.next
+	}
+	if strings.TrimSpace(body.String()) == "" {
+		return reviewHeld + "run " + b.Run + "'s result is empty"
+	}
+	return readResult + body.String()
 }
 
 // nativeWait is a wait turn's outcome from the engine's decoded
@@ -416,7 +554,9 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 			t.mu.Lock()
 			calls := slices.Clone(t.native)
 			t.mu.Unlock()
-			if t.review.Run != "" {
+			if t.review.Read {
+				e.Detail = nativeRead(calls, t.review)
+			} else if t.review.Run != "" {
 				e.Detail = nativeWait(calls, t.review)
 			} else {
 				e.Detail = nativeReceipt(calls, t.review)

@@ -413,6 +413,50 @@ func TestCommitmentDispatchHeld(t *testing.T) {
 	e.noReply(300 * time.Millisecond)
 }
 
+// A read turn's body is only the dispatched run's last assistant message
+// in the worker thread, from the engine's decoded t3_thread_read results,
+// complete and read to the timeline's end; another run's or a missing,
+// cut-off or partial read holds.
+func TestNativeReadBinding(t *testing.T) {
+	b := &core.Review{Key: "MEL-91/1/read/1", Worker: "t3:thread-L@env-2", Run: "run:L:24", Read: true}
+	args := `{"threadId":"thread-L","environmentId":"env-2","view":"messages","limit":100,"maxCharsPerItem":50000}`
+	more := `{"threadId":"thread-L","environmentId":"env-2","view":"messages","itemId":"item1528","textOffset":5}`
+	it := func(pos int, id, run, text string, cut bool) string {
+		v := map[string]any{"position": pos, "sourceThreadId": "thread-L", "itemId": id, "runId": run, "type": "assistant_message", "text": text, "textTruncated": cut, "nextTextOffset": nil}
+		if cut {
+			v["nextTextOffset"] = 5
+		}
+		j, _ := json.Marshal(v)
+		return string(j)
+	}
+	page := func(hasMore bool, items ...string) string {
+		j, _ := json.Marshal(map[string]any{"thread": map[string]any{"itemCount": 3}, "items": json.RawMessage("[" + strings.Join(items, ",") + "]"), "hasMore": hasMore})
+		return `{"structuredContent":` + string(j) + `}`
+	}
+	call := func(a, res string) harness.NativeCall {
+		return harness.NativeCall{Tool: t3ReadTool, Args: json.RawMessage(a), Result: json.RawMessage(res)}
+	}
+	for _, c := range []struct {
+		want  string
+		calls []harness.NativeCall
+	}{
+		// The run's last message, cut off and read on by itemId/textOffset.
+		{"result: Done. PR 12 merged.", []harness.NativeCall{
+			call(args, page(false, it(1520, "item1520", "run:L:24", "working…", false), it(1528, "item1528", "run:L:24", "Done.", true))),
+			call(more, page(false, it(1528, "item1528", "run:L:24", " PR 12 merged.", false)))}},
+		// Wrong run: only another run's answer is present.
+		{"held: no assistant result of run run:L:24", []harness.NativeCall{call(args, page(false, it(1529, "item1529", "run:L:25", "other run", false)))}},
+		{"held: no native mcp__t3__t3_thread_read call", nil},
+		{"held: run run:L:24's result item1528 is cut off and its rest was not read", []harness.NativeCall{call(args, page(false, it(1528, "item1528", "run:L:24", "Done.", true)))}},
+		{"held: the native mcp__t3__t3_thread_read results did not reach the thread's end", []harness.NativeCall{call(args, page(true, it(1528, "item1528", "run:L:24", "Done.", false)))}},
+		{"held: a native mcp__t3__t3_thread_read call was not bound", []harness.NativeCall{call(`{"threadId":"thread-X","environmentId":"env-2"}`, page(false, it(1528, "item1528", "run:L:24", "Done.", false)))}},
+	} {
+		if got := nativeRead(c.calls, b); !strings.HasPrefix(got, c.want) {
+			t.Fatalf("want %q, got %q", c.want, got)
+		}
+	}
+}
+
 // A wait turn's outcome is only the engine's decoded t3_thread_wait call
 // bound to the thread, environment and dispatched run.
 func TestNativeWaitBinding(t *testing.T) {

@@ -275,6 +275,21 @@ type waitDispatcher struct {
 	wmu   sync.Mutex
 	waits []string // keys of the checks made
 	plan  []string
+	reads []string // read outcomes in order: "missing" holds, else the body
+}
+
+func (d *waitDispatcher) Read(_ context.Context, q DispatchRequest, run string) (string, error) {
+	d.wmu.Lock()
+	defer d.wmu.Unlock()
+	d.waits = append(d.waits, q.Key+" "+run)
+	body := "missing"
+	if len(d.reads) > 0 {
+		body, d.reads = d.reads[0], d.reads[1:]
+	}
+	if body == "missing" {
+		return "", Permanent{errors.New("no assistant result of run " + run)}
+	}
+	return body, nil
 }
 
 func (d *waitDispatcher) Wait(_ context.Context, q DispatchRequest, run string) (string, bool, error) {
@@ -307,7 +322,7 @@ func TestDispatchLinkedWorkerWaits(t *testing.T) {
 	if (T3{Command: []string{"/bin/t3"}}).Observable("t3:thread-L@env-2") {
 		t.Fatal("local observer claims a linked-environment worker")
 	}
-	d := &waitDispatcher{plan: []string{"running", "deny", "running", "done"}}
+	d := &waitDispatcher{plan: []string{"running", "deny", "running", "done"}, reads: []string{"missing", "Shipped: PR 12, tests green."}}
 	e := open(t, t.TempDir(), Options{Dispatcher: d, Observer: T3{Command: []string{"/bin/false"}}, Observe: 20 * time.Millisecond})
 	defer e.close()
 	e.cmd("add MEL-67 worker=t3:thread-L@env-2 Linked")
@@ -316,12 +331,23 @@ func TestDispatchLinkedWorkerWaits(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 	e.cmdAs("r1", "retry MEL-67")
+	// Finished, but no bound result body: held visibly, never reported.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		st, _ := e.rt.State("MEL-67")
+		if st.Phase == PhaseHeld && strings.Contains(st.Blocked, "read MEL-67/1/read/1") && strings.Contains(st.Blocked, "no assistant result") && st.Evidence == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%+v", st)
+		}
+	}
+	e.cmdAs("r2", "retry MEL-67")
 	e.phase("MEL-67", PhaseReported, 1)
 	st, _ := e.rt.State("MEL-67")
-	if st.Evidence != "t3:thread-L@env-2 run run-MEL-67/1/dispatch completed (native t3_thread_wait; the run's own result is in the worker thread)" {
+	if st.Evidence != "t3:thread-L@env-2 run run-MEL-67/1/dispatch completed: Shipped: PR 12, tests green." {
 		t.Fatalf("%+v", st)
 	}
-	want := []string{"MEL-67/1/wait/1 run-MEL-67/1/dispatch", "MEL-67/1/wait/2 run-MEL-67/1/dispatch", "MEL-67/1/wait/3 run-MEL-67/1/dispatch", "MEL-67/1/wait/4 run-MEL-67/1/dispatch"}
+	want := []string{"MEL-67/1/wait/1 run-MEL-67/1/dispatch", "MEL-67/1/wait/2 run-MEL-67/1/dispatch", "MEL-67/1/wait/3 run-MEL-67/1/dispatch", "MEL-67/1/wait/4 run-MEL-67/1/dispatch", "MEL-67/1/read/1 run-MEL-67/1/dispatch", "MEL-67/1/read/2 run-MEL-67/1/dispatch"}
 	if got := d.checks(); !slices.Equal(got, want) {
 		t.Fatalf("checks %q", got)
 	}

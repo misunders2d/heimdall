@@ -241,6 +241,9 @@ type Review struct {
 	// Run is set for a wait turn: the harness waits, read-only, for this
 	// dispatched run of Worker with its native T3 tool.
 	Run string `json:"run,omitempty"`
+	// Read (with Run) is a result turn: after a terminal wait the harness
+	// reads Run's own assistant result with its native t3_thread_read.
+	Read bool `json:"read,omitempty"`
 }
 
 // ReviewChat is the chat of issue's own review conversation.

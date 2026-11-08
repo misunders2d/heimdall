@@ -1567,7 +1567,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				// A dispatch turn: its result is the engine's own record of
 				// the T3 send, never the model's answer.
 				tool := t3SendTool
-				if t.review.Run != "" {
+				if t.review.Read {
+					tool = t3ReadTool
+				} else if t.review.Run != "" {
 					tool = t3WaitTool
 				}
 				spec.NativeCalls = &harness.NativeCalls{Tools: []string{tool}, Done: func(n harness.NativeCall) {
