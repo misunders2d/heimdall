@@ -320,3 +320,25 @@ J
 		t.Fatalf("flag-like worker: %v", err)
 	}
 }
+
+// A settled claim replays its stored receipt exactly, with no send.
+func TestDispatchSettledClaimReplay(t *testing.T) {
+	d := &scriptDispatcher{}
+	e := open(t, t.TempDir(), Options{Dispatcher: d})
+	defer e.close()
+	q := DispatchRequest{Key: "MEL-66/1/dispatch", Worker: "t3:thread-P", Marker: "[heimdall MEL-66/1/dispatch]"}
+	want := Receipt{Thread: "thread-P", Run: "run:thread:P:ordinal:3", Message: "message:mcp:client%3As1:thread-send:x", Delivery: "queued"}
+	if _, _, _, err := e.rt.claim(q.Key); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.rt.settle(q.Key, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.rt.dispatchOnce(context.Background(), q)
+	if err != nil || got != want {
+		t.Fatalf("replay %+v %v", got, err)
+	}
+	if calls, _ := d.counts(); calls != 0 {
+		t.Fatalf("settled claim sent %d", calls)
+	}
+}

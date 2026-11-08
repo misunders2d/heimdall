@@ -1054,7 +1054,10 @@ func (r *Runtime) dispatchOnce(ctx context.Context, q DispatchRequest) (Receipt,
 	switch state {
 	case "sent":
 		var rc Receipt
-		return rc, json.Unmarshal([]byte(saved), &rc)
+		if err := json.Unmarshal([]byte(saved), &rc); err != nil {
+			return Receipt{}, fmt.Errorf("claim %s: stored receipt: %w", q.Key, err)
+		}
+		return rc, nil
 	case "sending":
 		rc, found, err := r.opt.Dispatcher.Reconcile(ctx, q)
 		if err != nil {
