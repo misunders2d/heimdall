@@ -429,9 +429,13 @@ func TestNativeReadBinding(t *testing.T) {
 		j, _ := json.Marshal(v)
 		return string(j)
 	}
-	page := func(hasMore bool, items ...string) string {
-		j, _ := json.Marshal(map[string]any{"thread": map[string]any{"itemCount": 3}, "items": json.RawMessage("[" + strings.Join(items, ",") + "]"), "hasMore": hasMore})
+	paged := func(hasMore bool, next int, items ...string) string {
+		j, _ := json.Marshal(map[string]any{"thread": map[string]any{"itemCount": 1530}, "items": json.RawMessage("[" + strings.Join(items, ",") + "]"), "hasMore": hasMore, "nextPosition": next})
 		return `{"structuredContent":` + string(j) + `}`
+	}
+	page := func(hasMore bool, items ...string) string { return paged(hasMore, 1528, items...) }
+	after := func(p int) string {
+		return fmt.Sprintf(`{"threadId":"thread-L","environmentId":"env-2","view":"messages","limit":100,"maxCharsPerItem":50000,"afterPosition":%d}`, p)
 	}
 	call := func(a, res string) harness.NativeCall {
 		return harness.NativeCall{Tool: t3ReadTool, Args: json.RawMessage(a), Result: json.RawMessage(res)}
@@ -444,6 +448,16 @@ func TestNativeReadBinding(t *testing.T) {
 		{"result: Done. PR 12 merged.", []harness.NativeCall{
 			call(args, page(false, it(1520, "item1520", "run:L:24", "working…", false), it(1528, "item1528", "run:L:24", "Done.", true))),
 			call(more, page(false, it(1528, "item1528", "run:L:24", " PR 12 merged.", false)))}},
+		// A continuous chain: first page from the start, the next after its
+		// nextPosition, ending hasMore=false; the last result is in the tail.
+		{"result: Final answer.", []harness.NativeCall{
+			call(args, paged(true, 1520, it(1520, "item1520", "run:L:24", "working…", false))),
+			call(after(1520), paged(false, 1528, it(1528, "item1528", "run:L:24", "Final answer.", false)))}},
+		// A skipped tail: progress on page one, then an end page read from
+		// beyond the next position; earlier progress is not the final.
+		{"held: the native mcp__t3__t3_thread_read pages are not one continuous read", []harness.NativeCall{
+			call(args, paged(true, 1520, it(1520, "item1520", "run:L:24", "working…", false))),
+			call(after(1600), paged(false, 1601))}},
 		// Wrong run: only another run's answer is present.
 		{"held: no assistant result of run run:L:24", []harness.NativeCall{call(args, page(false, it(1529, "item1529", "run:L:25", "other run", false)))}},
 		{"held: no native mcp__t3__t3_thread_read call", nil},

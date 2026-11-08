@@ -293,7 +293,11 @@ func nativeRead(calls []harness.NativeCall, b *core.Review) string {
 		next *int // T3's own offset of the rest; nil: complete
 	}
 	chunks := map[string]map[int]chunk{} // itemId → textOffset → page
-	last, ended := item{Position: -1}, false
+	// The plain (non-itemId) reads must be one chain from the start:
+	// the first omits afterPosition, each next one's afterPosition is the
+	// page before's nextPosition, strictly advancing, and only that chain's
+	// hasMore=false page is the end. itemId reads never extend or end it.
+	last, ended, pages, at := item{Position: -1}, false, 0, -1
 	for _, n := range calls {
 		var a struct {
 			ThreadID      string `json:"threadId"`
@@ -301,6 +305,7 @@ func nativeRead(calls []harness.NativeCall, b *core.Review) string {
 			View          string `json:"view"`
 			ItemID        string `json:"itemId"`
 			TextOffset    int    `json:"textOffset"`
+			AfterPosition *int   `json:"afterPosition"`
 		}
 		if json.Unmarshal(n.Args, &a) != nil || a.ThreadID != thread || a.EnvironmentID != env || a.View != "" && a.View != "messages" {
 			return reviewHeld + "a native " + t3ReadTool + " call was not bound to this worker thread"
@@ -309,13 +314,27 @@ func nativeRead(calls []harness.NativeCall, b *core.Review) string {
 			return reviewHeld + "the native " + t3ReadTool + " call failed or was denied"
 		}
 		var v struct {
-			Items   []item `json:"items"`
-			HasMore *bool  `json:"hasMore"`
+			Items        []item `json:"items"`
+			HasMore      *bool  `json:"hasMore"`
+			NextPosition *int   `json:"nextPosition"`
 		}
 		if json.Unmarshal(toolJSON(n.Result), &v) != nil || v.HasMore == nil {
 			return reviewHeld + "the native " + t3ReadTool + " result is not a thread read"
 		}
-		ended = ended || a.ItemID == "" && !*v.HasMore
+		if a.ItemID == "" {
+			start := pages == 0 && a.AfterPosition == nil
+			follows := pages > 0 && a.AfterPosition != nil && *a.AfterPosition == at
+			if ended || !start && !follows {
+				return reviewHeld + "the native " + t3ReadTool + " pages are not one continuous read of the thread (skipped, repeated or out of order); the run's last result is unknown"
+			}
+			if *v.HasMore {
+				if v.NextPosition == nil || *v.NextPosition <= at {
+					return reviewHeld + "the native " + t3ReadTool + " page did not advance; the run's last result is unknown"
+				}
+				at = *v.NextPosition
+			}
+			pages, ended = pages+1, !*v.HasMore
+		}
 		for _, it := range v.Items {
 			if it.SourceThreadID != thread || it.RunID != b.Run || it.Type != "assistant_message" || it.Text == nil {
 				continue
