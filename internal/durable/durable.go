@@ -18,6 +18,7 @@ import (
 	"log"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
@@ -35,6 +36,7 @@ const AppVersion = "heimdall-durable-1"
 const (
 	appName      = "heimdall"
 	workflowName = "heimdall.commitment"
+	dispatchName = "heimdall.dispatch"
 	topic        = "event"
 	stateKey     = "state"
 	defaultRes   = "default"
@@ -51,7 +53,8 @@ type Outbox interface {
 
 // Dispatcher hands a brief to the owner-selected worker. It must use key as
 // a native idempotency key: a repeated key returns the first receipt and
-// causes no second effect. It never chooses a provider or model; the worker
+// causes no second effect. A denial, or an effect whose outcome cannot be
+// reconciled, must be returned as Permanent: it is held, never replayed. It never chooses a provider or model; the worker
 // reference already names an existing native session. No production
 // dispatcher is qualified yet (docs/durable.md); without one, commitments
 // are dispatched by the owner and Heimdall supervises them.
@@ -59,8 +62,18 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, worker, key, brief string) (receipt string, err error)
 }
 
-// Resource is one admission queue: a capacity class such as a host or
-// provider. Commitments over capacity wait visibly in the queue.
+// Permanent marks an error that retrying cannot fix (a native denial, a
+// route conflict, an unreconcilable effect). The commitment holds visibly
+// until an explicit !work retry or close.
+type Permanent struct{ Err error }
+
+func (p Permanent) Error() string { return p.Err.Error() }
+func (p Permanent) Unwrap() error { return p.Err }
+
+// Resource is one capacity class such as a host or provider. Its DBOS queue
+// limits only active execution (dispatch), never a commitment's waits: a
+// commitment waiting on a worker or a verdict holds no slot. Dispatches
+// over capacity wait visibly in the queue.
 type Resource struct {
 	Concurrency int // active commitments on the resource; 0 = unlimited
 	PerWorker   int // active commitments per worker; default 1
@@ -142,6 +155,7 @@ func Open(opt Options) (*Runtime, error) {
 		r.queues[name] = q
 	}
 	dbos.RegisterWorkflow(ctx, r.commitment, dbos.WithWorkflowName(workflowName))
+	dbos.RegisterWorkflow(ctx, r.dispatch, dbos.WithWorkflowName(dispatchName))
 	return r, nil
 }
 
@@ -191,9 +205,10 @@ type State struct {
 	Next     string    `json:"next"`              // the owned next action
 	Since    time.Time `json:"since"`
 	Receipts []int64   `json:"receipts,omitempty"` // outbound ids delivered
-	Blocked  string    `json:"blocked,omitempty"`  // last permanently failed delivery
-	Note     string    `json:"note,omitempty"`     // observer state, e.g. unavailable
+	Blocked  string    `json:"blocked,omitempty"`  // why the commitment is held
+	Note     string    `json:"note,omitempty"`     // observer or technical-retry state
 	Runs     []string  `json:"runs,omitempty"`     // worker runs already used as evidence
+	Seen     int       `json:"seen,omitempty"`     // the worker host's run count at the last read
 }
 
 // Phases. Only closed is terminal.
@@ -204,7 +219,7 @@ const (
 	PhaseReported    = "reported"
 	PhaseAccepted    = "accepted"
 	PhaseOpen        = "open"
-	PhaseBlocked     = "delivery_blocked"
+	PhaseHeld        = "held" // a permanent failure; waits for !work retry or close
 	PhaseClosed      = "closed"
 )
 
@@ -236,14 +251,29 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 	c := w.c
 	for {
 		if r.opt.Dispatcher != nil && c.Worker != "" {
-			if err := r.publish(ctx, w, PhaseDispatching, "dispatch attempt to "+c.Worker); err != nil {
+			if err := r.publish(ctx, w, PhaseDispatching, "dispatch attempt to "+c.Worker+" (queued for "+c.Resource+" capacity)"); err != nil {
 				return err
 			}
-			key := effectKey(c.Issue, w.st.Attempt, "dispatch")
-			if _, err := retry(ctx, "dispatch", func(sctx context.Context) (string, error) {
-				return r.opt.Dispatcher.Dispatch(sctx, c.Worker, key, c.Brief)
-			}); err != nil {
-				return err
+			for n := 0; ; n++ {
+				key := effectKey(c.Issue, w.st.Attempt, "dispatch")
+				if n > 0 {
+					key = fmt.Sprintf("%s#retry%d", key, n)
+				}
+				// Only the dispatch occupies the resource queue.
+				h, err := dbos.RunWorkflow(ctx, r.dispatch, dispatchInput{Worker: c.Worker, Key: key, Brief: c.Brief}, dbos.WithWorkflowID(key), dbos.WithQueue(r.queues[c.Resource]), dbos.WithQueuePartitionKey(c.Worker))
+				if err != nil {
+					return err
+				}
+				res, err := h.GetResult()
+				if err != nil {
+					return err
+				}
+				if res.Held == "" {
+					break
+				}
+				if err := r.hold(ctx, w, "dispatch "+key+": "+res.Held); err != nil {
+					return err
+				}
 			}
 		}
 		if err := r.publish(ctx, w, PhaseWorking, "wait for the attempt's report"); err != nil {
@@ -366,11 +396,13 @@ const maxWait = 7 * 24 * time.Hour
 
 // awaitReport waits for the current attempt's report. With an observer for
 // the worker it also reads the worker's own state, backing off from
-// Options.Observe to 10 minutes: a run that finished after the attempt
-// began becomes the report (attributed to the observer, still UNACCEPTED).
-// A run already used as evidence, or finished before the attempt, never
-// counts. A worker question is shown as worker_waiting; an unavailable
-// observer is a visible technical note, never terminal.
+// Options.Observe to 10 minutes. A run counts as the attempt's result only
+// if it finished after the attempt began: it is newer than (or was still
+// active in) the baseline read at the start, or, if that read failed, the
+// host's own updatedAt is later than the start. A run already used as
+// evidence never counts. The result is a report, still UNACCEPTED: a
+// finished run is progress, not acceptance. A worker question shows as
+// worker_waiting; an unavailable observer is a visible note.
 func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 	o := r.opt.Observer
 	if o == nil || !o.Observable(w.c.Worker) {
@@ -380,7 +412,19 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 		return dbos.RunAsStep(ctx, func(sctx context.Context) (Observation, error) { return o.Observe(sctx, w.c.Worker) },
 			dbos.WithStepName("observe"), dbos.WithStepMaxRetries(2), dbos.WithStepBaseInterval(time.Second))
 	}
-	base, baseErr := observe()
+	// Chronology is the host's run order (runCount), never thread metadata
+	// such as updatedAt. A run belongs to this attempt only if it started
+	// after a read taken before the attempt began: the attempt-start read
+	// (one try, no retries), else the last read of an earlier attempt. With
+	// neither, the first healthy read sets the floor and whatever run it
+	// shows stays unresolved, never reported.
+	base, baseErr := dbos.RunAsStep(ctx, func(sctx context.Context) (Observation, error) { return o.Observe(sctx, w.c.Worker) },
+		dbos.WithStepName("observe-start"))
+	floor, known, startRun, unresolved := w.st.Seen, w.st.Seen > 0, "", ""
+	if baseErr == nil {
+		floor, known, startRun = base.RunCount, true, base.ActiveRun
+		w.st.Seen = base.RunCount
+	}
 	poll, quiet, noticed := r.opt.Observe, time.Duration(0), r.opt.Silence < 0
 	for {
 		ev, ok, err := r.next(ctx, w, poll)
@@ -399,7 +443,19 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 		quiet += poll
 		poll = min(poll*2, 10*time.Minute)
 		obs, err := observe()
-		note := ""
+		if err == nil {
+			w.st.Seen = max(w.st.Seen, obs.RunCount)
+			if !known {
+				known, floor = true, obs.RunCount
+				if obs.LatestRun != "" {
+					unresolved = fmt.Sprintf("observation unresolved: %s run %s (%s) may predate attempt %d (no read before it); waiting for a newer run", w.c.Worker, obs.LatestRun, obs.Status, w.st.Attempt)
+				}
+			}
+			if obs.RunCount > floor {
+				unresolved = ""
+			}
+		}
+		note := unresolved
 		if err != nil {
 			note = "observer unavailable: " + err.Error()
 		}
@@ -410,10 +466,6 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 			}
 		}
 		if err != nil {
-			continue
-		}
-		if baseErr != nil { // first good read is the attempt's baseline
-			base, baseErr = obs, nil
 			continue
 		}
 		if (obs.Pending > 0) != (w.st.Phase == PhaseWaiting) {
@@ -431,9 +483,9 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 			}
 			continue
 		}
-		fresh := obs.LatestRun != "" && obs.ActiveRun == "" && obs.Pending == 0 &&
-			(obs.LatestRun != base.LatestRun || base.ActiveRun != "") && !slices.Contains(w.st.Runs, obs.LatestRun)
-		if fresh {
+		finished := obs.LatestRun != "" && obs.ActiveRun == "" && obs.Pending == 0 && !slices.Contains(w.st.Runs, obs.LatestRun) &&
+			(obs.RunCount > floor || startRun != "" && obs.LatestRun == startRun)
+		if finished {
 			w.st.Runs = append(w.st.Runs, obs.LatestRun)
 			return Event{Kind: "report", Attempt: w.st.Attempt, By: "observer:" + w.c.Worker,
 				Evidence: fmt.Sprintf("%s run %s %s: %s", w.c.Worker, obs.LatestRun, obs.Status, or(obs.Reply, "(no reply text)"))}, nil
@@ -473,10 +525,9 @@ func (r *Runtime) close(ctx dbos.Context, w *run, ev Event) (State, error) {
 // deliver enqueues text to the commitment's original route once per effect
 // key and waits durably for that reply's receipt. Transient failures are
 // the outbox's own retry policy. A permanent failure is never replayed
-// blindly: blocking deliveries publish delivery_blocked, keep the failed
-// receipt, and wait for an explicit !work retry (re-enqueued under a new
-// key) or close; other events are kept for afterwards. A non-blocking
-// delivery (notices) records the failure and moves on.
+// blindly: a blocking delivery holds the commitment on the failed receipt
+// until an explicit !work retry (re-enqueued under a new key) or close. A
+// non-blocking delivery (notices) records the failure and moves on.
 func (r *Runtime) deliver(ctx dbos.Context, w *run, effect, text string, blocking bool) error {
 	c := w.c
 	for n := 0; ; n++ {
@@ -484,56 +535,75 @@ func (r *Runtime) deliver(ctx dbos.Context, w *run, effect, text string, blockin
 		if n > 0 {
 			key = fmt.Sprintf("%s#retry%d", key, n)
 		}
-		id, err := retry(ctx, "deliver", func(context.Context) (int64, error) {
-			return r.opt.Outbox.EnqueueEffect(key, core.Outbound{Conv: c.Route, ReplyTo: c.ReplyTo, Text: text + "\n— heimdall"})
-		})
-		if err != nil {
-			return err
-		}
-		rc, err := r.receipt(ctx, c, id)
-		if err != nil {
-			return err
-		}
-		if rc.State == store.OutSent {
-			w.st.Receipts = append(w.st.Receipts, id)
-			return nil
-		}
-		w.st.Blocked = fmt.Sprintf("outbound %d (%s) failed: %s", id, key, rc.Error)
-		if !blocking {
-			return nil
-		}
-		phase, next := w.st.Phase, w.st.Next
-		if err := r.publish(ctx, w, PhaseBlocked, "reconcile "+w.st.Blocked+"; then !work retry or !work close"); err != nil {
-			return err
-		}
-		for {
-			ev, err := dbos.Recv[Event](ctx, topic, maxWait)
-			if errors.Is(err, dbos.ErrTimeout) {
-				continue
+		id, err := step(r, ctx, w, "deliver", func(context.Context) (int64, error) {
+			id, err := r.opt.Outbox.EnqueueEffect(key, core.Outbound{Conv: c.Route, ReplyTo: c.ReplyTo, Text: text + "\n— heimdall"})
+			if errors.Is(err, store.ErrEffectConflict) {
+				err = Permanent{err}
 			}
+			return id, err
+		})
+		var why string
+		var perm Permanent
+		switch {
+		case errors.As(err, &perm):
+			why = "delivery " + key + ": " + perm.Error()
+		case err != nil:
+			return err
+		default:
+			rc, err := r.receipt(ctx, w, id)
 			if err != nil {
 				return err
 			}
-			if ev.Kind == "close" {
-				return closed{ev}
+			if rc.State == store.OutSent {
+				w.st.Receipts = append(w.st.Receipts, id)
+				return nil
 			}
-			if ev.Kind == "retry" {
-				break
-			}
-			w.buf = append(w.buf, ev)
+			why = fmt.Sprintf("outbound %d (%s) failed: %s", id, key, rc.Error)
 		}
-		w.st.Blocked = ""
-		if err := r.publish(ctx, w, phase, next); err != nil {
+		if !blocking {
+			w.st.Note = "notice not delivered: " + why
+			return nil
+		}
+		if err := r.hold(ctx, w, why); err != nil {
 			return err
 		}
 	}
 }
 
+// hold publishes the held phase with why and waits durably for an
+// explicit retry (returns nil) or close; other events are kept for later.
+func (r *Runtime) hold(ctx dbos.Context, w *run, why string) error {
+	phase, next := w.st.Phase, w.st.Next
+	w.st.Blocked = why
+	if err := r.publish(ctx, w, PhaseHeld, "reconcile "+why+"; then !work retry or !work close"); err != nil {
+		return err
+	}
+	for {
+		ev, err := dbos.Recv[Event](ctx, topic, maxWait)
+		if errors.Is(err, dbos.ErrTimeout) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if ev.Kind == "close" {
+			return closed{ev}
+		}
+		if ev.Kind == "retry" {
+			break
+		}
+		w.buf = append(w.buf, ev)
+	}
+	w.st.Blocked = ""
+	return r.publish(ctx, w, phase, next)
+}
+
 // receipt waits durably until outbound id is sent or failed.
-func (r *Runtime) receipt(ctx dbos.Context, c Commitment, id int64) (store.Receipt, error) {
+func (r *Runtime) receipt(ctx dbos.Context, w *run, id int64) (store.Receipt, error) {
+	c := w.c
 	pause := time.Second
 	for {
-		rc, err := retry(ctx, "receipt", func(context.Context) (store.Receipt, error) {
+		rc, err := step(r, ctx, w, "receipt", func(context.Context) (store.Receipt, error) {
 			if r.opt.Wake != nil {
 				r.opt.Wake(c.Route.Interface)
 			}
@@ -553,18 +623,91 @@ func (r *Runtime) receipt(ctx dbos.Context, c Commitment, id int64) (store.Recei
 	}
 }
 
-// retry runs fn as a checkpointed step. Technical failures retry with
-// backoff inside the step, then durably every 10 minutes: they never end the
-// commitment and never wait for the owner.
-func retry[R any](ctx dbos.Context, name string, fn func(context.Context) (R, error)) (R, error) {
+// stepOut is a step's checkpointed outcome: a Permanent error is recorded
+// as a result, so replay returns it without running fn again.
+type stepOut[R any] struct {
+	V    R      `json:"v"`
+	Perm string `json:"perm,omitempty"`
+}
+
+// attempt runs fn as one checkpointed step with in-step retries for
+// technical errors. A Permanent error returns at once.
+func attempt[R any](ctx dbos.Context, name string, fn func(context.Context) (R, error)) (R, error) {
+	out, err := dbos.RunAsStep(ctx, func(sctx context.Context) (stepOut[R], error) {
+		v, err := fn(sctx)
+		var p Permanent
+		if errors.As(err, &p) {
+			return stepOut[R]{Perm: p.Error()}, nil
+		}
+		return stepOut[R]{V: v}, err
+	}, dbos.WithStepName(name), dbos.WithStepMaxRetries(5), dbos.WithStepBaseInterval(time.Second), dbos.WithStepBackoffFactor(2))
+	if err == nil && out.Perm != "" {
+		err = Permanent{errors.New(out.Perm)}
+	}
+	return out.V, err
+}
+
+// step is attempt with visible technical recovery: after the in-step
+// retries it shows "technical retry" on the commitment and tries again with
+// durable backoff to 1 hour, never ending the commitment or asking the
+// owner. Permanent errors return to the caller, which holds.
+func step[R any](r *Runtime, ctx dbos.Context, w *run, name string, fn func(context.Context) (R, error)) (R, error) {
+	pause := 10 * time.Minute
+	for round := 1; ; round++ {
+		v, err := attempt(ctx, name, fn)
+		var p Permanent
+		if err == nil || errors.As(err, &p) || ctx.Err() != nil {
+			if err == nil && strings.HasPrefix(w.st.Note, "technical retry") {
+				w.st.Note = ""
+				if perr := r.publish(ctx, w, w.st.Phase, w.st.Next); perr != nil {
+					return v, perr
+				}
+			}
+			return v, err
+		}
+		w.st.Note = fmt.Sprintf("technical retry of %s (round %d, next in %s): %v", name, round, pause, err)
+		if perr := r.publish(ctx, w, w.st.Phase, w.st.Next); perr != nil {
+			return v, perr
+		}
+		if _, err := dbos.Sleep(ctx, pause); err != nil {
+			return v, err
+		}
+		pause = min(pause*2, time.Hour)
+	}
+}
+
+type dispatchInput struct {
+	Worker string `json:"worker"`
+	Key    string `json:"key"`
+	Brief  string `json:"brief"`
+}
+
+type dispatchResult struct {
+	Receipt string `json:"receipt,omitempty"`
+	Held    string `json:"held,omitempty"` // permanent: never replayed
+}
+
+// dispatch is the child workflow that occupies the resource queue: one
+// native-keyed dispatch. Technical errors retry durably (visible as the
+// parent's dispatching phase); a Permanent error comes back as Held.
+func (r *Runtime) dispatch(ctx dbos.Context, in dispatchInput) (dispatchResult, error) {
+	pause := 10 * time.Minute
 	for {
-		v, err := dbos.RunAsStep(ctx, fn, dbos.WithStepName(name), dbos.WithStepMaxRetries(5), dbos.WithStepBaseInterval(time.Second), dbos.WithStepBackoffFactor(2))
+		rcpt, err := attempt(ctx, "dispatch", func(sctx context.Context) (string, error) {
+			return r.opt.Dispatcher.Dispatch(sctx, in.Worker, in.Key, in.Brief)
+		})
+		var p Permanent
+		if errors.As(err, &p) {
+			return dispatchResult{Held: p.Error()}, nil
+		}
 		if err == nil || ctx.Err() != nil {
-			return v, err
+			return dispatchResult{Receipt: rcpt}, err
 		}
-		if _, err := dbos.Sleep(ctx, 10*time.Minute); err != nil {
-			return v, err
+		r.opt.Log.Printf("durable: dispatch %s: %v; retrying in %s", in.Key, err, pause)
+		if _, err := dbos.Sleep(ctx, pause); err != nil {
+			return dispatchResult{}, err
 		}
+		pause = min(pause*2, time.Hour)
 	}
 }
 

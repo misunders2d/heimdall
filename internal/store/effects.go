@@ -9,6 +9,9 @@ import (
 	"github.com/misunders2d/heimdall/internal/core"
 )
 
+// ErrEffectConflict: an effect key already names a reply on another route.
+var ErrEffectConflict = errors.New("effect key conflict")
+
 // EnqueueEffect stores out for delivery at most once per effect key: a
 // repeated key returns the reply already stored under it, in any state. The
 // key is a structured identity (internal/durable: task/attempt/effect),
@@ -27,7 +30,7 @@ func (s *Store) EnqueueEffect(effect string, out core.Outbound) (id int64, err e
 		if err == nil && (k != out.Conv || replyTo != out.ReplyTo) {
 			// A key names one effect on one route; never adopt another
 			// destination's receipt.
-			return fmt.Errorf("effect %q already belongs to another route (outbound %d)", effect, id)
+			return fmt.Errorf("%w: %q belongs to another route (outbound %d)", ErrEffectConflict, effect, id)
 		}
 		if err != sql.ErrNoRows {
 			return err

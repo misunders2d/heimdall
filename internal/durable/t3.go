@@ -16,6 +16,7 @@ type Observation struct {
 	LatestRun string `json:"latest_run"`
 	ActiveRun string `json:"active_run"` // "" when no run is in progress
 	Pending   int    `json:"pending"`    // requests waiting for an answer
+	RunCount  int    `json:"run_count"`  // the host's run order: runs started so far
 	Reply     string `json:"reply,omitempty"`
 }
 
@@ -64,6 +65,7 @@ func (t T3) Observe(ctx context.Context, worker string) (Observation, error) {
 			LatestRunID         *string `json:"latestRunId"`
 			ActiveRunID         *string `json:"activeRunId"`
 			PendingRequestCount int     `json:"pendingRequestCount"`
+			RunCount            int     `json:"runCount"`
 		} `json:"thread"`
 		Messages []struct {
 			Role  string `json:"role"`
@@ -74,7 +76,7 @@ func (t T3) Observe(ctx context.Context, worker string) (Observation, error) {
 	if err := json.Unmarshal(out, &v); err != nil || v.Thread == nil {
 		return Observation{}, errors.New("t3 thread show: unexpected output")
 	}
-	o := Observation{Status: v.Thread.Status, Pending: v.Thread.PendingRequestCount}
+	o := Observation{Status: v.Thread.Status, Pending: v.Thread.PendingRequestCount, RunCount: v.Thread.RunCount}
 	if v.Thread.LatestRunID != nil {
 		o.LatestRun = *v.Thread.LatestRunID
 	}

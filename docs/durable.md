@@ -24,17 +24,27 @@ linked to it.
 
 Steps, each checkpointed:
 1. **Admission.** The commitment is committed to `<data_dir>/durable.db`
-   (WAL, `synchronous(FULL)`) and queued on its resource before `!work add`
-   answers. A repeated issue returns the existing commitment.
-2. **Dispatch.** Runs only when a `Dispatcher` is configured. None is
-   qualified yet (see below), so every commitment today is dispatched by the
-   owner.
+   (WAL, `synchronous(FULL)`) before `!work add` answers. The commitment
+   workflow itself is not queued (see Capacity). A repeated issue returns the
+   existing commitment.
+2. **Dispatch.** Runs only when a `Dispatcher` is configured, as a child
+   workflow on the resource queue (the only queued part). None is qualified
+   yet (see below), so every commitment today is dispatched natively by the
+   owner-selected harness. A `Permanent` dispatch error (a native denial) is
+   held, never replayed, until `!work retry`, which dispatches under a new
+   key.
 3. **Wait** for a report on the current attempt. With `t3_command`
    configured, a `worker=t3:<thread>` is observed read-only
    (`thread show --json`), backing off from 30 s to 10 min.
-   - A run that finished after the attempt began becomes the report. It is
-     attributed to the observer and is still unaccepted.
-   - Runs from before the attempt, or already used as evidence, never count.
+   - Chronology is the host's run order (`runCount`), never thread
+     metadata such as `updatedAt` (a rename or organize changes it). A run
+     counts only if it started after a read taken before the attempt: the
+     attempt-start read (one try), else the last read of an earlier attempt.
+     It becomes the report, attributed to the observer, still unaccepted.
+   - With no such read (the very first read of attempt 1 failed), the first
+     healthy read sets the floor; the run it shows stays **unresolved**
+     (visible note), never reported, until a newer run finishes.
+   - Runs already used as evidence never count again.
    - A worker question shows as `worker_waiting`, with one notice.
    - An unreachable observer is a visible note, never terminal.
 
@@ -61,9 +71,13 @@ no schema version change, so an older Heimdall still opens the database. A
 repeated key returns the first reply. A key bound to another route is an
 error. The workflow waits for the reply's receipt:
 - **Transient failures** follow the outbox's existing retry policy.
-- **A permanent failure is never replayed.** The commitment shows
-  `delivery_blocked` with the failed receipt until `!work retry` or
-  `!work close`. Events that arrive meanwhile are kept.
+- **A permanent failure is never replayed.** The commitment shows `held`
+  with the failed receipt until `!work retry` or `!work close`. Events that
+  arrive meanwhile are kept. A key bound to another route is held the same
+  way.
+- **Technical errors** (database, observer) retry with a durable backoff
+  from 10 min to 1 h, shown as a note ("technical retry of …"). Native
+  denials and route conflicts are `Permanent`: held, not retried.
 - **A reply in flight when Heimdall died** is not enqueued again. The
   outbox's restart policy decides (sending becomes pending, at least once).
 
@@ -84,13 +98,19 @@ before any repeat. Platform delivery is at least once.
 ```
 
 The caller is the router's verified ingress caller, the same one `!job`
-uses. Employees and scheduled-run origins are refused. The creator and the
-reply route come from the stored message and never from command text.
+uses. Employees and scheduled-run origins are refused. The creator, the
+reply route and privacy come from the stored message and never from command
+text. Visibility follows `!job`:
+- in the verified owner's private chat, the owner sees their own
+  commitments from every route;
+- in a shared chat, only commitments created in that chat are visible;
+  others answer "not tracked here" or "already tracked elsewhere";
+- only a commitment's creator changes it.
 
 `!work pause` is the explicit owner pause. It cancels the workflow with a
 `paused_by` attribute. It never expires, and restart recovery does not
-resume it. `!work resume` puts the commitment back on its own resource
-queue. Ordinary queueing and failures are never shown as a pause.
+resume it. `!work resume` resumes it. Ordinary queueing and failures are
+never shown as a pause.
 
 ## Configuration
 
@@ -99,13 +119,17 @@ queue. Ordinary queueing and failures are never shown as a pause.
   "resources": {"default": {"per_worker": 1}, "contabo": {"concurrency": 3, "rate_limit": 2, "rate_period_seconds": 60}}}}
 ```
 
-Each resource is a DBOS queue:
-- `concurrency`: the number of active commitments;
+Each resource is a DBOS queue that limits **dispatch only**:
+- `concurrency`: dispatches running at once;
 - `per_worker`: concurrency per worker partition (default 1);
-- `rate_limit`: starts per period.
+- `rate_limit`: dispatch starts per period.
 
-Commitments over capacity stay visible as "queued for capacity", never
-dropped or paused.
+DBOS v1.8.0 counts a queued workflow against its queue for its whole life,
+including durable waits (test `TestDBOSQueueCountsWaitingWorkflows`). A
+queued commitment waiting days for a report would hold the slot, so
+commitments are not queued: a stalled commitment holds no slot
+(`TestStalledCommitmentHoldsNoSlot`, one slot). Dispatches over capacity
+stay visible as queued, never dropped or paused.
 
 ## Upgrade policy
 
@@ -145,23 +169,27 @@ version.
    alternative needs T3 to add a client request id to the host CLI `send`,
    or a daemon-scoped T3 credential. That is upstream, not a Heimdall
    workaround.
-3. **Acceptance verdict (interface boundary in Heimdall).** Prechecks
-   reject only. A real verifier would be a normal acceptance turn of the
-   owner-selected harness in the origin conversation, with a structured
-   verdict back to the workflow.
+3. **Acceptance verdict (supervisor turn: not implemented).** Prechecks
+   reject only. The authorized design is a server-initiated supervisor turn
+   of the owner-selected harness through the existing router turn
+   machinery (not a scheduler job), bound to the stored commitment, attempt
+   and route, with the creator revalidated and read-only control.
 
-   The only existing server-initiated turn path is the scheduler, and its
-   runs are tied to stored jobs. Per-task jobs are ruled out. The smallest
-   alternative is a router turn origin "commitment verification", bound
-   to the stored commitment, attempt and route:
-   - one turn per reported attempt, not per wake;
-   - read-only control, like scheduled runs;
-   - the verdict taken from the whole-answer exact form
-     `ACCEPT <evidence>` or `REJECT <reason>`, like NO_UPDATE.
+   Boundary: the router's server-initiated turn path is bound to scheduler
+   runs, not a thin hook.
+   - `core.Inbound.Validate` admits only `live` and `scheduled` origins.
+   - `conv.route` and `conv.start` admit a server-initiated turn only via
+     `row.Run` and `Jobs.Begin(row)`, which require a store run created by
+     `Store.StartRun` for a job.
+   - The turn's fences (scheduler control, session `sched:<job>`, harness
+     choice, end of run) key on `turn.job *scheduler.Turn`.
 
-   It would use the origin conversation's chat slot once per reported
-   attempt. Until then, `!work accept` and `!work reject` from the live
-   owner are the verdict.
+   The smallest change is a third origin with its own binding
+   (`Inbound.Commitment{Issue, Attempt, Target}`), routed like `row.Run`,
+   with scheduler and MCP control off, whose final answer becomes a verdict
+   event (`ISSUE/attempt/verdict`). That is a new turn contract in core and
+   router with its own fence tests. Until then, `!work accept` and
+   `!work reject` from the live owner are the verdict.
 
 Later slices:
 - automatic admission of accepted natural-language requests;

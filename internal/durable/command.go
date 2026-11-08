@@ -24,7 +24,22 @@ type Caller struct {
 	Conv      core.ConvKey
 	MsgID     string
 	Live      bool // core.OriginLive: a real person's message, not a scheduled run
+	Private   bool // the stored ingress is the caller's private chat with the bot
 }
+
+// sees reports whether c may see cm. As for !job: in the creator's private
+// chat, all of the creator's commitments; elsewhere only commitments routed
+// to this exact conversation.
+func (c Caller) sees(cm Commitment) bool {
+	if c.Private && cm.Creator == c.Principal.Key() {
+		return true
+	}
+	return cm.Route == c.Conv
+}
+
+// controls reports whether c may change cm: it must see it and be its
+// creator.
+func (c Caller) controls(cm Commitment) bool { return c.sees(cm) && cm.Creator == c.Principal.Key() }
 
 const usage = `!work — durable commitments (owner only; Linear is canonical).
 Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into reports; there is no qualified dispatcher or verifier, so verdicts come from you (docs/durable.md).
@@ -47,7 +62,7 @@ func (r *Runtime) Command(c Caller, text string) string {
 		f = f[1:]
 	}
 	if len(f) == 0 || strings.EqualFold(f[0], "list") {
-		return r.list()
+		return r.list(c)
 	}
 	sub := strings.ToLower(f[0])
 	if sub == "help" || len(f) < 2 {
@@ -59,6 +74,15 @@ func (r *Runtime) Command(c Caller, text string) string {
 	}
 	rest := strings.Join(f[2:], " ")
 	var err error
+	if sub != "add" {
+		cm, ok := r.input(issue)
+		if !ok || !c.sees(cm) {
+			return issue + " is not tracked here."
+		}
+		if sub != "show" && !c.controls(cm) {
+			return issue + ": only its creator can change it."
+		}
+	}
 	switch sub {
 	case "show":
 		return r.show(issue)
@@ -68,7 +92,10 @@ func (r *Runtime) Command(c Caller, text string) string {
 			var existing bool
 			if existing, err = r.Admit(cm); err == nil {
 				if existing {
-					return issue + " is already tracked:\n" + r.show(issue)
+					if cur, ok := r.input(issue); ok && c.sees(cur) {
+						return issue + " is already tracked:\n" + r.show(issue)
+					}
+					return issue + " is already tracked elsewhere."
 				}
 				return "Tracking " + issue + " (" + r.linearURL(issue) + "). It stays visible until closed."
 			}
@@ -137,18 +164,14 @@ func parseAdd(c Caller, issue string, args []string) (Commitment, error) {
 // durable.db and queued on its resource. A repeated issue returns the
 // existing commitment unchanged (existing=true).
 func (r *Runtime) Admit(cm Commitment) (existing bool, err error) {
-	q, ok := r.queues[cm.Resource]
-	if !ok {
+	if _, ok := r.queues[cm.Resource]; !ok {
 		return false, fmt.Errorf("unknown resource %q", cm.Resource)
 	}
 	if _, err := dbos.RetrieveWorkflow[State](r.ctx, cm.Issue); err == nil {
 		return true, nil
 	}
-	part := cm.Worker
-	if part == "" {
-		part = "owner"
-	}
-	_, err = dbos.RunWorkflow(r.ctx, r.commitment, cm, dbos.WithWorkflowID(cm.Issue), dbos.WithQueue(q), dbos.WithQueuePartitionKey(part))
+	// Not queued: waiting holds no capacity. Only dispatch is queued.
+	_, err = dbos.RunWorkflow(r.ctx, r.commitment, cm, dbos.WithWorkflowID(cm.Issue))
 	return false, err
 }
 
@@ -192,13 +215,9 @@ func (r *Runtime) Resume(issue string) error {
 	if err := dbos.SetWorkflowAttributes(r.ctx, issue, map[string]any{"paused_by": nil, "paused_at": nil}, dbos.WithMergeAttributes()); err != nil {
 		return err
 	}
-	// Back onto its own resource queue: capacity still applies (a cancelled
-	// workflow no longer records its queue).
-	cm, ok := decodeInput(ws[0].Input)
-	if !ok {
-		return errors.New("commitment input unreadable")
-	}
-	_, err = dbos.ResumeWorkflow[State](r.ctx, issue, dbos.WithResumeQueue("work:"+cm.Resource))
+	// The commitment itself holds no capacity; a pending dispatch child
+	// keeps its own resource queue.
+	_, err = dbos.ResumeWorkflow[State](r.ctx, issue)
 	return err
 }
 
@@ -214,6 +233,7 @@ type View struct {
 	Issue, Title, Status, Worker string
 	State                        State
 	PausedBy                     string
+	cm                           Commitment
 }
 
 // Views lists every commitment, open ones first. It only reads.
@@ -234,14 +254,12 @@ func (r *Runtime) Views() ([]View, error) {
 	for _, w := range ws {
 		v := View{Issue: w.ID, Status: string(w.Status)}
 		if cm, ok := decodeInput(w.Input); ok {
-			v.Title, v.Worker = cm.Title, cm.Worker
+			v.Title, v.Worker, v.cm = cm.Title, cm.Worker, cm
 		}
 		if p, ok := w.Attributes["paused_by"].(string); ok && p != "" {
 			v.PausedBy = p
 		}
-		if w.Status != dbos.WorkflowStatusEnqueued || w.Attempts > 0 {
-			v.State, _ = r.State(w.ID)
-		}
+		v.State, _ = r.State(w.ID)
 		out = append(out, v)
 	}
 	slices.SortStableFunc(out, func(a, b View) int {
@@ -250,10 +268,25 @@ func (r *Runtime) Views() ([]View, error) {
 	return out, nil
 }
 
-func (r *Runtime) list() string {
-	vs, err := r.Views()
+// input reads commitment issue's stored input.
+func (r *Runtime) input(issue string) (Commitment, bool) {
+	ws, err := dbos.ListWorkflows(r.ctx, dbos.WithFilterWorkflowIDs(issue), dbos.WithFilterName(workflowName), dbos.WithFilterLoadInput(true))
+	if err != nil || len(ws) == 0 {
+		return Commitment{}, false
+	}
+	return decodeInput(ws[0].Input)
+}
+
+func (r *Runtime) list(c Caller) string {
+	all, err := r.Views()
 	if err != nil {
 		return "Commitments unavailable: " + err.Error()
+	}
+	var vs []View
+	for _, v := range all {
+		if c.sees(v.cm) {
+			vs = append(vs, v)
+		}
 	}
 	if len(vs) == 0 {
 		return "No tracked commitments. " + strings.SplitN(usage, "\n", 2)[0]
@@ -282,8 +315,8 @@ func (r *Runtime) show(issue string) string {
 // line is the human status: paused, queued, failed and phase are distinct.
 func (v View) line() string {
 	switch {
-	case v.State.Phase == PhaseBlocked:
-		return "delivery blocked: " + v.State.Blocked + "; next: reconcile, then !work retry or !work close"
+	case v.State.Phase == PhaseHeld:
+		return "held: " + v.State.Blocked + "; next: reconcile, then !work retry or !work close"
 	case v.PausedBy != "":
 		return "paused by owner " + v.PausedBy + " (never expires; !work resume)"
 	case v.Status == string(dbos.WorkflowStatusEnqueued):

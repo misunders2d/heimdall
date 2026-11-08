@@ -306,19 +306,19 @@ func TestPermanentDeliveryFailureBlocksWithoutReplay(t *testing.T) {
 	e.phase("MEL-10", PhaseWorking, 1)
 	bad.MsgID = "b1"
 	e.rt.Command(bad, "report MEL-10 done")
-	e.phase("MEL-10", PhaseBlocked, 1)
+	e.phase("MEL-10", PhaseHeld, 1)
 	if st, _ := e.rt.State("MEL-10"); !strings.Contains(st.Blocked, "chat not found") || !strings.Contains(st.Next, "!work retry") {
 		t.Fatalf("blocked state %+v", st)
 	}
 	e.close()
 	e = open(t, dir, Options{})
 	defer e.close()
-	e.phase("MEL-10", PhaseBlocked, 1)
+	e.phase("MEL-10", PhaseHeld, 1)
 	time.Sleep(300 * time.Millisecond)
 	if got := outbound(t, dir, "MEL-10"); len(got) != 1 || !strings.HasPrefix(got[0], "failed:") {
 		t.Fatalf("replayed after restart: %q", got)
 	}
-	if l := e.cmd("list"); !strings.Contains(l, "delivery blocked: outbound") {
+	if l := e.rt.Command(bad, "list"); !strings.Contains(l, "held: outbound") {
 		t.Fatal(l)
 	}
 	// The verdict arrives while blocked: kept, not lost.
@@ -371,7 +371,8 @@ func TestAmbiguousSendIsReconciledNotReenqueued(t *testing.T) {
 		got := outbound(t, dir, "UNACCEPTED")
 		return len(got) == 1 && strings.HasPrefix(got[0], "sent:")
 	})
-	e.cmdAs("h2", "accept MEL-11")
+	hang.MsgID = "h2"
+	e.rt.Command(hang, "accept MEL-11")
 	e.phase("MEL-11", PhaseClosed, 1)
 	final, _ := e.rt.State("MEL-11")
 	if got := outbound(t, dir, "UNACCEPTED"); len(got) != 1 || !strings.HasPrefix(got[0], "sent:") || len(final.Receipts) != 2 {
@@ -429,9 +430,7 @@ func TestOwnerPauseNeverExpires(t *testing.T) {
 	if r := e.cmd("resume MEL-5"); r != "MEL-5 resumed." {
 		t.Fatal(r)
 	}
-	if w := e.status("MEL-5"); w.QueueName != "work:default" || w.QueuePartitionKey != "owner" {
-		t.Fatalf("resumed outside its resource queue: %q %q", w.QueueName, w.QueuePartitionKey)
-	}
+	waitFor(t, 5*time.Second, "resumed", func() bool { return e.status("MEL-5").Status == dbos.WorkflowStatusPending })
 	if r := e.cmdAs("m1", "report MEL-5 ok"); r != "Sent report to MEL-5." {
 		t.Fatal(r)
 	}
@@ -492,14 +491,72 @@ func TestCommandFences(t *testing.T) {
 	if r := e.cmd("add mel-x y"); !strings.Contains(r, "Not a Linear issue") {
 		t.Fatal(r)
 	}
+	// Privacy comes from stored ingress: a task created in the owner's
+	// private chat is invisible from a shared chat, and vice versa only its
+	// own route shows there.
+	priv := owner
+	priv.Conv, priv.Private, priv.MsgID = core.ConvKey{Interface: "test", Chat: "dm"}, true, "p1"
+	e.rt.Command(priv, "add MEL-8 Private plan")
+	shared := owner
+	shared.Conv, shared.MsgID = core.ConvKey{Interface: "test", Chat: "group"}, "g1"
+	for _, q := range []string{"show MEL-8", "report MEL-8 x", "pause MEL-8", "add MEL-8 again"} {
+		if r := e.rt.Command(shared, q); strings.Contains(r, "Private plan") || !strings.Contains(r, "not tracked here") && !strings.Contains(r, "tracked elsewhere") {
+			t.Fatalf("%s from shared chat: %s", q, r)
+		}
+	}
+	if l := e.rt.Command(shared, "list"); strings.Contains(l, "MEL-8") || strings.Contains(l, "MEL-7") {
+		t.Fatalf("shared list leaks: %s", l)
+	}
+	if l := e.rt.Command(priv, "list"); !strings.Contains(l, "MEL-8") || !strings.Contains(l, "MEL-7") {
+		t.Fatalf("private owner view: %s", l)
+	}
+	other := owner
+	other.Principal.ID = "owner2"
+	if r := e.rt.Command(other, "accept MEL-7"); !strings.Contains(r, "only its creator") {
+		t.Fatalf("another owner changed it: %s", r)
+	}
+}
+
+// memDispatcher is a worker host with native idempotency keys; deny makes
+// a key's dispatch a permanent denial.
+type memDispatcher struct {
+	mu    sync.Mutex
+	at    map[string]time.Time
+	calls map[string]int
+	deny  map[string]bool
+}
+
+func newMem() *memDispatcher {
+	return &memDispatcher{at: map[string]time.Time{}, calls: map[string]int{}, deny: map[string]bool{}}
+}
+
+func (m *memDispatcher) Dispatch(_ context.Context, worker, key, _ string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls[key]++
+	if m.deny[key] {
+		return "", Permanent{fmt.Errorf("native denial for %s", key)}
+	}
+	if _, ok := m.at[key]; !ok {
+		m.at[key] = time.Now()
+	}
+	return "rcpt-" + key, nil
+}
+
+func (m *memDispatcher) count(key string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[key]
 }
 
 // 60 commitments, one rate-limited resource: none dropped, all visible,
 // the unlimited resource is not held back by the limited one.
 func TestSixtyQueuedOneRateLimited(t *testing.T) {
-	e := open(t, t.TempDir(), Options{Resources: map[string]Resource{"limited": {RateLimit: 2, RatePeriod: time.Second}}})
+	d := newMem()
+	e := open(t, t.TempDir(), Options{Dispatcher: d, Resources: map[string]Resource{"limited": {RateLimit: 2, RatePeriod: time.Second}}})
 	defer e.close()
 	var issues []string
+	start := time.Now()
 	for i := 1; i <= 60; i++ {
 		issue, res := fmt.Sprintf("Q-%d", i), "default"
 		if i > 50 {
@@ -512,11 +569,10 @@ func TestSixtyQueuedOneRateLimited(t *testing.T) {
 	if err != nil || len(vs) != 60 {
 		t.Fatalf("visible %d %v", len(vs), err)
 	}
-	finished := map[string]time.Time{}
-	start := time.Now()
+	finished := map[string]bool{}
 	waitFor(t, 60*time.Second, "all 60 closed", func() bool {
 		for _, is := range issues {
-			if _, ok := finished[is]; ok {
+			if finished[is] {
 				continue
 			}
 			st, err := e.rt.State(is)
@@ -529,7 +585,7 @@ func TestSixtyQueuedOneRateLimited(t *testing.T) {
 			case PhaseReported:
 				_ = e.rt.Signal(is, Event{Kind: "accept", By: "test:owner"}, is+"/a")
 			case PhaseClosed:
-				finished[is] = time.Now()
+				finished[is] = true
 			}
 		}
 		for _, w := range must(dbos.ListWorkflows(e.rt.ctx, dbos.WithFilterName(workflowName))) {
@@ -539,20 +595,114 @@ func TestSixtyQueuedOneRateLimited(t *testing.T) {
 		}
 		return len(finished) == 60
 	})
-	var lastDefault, lastLimited time.Duration
-	for is, at := range finished {
-		d := at.Sub(start)
-		var n int
-		fmt.Sscanf(is, "Q-%d", &n)
-		if n > 50 {
-			lastLimited = max(lastLimited, d)
+	var lastDefault, firstLimited, lastLimited time.Duration
+	firstLimited = time.Hour
+	for i := 1; i <= 60; i++ {
+		at := d.at[effectKey(fmt.Sprintf("Q-%d", i), 1, "dispatch")].Sub(start)
+		if i > 50 {
+			firstLimited, lastLimited = min(firstLimited, at), max(lastLimited, at)
 		} else {
-			lastDefault = max(lastDefault, d)
+			lastDefault = max(lastDefault, at)
 		}
 	}
-	t.Logf("60 closed: default resource by %s, rate-limited by %s", lastDefault, lastLimited)
-	if lastLimited < 4*time.Second {
-		t.Fatalf("rate limit not applied: %s", lastLimited)
+	t.Logf("dispatches: default resource all by %s; rate-limited from %s to %s", lastDefault, firstLimited, lastLimited)
+	if lastLimited-firstLimited < 3*time.Second {
+		t.Fatalf("rate limit not applied: %s", lastLimited-firstLimited)
+	}
+}
+
+// DBOS v1.8.0 counts a workflow that is merely waiting (Recv) against its
+// queue's concurrency: this is why commitments are not queued themselves.
+func TestDBOSQueueCountsWaitingWorkflows(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "heimdall.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	rt, err := Open(Options{Path: filepath.Join(dir, "durable.db"), Outbox: st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	q, err := dbos.RegisterQueue(rt.ctx, "probe-one", dbos.WithGlobalConcurrency(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbos.RegisterWorkflow(rt.ctx, probeWait, dbos.WithWorkflowName("probe-wait"))
+	if err := rt.Launch(); err != nil {
+		t.Fatal(err)
+	}
+	status := func(id string) dbos.WorkflowStatusType {
+		h, err := dbos.RetrieveWorkflow[string](rt.ctx, id)
+		if err != nil {
+			return ""
+		}
+		s, _ := h.GetStatus()
+		return s.Status
+	}
+	for _, id := range []string{"wait-a", "wait-b"} {
+		if _, err := dbos.RunWorkflow(rt.ctx, probeWait, id, dbos.WithWorkflowID(id), dbos.WithQueue(q)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, 5*time.Second, "a running", func() bool { return status("wait-a") == dbos.WorkflowStatusPending })
+	time.Sleep(time.Second)
+	if s := status("wait-b"); s != dbos.WorkflowStatusEnqueued {
+		t.Fatalf("b %s: DBOS did not hold the slot for a waiting workflow", s)
+	}
+	if err := dbos.Send(rt.ctx, "wait-a", "go", "go"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, "b starts after a ends", func() bool { return status("wait-b") == dbos.WorkflowStatusPending })
+}
+
+func probeWait(ctx dbos.Context, in string) (string, error) {
+	return dbos.Recv[string](ctx, "go", time.Hour)
+}
+
+// One actual-compute slot: a stalled commitment (waiting on its worker)
+// does not keep an unrelated ready one from dispatching.
+func TestStalledCommitmentHoldsNoSlot(t *testing.T) {
+	d := newMem()
+	e := open(t, t.TempDir(), Options{Dispatcher: d, Resources: map[string]Resource{"one": {Concurrency: 1}}})
+	defer e.close()
+	e.cmd("add MEL-30 resource=one worker=wa Stalls")
+	e.phase("MEL-30", PhaseWorking, 1)
+	e.cmd("add MEL-31 resource=one worker=wb Ready")
+	e.phase("MEL-31", PhaseWorking, 1)
+	if d.count("MEL-31/1/dispatch") != 1 || d.count("MEL-30/1/dispatch") != 1 {
+		t.Fatalf("dispatches %v", d.calls)
+	}
+	if l := e.cmd("list"); !strings.Contains(l, "MEL-30") || !strings.Contains(l, "MEL-31") {
+		t.Fatal(l)
+	}
+}
+
+// A native denial is held, never replayed, across restarts, until an
+// explicit retry (under a new key).
+func TestDispatchDenialHeldNotReplayed(t *testing.T) {
+	dir := t.TempDir()
+	d := newMem()
+	d.deny["MEL-32/1/dispatch"] = true
+	e := open(t, dir, Options{Dispatcher: d})
+	e.cmd("add MEL-32 worker=wa Denied")
+	e.phase("MEL-32", PhaseHeld, 1)
+	if st, _ := e.rt.State("MEL-32"); !strings.Contains(st.Blocked, "native denial") {
+		t.Fatalf("%+v", st)
+	}
+	e.close()
+	e = open(t, dir, Options{Dispatcher: d})
+	defer e.close()
+	e.phase("MEL-32", PhaseHeld, 1)
+	time.Sleep(300 * time.Millisecond)
+	if n := d.count("MEL-32/1/dispatch"); n != 1 {
+		t.Fatalf("denied dispatch replayed %d times", n)
+	}
+	e.cmdAs("r1", "retry MEL-32")
+	e.phase("MEL-32", PhaseWorking, 1)
+	if d.count("MEL-32/1/dispatch#retry1") != 1 {
+		t.Fatalf("retry %v", d.calls)
 	}
 }
 
