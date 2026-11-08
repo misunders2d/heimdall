@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,6 +87,9 @@ var errNoTurn = errors.New("commitment turn not stored")
 // current applies a commitment turn's fence: a review needs its attempt
 // reported, a dispatch its attempt dispatching, in a running workflow.
 func current(w *durable.Runtime, b *core.Review) bool {
+	if b.Run != "" {
+		return w.Waitable(b.Issue, b.Attempt)
+	}
 	if b.Worker != "" {
 		return w.Dispatchable(b.Issue, b.Attempt)
 	}
@@ -97,14 +102,15 @@ func current(w *durable.Runtime, b *core.Review) bool {
 // own native T3 tool (t3_thread_send) and native permissions, unchanged. It
 // is durable.Dispatcher. The turn is keyed by q.Key: a repeated key never
 // starts a second turn. Only a well-formed receipt for the selected thread
-// counts; any other outcome (native denial or approval request, tool
-// unavailable, malformed answer, timeout, interruption) is held, never
+// counts; any other outcome (native denial or approval request, no bound
+// native call, timeout, interruption) is held, never
 // replayed; !work retry starts a new turn under a new key with the same
 // clientRequestId. Nothing is sent to any chat. T3 dedupes that
 // clientRequestId only within the creator's T3 sign-in (one OAuth client
-// session); the receipt is relayed by the model's answer.
+// session). The receipt is the engine's decoded native tool result
+// (harness.NativeCalls), never the model's answer.
 func (r *Router) Dispatch(ctx context.Context, q durable.DispatchRequest) (durable.Receipt, error) {
-	in, thread, err := r.dispatchInbound(ctx, q)
+	in, thread, err := r.dispatchInbound(ctx, q, "")
 	if err != nil {
 		return durable.Receipt{}, err
 	}
@@ -118,7 +124,7 @@ func (r *Router) Dispatch(ctx context.Context, q durable.DispatchRequest) (durab
 // Reconcile returns a dispatch turn's persisted outcome without starting
 // one: found=false when no turn was stored under the key.
 func (r *Router) Reconcile(ctx context.Context, q durable.DispatchRequest) (durable.Receipt, bool, error) {
-	in, thread, err := r.dispatchInbound(ctx, q)
+	in, thread, err := r.dispatchInbound(ctx, q, "")
 	if err != nil {
 		return durable.Receipt{}, false, err
 	}
@@ -133,7 +139,33 @@ func (r *Router) Reconcile(ctx context.Context, q durable.DispatchRequest) (dura
 	return rc, err == nil, err
 }
 
-func (r *Router) dispatchInbound(ctx context.Context, q durable.DispatchRequest) (core.Inbound, string, error) {
+// Wait is durable.Waiter: one server-initiated turn of the creator's
+// harness waits, read-only, for run with its native t3_thread_wait, under
+// the same fences and binding as the dispatch. Only the engine's decoded
+// tool result counts; anything else holds.
+func (r *Router) Wait(ctx context.Context, q durable.DispatchRequest, run string) (string, bool, error) {
+	if run == "" {
+		return "", false, durable.Permanent{Err: errors.New("wait " + q.Key + ": no dispatched run")}
+	}
+	in, _, err := r.dispatchInbound(ctx, q, run)
+	if err != nil {
+		return "", false, err
+	}
+	o, err := r.commitmentTurn(ctx, in, true)
+	if err != nil {
+		return "", false, err
+	}
+	var v struct {
+		Status   string `json:"status"`
+		Finished bool   `json:"finished"`
+	}
+	if o.TurnState == store.TurnDone && strings.HasPrefix(o.TurnDetail, waitResult) && json.Unmarshal([]byte(strings.TrimPrefix(o.TurnDetail, waitResult)), &v) == nil {
+		return v.Status, v.Finished, nil
+	}
+	return "", false, durable.Permanent{Err: fmt.Errorf("wait turn %d %s: %s; not replayed (!work retry waits again)", o.Turn, o.State, or(strings.TrimPrefix(or(o.TurnDetail, o.Detail), reviewHeld), "no result"))}
+}
+
+func (r *Router) dispatchInbound(ctx context.Context, q durable.DispatchRequest, run string) (core.Inbound, string, error) {
 	select {
 	case <-r.ready:
 	case <-ctx.Done():
@@ -146,7 +178,13 @@ func (r *Router) dispatchInbound(ctx context.Context, q durable.DispatchRequest)
 	}
 	in := core.Inbound{Conv: core.ConvKey{Interface: q.Route.Interface, Chat: core.ReviewChat(q.Issue)}, MsgID: q.Key, From: q.Owner,
 		Origin: core.OriginCommitment, Text: dispatchPrompt(q, thread, env), At: time.Now(), OAuthActor: q.OAuthActor, OAuthInstallation: q.OAuthInstallation,
-		Review: &core.Review{Issue: q.Issue, Attempt: q.Attempt, Key: q.Key, Target: q.Route, Private: q.Private, Worker: q.Worker}}
+		Review: &core.Review{Issue: q.Issue, Attempt: q.Attempt, Key: q.Key, Target: q.Route, Private: q.Private, Worker: q.Worker, Request: q.ClientRequestID, Run: run}}
+	if run == "" {
+		in.Review.Message = q.Message
+	}
+	if run != "" {
+		in.Text = waitPrompt(q, thread, env, run)
+	}
 	return in, thread, nil
 }
 
@@ -160,13 +198,67 @@ func dispatchPrompt(q durable.DispatchRequest, thread, env string) string {
 	}
 	fmt.Fprintf(&b, "mode: queue\nclientRequestId: %s\nmessage: the text between BEGIN MESSAGE and END MESSAGE below, verbatim.\n", q.ClientRequestID)
 	b.WriteString("Do nothing else: no other tool call, message or retry, and never another clientRequestId. ")
-	b.WriteString("Then answer with the first line exactly RECEIPT and the tool's JSON result unchanged on the following lines. ")
-	b.WriteString("If the tool is unavailable, refused or failed, answer with the first line exactly UNAVAILABLE and the error.\n")
+	b.WriteString("Then answer in one line. Heimdall reads the tool's own result, not your answer.\n")
 	fmt.Fprintf(&b, "BEGIN MESSAGE\n%s\nEND MESSAGE", q.Message)
 	return b.String()
 }
 
-const dispatchReceipt = "receipt: "
+const (
+	dispatchReceipt = "receipt: "
+	waitResult      = "wait: "
+	t3WaitTool      = "mcp__t3__t3_thread_wait"
+	waitMs          = 5000 // a bounded status check; DBOS owns the waiting between checks
+)
+
+// waitPrompt asks for exactly one native, read-only wait for run.
+func waitPrompt(q durable.DispatchRequest, thread, env, run string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Wait for %s, attempt %d. Call your native T3 tool t3_thread_wait exactly once with:\nthreadId: %s\n", q.Issue, q.Attempt, thread)
+	if env != "" {
+		fmt.Fprintf(&b, "environmentId: %s\n", env)
+	}
+	fmt.Fprintf(&b, "runId: %s\ntimeoutMs: %d\n", run, waitMs)
+	b.WriteString("Do nothing else: no other tool call or message. Then answer in one line. Heimdall reads the tool's own result, not your answer.")
+	return b.String()
+}
+
+// nativeWait is a wait turn's outcome from the engine's decoded
+// t3_thread_wait call bound to the thread, environment and run.
+func nativeWait(calls []harness.NativeCall, b *core.Review) string {
+	ref, _ := strings.CutPrefix(b.Worker, "t3:")
+	thread, env, _ := strings.Cut(ref, "@")
+	if len(calls) == 0 {
+		return reviewHeld + "no native " + t3WaitTool + " call in the wait turn (its answer is not evidence)"
+	}
+	n := calls[0]
+	var a struct {
+		ThreadID      string `json:"threadId"`
+		EnvironmentID string `json:"environmentId"`
+		RunID         string `json:"runId"`
+	}
+	if json.Unmarshal(n.Args, &a) != nil || a.ThreadID != thread || a.EnvironmentID != env || a.RunID != b.Run {
+		return reviewHeld + "the native " + t3WaitTool + " call was not bound to this run"
+	}
+	if n.Error {
+		return reviewHeld + "the native " + t3WaitTool + " call failed or was denied"
+	}
+	var v struct {
+		RunID    string `json:"runId"`
+		Status   string `json:"status"`
+		TimedOut bool   `json:"timedOut"`
+	}
+	if json.Unmarshal(toolJSON(n.Result), &v) != nil || v.RunID != b.Run || v.Status == "" {
+		return reviewHeld + "the native " + t3WaitTool + " result does not name run " + b.Run
+	}
+	// T3's own run statuses (isTerminalRunStatus, app 0.1.7): only these
+	// end a run; the rest are still going. Anything else holds.
+	terminal := slices.Contains([]string{"completed", "failed", "cancelled", "interrupted", "rolled_back"}, v.Status)
+	if !terminal && !slices.Contains([]string{"preparing", "queued", "starting", "running", "waiting"}, v.Status) {
+		return reviewHeld + "the native " + t3WaitTool + " result has an unknown run status " + strconv.Quote(v.Status)
+	}
+	out, _ := json.Marshal(map[string]any{"status": v.Status, "finished": terminal && !v.TimedOut})
+	return waitResult + string(out)
+}
 
 // dispatchOutcome maps a finished dispatch turn: only a stored receipt is
 // a dispatch; anything else holds.
@@ -181,36 +273,77 @@ func dispatchOutcome(o store.InboundOutcome, thread string) (durable.Receipt, er
 	return durable.Receipt{}, durable.Permanent{Err: fmt.Errorf("dispatch turn %d %s: %s; not replayed (check the worker thread, then !work retry: same clientRequestId, deduped by T3 only within the creator's T3 sign-in)", o.Turn, o.State, or(why, "no receipt"))}
 }
 
-// parseReceipt reads a dispatch answer: RECEIPT and t3_thread_send's JSON
-// for the selected thread, or UNAVAILABLE. It returns the turn detail.
-func parseReceipt(answer, thread string) string {
-	answer = strings.TrimSpace(answer)
-	first, rest, _ := strings.Cut(answer, "\n")
-	word := strings.Trim(first, " \t*_`#")
-	if word == "UNAVAILABLE" {
-		return reviewHeld + "native send unavailable: " + clipText(strings.Join(strings.Fields(rest), " "), 500)
+const t3SendTool = "mcp__t3__t3_thread_send"
+
+// nativeReceipt is a dispatch turn's outcome from the engine's own decoded
+// T3 tool calls; the model's answer is never read. A call bound to this
+// dispatch (thread, environment, clientRequestId, queue mode, the message
+// with this turn's marker) whose native result is a send receipt for the
+// thread is the dispatch. No bound call, a call to anything else, a native
+// error or a result without a receipt holds: a send may have happened.
+func nativeReceipt(calls []harness.NativeCall, b *core.Review) string {
+	ref, _ := strings.CutPrefix(b.Worker, "t3:")
+	thread, env, _ := strings.Cut(ref, "@")
+	if len(calls) == 0 || b.Message == "" {
+		return reviewHeld + "no native " + t3SendTool + " call in the dispatch turn (its answer is not evidence)"
 	}
-	rest = strings.TrimSpace(rest)
-	rest = strings.TrimPrefix(strings.TrimPrefix(rest, "```json"), "```")
-	rest = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(rest), "```"))
+	for _, n := range calls {
+		var a struct {
+			ThreadID        string `json:"threadId"`
+			EnvironmentID   string `json:"environmentId"`
+			ClientRequestID string `json:"clientRequestId"`
+			Mode            string `json:"mode"`
+			Message         string `json:"message"`
+		}
+		if json.Unmarshal(n.Args, &a) != nil || a.ThreadID != thread || a.EnvironmentID != env || a.ClientRequestID != b.Request || a.Mode != "queue" || a.Message != b.Message {
+			return reviewHeld + "a native " + t3SendTool + " call was not bound to this dispatch (thread, environment, clientRequestId, mode or message); not replayed"
+		}
+	}
+	n := calls[0]
+	if n.Error {
+		return reviewHeld + "the native " + t3SendTool + " call failed or was denied"
+	}
 	var v struct {
 		ThreadID  string `json:"threadId"`
 		MessageID string `json:"messageId"`
 		RunID     string `json:"runId"`
 		Delivery  string `json:"delivery"`
 	}
-	if word != "RECEIPT" || json.Unmarshal([]byte(rest), &v) != nil || v.ThreadID != thread || v.RunID == "" || !strings.Contains(v.MessageID, ":thread-send:") {
-		return reviewHeld + "no well-formed t3_thread_send receipt for " + thread + " in the answer; the send may have happened"
+	if json.Unmarshal(toolJSON(n.Result), &v) != nil || v.ThreadID != thread || v.RunID == "" || !strings.Contains(v.MessageID, ":thread-send:") {
+		return reviewHeld + "the native " + t3SendTool + " result has no send receipt for " + thread + "; the send may have happened"
 	}
-	b, _ := json.Marshal(durable.Receipt{Thread: v.ThreadID, Run: v.RunID, Message: v.MessageID, Delivery: v.Delivery})
-	return dispatchReceipt + string(b)
+	out, _ := json.Marshal(durable.Receipt{Thread: v.ThreadID, Run: v.RunID, Message: v.MessageID, Delivery: v.Delivery})
+	return dispatchReceipt + string(out)
 }
 
-func clipText(s string, n int) string {
-	if len(s) <= n {
-		return s
+// toolJSON is an MCP tool result's JSON object: structuredContent, or the
+// JSON text of its first text block (Claude content, Pi/Codex result).
+func toolJSON(raw json.RawMessage) json.RawMessage {
+	var r struct {
+		StructuredContent json.RawMessage `json:"structuredContent"`
+		Content           json.RawMessage `json:"content"`
 	}
-	return s[:n] + "…"
+	if json.Unmarshal(raw, &r) == nil {
+		if len(r.StructuredContent) > 0 && string(r.StructuredContent) != "null" {
+			return r.StructuredContent
+		}
+		if len(r.Content) > 0 {
+			raw = r.Content
+		}
+	}
+	var blocks []struct{ Type, Text string }
+	if json.Unmarshal(raw, &blocks) == nil {
+		for _, b := range blocks {
+			if b.Type == "text" {
+				return json.RawMessage(b.Text)
+			}
+		}
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return json.RawMessage(text)
+	}
+	return raw
 }
 
 // OwnsRoute revalidates a durable commitment's creator before a dispatch:
@@ -279,9 +412,15 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, failureReason(c.r.scrub(res.Failure))
 	default:
 		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, !res.Unclean
-		if worker, ok := strings.CutPrefix(t.review.Worker, "t3:"); ok {
-			thread, _, _ := strings.Cut(worker, "@")
-			e.Detail = parseReceipt(c.r.scrub(stripHarnessTag(res.Answer, d.harness)), thread)
+		if t.review.Worker != "" {
+			t.mu.Lock()
+			calls := slices.Clone(t.native)
+			t.mu.Unlock()
+			if t.review.Run != "" {
+				e.Detail = nativeWait(calls, t.review)
+			} else {
+				e.Detail = nativeReceipt(calls, t.review)
+			}
 		} else {
 			e.Detail = parseVerdict(c.r.scrub(stripHarnessTag(res.Answer, d.harness)))
 		}

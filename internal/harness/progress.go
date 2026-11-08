@@ -21,6 +21,36 @@ type Progress struct {
 	SignIn string
 }
 
+// NativeCall is one finished native tool call, decoded from the engine's own
+// stream: its name, arguments and result exactly as the engine reported
+// them (never the model's answer). Only calls named in NativeCalls.Tools are
+// decoded; nothing else is captured.
+type NativeCall struct {
+	Tool   string
+	Args   json.RawMessage
+	Result json.RawMessage
+	Error  bool
+}
+
+// NativeCalls is an internal, opt-in sink for named native tool calls (a
+// durable dispatch turn's own T3 send). Nil for every other turn.
+type NativeCalls struct {
+	Tools []string
+	Done  func(NativeCall)
+}
+
+func (n *NativeCalls) wants(tool string) bool {
+	if n == nil || n.Done == nil {
+		return false
+	}
+	for _, t := range n.Tools {
+		if t == tool {
+			return true
+		}
+	}
+	return false
+}
+
 // Ported telemetry correlation from AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5:
 // internal/client/{pirpc,claudestream,codexroom}.go. Only public summary
 // fields are used for Codex; raw reasoning text is never consumed.
@@ -31,6 +61,27 @@ type progressTracker struct {
 	index       int
 	text        string
 	claudeTools map[string]string
+	native      *NativeCalls
+	nativeArgs  map[string]json.RawMessage // call id → arguments of a wanted call
+}
+
+func (t *progressTracker) nativeStart(id, tool string, args json.RawMessage) {
+	if id == "" || !t.native.wants(tool) {
+		return
+	}
+	if t.nativeArgs == nil {
+		t.nativeArgs = map[string]json.RawMessage{}
+	}
+	t.nativeArgs[id] = args
+}
+
+func (t *progressTracker) nativeEnd(id, tool string, result json.RawMessage, failed bool) {
+	args, ok := t.nativeArgs[id]
+	if !ok || !t.native.wants(tool) {
+		return
+	}
+	delete(t.nativeArgs, id)
+	t.native.Done(NativeCall{Tool: tool, Args: args, Result: result, Error: failed})
 }
 
 func (t *progressTracker) start(key string, index int, emit func(Progress)) {
@@ -77,12 +128,17 @@ func tailProgress(s string, n int) string {
 	return s
 }
 func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
-	if emit == nil {
+	if emit == nil && t.native == nil {
 		return
+	}
+	if emit == nil {
+		emit = func(Progress) {}
 	}
 	var e struct {
 		Type, Method, ToolName string
+		ToolCallID             string `json:"toolCallId"`
 		IsError                bool
+		Args                   json.RawMessage
 		Result                 json.RawMessage
 		AssistantMessageEvent  json.RawMessage
 		Event                  json.RawMessage
@@ -91,6 +147,7 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 			Role    string
 			Content []struct {
 				Type, ID, Name, Thinking string
+				Input                    json.RawMessage `json:"input"`
 				ToolUseID                string          `json:"tool_use_id"`
 				IsError                  bool            `json:"is_error"`
 				Content                  json.RawMessage `json:"content"`
@@ -111,8 +168,11 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		case "auto_retry_start", "auto_compaction_start":
 			emit(Progress{Phase: "finalizing"})
 		case "tool_execution_start":
+			// Codemode's nested calls emit these too, with their own ids.
+			t.nativeStart(e.ToolCallID, e.ToolName, e.Args)
 			emit(Progress{Phase: "tools", Tool: e.ToolName})
 		case "tool_execution_end":
+			t.nativeEnd(e.ToolCallID, e.ToolName, e.Result, e.IsError)
 			emit(Progress{Phase: "tools", Tool: e.ToolName, Completed: true, Error: e.IsError, ErrorSummary: toolError(e.ToolName, e.IsError, e.Result), SignIn: signIn(e.ToolName, e.Result)})
 		case "message_update":
 			var u struct {
@@ -142,6 +202,7 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 		if e.Type == "user" {
 			for _, b := range e.Message.Content {
 				if name := t.claudeTools[b.ToolUseID]; b.Type == "tool_result" && name != "" {
+					t.nativeEnd(b.ToolUseID, name, b.Content, b.IsError)
 					emit(Progress{Phase: "tools", Tool: name, Completed: true, Error: b.IsError, ErrorSummary: toolError(name, b.IsError, b.Content)})
 					delete(t.claudeTools, b.ToolUseID)
 				}
@@ -154,6 +215,7 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 						t.claudeTools = map[string]string{}
 					}
 					t.claudeTools[b.ID] = b.Name
+					t.nativeStart(b.ID, b.Name, b.Input)
 				}
 				if b.Type == "thinking" && b.Thinking != "" {
 					emit(Progress{Phase: "thinking", Text: tailProgress(b.Thinking, 2000), Reset: true})
@@ -206,6 +268,7 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 				Summary                              json.RawMessage
 				Error                                json.RawMessage
 				Result                               json.RawMessage
+				Arguments                            json.RawMessage
 				ExitCode                             *int
 			}
 			ItemID       string
@@ -280,6 +343,8 @@ func (t *progressTracker) event(style string, raw []byte, emit func(Progress)) {
 				summary := ""
 				if p.Item.Type == "mcpToolCall" {
 					summary = nativeError(failed, p.Item.Error, p.Item.Result)
+					t.nativeStart(p.Item.ID, tool, p.Item.Arguments)
+					t.nativeEnd(p.Item.ID, tool, p.Item.Result, failed)
 				}
 				emit(Progress{Phase: "tools", Tool: tool, Completed: true, Error: failed, ErrorSummary: summary})
 			}

@@ -145,6 +145,9 @@ type Spec struct {
 	MCPNotify  func(string)
 	OwnerSlack *OwnerSlack
 	Progress   func(Progress)
+	// NativeCalls (internal, opt-in): named native tool calls decoded from
+	// the engine's stream, for a durable dispatch turn only.
+	NativeCalls *NativeCalls
 
 	Harness      string
 	Prompt       string
@@ -475,13 +478,16 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	switch b := r.bridge.(type) {
 	case *piRPCBridge:
 		b.progress = spec.Progress
+		b.telemetry.native = spec.NativeCalls
 		if spec.Harness == "pi" && spec.Caller.Private {
 			b.mcpNotify = spec.MCPNotify
 		}
 	case *claudeStreamBridge:
 		b.progress = spec.Progress
+		b.telemetry.native = spec.NativeCalls
 	case *codexBridge:
 		b.progress = spec.Progress
+		b.telemetry.native = spec.NativeCalls
 	}
 	r.continuation, r.progress = spec.Continuation, spec.Progress
 	cmd.Stdout = r.bridge

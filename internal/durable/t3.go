@@ -32,14 +32,12 @@ type Observer interface {
 	Observe(ctx context.Context, worker string) (Observation, error)
 }
 
-// T3 observes T3 Code threads ("t3:<thread id>") through the host CLI's
-// read-only `thread show --json`, and dispatches with `thread send --json`.
-// Command is the installed CLI, configured explicitly; there is no default
-// path. Qualified only where that CLI runs as the same user as the T3
-// server on the same host (docs/durable.md). The CLI reaches only that
-// host's environment, and its send takes no client request id: each call is
-// a fresh native client session, so T3 itself dedupes nothing. Exactly-once
-// sending by Heimdall rests on the runtime's claim and Reconcile.
+// T3 observes T3 Code threads ("t3:<thread id>") of its own host through
+// the host CLI's read-only `thread show --json`. Command is the installed
+// CLI, configured explicitly; there is no default path. Qualified only where
+// that CLI runs as the same user as the T3 server on the same host
+// (docs/durable.md). A worker in another environment ("t3:<thread>@<env>")
+// is not observable here; the router's native wait turn reads it.
 type T3 struct {
 	Command []string
 	Timeout time.Duration
@@ -131,53 +129,6 @@ func (t T3) thread(worker string) (string, error) {
 		return "", errors.New("not a t3 thread reference")
 	}
 	return id, nil
-}
-
-// Dispatch sends req.Message to the worker thread, queued behind any active
-// work (the CLI's only mode), and returns T3's own receipt. Only a server
-// that is not running is certainly unsent; every other failure is an
-// unknown outcome that the runtime reconciles.
-func (t T3) Dispatch(ctx context.Context, req DispatchRequest) (Receipt, error) {
-	id, err := t.thread(req.Worker)
-	if err != nil {
-		return Receipt{}, Permanent{err}
-	}
-	out, err := t.run(ctx, req.Message, "thread", "send", id, "-", "--json")
-	if err != nil {
-		if strings.Contains(err.Error(), "No running T3 Code server") {
-			return Receipt{}, NotSent{fmt.Errorf("t3 thread send: %w", err)}
-		}
-		return Receipt{}, fmt.Errorf("t3 thread send: %w", err)
-	}
-	var v struct {
-		ThreadID  string `json:"threadId"`
-		MessageID string `json:"messageId"`
-		RunID     string `json:"runId"`
-		Delivery  string `json:"delivery"`
-	}
-	if err := json.Unmarshal(out, &v); err != nil || v.ThreadID != id || v.RunID == "" {
-		return Receipt{}, fmt.Errorf("t3 thread send: unexpected receipt %q", clip(string(out), 300))
-	}
-	return Receipt{Thread: v.ThreadID, Run: v.RunID, Message: v.MessageID, Delivery: v.Delivery}, nil
-}
-
-// Reconcile looks for the user message that starts with req.Marker among
-// the worker's latest messages and returns the run T3 recorded it in.
-func (t T3) Reconcile(ctx context.Context, req DispatchRequest) (Receipt, bool, error) {
-	id, err := t.thread(req.Worker)
-	if err != nil {
-		return Receipt{}, false, Permanent{err}
-	}
-	v, err := t.show(ctx, id, 50)
-	if err != nil {
-		return Receipt{}, false, err
-	}
-	for _, m := range v.Messages {
-		if m.Role == "user" && m.RunID != "" && strings.HasPrefix(strings.TrimSpace(m.Text), req.Marker) {
-			return Receipt{Thread: id, Run: m.RunID, Delivery: "reconciled"}, true, nil
-		}
-	}
-	return Receipt{}, false, nil
 }
 
 func clip(s string, n int) string {

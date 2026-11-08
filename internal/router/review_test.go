@@ -3,6 +3,8 @@ package router
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/durable"
+	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -323,15 +326,29 @@ func TestOwnsRouteRevalidatesCreator(t *testing.T) {
 	}
 }
 
+// t3send is a fake native mcp__t3__t3_thread_send call (fakeharness T3SEND).
+func t3send(args, result string, failed bool) string {
+	b, _ := json.Marshal(map[string]any{"args": json.RawMessage(args), "result": json.RawMessage(result), "error": failed})
+	return "T3SEND=" + base64.StdEncoding.EncodeToString(b)
+}
+
+const sendResult = `[{"type":"text","text":"{\"threadId\":\"thread-X\",\"link\":\"<t3-thread://v2/env-L/thread-X>\",\"messageId\":\"message:mcp:client%3As1:thread-send:string%3AMEL-80%2F1%2Fdispatch\",\"runId\":\"run:thread:thread-X:ordinal:2\",\"status\":\"starting\",\"delivery\":\"queued\"}"}]`
+
+// sendArgs are a native send's arguments; message "{MESSAGE}" makes the
+// fake copy the authorized message from its prompt.
+func sendArgs(thread, env, crid, message string) string {
+	b, _ := json.Marshal(map[string]string{"threadId": thread, "environmentId": env, "mode": "queue", "clientRequestId": crid, "message": message})
+	return string(b)
+}
+
 // A dispatch is one server-initiated turn of the creator's harness, in the
 // commitment's own conversation, asked to call its native t3_thread_send
-// once with the stable clientRequestId; the receipt it returns binds the
-// attempt to its run. A repeated key reconciles to the stored turn, never
-// a second one, and nothing reaches any chat.
+// once with the stable clientRequestId. The engine's own decoded tool call
+// and result, bound to the thread, environment and key, is the receipt; a
+// repeated key reconciles to the stored turn, and nothing reaches a chat.
 func TestCommitmentDispatchReceipt(t *testing.T) {
 	e, rt := workEnv(t, true)
-	answer := "RECEIPT\n```json\n" + `{"threadId":"thread-X","link":"<t3-thread://v2/env-L/thread-X>","messageId":"message:mcp:client%3As1:thread-send:string%3AMEL-80%2F1%2Fdispatch","runId":"run:thread:thread-X:ordinal:2","status":"starting","delivery":"queued"}` + "\n```"
-	e.send(owner, "c8", "!work add MEL-80 worker=t3:thread-X@env-L Ship it "+say(answer))
+	e.send(owner, "c8", "!work add MEL-80 worker=t3:thread-X@env-L Ship it "+t3send(sendArgs("thread-X", "env-L", "MEL-80/1/dispatch", "{MESSAGE}"), sendResult, false)+" "+say("sent"))
 	e.replyIn("c8", "MEL-80")
 	st := phase(t, rt, "MEL-80", durable.PhaseWorking)
 	if st.Dispatched != "run:thread:thread-X:ordinal:2" {
@@ -350,25 +367,39 @@ func TestCommitmentDispatchReceipt(t *testing.T) {
 	if again, err := e.r.Dispatch(context.Background(), q); err != nil || again != rc {
 		t.Fatalf("repeated key %+v %v", again, err)
 	}
-	if n := count(t, e.dbPath, `SELECT count(*) FROM turns WHERE chat=?`, conv.Chat); n != 1 {
+	if n := count(t, e.dbPath, `SELECT count(*) FROM inbound WHERE chat=? AND msg_id=? AND turn_id IS NOT NULL`, conv.Chat, key); n != 1 {
 		t.Fatalf("dispatch turns %d", n)
+	}
+	// The linked worker is then checked by a short native wait turn; this
+	// fake answers it without a native call, so it holds.
+	st = phase(t, rt, "MEL-80", durable.PhaseHeld)
+	if !strings.Contains(st.Blocked, "wait MEL-80/1/wait/1") || !strings.Contains(st.Blocked, "no native mcp__t3__t3_thread_wait call") {
+		t.Fatalf("%+v", st)
+	}
+	if n := count(t, e.dbPath, `SELECT count(*) FROM inbound WHERE chat=? AND msg_id=? AND text LIKE '%runId: run:thread:thread-X:ordinal:2%timeoutMs: 5000%'`, conv.Chat, "MEL-80/1/wait/1"); n != 1 {
+		t.Fatalf("wait prompt not bound: %d", n)
 	}
 	e.noReply(300 * time.Millisecond)
 }
 
-// Without a native send, a native approval request, or with a receipt that
-// is not well-formed for the selected thread, the commitment holds on the
-// stored turn: one turn, never replayed, nothing sent to the chat.
+// The model's answer cannot manufacture a dispatch: a receipt in its text
+// with no native call, a native error or denial, a call bound to another
+// key, or a native approval request all hold on the stored turn: one turn,
+// never replayed, nothing sent to the chat.
 func TestCommitmentDispatchHeld(t *testing.T) {
 	e, rt := workEnv(t, true)
+	fabricated := "RECEIPT\n" + `{"threadId":"thread-X","messageId":"message:mcp:c:thread-send:k","runId":"run:2","delivery":"queued"}`
 	for i, c := range []struct{ text, why string }{
-		{say("UNAVAILABLE\nno t3_thread_send tool in this session"), "native send unavailable: no t3_thread_send tool"},
+		{say(fabricated), "no native mcp__t3__t3_thread_send call"},
+		{t3send(sendArgs("thread-X", "", "MEL-82/1/dispatch", "{MESSAGE}"), `[{"type":"text","text":"runtime_mode_escalation_denied"}]`, true), "failed or was denied"},
+		{t3send(sendArgs("thread-X", "", "other-key", "{MESSAGE}"), sendResult, false), "not bound to this dispatch"},
+		// Same marker and key, changed body.
+		{t3send(sendArgs("thread-X", "", "MEL-84/1/dispatch", "[heimdall MEL-84/1/dispatch]\nMEL-84: Hold me TAMPERED"), sendResult, false), "not bound to this dispatch"},
 		{"ASK_HUMAN", "native approval or input"},
-		{say(`RECEIPT` + "\n" + `{"threadId":"other","messageId":"message:mcp:c:thread-send:k","runId":"run:2"}`), "the send may have happened"},
 	} {
 		issue := fmt.Sprintf("MEL-8%d", i+1)
 		chat := fmt.Sprintf("d%d", i)
-		e.send(owner, chat, "!work add "+issue+" worker=t3:thread-Y Hold me "+c.text)
+		e.send(owner, chat, "!work add "+issue+" worker=t3:thread-X Hold me "+c.text)
 		e.replyIn(chat, issue)
 		st := phase(t, rt, issue, durable.PhaseHeld)
 		if !strings.Contains(st.Blocked, c.why) || !strings.Contains(st.Blocked, "not replayed") {
@@ -380,4 +411,28 @@ func TestCommitmentDispatchHeld(t *testing.T) {
 		}
 	}
 	e.noReply(300 * time.Millisecond)
+}
+
+// A wait turn's outcome is only the engine's decoded t3_thread_wait call
+// bound to the thread, environment and dispatched run.
+func TestNativeWaitBinding(t *testing.T) {
+	b := &core.Review{Key: "MEL-90/1/wait/1", Worker: "t3:thread-L@env-2", Run: "run:L:3"}
+	args := `{"threadId":"thread-L","environmentId":"env-2","runId":"run:L:3","timeoutMs":5000}`
+	call := func(a, res string, failed bool) []harness.NativeCall {
+		return []harness.NativeCall{{Tool: t3WaitTool, Args: json.RawMessage(a), Result: json.RawMessage(res), Error: failed}}
+	}
+	for want, calls := range map[string][]harness.NativeCall{
+		`wait: {"finished":true,"status":"completed"}`:                   call(args, `{"structuredContent":{"threadId":"thread-L","runId":"run:L:3","status":"completed","timedOut":false}}`, false),
+		`wait: {"finished":false,"status":"running"}`:                    call(args, `[{"type":"text","text":"{\"runId\":\"run:L:3\",\"status\":\"running\",\"timedOut\":true}"}]`, false),
+		"held: no native mcp__t3__t3_thread_wait call":                   nil,
+		"held: the native mcp__t3__t3_thread_wait call was not bound":    call(`{"threadId":"thread-L","environmentId":"env-2","runId":"run:L:1"}`, `{}`, false),
+		"held: the native mcp__t3__t3_thread_wait call failed":           call(args, `"denied"`, true),
+		"held: the native mcp__t3__t3_thread_wait result does not":       call(args, `{"structuredContent":{"runId":"run:L:9","status":"completed"}}`, false),
+		`wait: {"finished":false,"status":"queued"}`:                     call(args, `{"structuredContent":{"runId":"run:L:3","status":"queued","timedOut":false}}`, false),
+		"held: the native mcp__t3__t3_thread_wait result has an unknown": call(args, `{"structuredContent":{"runId":"run:L:3","status":"settling","timedOut":false}}`, false),
+	} {
+		if got := nativeWait(calls, b); !strings.HasPrefix(got, want) {
+			t.Fatalf("want %q, got %q", want, got)
+		}
+	}
 }

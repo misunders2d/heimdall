@@ -234,6 +234,13 @@ type Review struct {
 	// attempt's brief to this owner-selected T3 thread with its own native
 	// T3 tool, and answers with the tool's receipt.
 	Worker string `json:"worker,omitempty"`
+	// Request is the dispatch's native clientRequestId, and Message the
+	// exact authorized message the native send must carry.
+	Request string `json:"request,omitempty"`
+	Message string `json:"message,omitempty"`
+	// Run is set for a wait turn: the harness waits, read-only, for this
+	// dispatched run of Worker with its native T3 tool.
+	Run string `json:"run,omitempty"`
 }
 
 // ReviewChat is the chat of issue's own review conversation.

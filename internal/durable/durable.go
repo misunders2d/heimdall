@@ -72,6 +72,14 @@ type Dispatcher interface {
 	Reconcile(ctx context.Context, req DispatchRequest) (rcpt Receipt, found bool, err error)
 }
 
+// Waiter is a Dispatcher that also waits, read-only, for the run its
+// dispatch started, through the same native route: for a worker the local
+// observer cannot read (another T3 environment). finished=false is a
+// timeout or a run still going; a Permanent error holds.
+type Waiter interface {
+	Wait(ctx context.Context, req DispatchRequest, run string) (status string, finished bool, err error)
+}
+
 // DispatchRequest is one attempt's dispatch, built by the runtime from the
 // admitted commitment only.
 type DispatchRequest struct {
@@ -272,6 +280,11 @@ func (r *Runtime) SetReviewer(v Reviewer) { r.opt.Reviewer = v }
 // starts and again as it ends, before recording a verdict.
 func (r *Runtime) Reviewable(issue string, attempt int) bool {
 	return r.current(issue, attempt, PhaseReported)
+}
+
+// Waitable reports whether issue still waits for attempt's work.
+func (r *Runtime) Waitable(issue string, attempt int) bool {
+	return r.current(issue, attempt, PhaseWorking)
 }
 
 // Dispatchable reports whether issue still dispatches attempt; the router
@@ -620,6 +633,9 @@ func (r *Runtime) observeFloor(ctx dbos.Context, w *run) error {
 // worker_waiting; an unavailable observer is a visible note.
 func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 	o := r.opt.Observer
+	if wt, ok := r.opt.Dispatcher.(Waiter); ok && w.st.Dispatched != "" && (o == nil || !o.Observable(w.c.Worker)) {
+		return r.awaitRun(ctx, w, wt)
+	}
 	if o == nil || !o.Observable(w.c.Worker) {
 		return r.await(ctx, w, "report")
 	}
@@ -716,6 +732,64 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 				return Event{}, err
 			}
 		}
+	}
+}
+
+// awaitRun checks the attempt's dispatched run through the Waiter, one
+// short keyed check at a time (ISSUE/attempt/wait/N): each is a bounded
+// native call that releases the harness at once. Between checks DBOS waits
+// durably (from Options.Observe, doubling to 10 minutes) and takes owner
+// events. The finished run is the report, still unaccepted.
+func (r *Runtime) awaitRun(ctx dbos.Context, w *run, wt Waiter) (Event, error) {
+	c, run := w.c, w.st.Dispatched
+	type waited struct {
+		Status   string `json:"status"`
+		Finished bool   `json:"finished"`
+	}
+	poll := r.opt.Observe
+	for n := 1; ; n++ {
+		req := DispatchRequest{Key: effectKey(c.Issue, w.st.Attempt, fmt.Sprintf("wait/%d", n)), Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Private: c.Private,
+			OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Worker: c.Worker}
+		res, err := step(r, ctx, w, "wait", func(sctx context.Context) (waited, error) {
+			s, f, err := wt.Wait(sctx, req, run)
+			return waited{s, f}, err
+		})
+		var p Permanent
+		if errors.As(err, &p) {
+			if err := r.hold(ctx, w, "wait "+req.Key+": "+p.Error()); err != nil {
+				return Event{}, err
+			}
+			continue
+		}
+		if err != nil {
+			return Event{}, err
+		}
+		if res.Finished && !slices.Contains(w.st.Runs, run) {
+			w.st.Runs = append(w.st.Runs, run)
+			w.st.Note = ""
+			return Event{Kind: "report", Attempt: w.st.Attempt, By: "waiter:" + c.Worker,
+				Evidence: fmt.Sprintf("%s run %s %s (native t3_thread_wait; the run's own result is in the worker thread)", c.Worker, run, res.Status)}, nil
+		}
+		if note := fmt.Sprintf("waiting on %s run %s through the creator's native T3 tools (%s)", c.Worker, run, or(res.Status, "not finished")); note != w.st.Note {
+			w.st.Note = note
+			if err := r.publish(ctx, w, w.st.Phase, w.st.Next); err != nil {
+				return Event{}, err
+			}
+		}
+		for waited := false; !waited; {
+			ev, ok, err := r.next(ctx, w, poll)
+			switch {
+			case err != nil:
+				return Event{}, err
+			case !ok:
+				waited = true
+			case ev.Kind == "close":
+				return ev, closed{ev}
+			case ev.Kind == "report" && ev.Attempt == w.st.Attempt:
+				return ev, nil
+			}
+		}
+		poll = min(poll*2, 10*time.Minute)
 	}
 }
 

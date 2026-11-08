@@ -5,9 +5,9 @@ or live-accepted. Slice 1 is **partial**:
 - worker results are observed without the owner (T3 observer);
 - with `supervisor_review`, the verdict comes from a server-initiated
   review turn of the creator's harness (see Verdict);
-- with `t3_dispatch`, each attempt's brief is sent to its
-  `worker=t3:<thread>` through the T3 host CLI, claimed before sending and
-  reconciled, never resent (see "Dispatch").
+- with `t3_dispatch`, each attempt is sent by a turn of the creator's
+  harness with its native T3 tools, bound by the engine's own tool result
+  (see "Dispatch").
 
 This is not complete MEL-763. See "Not qualified" below.
 
@@ -171,50 +171,45 @@ router turn machinery. It is not a scheduler job and not owner ingress.
 
 ## Dispatch (`t3_dispatch`)
 
-The route is the existing T3 host CLI, the same one the observer reads
-(`t3_command`): `thread send <thread> - --json`, the brief on stdin. It
-queues behind any active work (the CLI's only mode) and prints T3's own
-receipt: thread, message id, run id, delivery.
-
-T3 dedupes nothing on this route (T3 server source, app 0.1.7): each CLI
-call signs in as a fresh short-lived MCP client (`client:<session>`
-namespace) and calls `t3_thread_send` with no `clientRequestId`. MCP
-`clientRequestId` dedupes only within one credential's namespace, a T3
-provider session or an outside OAuth client. Heimdall has neither: its
-harness turns are not T3-launched sessions, and no daemon sign-in is added.
-So Heimdall owns the at-most-once send:
-- **Bound.** The runtime builds the request from the admitted commitment
-  only: issue, attempt, key `ISSUE/attempt/dispatch[#retryN]`, the
-  owner-selected worker, and the brief. The message's first line is the
-  marker `[heimdall KEY]`.
-- **Fences.** Immediately before sending, the creator must still be an
-  admitted owner on the original route (`Router.OwnsRoute`), and the
-  workflow must still be running and dispatching this attempt (actual
-  workflow status). Otherwise it is held, and nothing is sent.
-- **Claim before the effect.** The key is claimed in
-  `heimdall_dispatch_claims` (in `durable.db`, `synchronous(FULL)`) before
-  the CLI runs; a DBOS step is checkpointed only when it returns. The
-  receipt is stored with the claim.
-- **Outcomes.** A receipt binds the attempt to its run. A server that is
-  not running is certainly unsent: the claim is released and retried. Any
-  other failure (timeout, kill, lost response, an error text) is an
-  **unknown outcome**: it is never sent again. The next try reads the
-  thread's latest 50 messages for the user message starting with the
-  marker and adopts the run T3 recorded it in. Not found within 2 minutes:
-  held ("outcome unknown … not resent") until `!work retry`, which sends
-  under a new key after the owner checked the worker.
-- A restart re-executes an unfinished step; the claim makes that the
-  reconcile path, never a second send (`TestCrashAtEverySeam/dispatch`,
-  with a worker host that dedupes nothing).
-
-The CLI reaches only its own host's T3 environment: a worker in a linked
-environment cannot be dispatched this way.
+Each attempt is dispatched by one server-initiated turn of the creator's
+harness choice, in the commitment's own conversation (`work:<ISSUE>`), with
+the creator's verified native OAuth actor from admission: the harness uses
+its own native T3 MCP tools, unchanged (owner Pi turns get `t3` from the
+owner's native `mcp.json` and sign-in; see owner-slack-read.md). The turn
+asks for exactly one `t3_thread_send` to the owner-selected
+`worker=t3:<thread>[@<environment>]`, mode `queue`, with clientRequestId
+`ISSUE/attempt/dispatch` and the authorized message.
+- **Evidence is native.** The engine's own decoded tool call and result
+  (Pi `tool_execution_*`, including codemode-nested calls; Claude
+  `tool_use`/`tool_result`; Codex `mcpToolCall`) is the receipt, captured
+  only for that tool and only in dispatch and wait turns. Its thread,
+  environment, clientRequestId, mode and exact message must match; its
+  result must be a send receipt for the thread. The model's answer is
+  never read.
+- **Held, never replayed:** no bound native call, a call bound to anything
+  else, a native error or denial, a native approval request, a stale
+  creator, a timeout or a restart during the turn. `!work retry` runs a new
+  turn under a new key with the same clientRequestId.
+- **Idempotency is native only within one namespace.** T3 dedupes a
+  clientRequestId within the caller's credential: here the creator's T3
+  OAuth sign-in (`client:<session>`). A new sign-in is a new namespace.
+  Heimdall's own key (the turn's message identity and the dispatch claim)
+  never starts a second turn for a key.
+- **Completion.** A worker the local observer cannot read (another
+  environment) is checked by short keyed wait turns (`ISSUE/attempt/wait/N`):
+  one native `t3_thread_wait` for the receipt's run with a 5 s timeout, so no
+  harness is held while waiting. DBOS waits between checks (from
+  `observe_seconds`, doubling to 10 min) and takes owner events. Only T3's
+  terminal run statuses (completed, failed, cancelled, interrupted,
+  rolled_back) finish; preparing, queued, starting, running and waiting
+  keep waiting; anything else holds. The finished run is a report, still
+  unaccepted.
 
 ## Configuration
 
 ```json
 {"durable": {"enabled": true, "linear_workspace": "mellanni", "supervisor_review": true,
-  "t3_command": ["/absolute/path/to/t3"], "t3_dispatch": true,
+  "t3_dispatch": true,
   "resources": {"default": {"per_worker": 1}, "contabo": {"concurrency": 3, "rate_limit": 2, "rate_period_seconds": 60}}}}
 ```
 
@@ -257,20 +252,12 @@ version.
      the same user.
 
    Neither is verified on the hub. Never configure an ephemeral mount path.
-2. **Dispatch (implemented, synthetic tests only).** The CLI `send` path
-   was read from T3's bundled source, not exercised: no real message was
-   sent. It shares the observer's host requirements (item 1). Native
-   boundaries, not Heimdall workarounds:
-   - no `clientRequestId` on the host CLI `send`, so T3 dedupes nothing;
-     at-most-once sending rests on Heimdall's claim and reconcile;
-   - no `environmentId`: only the local environment's threads;
-   - reconcile reads only the latest 50 messages, and a server error
-     text (for example a missing thread) is an unknown outcome, so both
-     hold rather than resend.
-
-   The smallest native integration that would remove the first two is a
-   `--client-request-id` (and environment) flag on `t3 thread send` that
-   uses one stable namespace for the caller, upstream in T3.
+2. **Dispatch and linked completion (implemented, synthetic tests only).**
+   Fake engines emit the native tool events; no real T3 send or wait ran.
+   Not verified here: the hub's owner Pi `t3` sign-in, its exposure
+   (direct or codemode) and that Pi's RPC stream carries codemode-nested
+   tool events as documented. Native dedupe holds only within one T3
+   sign-in.
 3. **Acceptance verdict (implemented, laptop tests only).** See "Supervisor
    review". Its tests use the fake harness, so it is not qualified against
    a live engine or route.

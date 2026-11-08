@@ -166,3 +166,50 @@ func TestPiToolResultSignIn(t *testing.T) {
 		}
 	}
 }
+
+// Only named native tool calls are decoded, from the engine's own events:
+// Pi direct and codemode-nested calls (by toolCallId), Claude tool_use and
+// tool_result, Codex mcpToolCall. Other tools and model text never are,
+// and nothing is decoded when the sink is off.
+func TestNativeCallsDecoded(t *testing.T) {
+	const name = "mcp__t3__t3_thread_send"
+	var got []NativeCall
+	sink := &NativeCalls{Tools: []string{name}, Done: func(n NativeCall) { got = append(got, n) }}
+	streams := map[string][]string{
+		"pi": {
+			`{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"ls"}}`,
+			`{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{"content":[{"type":"text","text":"x"}]},"isError":false}`,
+			`{"type":"tool_execution_start","toolCallId":"c2/1","parentToolCallId":"c2","toolName":"` + name + `","args":{"threadId":"T"}}`,
+			`{"type":"tool_execution_end","toolCallId":"c2/1","parentToolCallId":"c2","toolName":"` + name + `","result":{"content":[{"type":"text","text":"{\"runId\":\"r\"}"}]},"isError":false}`,
+			`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"` + name + ` {\"runId\":\"fake\"}"}}`,
+		},
+		"claude": {
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu","name":"` + name + `","input":{"threadId":"T"}}]}}`,
+			`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu","is_error":true,"content":"denied"}]}}`,
+		},
+		"codex": {
+			`{"method":"item/completed","params":{"item":{"id":"i1","type":"mcpToolCall","server":"t3","tool":"t3_thread_send","status":"completed","arguments":{"threadId":"T"},"result":{"structuredContent":{"runId":"r"}}}}}`,
+		},
+	}
+	for style, lines := range streams {
+		var tr progressTracker
+		tr.native = sink
+		for _, l := range lines {
+			tr.event(style, []byte(l), nil)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("decoded %+v", got)
+	}
+	for _, n := range got {
+		if n.Tool != name || string(n.Args) != `{"threadId":"T"}` {
+			t.Fatalf("%+v", n)
+		}
+	}
+	var off progressTracker
+	off.event("pi", []byte(streams["pi"][2]), nil)
+	off.event("pi", []byte(streams["pi"][3]), nil)
+	if len(got) != 3 || off.nativeArgs != nil {
+		t.Fatal("decoded with the sink off")
+	}
+}

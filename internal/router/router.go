@@ -582,7 +582,8 @@ type turn struct {
 	tools        []string          // successful completed native tools, for expect (t.mu)
 	toolsStarted []string          // starts are progress only, never proof of success
 	toolErrors   []string
-	signIn       []string // services a tool result said need a sign-in, for the job's outcome (t.mu)
+	signIn       []string             // services a tool result said need a sign-in, for the job's outcome (t.mu)
+	native       []harness.NativeCall // a dispatch turn's own native T3 sends (t.mu)
 }
 
 type readyEvent struct {
@@ -1562,6 +1563,19 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			// One bounded turn; no scheduler or MCP control, no progress,
 			// notifications or continuations (spec fields left off).
 			spec.OneShot, spec.Timeout = true, reviewTimeout
+			if t.review.Worker != "" {
+				// A dispatch turn: its result is the engine's own record of
+				// the T3 send, never the model's answer.
+				tool := t3SendTool
+				if t.review.Run != "" {
+					tool = t3WaitTool
+				}
+				spec.NativeCalls = &harness.NativeCalls{Tools: []string{tool}, Done: func(n harness.NativeCall) {
+					t.mu.Lock()
+					t.native = append(t.native, n)
+					t.mu.Unlock()
+				}}
+			}
 		}
 		if t.job == nil && t.review == nil {
 			spec.Continuation = func(ev harness.Continuation) bool {

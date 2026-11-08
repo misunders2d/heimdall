@@ -41,6 +41,12 @@
 //	               STATE/terminated and exits, unless NOTERM ignores it
 //
 //	SAY=BASE64     answer exactly the decoded text (standard encoding)
+//	T3SEND=BASE64  (claude) before answering, report a native
+//	               mcp__t3__t3_thread_send tool call: the decoded JSON's
+//	               "args" as its input, "result" as its tool_result content
+//	               and "error" as is_error; an args "message" of
+//	               "{MESSAGE}" is the prompt's text between BEGIN MESSAGE
+//	               and END MESSAGE, copied as a model would
 //	CONTROL=BASE64 before answering, start this binary as a child stdio MCP
 //	               server (FAKE_CONTROL_MCP=$FAKE_CONTROL_SOCKET), call its
 //	               heimdall_scheduler tool with the decoded arguments and
@@ -408,6 +414,36 @@ func (f *fake) control(enc string) {
 	}
 }
 
+// t3Send emits one native T3 send tool call (T3SEND=BASE64) in the Claude
+// stream, as Claude reports an MCP tool's use and result.
+func (f *fake) t3Send(session string) {
+	for _, w := range strings.Fields(f.prompt) {
+		enc, ok := strings.CutPrefix(w, "T3SEND=")
+		if !ok {
+			continue
+		}
+		b, err := base64.StdEncoding.DecodeString(enc)
+		var call struct {
+			Args   json.RawMessage `json:"args"`
+			Result json.RawMessage `json:"result"`
+			Error  bool            `json:"error"`
+		}
+		if err != nil || json.Unmarshal(b, &call) != nil {
+			continue
+		}
+		var args map[string]any
+		if json.Unmarshal(call.Args, &args) == nil && args["message"] == "{MESSAGE}" {
+			if _, rest, ok := strings.Cut(f.prompt, "BEGIN MESSAGE\n"); ok {
+				body, _, _ := strings.Cut(rest, "\nEND MESSAGE")
+				args["message"] = body
+				call.Args, _ = json.Marshal(args)
+			}
+		}
+		f.emit(map[string]any{"type": "assistant", "session_id": session, "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "toolu_t3", "name": "mcp__t3__t3_thread_send", "input": call.Args}}}})
+		f.emit(map[string]any{"type": "user", "session_id": session, "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "toolu_t3", "is_error": call.Error, "content": call.Result}}}})
+	}
+}
+
 func (f *fake) answer() string {
 	for _, w := range strings.Fields(f.prompt) {
 		if enc, ok := strings.CutPrefix(w, "CONTROL="); ok {
@@ -680,6 +716,7 @@ func (f *fake) claude() {
 		}
 		replay("u0", msg["content"])
 		f.failPost()
+		f.t3Send(id)
 		if f.has("DENIAL_SYSTEM") {
 			f.emit(map[string]any{"type": "system", "subtype": "permission_denied", "session_id": id, "tool_name": "Bash", "tool_input": map[string]string{"command": "PRIVATE_COMMAND"}})
 		}

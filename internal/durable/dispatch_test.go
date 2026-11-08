@@ -4,8 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -247,80 +246,6 @@ func TestDispatchRepairThenNextStep(t *testing.T) {
 	}
 }
 
-// The T3 adapter sends with the CLI's documented `thread send <id> -
-// --json` (message on stdin) and returns T3's own receipt; only a server
-// that is not running is NotSent; every other failure is an unknown
-// outcome. Reconcile finds the marked user message's run.
-func TestT3DispatchCLI(t *testing.T) {
-	dir := t.TempDir()
-	argv, stdin, mode := filepath.Join(dir, "argv"), filepath.Join(dir, "stdin"), filepath.Join(dir, "mode")
-	script := filepath.Join(dir, "t3")
-	body := `#!/bin/sh
-printf '%s\n' "$@" > ` + argv + `
-case "$(cat ` + mode + `)" in
-down) echo "No running T3 Code server uses /home/x/.t3. Start T3 Code, then retry." >&2; exit 1;;
-denied) echo "Thread T was not found." >&2; exit 1;;
-other) echo '{"threadId":"OTHER","runId":"run:x","messageId":"m"}'; exit 0;;
-esac
-if [ "$2" = send ]; then
-cat > ` + stdin + `
-echo '{"threadId":"T","link":"<t3-thread://v2/env/T>","messageId":"message:mcp:client%3As1:thread-send:undefined%3Aundefined","runId":"run:thread:T:ordinal:3","status":"starting","delivery":"queued"}'
-exit 0
-fi
-cat <<'J'
-{"thread":{"threadId":"T","status":"running","latestRunId":"run:thread:T:ordinal:4","activeRunId":"run:thread:T:ordinal:4","pendingRequestCount":0,"runCount":4},"messages":[{"role":"user","runId":"run:thread:T:ordinal:3","text":"[heimdall MEL-70/1/dispatch]\nMEL-70: brief"},{"role":"user","runId":"run:thread:T:ordinal:4","text":"later"}]}
-J
-`
-	for _, f := range []struct{ p, s string }{{script, body}, {mode, "ok"}} {
-		if err := os.WriteFile(f.p, []byte(f.s), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	q := DispatchRequest{Key: "MEL-70/1/dispatch", Worker: "t3:T", Marker: "[heimdall MEL-70/1/dispatch]", Message: "[heimdall MEL-70/1/dispatch]\nMEL-70: brief"}
-	c := T3{Command: []string{script}}
-	rc, err := c.Dispatch(context.Background(), q)
-	if err != nil || rc != (Receipt{Thread: "T", Run: "run:thread:T:ordinal:3", Message: "message:mcp:client%3As1:thread-send:undefined%3Aundefined", Delivery: "queued"}) {
-		t.Fatalf("%+v %v", rc, err)
-	}
-	if a, _ := os.ReadFile(argv); string(a) != "thread\nsend\nT\n-\n--json\n" {
-		t.Fatalf("argv %q", a)
-	}
-	if s, _ := os.ReadFile(stdin); string(s) != q.Message {
-		t.Fatalf("stdin %q", s)
-	}
-	got, found, err := c.Reconcile(context.Background(), q)
-	if err != nil || !found || got.Run != "run:thread:T:ordinal:3" {
-		t.Fatalf("reconcile %+v %v %v", got, found, err)
-	}
-	if a, _ := os.ReadFile(argv); string(a) != "thread\nshow\nT\n--json\n--messages\n50\n" {
-		t.Fatalf("argv %q", a)
-	}
-	if _, found, _ := c.Reconcile(context.Background(), DispatchRequest{Worker: "t3:T", Marker: "[heimdall MEL-70/2/dispatch]"}); found {
-		t.Fatal("found an unsent marker")
-	}
-	for m, want := range map[string]string{"down": "notsent", "denied": "unknown", "other": "unknown"} {
-		os.WriteFile(mode, []byte(m), 0o600)
-		_, err := c.Dispatch(context.Background(), q)
-		var ns NotSent
-		var p Permanent
-		got := "unknown"
-		switch {
-		case err == nil:
-			got = "ok"
-		case errors.As(err, &ns):
-			got = "notsent"
-		case errors.As(err, &p):
-			got = "permanent"
-		}
-		if got != want {
-			t.Fatalf("%s: %s (%v)", m, got, err)
-		}
-	}
-	if _, err := c.Dispatch(context.Background(), DispatchRequest{Worker: "t3:-x"}); !errors.As(err, new(Permanent)) {
-		t.Fatalf("flag-like worker: %v", err)
-	}
-}
-
 // A settled claim replays its stored receipt exactly, with no send.
 func TestDispatchSettledClaimReplay(t *testing.T) {
 	d := &scriptDispatcher{}
@@ -340,5 +265,64 @@ func TestDispatchSettledClaimReplay(t *testing.T) {
 	}
 	if calls, _ := d.counts(); calls != 0 {
 		t.Fatalf("settled claim sent %d", calls)
+	}
+}
+
+// waitDispatcher dispatches like scriptDispatcher and answers each short
+// native wait check from plan: "running", "done" or "deny".
+type waitDispatcher struct {
+	scriptDispatcher
+	wmu   sync.Mutex
+	waits []string // keys of the checks made
+	plan  []string
+}
+
+func (d *waitDispatcher) Wait(_ context.Context, q DispatchRequest, run string) (string, bool, error) {
+	d.wmu.Lock()
+	defer d.wmu.Unlock()
+	d.waits = append(d.waits, q.Key+" "+run)
+	how := "running"
+	if len(d.plan) > 0 {
+		how, d.plan = d.plan[0], d.plan[1:]
+	}
+	switch how {
+	case "deny":
+		return "", false, Permanent{errors.New("native wait denied")}
+	case "done":
+		return "completed", true, nil
+	}
+	return "running", false, nil
+}
+
+func (d *waitDispatcher) checks() []string {
+	d.wmu.Lock()
+	defer d.wmu.Unlock()
+	return slices.Clone(d.waits)
+}
+
+// A worker in another environment is never read by the local observer: its
+// dispatched run is checked by short keyed native waits, DBOS waits between
+// them, a denied check holds until retry, and the finished run reports.
+func TestDispatchLinkedWorkerWaits(t *testing.T) {
+	if (T3{Command: []string{"/bin/t3"}}).Observable("t3:thread-L@env-2") {
+		t.Fatal("local observer claims a linked-environment worker")
+	}
+	d := &waitDispatcher{plan: []string{"running", "deny", "running", "done"}}
+	e := open(t, t.TempDir(), Options{Dispatcher: d, Observer: T3{Command: []string{"/bin/false"}}, Observe: 20 * time.Millisecond})
+	defer e.close()
+	e.cmd("add MEL-67 worker=t3:thread-L@env-2 Linked")
+	e.phase("MEL-67", PhaseHeld, 1)
+	if st, _ := e.rt.State("MEL-67"); !strings.Contains(st.Blocked, "native wait denied") {
+		t.Fatalf("%+v", st)
+	}
+	e.cmdAs("r1", "retry MEL-67")
+	e.phase("MEL-67", PhaseReported, 1)
+	st, _ := e.rt.State("MEL-67")
+	if st.Evidence != "t3:thread-L@env-2 run run-MEL-67/1/dispatch completed (native t3_thread_wait; the run's own result is in the worker thread)" {
+		t.Fatalf("%+v", st)
+	}
+	want := []string{"MEL-67/1/wait/1 run-MEL-67/1/dispatch", "MEL-67/1/wait/2 run-MEL-67/1/dispatch", "MEL-67/1/wait/3 run-MEL-67/1/dispatch", "MEL-67/1/wait/4 run-MEL-67/1/dispatch"}
+	if got := d.checks(); !slices.Equal(got, want) {
+		t.Fatalf("checks %q", got)
 	}
 }
