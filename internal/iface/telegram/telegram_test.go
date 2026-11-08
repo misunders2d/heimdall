@@ -887,6 +887,7 @@ func TestAttachmentLabels(t *testing.T) {
 		{map[string]any{"contact": map[string]any{"first_name": "Di", "phone_number": "+1", "user_id": 5}}, "[Contact: Di, +1, tg_user_id=5]"},
 		{map[string]any{"location": map[string]any{"latitude": 1.5, "longitude": -2.25}}, "[Location: lat=1.5, lon=-2.25]"},
 		{map[string]any{"venue": map[string]any{"title": "Cafe", "address": "Main St"}}, "[Venue: Cafe — Main St]"},
+		{map[string]any{"sticker": map[string]any{"file_id": "s", "type": "custom_emoji", "emoji": "⭐", "is_animated": true}}, "[Sticker: ⭐ | custom_emoji animated]"},
 	} {
 		raw, _ := json.Marshal(tc.m)
 		var m message
@@ -901,7 +902,7 @@ func TestAttachmentLabels(t *testing.T) {
 
 // Files on a message and on the message it replies to are downloaded into
 // the private upload directory; a file Telegram will not hand over is
-// described instead; contacts and locations are labels.
+// described instead; contacts, locations and stickers are labels.
 func TestAttachmentsAreDownloaded(t *testing.T) {
 	api := newFakeAPI(t)
 	api.files["photos/f1.jpg"] = []byte("jpeg bytes")
@@ -927,7 +928,7 @@ func TestAttachmentsAreDownloaded(t *testing.T) {
 	sticker["sticker"] = map[string]any{"file_id": "s"}
 	api.push(upd(1, photo), upd(2, replyToDoc), upd(3, big), upd(4, missing), upd(5, where), upd(6, sticker))
 	stop := run(t, i, c.accept)
-	eventually(t, "accepted", func() bool { return len(c.list()) == 5 })
+	eventually(t, "accepted", func() bool { return len(c.list()) == 6 })
 	eventually(t, "offset past all", func() bool { return api.lastOffset() == 7 })
 	stop()
 	got := c.list()
@@ -951,6 +952,10 @@ func TestAttachmentsAreDownloaded(t *testing.T) {
 	}
 	if got[4].Attachments != nil || got[4].Context != "[Location: lat=1.5, lon=2.5]" {
 		t.Fatalf("location: %+v", got[4])
+	}
+	// A bare sticker is a labelled turn (2026-11-08); its file is never fetched.
+	if got[5].Attachments != nil || got[5].Context != "[Sticker: no emoji | static]" {
+		t.Fatalf("sticker: %+v", got[5])
 	}
 	if strings.Contains(logs.String(), token) {
 		t.Fatal("token in logs")

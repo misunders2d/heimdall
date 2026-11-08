@@ -159,6 +159,9 @@ type message struct {
 	media
 
 	Quote json.RawMessage `json:"quote"` // optional cargo; malformed fields must not poison the update
+	// ExternalReply (ExternalReplyInfo) is a reply to a message of another
+	// chat or topic; optional cargo, decoded lazily like Quote.
+	ExternalReply json.RawMessage `json:"external_reply"`
 }
 
 // origin is a forwarded message's MessageOrigin.
