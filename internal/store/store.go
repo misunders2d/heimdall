@@ -204,6 +204,7 @@ type outExtra struct {
 	Formatted bool                 `json:"formatted,omitempty"`
 	Reactions []core.Reaction      `json:"reactions,omitempty"`
 	File      *core.File           `json:"file,omitempty"`
+	Effect    string               `json:"effect,omitempty"` // EnqueueEffect's idempotency key
 }
 
 func outExtraOf(out core.Outbound) (string, error) {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/config"
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/durable"
 	"github.com/misunders2d/heimdall/internal/googleoauth"
 	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/iface/local"
@@ -183,7 +184,14 @@ func run(args []string) error {
 		logger.Printf("employee Google disabled: %v", err)
 		google = nil
 	}
-	r := router.New(router.Options{Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
+	work, err := openDurable(cfg, st, logger)
+	if err != nil {
+		return err
+	}
+	if work != nil {
+		defer work.Close()
+	}
+	r := router.New(router.Options{Work: work, Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
 	if cfg.Scheduler.On() && cfg.Scheduler.Control != nil {
 		listener, err := func() (*net.UnixListener, error) {
 			u, err := user.Lookup(cfg.RunAs[core.RoleOwner].User)
@@ -202,10 +210,30 @@ func run(args []string) error {
 			defer listener.Close()
 		}
 	}
+	if work != nil {
+		work.SetWake(r.Wake)
+		if err := work.Launch(); err != nil {
+			return fmt.Errorf("durable commitments: %w", err)
+		}
+	}
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")
 	return err
+}
+
+// openDurable opens durable commitments when configured (docs/durable.md):
+// <data_dir>/durable.db beside heimdall.db. Disabled by default.
+func openDurable(cfg *config.Config, st *store.Store, logger *log.Logger) (*durable.Runtime, error) {
+	d := cfg.Durable
+	if !d.On() {
+		return nil, nil
+	}
+	res := map[string]durable.Resource{}
+	for name, r := range d.Resources {
+		res[name] = durable.Resource{Concurrency: r.Concurrency, PerWorker: r.PerWorker, RateLimit: r.RateLimit, RatePeriod: time.Duration(r.RatePeriodSeconds) * time.Second}
+	}
+	return durable.Open(durable.Options{Path: filepath.Join(cfg.DataDir, "durable.db"), Outbox: st, Resources: res, Silence: time.Duration(d.SilenceSeconds) * time.Second, Linear: d.Linear, Log: logger})
 }
 
 // guardLog is the prompt-injection log: metadata of flagged messages, never

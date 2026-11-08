@@ -20,6 +20,7 @@ const (
 	cmdChatID  = "chatid" // show the conversation's and caller's IDs
 	cmdUse     = "use"
 	cmdJob     = "job"     // !jobs and !job …: the scheduler's commands (Text)
+	cmdWork    = "work"    // !work …: durable commitments (Text)
 	cmdInvalid = "invalid" // answered with Error, never sent to a harness
 )
 
@@ -75,6 +76,8 @@ func parseCommand(text string) command {
 		return command{Kind: cmdChatID}
 	case "job", "jobs":
 		return command{Kind: cmdJob, Text: strings.TrimSpace(word + " " + rest)}
+	case "work":
+		return command{Kind: cmdWork, Text: rest}
 	case "use":
 		switch arg := strings.ToLower(rest); {
 		case arg == "":

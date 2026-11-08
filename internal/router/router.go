@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/durable"
 	"github.com/misunders2d/heimdall/internal/googleoauth"
 	"github.com/misunders2d/heimdall/internal/harness"
 	"github.com/misunders2d/heimdall/internal/scheduler"
@@ -77,6 +78,7 @@ type Options struct {
 	GuardLog          string               // the prompt-injection log (metadata only); "" logs nothing
 	GuardLogMax       int64                // its size before rotation to GuardLog+".1"; default DefaultGuardLogMax
 	Jobs              *scheduler.Scheduler // nil: the scheduler is disabled
+	Work              *durable.Runtime     // nil: durable commitments are disabled
 }
 
 type Router struct {
@@ -394,6 +396,10 @@ func (r *Router) enqueue(out core.Outbound) {
 	}
 	r.wake(out.Conv.Interface)
 }
+
+// Wake prompts iface's delivery loop; durable commitments call it after
+// enqueueing a reply.
+func (r *Router) Wake(iface string) { r.wake(iface) }
 
 func (r *Router) wake(iface string) {
 	select {
@@ -806,6 +812,14 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		}
 		c.answer(row, store.CommandEnd{Detail: "job", Job: change}, text)
 		return false
+	case cmdWork:
+		text := "Durable commitments are not enabled here."
+		if w := c.r.opt.Work; w != nil {
+			// The same verified ingress caller as !job; scheduled runs are not live.
+			text = w.Command(durable.Caller{Principal: row.From, Role: role, Conv: c.key, MsgID: row.MsgID, Live: row.Origin == core.OriginLive}, cmd.Text)
+		}
+		c.answer(row, store.CommandEnd{Detail: "work"}, text)
+		return false
 	case cmdInvalid:
 		c.answer(row, store.CommandEnd{Detail: "invalid"}, cmd.Error)
 		return false
@@ -813,6 +827,9 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		text := helpText(c.r.opt.Order)
 		if c.r.opt.Jobs != nil {
 			text += "\n" + strings.Join(scheduler.HelpLines, "\n")
+		}
+		if c.r.opt.Work != nil {
+			text += "\n!work help — durable commitments (owner)"
 		}
 		c.answer(row, store.CommandEnd{Detail: "help"}, text)
 		return false

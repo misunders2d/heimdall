@@ -44,7 +44,28 @@ type Config struct {
 	Telegram          *Telegram                `json:"telegram,omitempty"`
 	PromptGuard       *PromptGuard             `json:"prompt_guard,omitempty"`
 	Scheduler         *Scheduler               `json:"scheduler,omitempty"`
+	Durable           *Durable                 `json:"durable,omitempty"`
 }
+
+// Durable configures durable commitments (docs/durable.md). Disabled by
+// default; slice 1 admits only explicit owner !work commitments.
+type Durable struct {
+	Enabled        bool                       `json:"enabled"`
+	SilenceSeconds int                        `json:"silence_seconds,omitempty"` // one no-signal notice per attempt and phase after this; default 86400; negative = none
+	Linear         string                     `json:"linear_workspace,omitempty"`
+	Resources      map[string]DurableResource `json:"resources,omitempty"` // admission queues; "default" always exists
+}
+
+// DurableResource is one capacity class (a host or provider).
+type DurableResource struct {
+	Concurrency       int `json:"concurrency,omitempty"` // active commitments; 0 = unlimited
+	PerWorker         int `json:"per_worker,omitempty"`  // default 1
+	RateLimit         int `json:"rate_limit,omitempty"`  // starts per rate_period_seconds
+	RatePeriodSeconds int `json:"rate_period_seconds,omitempty"`
+}
+
+// On reports whether durable commitments run.
+func (d *Durable) On() bool { return d != nil && d.Enabled }
 
 // Scheduler configures scheduled jobs (docs/scheduler.md §10). Jobs are
 // kept in the store whether it is enabled or not.
