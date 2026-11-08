@@ -3,9 +3,12 @@ package harness
 // Native between-turn dispatch. Claude lifecycle/result origin fields were
 // observed with Claude Code 2.1.319 and a loopback synthetic Messages server
 // (2026-11-07); task types also compared with anthropics/claude-agent-sdk-python
-// src/claude_agent_sdk/types.py. No task output_file is opened or delivered.
+// src/claude_agent_sdk/types.py. task_updated.patch.status and optional run_id
+// checked against https://code.claude.com/docs/en/agent-sdk/typescript
+// (SDKTaskUpdatedMessage, 2026-11-08). No task output_file is opened or delivered.
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/misunders2d/heimdall/internal/core"
 )
@@ -14,17 +17,19 @@ import (
 // person request. A notice has no native result; a result retains the normal
 // adapter's session, replay, subagent and terminal-event checks.
 type Continuation struct {
+	LossID      uint64 // one process loss, shared by all source records
 	ID          uint64
-	Phase       string // start, result, notice
+	Phase       string // start, result, notice, settled
 	Result      Result
 	Notice      string
 	Interrupted bool
 }
 type passiveTurn struct {
-	bridge bridge
-	source *Run
-	id     uint64
-	done   chan struct{}
+	bridge   bridge
+	source   *Run
+	id       uint64
+	done     chan struct{}
+	terminal string // aggregate task terminal status; never inferred from an answer
 }
 
 func bridgeDone(b bridge) bool {
@@ -64,19 +69,38 @@ func (w *worker) lossLocked(why string) {
 	// Consume every piece of loss bookkeeping before callbacks. Stop and Wait
 	// may both run, but a frame/task/continuation is reported at most once.
 	w.tasks = nil
+	w.finished = nil
 	w.notified = nil
 	w.continuing = nil
 	w.background = nil
 	w.frames = nil
 	w.frameBytes = 0
+	w.seq++
+	lossID := w.seq
 	for r := range owners {
 		w.seq++
-		w.emitLocked(r, Continuation{ID: w.seq, Phase: "notice", Interrupted: true, Notice: "Background work was interrupted: " + why + ". It was not re-run; check existing results before resending.\n— heimdall"})
+		w.emitLocked(r, Continuation{ID: w.seq, LossID: lossID, Phase: "notice", Interrupted: true, Notice: "Pending background work was interrupted: " + why + ". It was not re-run; check existing results before resending.\n— heimdall"})
 	}
 	for p := range pending {
 		close(p.done)
-		w.emitLocked(p.source, Continuation{ID: p.id, Phase: "result", Interrupted: true, Result: Result{Cancelled: true, Unclean: true, SessionID: p.source.SessionID()}})
+		w.emitLocked(p.source, Continuation{ID: p.id, Phase: "result", Interrupted: true, Notice: why, Result: Result{Cancelled: true, Unclean: true, SessionID: p.source.SessionID()}})
 	}
+}
+
+// Terminal ownership is a bounded tombstone, not pending work. It routes a
+// later native notification back to its source and rejects lifecycle replay.
+func (w *worker) rememberFinishedLocked(key string, r *Run) {
+	if w.finished == nil {
+		w.finished = map[string]*Run{}
+	}
+	if len(w.finished) >= 128 && w.finished[key] == nil {
+		for k := range w.finished {
+			delete(w.finished, k)
+			delete(w.notified, k)
+			break
+		}
+	}
+	w.finished[key] = r
 }
 func (w *worker) passiveLocked(source *Run) *passiveTurn {
 	w.seq++
@@ -150,6 +174,23 @@ func (w *worker) lineLocked(raw []byte) {
 	writeLine(w.current.bridge, raw)
 }
 
+// Native run IDs identify a shared decoder. Without one, only the task's
+// composite key identifies its decoder; empty prefixes never group tasks.
+func taskOrigin(key string) string {
+	run, _, _ := strings.Cut(key, "\x00")
+	if run == "" {
+		return key
+	}
+	return run
+}
+func terminalStatus(old, next string) string {
+	rank := map[string]int{"completed": 1, "killed": 2, "failed": 3}
+	if rank[next] > rank[old] {
+		return next
+	}
+	return old
+}
+
 func (w *worker) claudeLineLocked(raw []byte) {
 	var e struct {
 		Type    string          `json:"type"`
@@ -161,6 +202,9 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		Task    string          `json:"task_id"`
 		RunID   string          `json:"run_id"`
 		Summary string          `json:"summary"`
+		Patch   struct {
+			Status string `json:"status"`
+		} `json:"patch"`
 		Message json.RawMessage `json:"message"`
 		Origin  struct {
 			Kind string `json:"kind"`
@@ -194,6 +238,9 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		}
 	}
 	if e.Type == "system" && e.Task != "" {
+		if e.Replay {
+			return
+		}
 		if w.tasks == nil {
 			w.tasks = map[string]*Run{}
 		}
@@ -202,29 +249,101 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		}
 		key := e.RunID + "\x00" + e.Task
 		switch e.Subtype {
+		case "task_updated":
+			switch e.Patch.Status {
+			case "completed", "failed", "killed":
+			default:
+				return
+			}
+			// Older native updates omit run_id. Resolve only a unique owned
+			// task; an ambiguous task ID cannot settle another run.
+			matched := ""
+			for k := range w.tasks {
+				if k == key || e.RunID == "" && strings.HasSuffix(k, "\x00"+e.Task) {
+					if matched != "" {
+						return
+					}
+					matched = k
+				}
+			}
+			if matched == "" || w.notified[matched] {
+				return
+			}
+			source := w.tasks[matched]
+			delete(w.tasks, matched)
+			w.rememberFinishedLocked(matched, source)
+			nativeKey := taskOrigin(matched)
+			p := w.continuing[nativeKey]
+			if p != nil {
+				p.terminal = terminalStatus(p.terminal, e.Patch.Status)
+			}
+			// Settle only this decoder's group, with the aggregate outcome.
+			for k := range w.tasks {
+				if taskOrigin(k) == nativeKey {
+					return
+				}
+			}
+			if p != nil {
+				delete(w.continuing, nativeKey)
+				close(p.done)
+				w.emitLocked(p.source, Continuation{ID: p.id, Phase: "settled", Notice: p.terminal, Result: Result{SessionID: source.SessionID()}})
+			}
 		case "task_started":
-			if len(w.tasks) < 128 {
-				w.tasks[key] = w.current
-				if w.continuing == nil {
-					w.continuing = map[string]*passiveTurn{}
-				}
-				nativeKey := e.RunID
-				if nativeKey == "" {
-					nativeKey = key
-				}
-				if w.continuing[nativeKey] == nil {
-					w.continuing[nativeKey] = w.passiveLocked(w.current)
-				}
-			} else {
+			if w.tasks[key] != nil || w.notified[key] || w.finished[key] != nil {
+				return
+			}
+			if len(w.tasks) >= 128 {
 				w.lossLocked("native task tracking limit reached")
 				w.current.Stop("background task limit")
+				return
+			}
+			if w.continuing == nil {
+				w.continuing = map[string]*passiveTurn{}
+			}
+			nativeKey := taskOrigin(key)
+			source := w.current
+			if p := w.continuing[nativeKey]; p != nil {
+				source = p.source
+			}
+			w.tasks[key] = source
+			if w.continuing[nativeKey] == nil {
+				w.continuing[nativeKey] = w.passiveLocked(source)
 			}
 		case "task_notification":
+			if e.RunID == "" {
+				match := ""
+				for _, owners := range []map[string]*Run{w.tasks, w.finished} {
+					for k := range owners {
+						if strings.HasSuffix(k, "\x00"+e.Task) {
+							if match != "" && match != k {
+								return
+							}
+							match = k
+						}
+					}
+				}
+				if match != "" {
+					key = match
+				}
+			}
+			nativeKey := taskOrigin(key)
 			source := w.tasks[key]
+			if source == nil {
+				source = w.finished[key]
+			}
+			if p := w.continuing[nativeKey]; p != nil {
+				source = p.source
+			}
 			if source == nil {
 				source = w.current
 			}
+			if !w.notified[key] && len(w.tasks) >= 128 {
+				w.lossLocked("native task tracking limit reached")
+				w.current.Stop("background task limit")
+				return
+			}
 			if !w.notified[key] {
+				delete(w.finished, key) // pending follow-through is no longer a terminal tombstone
 				w.notified[key] = true
 				// Keep ownership until the spontaneous result, including the gap between
 				// task_notification and its init/assistant/result. Never read output_file.
@@ -232,10 +351,7 @@ func (w *worker) claudeLineLocked(raw []byte) {
 				if w.continuing == nil {
 					w.continuing = map[string]*passiveTurn{}
 				}
-				nativeKey := e.RunID
-				if nativeKey == "" {
-					nativeKey = key
-				}
+
 				if w.continuing[nativeKey] == nil {
 					w.continuing[nativeKey] = w.passiveLocked(source)
 				}
@@ -319,21 +435,37 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		}
 		source := w.current
 		autonomous := bridgeDone(w.current.bridge) || e.Origin.Kind == "task-notification"
+		nativeKey := e.Origin.Run
 		if e.Origin.Kind == "task-notification" {
+			if nativeKey == "" {
+				for key := range w.tasks {
+					if w.notified[key] {
+						origin := taskOrigin(key)
+						if nativeKey != "" && nativeKey != origin {
+							w.lossLocked("native result omitted an ambiguous task origin")
+							w.current.Stop("ambiguous native task result")
+							return
+						}
+						nativeKey = origin
+					}
+				}
+			}
+			if p := w.continuing[nativeKey]; p != nil {
+				source = p.source
+			}
 			for key, r := range w.tasks {
-				if len(key) > len(e.Origin.Run) && key[:len(e.Origin.Run)+1] == e.Origin.Run+"\x00" {
-					source = r
+				if taskOrigin(key) == nativeKey && w.notified[key] {
 					delete(w.tasks, key)
-					delete(w.notified, key)
+					w.rememberFinishedLocked(key, r)
 				}
 			}
 		}
 		var target bridge
 		var p *passiveTurn
 		if autonomous {
-			p = w.continuing[e.Origin.Run]
+			p = w.continuing[nativeKey]
 			if p != nil {
-				delete(w.continuing, e.Origin.Run)
+				delete(w.continuing, nativeKey)
 			}
 			if p == nil {
 				p = w.background
@@ -354,6 +486,12 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		writeLine(target, raw)
 		if p != nil {
 			w.finishPassiveLocked(p)
+			for key, owner := range w.tasks {
+				if taskOrigin(key) == nativeKey {
+					w.continuing[nativeKey] = w.passiveLocked(owner)
+					break
+				}
+			}
 		}
 	case "control_request":
 		if w.pending != nil {

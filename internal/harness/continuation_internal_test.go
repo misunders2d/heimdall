@@ -121,3 +121,140 @@ func TestFinalizationStartWarning(t *testing.T) {
 		})
 	}
 }
+
+func TestTaskTerminalUpdateSettlesWithoutFollowup(t *testing.T) {
+	for _, status := range []string{"completed", "failed", "killed"} {
+		t.Run(status, func(t *testing.T) {
+			w, _, events := asyncFixture(t)
+			out := &workerOutput{w}
+			out.Write(protocolLine(map[string]any{"type": "system", "subtype": "task_started", "session_id": "owned", "task_id": "task", "run_id": "run"}))
+			out.Write(protocolLine(map[string]any{"type": "result", "session_id": "owned", "uuid": "person", "result": "DONE"}))
+			out.Write(protocolLine(map[string]any{"type": "system", "subtype": "task_updated", "session_id": "owned", "task_id": "task", "patch": map[string]any{"status": status}}))
+			if len(w.tasks) != 0 || len(w.continuing) != 0 {
+				t.Fatalf("terminal task retained: tasks=%d passive=%d", len(w.tasks), len(w.continuing))
+			}
+			w.lossLocked("expiry")
+			for _, e := range *events {
+				if e.Interrupted {
+					t.Fatal("completed work reported interrupted")
+				}
+			}
+		})
+	}
+}
+
+func TestTerminalTaskFencesAndNotificationOwnership(t *testing.T) {
+	w, b, events := asyncFixture(t)
+	out := &workerOutput{w}
+	event := func(sub, run, status string, extra map[string]any) {
+		e := map[string]any{"type": "system", "subtype": sub, "session_id": "owned", "task_id": "task", "run_id": run, "patch": map[string]any{"status": status}}
+		for k, v := range extra {
+			e[k] = v
+		}
+		out.Write(protocolLine(e))
+	}
+	event("task_started", "old", "", nil)
+	out.Write(protocolLine(map[string]any{"type": "result", "session_id": "owned", "uuid": "person", "result": "DONE"}))
+	if len(w.tasks) != 1 || len(w.continuing) != 1 {
+		t.Fatal("foreground answer settled pending task")
+	}
+	for _, extra := range []map[string]any{{"session_id": "foreign"}, {"parent_tool_use_id": "sub"}, {"isReplay": true}} {
+		event("task_updated", "old", "completed", extra)
+		if len(w.tasks) != 1 {
+			t.Fatal("unowned terminal update settled task")
+		}
+	}
+	event("task_updated", "wrong-origin", "completed", nil)
+	event("task_updated", "old", "running", nil)
+	if len(w.tasks) != 1 {
+		t.Fatal("nonterminal or wrong origin settled task")
+	}
+	event("task_updated", "old", "completed", nil)
+	if len(w.tasks) != 0 || len(w.continuing) != 0 {
+		t.Fatal("terminal state stale")
+	}
+	// Same native task may restart with a new run ID; replay of old start must not.
+	event("task_started", "old", "", nil)
+	if len(w.tasks) != 0 {
+		t.Fatal("terminal start replay resurrected work")
+	}
+	old := w.current
+	other := &Run{bridge: b, ctx: old.ctx, harness: "claude"}
+	w.current = other
+	event("task_notification", "old", "", map[string]any{"summary": "completed"})
+	if w.tasks["old\x00task"] != old {
+		t.Fatal("late notification lost original owner")
+	}
+	out.Write(protocolLine(map[string]any{"type": "result", "session_id": "owned", "uuid": "followup", "result": "FOLLOWUP", "origin": map[string]any{"kind": "task-notification", "runId": "old"}}))
+	if len(w.tasks) != 0 || len(w.continuing) != 0 {
+		t.Fatal("followup retained completed state")
+	}
+	n := len(*events)
+	event("task_notification", "old", "", nil)
+	out.Write(protocolLine(map[string]any{"type": "result", "session_id": "owned", "uuid": "followup", "result": "FOLLOWUP", "origin": map[string]any{"kind": "task-notification", "runId": "old"}}))
+	if len(*events) != n {
+		t.Fatal("terminal notification/result replayed")
+	}
+	w.lossLocked("expiry")
+	if len(*events) != n {
+		t.Fatal("delivered followup reported lost")
+	}
+}
+
+func TestIndependentTasksWithoutRunIDSettleIndependently(t *testing.T) {
+	w, _, events := asyncFixture(t)
+	out := &workerOutput{w}
+	for _, id := range []string{"one", "two"} {
+		out.Write(protocolLine(map[string]any{"type": "system", "subtype": "task_started", "task_id": id, "session_id": "owned"}))
+	}
+	for i, id := range []string{"one", "two"} {
+		out.Write(protocolLine(map[string]any{"type": "system", "subtype": "task_updated", "task_id": id, "session_id": "owned", "patch": map[string]any{"status": "completed"}}))
+		if len(w.continuing) != 1-i {
+			t.Fatalf("terminal %s left %d passive records", id, len(w.continuing))
+		}
+	}
+	for _, e := range *events {
+		if e.Interrupted {
+			t.Fatal("completed task reported lost")
+		}
+	}
+}
+func TestSharedOriginAggregatesTerminalStatus(t *testing.T) {
+	for _, statuses := range [][]string{{"failed", "completed"}, {"completed", "failed"}, {"killed", "completed"}, {"completed", "killed"}} {
+		t.Run(statuses[0]+statuses[1], func(t *testing.T) {
+			w, _, events := asyncFixture(t)
+			out := &workerOutput{w}
+			for _, id := range []string{"one", "two"} {
+				out.Write(protocolLine(map[string]any{"type": "system", "subtype": "task_started", "task_id": id, "run_id": "shared", "session_id": "owned"}))
+			}
+			for i, id := range []string{"one", "two"} {
+				out.Write(protocolLine(map[string]any{"type": "system", "subtype": "task_updated", "task_id": id, "run_id": "shared", "session_id": "owned", "patch": map[string]any{"status": statuses[i]}}))
+			}
+			if len(w.continuing) != 0 || len(*events) != 2 {
+				t.Fatalf("shared origin not settled once: %+v", *events)
+			}
+			want := statuses[0]
+			if want == "completed" {
+				want = statuses[1]
+			}
+			if (*events)[1].Notice != want {
+				t.Fatalf("status %s, want %s", (*events)[1].Notice, want)
+			}
+		})
+	}
+}
+
+func TestSharedOriginRetainsFirstSource(t *testing.T) {
+	w, b, _ := asyncFixture(t)
+	out := &workerOutput{w}
+	first := w.current
+	start := func(id string) {
+		out.Write(protocolLine(map[string]any{"type": "system", "subtype": "task_started", "session_id": "owned", "task_id": id, "run_id": "shared"}))
+	}
+	start("one")
+	w.current = &Run{bridge: b, ctx: first.ctx, harness: "claude"}
+	start("two")
+	if w.tasks["shared\x00two"] != first || w.continuing["shared"].source != first {
+		t.Fatal("shared origin changed source with foreground run")
+	}
+}

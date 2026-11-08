@@ -136,6 +136,10 @@ func (f *fake) warm() {
 			f.emit(map[string]any{"type": "system", "subtype": "task_started", "session_id": session, "task_id": task, "run_id": runID})
 			contextText := f.inputContext + "\n" + text
 			background = func() {
+				f.emit(map[string]any{"type": "system", "subtype": "task_updated", "session_id": session, "task_id": task, "patch": map[string]any{"status": "completed"}})
+				if strings.Contains(text, "BG_TERMINAL_ONLY") {
+					return
+				}
 				f.emit(map[string]any{"type": "system", "subtype": "task_notification", "session_id": session, "task_id": task, "run_id": runID, "summary": "Synthetic background task completed"})
 				answer := "BACKGROUND_DELIVERED"
 				if strings.Contains(text, "BG_JOB") {

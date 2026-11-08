@@ -57,14 +57,15 @@ type Options struct {
 	Access              *core.Access // root-side Pi admission; nil only in standalone adapter tests
 	UnmentionedCommands []string     // nil: stop/cancel, empty: every command needs addressing
 
-	Token        string        // bot token; never logged
-	BotUsername  string        // the bot getMe must report, without "@"
-	FileBase     string        // download prefix including /file/bot; defaults to API + /file/bot
-	MaxFileBytes int64         // zero: public API limit
-	API          string        // Bot API base URL; default DefaultAPI
-	Log          *log.Logger   // metadata only, never message text
-	PollTimeout  time.Duration // getUpdates long-poll timeout; default 50s
-	UploadDir    string        // where attachments are downloaded (private to Heimdall); "": not downloaded
+	Token         string        // bot token; never logged
+	BotUsername   string        // the bot getMe must report, without "@"
+	LocalFileRoot string        // opt-in local Bot API root; absolute paths only inside this root
+	FileBase      string        // download prefix including /file/bot; defaults to API + /file/bot
+	MaxFileBytes  int64         // zero: public API limit
+	API           string        // Bot API base URL; default DefaultAPI
+	Log           *log.Logger   // metadata only, never message text
+	PollTimeout   time.Duration // getUpdates long-poll timeout; default 50s
+	UploadDir     string        // where attachments are downloaded (private to Heimdall); "": not downloaded
 }
 
 // Interface is one Telegram bot.
@@ -101,6 +102,9 @@ func New(opt Options) (*Interface, error) {
 		opt.API = DefaultAPI
 	}
 	opt.API = strings.TrimRight(opt.API, "/")
+	if opt.LocalFileRoot != "" && (opt.LocalFileRoot != "/var/lib/telegram-bot-api" || !localAPI(opt.API)) {
+		return nil, errors.New("telegram: local_file_root requires loopback API and approved /var/lib/telegram-bot-api root")
+	}
 	if opt.FileBase == "" {
 		opt.FileBase = opt.API + "/file/bot"
 	}

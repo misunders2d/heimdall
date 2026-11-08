@@ -487,6 +487,7 @@ type conv struct {
 
 	continuations []continuationEvent
 	nativeTurns   map[continuationKey]*turn
+	losses        map[lossKey]bool
 
 	r      *Router
 	key    core.ConvKey
@@ -527,8 +528,9 @@ type turn struct {
 	startCtx      context.Context
 	startCancel   context.CancelFunc
 
-	detached  bool // native continuation: no inbound batch or parallelism reservation
-	published bool // loop-owned: original reply has entered the durable outbox
+	interruption string // native process loss; separate from user stop/reset
+	detached     bool   // native continuation: no inbound batch or parallelism reservation
+	published    bool   // loop-owned: original reply has entered the durable outbox
 
 	id         int64
 	role       core.Role
@@ -1876,6 +1878,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	switch {
 	case res.Cancelled && t.stopped.Load():
 		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, "stopped by stop or reset"
+		if t.interruption != "" {
+			e.Detail = "pending background work interrupted: " + t.interruption
+		}
 		text = "⏹ Stopped."
 	case res.Cancelled && res.Cause.Limited():
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, string(res.Cause)

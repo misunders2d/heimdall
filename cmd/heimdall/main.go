@@ -152,7 +152,11 @@ func run(args []string) error {
 				return errors.New("invalid HEIMDALL_TELEGRAM_MAX_FILE_BYTES")
 			}
 		}
-		tg, err := telegram.New(telegram.Options{Access: &access, UnmentionedCommands: cfg.UnmentionedCommands(), Token: os.Getenv(telegram.TokenEnv), API: apiBase, FileBase: fileBase, MaxFileBytes: maxBytes, BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
+		localRoot := cfg.Telegram.LocalFileRoot
+		if v := os.Getenv("HEIMDALL_TELEGRAM_LOCAL_FILE_ROOT"); v != "" {
+			localRoot = v
+		}
+		tg, err := telegram.New(telegram.Options{LocalFileRoot: localRoot, Access: &access, UnmentionedCommands: cfg.UnmentionedCommands(), Token: os.Getenv(telegram.TokenEnv), API: apiBase, FileBase: fileBase, MaxFileBytes: maxBytes, BotUsername: cfg.Telegram.BotUsername, Log: logger, UploadDir: filepath.Join(cfg.DataDir, "uploads", "telegram")})
 		if err != nil {
 			return err
 		}

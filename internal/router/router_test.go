@@ -1782,7 +1782,7 @@ func TestWarmIdleExpiryIsLogged(t *testing.T) {
 	e.start()
 	e.send(owner, "c1", "hello LINGER=30")
 	want(t, e.reply(), "omp#1")
-	eventuallyTrue(t, "idle expiry", func() bool { return strings.Contains(e.logs.String(), "warm idle or lifetime expiry: SIGTERM") })
+	eventuallyTrue(t, "idle expiry", func() bool { return strings.Contains(e.logs.String(), "warm idle expiry: SIGTERM") })
 }
 
 func TestReactionsOfEachAnswer(t *testing.T) {

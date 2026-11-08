@@ -7,12 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
@@ -91,25 +94,18 @@ func (t *Interface) download(ctx context.Context, a *attachment) (string, int64,
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.opt.FileBase+t.opt.Token+"/"+f.FilePath, nil)
+	reader, err := t.fileReader(ctx, f.FilePath)
 	if err != nil {
-		return "", 0, t.scrubbed("file download", err)
+		return "", 0, err
 	}
-	res, err := t.http.Do(req)
-	if err != nil {
-		return "", 0, t.scrubbed("file download", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("file download HTTP %d", res.StatusCode)
-	}
+	defer reader.Close()
 	name := or(a.Name, path.Base(f.FilePath))
 	dst := filepath.Join(t.opt.UploadDir, fmt.Sprintf("%d-%s-%s", time.Now().UnixMilli(), randHex(4), safeName(name)))
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", 0, err
 	}
-	n, err := io.Copy(out, io.LimitReader(res.Body, t.opt.MaxFileBytes+1))
+	n, err := io.Copy(out, io.LimitReader(reader, t.opt.MaxFileBytes+1))
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}
@@ -124,6 +120,68 @@ func (t *Interface) download(ctx context.Context, a *attachment) (string, int64,
 		return "", 0, err
 	}
 	return dst, n, nil
+}
+
+// Local files are opt-in and only trusted when getFile came from a loopback
+// API. os.Root confines resolution, including symlinks, throughout open.
+func localAPI(base string) bool {
+	u, err := url.Parse(base)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && ip.IsLoopback()
+}
+func (t *Interface) fileReader(ctx context.Context, name string) (io.ReadCloser, error) {
+	if filepath.IsAbs(name) {
+		if t.opt.LocalFileRoot == "" || !localAPI(t.opt.API) {
+			return nil, errors.New("absolute Telegram file path requires an approved local API root")
+		}
+		base := filepath.Clean(t.opt.LocalFileRoot)
+		resolved, err := filepath.EvalSymlinks(base)
+		if err != nil || resolved != base {
+			return nil, errors.New("local Telegram file root unavailable or indirect")
+		}
+		rel, err := filepath.Rel(base, name)
+		if err != nil || !filepath.IsLocal(rel) {
+			return nil, errors.New("local Telegram file path outside approved root")
+		}
+		root, err := os.OpenRoot(base)
+		if err != nil {
+			return nil, errors.New("local Telegram file root unavailable")
+		}
+		defer root.Close()
+		file, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return nil, errors.New("local Telegram file unavailable or outside approved root")
+		}
+		info, err := file.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			file.Close()
+			return nil, errors.New("local Telegram file is not a regular file")
+		}
+		if info.Size() > t.opt.MaxFileBytes {
+			file.Close()
+			return nil, errors.New("local Telegram file too large")
+		}
+		return file, nil
+	}
+	if !filepath.IsLocal(name) || strings.ContainsAny(name, `\?#`) || path.Clean(name) != name {
+		return nil, errors.New("invalid relative Telegram file path")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.opt.FileBase+t.opt.Token+"/"+name, nil)
+	if err != nil {
+		return nil, t.scrubbed("file download", err)
+	}
+	res, err := t.http.Do(req)
+	if err != nil {
+		return nil, t.scrubbed("file download", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		res.Body.Close()
+		return nil, fmt.Errorf("file download HTTP %d", res.StatusCode)
+	}
+	return res.Body, nil
 }
 
 // pruneUploads removes downloads older than uploadRetention: messages that
@@ -163,7 +221,11 @@ func describe(a *attachment, err error) string {
 	if err != nil {
 		lines = append(lines, "error: "+err.Error())
 	}
-	lines = append(lines, "note: download failed under the configured API and size limit; ask for a smaller or compressed file, or a link.")
+	note := "File contents unavailable. This is a download or server configuration failure, not evidence of excessive size; do not claim to have inspected the file."
+	if err != nil && strings.Contains(err.Error(), "file too large") {
+		note = "File exceeds the configured size limit; a smaller file is required."
+	}
+	lines = append(lines, "note: "+note)
 	return strings.Join(lines, "\n")
 }
 

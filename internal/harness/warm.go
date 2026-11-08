@@ -122,6 +122,8 @@ type worker struct {
 	pending     *Run
 	background  *passiveTurn
 	continuing  map[string]*passiveTurn
+	finished    map[string]*Run // bounded terminal task ownership for a later notification
+	activity    time.Time
 	tasks       map[string]*Run
 	notified    map[string]bool
 	seq         uint64
@@ -150,6 +152,7 @@ func (o *workerOutput) Write(p []byte) (int, error) {
 		if i == len(rest) {
 			break
 		}
+		o.w.activity = time.Now()
 		o.w.lineLocked(bytes.TrimSuffix(o.w.buf, []byte{'\r'}))
 		o.w.buf = nil
 		rest = rest[i+1:]
@@ -481,18 +484,51 @@ func (p *Pool) watch(r *Run, key warmKey, fp [32]byte, born time.Time, epoch uin
 		close(pooled)
 		idle := time.NewTimer(time.Duration(p.cfg.IdleTimeoutSeconds) * time.Second)
 		defer idle.Stop()
-		select {
-		case <-e.retired:
+
+		for {
+			why := ""
+			select {
+			case <-e.retired:
+				return
+			case <-idle.C:
+				// Fence output and pool claims together. Pending native work is
+				// never idle, but cannot extend the absolute lifetime below.
+				w := r.worker
+				w.mu.Lock()
+				p.mu.Lock()
+				if p.entries[key] != e {
+					p.mu.Unlock()
+					w.mu.Unlock()
+					return
+				}
+				quiet := time.Since(maxTime(e.idle, w.activity))
+				delay := time.Duration(p.cfg.IdleTimeoutSeconds) * time.Second
+				if !w.hasPendingLocked() && quiet >= delay {
+					w.retiring = true
+					why = "warm idle expiry"
+				} else {
+					if !w.hasPendingLocked() {
+						delay -= quiet
+					}
+					idle.Reset(max(time.Nanosecond, delay))
+				}
+				p.mu.Unlock()
+				w.mu.Unlock()
+				if why == "" {
+					continue
+				}
+			case <-life.C:
+				why = "worker lifetime reached"
+			case <-r.Exited():
+				why = "native process exited"
+			}
+			p.mu.Lock()
+			if p.entries[key] == e {
+				delete(p.entries, key)
+				p.retire(e, why)
+			}
+			p.mu.Unlock()
 			return
-		case <-idle.C:
-		case <-life.C:
-		case <-r.Exited():
-		}
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.entries[key] == e {
-			delete(p.entries, key)
-			p.retire(e, "warm idle or lifetime expiry")
 		}
 	}()
 }
@@ -640,6 +676,15 @@ func (w *worker) available(requireBackground bool) bool {
 	return !w.dead && !w.retiring && (!requireBackground || len(w.tasks) > 0 || w.background != nil || len(w.frames) > 0 || len(w.continuing) > 0)
 }
 
+func (w *worker) hasPendingLocked() bool {
+	return len(w.tasks) > 0 || len(w.continuing) > 0 || w.background != nil || len(w.frames) > 0
+}
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
 func minTime(a, b time.Time) time.Time {
 	if a.Before(b) {
 		return a

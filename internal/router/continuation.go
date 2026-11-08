@@ -6,7 +6,14 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/store"
 )
+
+type lossKey struct {
+	process      *harness.Run
+	id           uint64
+	who, session string
+}
 
 type continuationKey struct {
 	source *turn
@@ -57,6 +64,24 @@ func (c *conv) continuation(ctx context.Context, e continuationEvent) {
 		return
 	}
 	if e.native.Phase == "notice" {
+		if e.native.Interrupted && e.native.LossID != 0 {
+			source.mu.Lock()
+			run := source.run
+			source.mu.Unlock()
+			if run != nil {
+				key := lossKey{run.Process(), e.native.LossID, source.who, run.SessionID()}
+				if c.losses[key] {
+					return
+				}
+				if len(c.losses) >= 128 {
+					c.losses = map[lossKey]bool{}
+				}
+				if c.losses == nil {
+					c.losses = map[lossKey]bool{}
+				}
+				c.losses[key] = true
+			}
+		}
 		if e.native.Interrupted {
 			source.mu.Lock()
 			run := source.run
@@ -103,9 +128,25 @@ func (c *conv) continuation(ctx context.Context, e continuationEvent) {
 		return
 	}
 	delete(c.nativeTurns, key)
+	if e.native.Phase == "settled" {
+		if t.typing != nil {
+			close(t.typing)
+			t.typing = nil
+		}
+		state := store.TurnDone
+		if e.native.Notice == "failed" {
+			state = store.TurnFailed
+		}
+		if e.native.Notice == "killed" {
+			state = store.TurnCancelled
+		}
+		c.settle(ctx, t, store.TurnEnd{State: state, Harness: e.harness, Session: e.native.Result.SessionID, Detail: "native task " + e.native.Notice})
+		return
+	}
 	d := doneEvent{t: t, harness: e.harness, res: e.native.Result}
 	if e.native.Interrupted {
 		t.stopped.Store(true)
+		t.interruption = e.native.Notice
 	}
 	if d.res.Failure == "" && d.res.NeedsHuman == "" && !d.res.Cancelled {
 		d.files, d.skipped = c.collect(t)

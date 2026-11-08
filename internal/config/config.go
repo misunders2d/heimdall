@@ -89,6 +89,7 @@ func (c *Config) GuardLogMax() int64 {
 // Telegram configures the Telegram interface. Its bot token is read from
 // the HEIMDALL_TELEGRAM_TOKEN environment variable, never from this file.
 type Telegram struct {
+	LocalFileRoot string `json:"local_file_root,omitempty"` // opt-in; approved local Bot API root only
 	// BotUsername is the bot the token must belong to: getMe is checked
 	// against it before polling, so a wrong token is never used.
 	BotUsername  string `json:"bot_username"`
@@ -263,6 +264,9 @@ func (c *Config) fill(staged bool) error {
 		}
 	}
 	if c.Telegram != nil {
+		if c.Telegram.LocalFileRoot != "" && c.Telegram.LocalFileRoot != "/var/lib/telegram-bot-api" {
+			return errors.New("telegram.local_file_root must be /var/lib/telegram-bot-api")
+		}
 		if c.Telegram.MaxFileBytes < 0 || c.Telegram.MaxFileBytes == 1<<63-1 {
 			return errors.New("telegram.max_file_bytes must be positive")
 		}

@@ -86,7 +86,7 @@ func TestNativeCompletionWhileNewUserTurnRuns(t *testing.T) {
 }
 
 func TestNativeBackgroundRetirementReported(t *testing.T) {
-	for _, why := range []string{"idle", "lifetime", "lru", "exit", "launch"} {
+	for _, why := range []string{"lifetime", "lru", "exit", "launch"} {
 		t.Run(why, func(t *testing.T) {
 			e := continuationEnv(t, "telegram")
 			e.stop()
@@ -119,10 +119,10 @@ func TestNativeBackgroundRetirementReported(t *testing.T) {
 				e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "next input")
 			}
 			a := e.reply()
-			if !strings.Contains(a.Text, "Background work was interrupted") {
+			if !strings.Contains(a.Text, "Pending background work was interrupted") {
 				a = e.reply()
 			}
-			want(t, a, "Background work was interrupted")
+			want(t, a, "Pending background work was interrupted")
 		})
 	}
 }
@@ -346,13 +346,13 @@ func TestNativeRetirementAfterBufferedAnswerNotifiesOnce(t *testing.T) {
 	e := continuationEnv(t, "telegram")
 	e.stop()
 	stopOnce.Delete(e.st)
-	e.opt.Harness.IdleTimeoutSeconds = 1
+	e.opt.Harness.MaxLifetimeSeconds = 1
 	e.start()
 	conv := core.ConvKey{Interface: "telegram", Chat: "42"}
 	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "BACKGROUND BG_NORESULT")
 	e.reply()
 	e.reply()
-	want(t, e.reply(), "Background work was interrupted")
+	want(t, e.reply(), "Pending background work was interrupted")
 	e.noReply(250 * time.Millisecond)
 	eventuallyTrue(t, "retired background settled", e.r.Idle)
 	assertNoRunningNative(t, e)
@@ -438,4 +438,95 @@ func TestPendingGenericStartStopAndShutdown(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestPendingBackgroundSurvivesIdle(t *testing.T) {
+	e := continuationEnv(t, "telegram")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.opt.Harness = harness.WarmConfig{IdleTimeoutSeconds: 1}
+	e.start()
+	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, core.ConvKey{Interface: "telegram", Chat: "42"}, "BACKGROUND BG_SLOW")
+	want(t, e.reply(), "turn=1")
+	want(t, e.reply(), "background task completed")
+	want(t, e.reply(), "BACKGROUND_DELIVERED")
+}
+
+func TestNativeLossDeduplicatesAndSettlesEverySource(t *testing.T) {
+	e := continuationEnv(t, "telegram")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.opt.Harness = harness.WarmConfig{IdleTimeoutSeconds: 1, MaxLifetimeSeconds: 3, RunTimeoutSeconds: 1}
+	e.start()
+	who := core.Principal{Platform: "fake", ID: "owner"}
+	conv := core.ConvKey{Interface: "telegram", Chat: "42"}
+	for i := 0; i < 2; i++ {
+		e.sendIn(who, conv, "BACKGROUND_NEVER")
+		want(t, e.reply(), "turn=")
+	}
+	want(t, e.reply(), "Pending background work was interrupted", "worker lifetime reached")
+	e.noReply(150 * time.Millisecond)
+	eventuallyTrue(t, "all native sources settled", e.r.Idle)
+	assertNoRunningNative(t, e)
+	db, err := sql.Open("sqlite", "file:"+e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var cancelled int
+	if err := db.QueryRow(`SELECT count(*) FROM turns WHERE state='cancelled' AND detail LIKE 'pending background work interrupted:%lifetime%'`).Scan(&cancelled); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled != 2 {
+		t.Fatalf("durable settlement count=%d, want 2", cancelled)
+	}
+	pids, _ := os.ReadFile(filepath.Join(e.state, "pids"))
+	if len(strings.Fields(string(pids))) != 1 {
+		t.Fatal("worker replaced or work replayed")
+	}
+}
+
+func TestNativeTerminalOnlySettlesDurably(t *testing.T) {
+	e := continuationEnv(t, "telegram")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.opt.Harness = harness.WarmConfig{IdleTimeoutSeconds: 1}
+	e.start()
+	who := core.Principal{Platform: "fake", ID: "owner"}
+	conv := core.ConvKey{Interface: "telegram", Chat: "42"}
+	e.sendIn(who, conv, "BACKGROUND BG_TERMINAL_ONLY")
+	want(t, e.reply(), "turn=1")
+	eventuallyTrue(t, "terminal native task settles", e.r.Idle)
+	e.noReply(1200 * time.Millisecond)
+	db, err := sql.Open("sqlite", "file:"+e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM turns WHERE state='done' AND detail='native task completed'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("terminal settlement n=%d err=%v", n, err)
+	}
+}
+func TestNativeLossKeepsDifferentCallersSeparate(t *testing.T) {
+	e := continuationEnv(t, "telegram")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.opt.Harness = harness.WarmConfig{MaxLifetimeSeconds: 2}
+	e.start()
+	conv := core.ConvKey{Interface: "telegram", Chat: "42"}
+	for _, id := range []string{"owner", "employee"} {
+		e.sendIn(core.Principal{Platform: "fake", ID: id}, conv, "BACKGROUND_NEVER")
+		want(t, e.reply(), "turn=")
+	}
+	first := e.reply()
+	second := e.reply()
+	want(t, first, "Pending background work was interrupted")
+	want(t, second, "Pending background work was interrupted")
+	if first.ReplyTo == second.ReplyTo {
+		t.Fatal("different callers merged into same reply")
+	}
+	e.noReply(100 * time.Millisecond)
+	eventuallyTrue(t, "both callers settled", e.r.Idle)
+	assertNoRunningNative(t, e)
 }
