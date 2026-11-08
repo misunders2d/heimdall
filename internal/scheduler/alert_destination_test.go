@@ -266,3 +266,34 @@ func TestAlertDestinationStoreRecheck(t *testing.T) {
 		t.Fatal("empty destination admitted")
 	}
 }
+
+// A stale alias: the creator's Slack DM ingress was valid, then the alias
+// mapping is removed while the Telegram creator stays owner. The actual scan
+// path must refuse it with no checkpoint, receipt or result outbox row.
+func TestAlertDestinationStaleAliasScan(t *testing.T) {
+	r, id, self, _ := destRig(t)
+	slackDM := core.ConvKey{Interface: "slack", Chat: "DSELF", Thread: "1000.3"}
+	ingress(t, r, slackDM, self, true, core.OriginLive)
+	if got := r.s.senders(id); len(got) != 2 {
+		t.Fatal("alias not admitted before removal", got)
+	}
+	b, _ := json.Marshal(map[string]any{"principals": map[string]any{}})
+	if err := os.WriteFile(filepath.Join(r.s.access.Dir, "identities.json"), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.s.senders(id); len(got) != 1 || got[0] != boss.Key() {
+		t.Fatal("creator must remain the only sender", got)
+	}
+	e := r.scan(id, []store.Alert{{Key: "MEL-755", Revision: "delivered", Text: "Stale alias result (synthetic).", To: "slack:DSELF/1000.3"}})
+	cp, err := r.st.Checkpoint(id, boss.Key())
+	if err != nil || e.Run.State != store.RunFailed || cp.Version != 0 || len(cp.Receipts) != 0 {
+		t.Fatal("stale alias destination committed", e.Run, cp, err)
+	}
+	if outs := drain(r, core.PlatformSlack); len(outs) != 0 {
+		t.Fatal("slack result row queued", outs)
+	}
+	outs := drain(r, core.PlatformTelegram)
+	if len(outs) != 1 || outs[0].Conv != bossDM || strings.Contains(outs[0].Text, "(synthetic).") {
+		t.Fatal("want one fixed failure notice to the creator only", outs)
+	}
+}
