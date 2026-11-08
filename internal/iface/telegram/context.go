@@ -18,6 +18,7 @@ import (
 // media is what a message carries besides text.
 type media struct {
 	Photo     []tgFile  `json:"photo"`
+	Animation *tgFile   `json:"animation"` // a GIF; Message also sets Document, ExternalReplyInfo does not
 	Document  *tgFile   `json:"document"`
 	Voice     *tgFile   `json:"voice"`
 	Audio     *tgFile   `json:"audio"`
@@ -72,18 +73,20 @@ func oneLine(s string, n int) string {
 	return s
 }
 
-// tgFile covers PhotoSize, Document, Voice, Audio, Video and VideoNote.
+// tgFile covers PhotoSize, Animation, Document, Voice, Audio, Video and
+// VideoNote.
 type tgFile struct {
-	FileID       string `json:"file_id"`
-	FileUniqueID string `json:"file_unique_id"`
-	FileSize     int64  `json:"file_size"`
-	FileName     string `json:"file_name"`
-	MimeType     string `json:"mime_type"`
-	Title        string `json:"title"`
-	Duration     int    `json:"duration"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	Length       int    `json:"length"` // video note diameter
+	FileID       string  `json:"file_id"`
+	FileUniqueID string  `json:"file_unique_id"`
+	FileSize     int64   `json:"file_size"`
+	FileName     string  `json:"file_name"`
+	MimeType     string  `json:"mime_type"`
+	Title        string  `json:"title"`
+	Duration     int     `json:"duration"`
+	Width        int     `json:"width"`
+	Height       int     `json:"height"`
+	Length       int     `json:"length"`    // video note diameter
+	Thumbnail    *tgFile `json:"thumbnail"` // the sender's still preview (PhotoSize)
 }
 
 type contact struct {
@@ -113,6 +116,9 @@ type attachment struct {
 	Kind                 string
 	Duration             int
 	Width, Height        int
+	// Preview is a still image of a moving attachment (an animation's
+	// thumbnail), downloaded beside it for harnesses that take only images.
+	Preview *attachment
 }
 
 // detect is the hub's detectTelegramAttachment: the first attachment of m,
@@ -130,6 +136,21 @@ func detectMedia(m *media) *attachment {
 	case len(m.Photo) > 0:
 		p := m.Photo[len(m.Photo)-1] // the largest size
 		return &attachment{FileID: p.FileID, FileUniqueID: p.FileUniqueID, Size: p.FileSize, Label: "[Photo]", Name: "photo.jpg", MIME: "image/jpeg", Kind: "photo", Width: p.Width, Height: p.Height}
+	case m.Animation != nil:
+		// Before Document: Telegram sets Document beside it for older clients.
+		v := m.Animation
+		label := "[Animation (GIF): " + or(v.FileName, "unknown")
+		if v.Width > 0 && v.Height > 0 {
+			label += fmt.Sprintf(" | %dx%d", v.Width, v.Height)
+		}
+		if v.Duration > 0 {
+			label += fmt.Sprintf(" | %ds", v.Duration)
+		}
+		a := &attachment{FileID: v.FileID, FileUniqueID: v.FileUniqueID, Size: v.FileSize, Label: label + "]", Name: or(v.FileName, "animation.mp4"), MIME: or(v.MimeType, "video/mp4"), Kind: "animation", Duration: v.Duration, Width: v.Width, Height: v.Height}
+		if p := v.Thumbnail; p != nil && p.FileID != "" {
+			a.Preview = &attachment{FileID: p.FileID, FileUniqueID: p.FileUniqueID, Size: p.FileSize, Name: "animation-preview.jpg", MIME: "image/jpeg", Kind: "animation_preview", Width: p.Width, Height: p.Height}
+		}
+		return a
 	case m.Document != nil:
 		d := m.Document
 		return &attachment{FileID: d.FileID, FileUniqueID: d.FileUniqueID, Size: d.FileSize, Label: "[Document: " + or(d.FileName, "unknown") + "]", Name: or(d.FileName, "document.bin"), MIME: or(d.MimeType, "application/octet-stream"), Kind: "document"}

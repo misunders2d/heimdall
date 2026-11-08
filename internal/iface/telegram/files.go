@@ -45,20 +45,27 @@ func (t *Interface) attachments(ctx context.Context, m *message) []core.Attachme
 		if a == nil || a.FileID == "" {
 			continue
 		}
-		key := or(a.FileUniqueID, a.FileID)
-		if seen[key] {
-			continue
+		// An animation's still preview follows it: harnesses that take
+		// only images see that frame, labelled as a preview, not the motion.
+		for _, f := range []*attachment{a, a.Preview} {
+			if f == nil || f.FileID == "" {
+				continue
+			}
+			key := or(f.FileUniqueID, f.FileID)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			at := core.Attachment{Kind: f.Kind, Name: safeName(f.Name), MIME: f.MIME, Size: f.Size, Source: c.source}
+			stored, size, err := t.download(ctx, f)
+			if err != nil {
+				t.logf("message %d in chat %d: %s attachment not downloaded: %v", m.MessageID, m.Chat.ID, f.Kind, err)
+				at.Note = describe(f, err)
+			} else {
+				at.Stored, at.Size = stored, size
+			}
+			out = append(out, at)
 		}
-		seen[key] = true
-		at := core.Attachment{Kind: a.Kind, Name: safeName(a.Name), MIME: a.MIME, Size: a.Size, Source: c.source}
-		stored, size, err := t.download(ctx, a)
-		if err != nil {
-			t.logf("message %d in chat %d: %s attachment not downloaded: %v", m.MessageID, m.Chat.ID, a.Kind, err)
-			at.Note = describe(a, err)
-		} else {
-			at.Stored, at.Size = stored, size
-		}
-		out = append(out, at)
 	}
 	return out
 }
