@@ -117,3 +117,33 @@ func TestSlackAliasesAndBrokenSnapshots(t *testing.T) {
 		t.Fatal("file admin not ordinary employee")
 	}
 }
+
+func TestSamePersonUsesAccessAliasesOnly(t *testing.T) {
+	tgOwner := Principal{Platform: PlatformTelegram, ID: "1"}
+	slackSelf := SlackPrincipal("owner@example.test", "T", "")
+	slackOther := SlackPrincipal("other@example.test", "T", "")
+	if !(Access{}).SamePerson(tgOwner, tgOwner) || (Access{}).SamePerson(tgOwner, slackSelf) {
+		t.Fatal("without access files only equal keys match")
+	}
+	dir := t.TempDir()
+	for name, v := range map[string]any{"whitelist.json": accessList{}, "blacklist.json": accessList{}, "admins.json": accessList{}, "capabilities.json": map[string][]string{},
+		"identities.json": map[string]any{"principals": map[string]any{"owner@example.test": map[string]any{"aliases": []string{"tg_user_1"}}}}} {
+		b, _ := json.Marshal(v)
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := Access{Dir: dir}
+	if !a.SamePerson(tgOwner, slackSelf) || !a.SamePerson(slackSelf, tgOwner) {
+		t.Fatal("alias not matched")
+	}
+	if a.SamePerson(tgOwner, slackOther) || a.SamePerson(slackSelf, slackOther) || a.SamePerson(tgOwner, Principal{Platform: PlatformTelegram, ID: "2"}) {
+		t.Fatal("different person matched")
+	}
+	if err := os.Remove(filepath.Join(dir, "identities.json")); err != nil {
+		t.Fatal(err)
+	}
+	if a.SamePerson(tgOwner, slackSelf) {
+		t.Fatal("missing access snapshot must fail closed")
+	}
+}

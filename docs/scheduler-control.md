@@ -166,6 +166,19 @@ Pending, held and sending receipts cannot be acknowledged or retired. A new
 revision cannot hide an older failed receipt. Transport remains at-least-once;
 an unresolvable crash/ack gap can still duplicate a platform message.
 
+Supervised requests (2026-11-08): an alert may carry `"to"` (`tg:<chat>[/<topic>]`
+or `slack:<channel>[/<thread ts>]`) so a request's result returns to its original
+conversation. A destination is never authority. It is accepted only when the
+job's creator, or its own identity alias in the current access snapshot that is
+an owner now, sent live verified input in that exact **private** conversation
+and thread; the scheduler checks before the run ends and the store again in the
+commit transaction. Group, public, other-person, scheduled-only, malformed or
+unverifiable destinations fail the whole scan (no checkpoint, receipt or outbox
+row), with the usual fixed failure notice. Omitted `to` keeps the job target.
+Each receipt's `to` is read from its actual outbox row; key/revision dedupe is
+unchanged, so a repeat naming another chat neither re-sends nor re-routes. The
+task list and its stages live in the tracker (Linear); Heimdall keeps no task state.
+
 Optional `delivery_window` gates run starts and outbox attempts, including retries
 and each Slack text chunk. End time is exclusive. Closed windows defer pending
 rows to next opening, including weekends/DST; live chat replies can bypass deferred
