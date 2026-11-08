@@ -116,3 +116,53 @@ func TestSentScheduledResultsIsolationAndReceiptCursor(t *testing.T) {
 		})
 	}
 }
+
+func TestSentScheduledResultCrossPlatformSourceAccount(t *testing.T) {
+	// Incident-shaped provenance: Slack creator/account, Telegram target. This
+	// storage test supplies server authorization; router tests use Access aliases.
+	source := core.SlackPrincipal("owner@example.test", "Tsource", "")
+	recipient := core.Principal{Platform: core.PlatformTelegram, ID: "101"}
+	target := core.ConvKey{Interface: core.PlatformTelegram, Chat: "101"}
+	for _, kind := range []string{"trusted", "no authorization", "foreign owner", "missing binding", "stale team", "stale actor", "stale installation", "wrong target", "not private"} {
+		t.Run(kind, func(t *testing.T) {
+			s := open(t)
+			scheduledReceipt(t, s, "review", source, target, "sl_user_source", "sl_user_bot", source.Key(), OutSent, "Review delivered; historical data only.")
+			if kind != "missing binding" {
+				binding := core.Inbound{Conv: core.ConvKey{Interface: core.PlatformSlack, Chat: "Dsource"}, From: source, MsgID: "live", Origin: core.OriginLive, Private: true, OAuthActor: "sl_user_source", OAuthInstallation: "sl_user_bot"}
+				switch kind {
+				case "stale team":
+					binding.From.Team = "Tother"
+				case "stale actor":
+					binding.OAuthActor = "sl_user_other"
+				case "stale installation":
+					binding.OAuthInstallation = "sl_user_other_bot"
+				}
+				if _, _, err := s.AddInbound(binding); err != nil {
+					t.Fatal(err)
+				}
+			}
+			in := core.Inbound{Conv: target, From: recipient, Private: true, At: time.UnixMilli(2000)}
+			allow := func(p core.Principal) bool { return kind != "foreign owner" && p.Key() == source.Key() }
+			if kind == "no authorization" {
+				allow = nil
+			}
+			if kind == "wrong target" {
+				in.Conv.Chat = "other"
+			}
+			if kind == "not private" {
+				in.Private = false
+			}
+			got, _, err := s.SentScheduledResults(in, DeliveryCursor{At: 1000}, allow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "trusted" {
+				if len(got) != 1 {
+					t.Fatal("trusted source/target omitted", got)
+				}
+			} else if len(got) != 0 {
+				t.Fatal("cross-platform scope leaked", kind, got)
+			}
+		})
+	}
+}

@@ -21,21 +21,28 @@ type DeliveredResult struct {
 // SentScheduledResults reads only confirmed text deliveries to this exact target,
 // created by this principal and OAuth account. No job prompt or caller authority
 // is selected. The person input's receipt time fences concurrently arriving sends.
-func (s *Store) SentScheduledResults(in core.Inbound, after DeliveryCursor) ([]DeliveredResult, DeliveryCursor, error) {
-	rows, err := s.db.Query(`SELECT o.id,o.sent_at,o.text FROM outbound o
+func (s *Store) SentScheduledResults(in core.Inbound, after DeliveryCursor, owners ...func(core.Principal) bool) ([]DeliveredResult, DeliveryCursor, error) {
+	rows, err := s.db.Query(`SELECT o.id,o.sent_at,o.text,i.platform,i.user_id,i.user_email,i.user_team,i.user_key_id,
+ COALESCE(json_extract(nullif(i.extra,''),'$.oauth_actor'),''),
+ COALESCE(json_extract(nullif(i.extra,''),'$.oauth_installation'),''),
+ COALESCE(b.user_team,''),COALESCE(b.user_key_id,''),
+ COALESCE(json_extract(nullif(b.extra,''),'$.oauth_actor'),''),
+ COALESCE(json_extract(nullif(b.extra,''),'$.oauth_installation'),''),b.id IS NOT NULL
+ FROM outbound o
  JOIN turns t ON t.id=json_extract(nullif(o.extra,''),'$.turn_id')
  JOIN inbound i ON i.turn_id=t.id
  JOIN job_runs r ON r.inbound_id=i.id
  JOIN jobs j ON j.id=r.job_id
+ LEFT JOIN inbound b ON b.id=(SELECT MAX(v.id) FROM inbound v
+ WHERE v.platform=i.platform AND v.user_id=i.user_id AND v.iface=v.platform
+ AND v.private=1 AND v.origin='live' AND coalesce(json_extract(nullif(v.extra,''),'$.mcp_control'),0)=0
+ AND json_extract(nullif(v.extra,''),'$.run') IS NULL)
  WHERE o.iface=? AND o.chat=? AND o.thread=? AND o.state=?
- AND t.principal=? AND t.role=? AND t.state=? AND j.creator=t.principal
- AND i.user_team=? AND i.user_key_id=?
+ AND t.role=? AND t.state=? AND j.creator=t.principal
  AND i.platform || ':' || i.user_id=t.principal AND i.origin=?
- AND COALESCE(json_extract(nullif(i.extra,''),'$.oauth_actor'),'')=?
- AND COALESCE(json_extract(nullif(i.extra,''),'$.oauth_installation'),'')=?
  AND o.sent_at>=? AND o.sent_at<=? AND length(CAST(o.text AS BLOB)) BETWEEN 1 AND 4000
  AND json_extract(nullif(o.extra,''),'$.file') IS NULL
- ORDER BY o.sent_at DESC,o.id DESC LIMIT 16`, in.Conv.Interface, in.Conv.Chat, in.Conv.Thread, OutSent, in.From.Key(), core.RoleOwner, TurnDone, in.From.Team, in.From.KeyID, core.OriginScheduled, in.OAuthActor, in.OAuthInstallation, after.At, in.At.UnixMilli())
+ ORDER BY o.sent_at DESC,o.id DESC LIMIT 16`, in.Conv.Interface, in.Conv.Chat, in.Conv.Thread, OutSent, core.RoleOwner, TurnDone, core.OriginScheduled, after.At, in.At.UnixMilli())
 	if err != nil {
 		return nil, after, err
 	}
@@ -48,9 +55,27 @@ func (s *Store) SentScheduledResults(in core.Inbound, after DeliveryCursor) ([]D
 	for rows.Next() {
 		var d DeliveredResult
 		var at int64
-		if err := rows.Scan(&d.ID, &at, &d.Text); err != nil {
+		var source core.Principal
+		var actor, installation, team, key, bActor, bInstallation string
+		var bound bool
+		if err := rows.Scan(&d.ID, &at, &d.Text, &source.Platform, &source.ID, &source.Email, &source.Team, &source.KeyID, &actor, &installation, &team, &key, &bActor, &bInstallation, &bound); err != nil {
 			return nil, after, err
 		}
+		exact := source.Key() == in.From.Key()
+		if exact {
+			if source.Team != in.From.Team || source.KeyID != in.From.KeyID || actor != in.OAuthActor || installation != in.OAuthInstallation {
+				continue
+			}
+		} else {
+			// Cross-platform equivalence is server-owned policy, never a
+			// claim in result text. Source account scope is checked on its
+			// original platform, never compared with another platform's IDs.
+			if !in.Private || len(owners) != 1 || owners[0] == nil || !owners[0](source) ||
+				source.Platform == in.From.Platform || !bound || source.Team != team || source.KeyID != key || actor != bActor || installation != bInstallation {
+				continue
+			}
+		}
+
 		if at == after.At && after.IDs[d.ID] {
 			continue
 		}
