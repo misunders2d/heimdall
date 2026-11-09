@@ -214,6 +214,7 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 		return c.scheduledCaller(ctx, who)
 	}
 	p, k := who.Principal, who.Conv
+	actor, installation := who.OAuthActor, who.OAuthInstallation
 	// An external origin's conversation is the mapped principal's registered
 	// private ingress (ControlBinding at resolution), not an active turn.
 	if who.External == "" {
@@ -230,12 +231,17 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 			return Caller{}, errors.New("live owner identity verification failed")
 		}
 		p = v.Principal
+		if who.External != "" {
+			// An external origin has no stored message: its native OAuth
+			// actor is the live verification's, never a launcher's.
+			actor, installation = v.OAuthActor, v.OAuthInstallation
+		}
 	}
 	r, _, ok := c.s.access.Decide(p, k)
 	if !ok || r != core.RoleOwner {
 		return Caller{}, errors.New("bound caller is not a current owner")
 	}
-	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, External: who.External}, nil
+	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: actor, OAuthInstallation: installation, External: who.External}, nil
 }
 
 // scheduledCaller binds a router-started scheduled run. The router already
@@ -362,9 +368,6 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		return fail(errors.New("request origin expired during verification"))
 	}
 	if strings.HasPrefix(req.Action, "task_") {
-		if who.External != "" {
-			return fail(errors.New("durable tasks are admitted only from a live Heimdall chat turn; an external origin manages scheduled jobs"))
-		}
 		return c.task(uid, req, who, valid)
 	}
 	if req.Title != "" {
@@ -568,6 +571,9 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 	}
 	if req.RequestID == "" || bad(req.RequestID, 128) {
 		return fail("mutation requires a stable request_id (1-128 bytes); reuse only for the same request")
+	}
+	if who.External != "" && who.Principal.Platform == core.PlatformSlack && (who.OAuthActor == "" || who.OAuthInstallation == "") {
+		return fail("live Slack verification gave no native OAuth actor; the task was not admitted")
 	}
 	raw, _ := json.Marshal(struct {
 		Request ControlRequest

@@ -71,7 +71,10 @@ the `heimdall-live` unit.
   `author: human` runs of people explicitly mapped to an existing principal
   that is a current owner count; environment variables are never identity;
   no AgentNet code or import. Create/edit apply at once; removal and
-  `rerun_on_timeout` keep human confirmation; durable tasks are refused.
+  `rerun_on_timeout` keep human confirmation. A verified external human
+  owner may add, list and show durable tasks (a Slack owner only with the
+  live-verified OAuth actor); employee, agent, scheduled and unknown
+  origins stay refused.
 - **Roles.**
   - *Owner (root)*: `ADMIN_USER_IDS` authority only. File admins are admitted employees.
     Config owners are only an explicit non-hub fallback.

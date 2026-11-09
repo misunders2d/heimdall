@@ -66,7 +66,19 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
   only a real human reply there confirms (unchanged removal rule).
 - Reads, `run`, `pause`, `resume`, `stop`, `acknowledge`: as for a live owner
   turn.
-- `task_*`: refused (durable tasks stay with live Heimdall chat turns).
+- `task_add`, `task_list`, `task_show`: as for a live owner turn. The task's
+  creator, route and privacy are the mapped principal's registered private
+  conversation. A Slack owner's native OAuth actor and installation come only
+  from the live Slack verification of that same principal and team; without
+  them the task is refused. A Telegram owner's task carries no actor, as live
+  Telegram turns do. No chat notice is posted; the control reply is the
+  stored receipt. Employee, agent, scheduled and unknown origins stay
+  refused.
+
+  Producer gap (current AgentNet `--run-origin`): only a new question or task
+  from the person's verified human device is `author: human`; that person's
+  later replies in the same conversation are `agent` and are refused here.
+  Heimdall does not relax the author check to compensate.
 - The job's creator is the mapped principal; it is created in, and `here`
   delivers to, that principal's private Heimdall conversation, where the
   create/edit notice is also posted as the audit trail. A definition may

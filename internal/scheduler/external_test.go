@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/durable"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -162,10 +163,105 @@ func TestExternalOwnerRunCreatesScheduleAtOnce(t *testing.T) {
 	if r.job(jobs[0].ID).State != store.JobActive {
 		t.Fatal("removal applied without human confirmation")
 	}
-	task := ControlRequest{Action: "task_add", ID: "MEL-1", Title: "t", RequestID: "task-1"}
-	r.s.Tasks = func(Caller, string, string, string) (string, bool) { return "admitted", true }
-	if got := c.executePeer(context.Background(), &syscall.Ucred{Uid: 1234}, task, who, valid); !strings.Contains(got.Error, "live Heimdall chat turn") {
-		t.Fatal("external origin admitted a durable task", got)
+}
+
+// A verified external human owner admits a durable task into a real
+// durable.db: creator, private route and OAuth actor are the bound
+// owner's (Telegram: none, as for live Telegram turns; Slack: only the live
+// verification's), request_id and issue are deduplicated, and a Slack
+// verification without an actor admits nothing.
+func TestExternalOwnerTaskAdmission(t *testing.T) {
+	r, c, f, run := externalRig(t)
+	ctx := context.Background()
+	a := &tasksAssistant{}
+	work, err := durable.Open(durable.Options{Path: filepath.Join(t.TempDir(), "durable.db"), Outbox: r.st, Assistant: a, Silence: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := work.Launch(); err != nil {
+		t.Fatal(err)
+	}
+	defer work.Close()
+	r.s.Tasks = func(who Caller, action, issue, title string) (string, bool) {
+		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title)
+	}
+	op := &syscall.Ucred{Uid: 1234}
+	bind := func() (Caller, func() bool) {
+		t.Helper()
+		who, valid, err := c.resolvePeer(run.Process.Pid, alwaysAlive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return who, valid
+	}
+	wake := func(issue string) durable.WorkRequest {
+		t.Helper()
+		for end := time.Now().Add(20 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+			a.mu.Lock()
+			for _, q := range a.reqs {
+				if q.Issue == issue {
+					a.mu.Unlock()
+					return q
+				}
+			}
+			a.mu.Unlock()
+		}
+		t.Fatalf("no wake for %s", issue)
+		return durable.WorkRequest{}
+	}
+
+	who, valid := bind()
+	add := ControlRequest{Action: "task_add", ID: "MEL-300", Title: "Confirm the supplier PO", RequestID: "ext-task-1"}
+	got := c.executePeer(ctx, op, add, who, valid)
+	if got.Error != "" || !got.Changed || !strings.HasPrefix(got.Reply, "Tracking MEL-300") {
+		t.Fatal(got)
+	}
+	if again := c.executePeer(ctx, op, add, who, valid); again != got {
+		t.Fatal("request_id replay changed result", again)
+	}
+	dup := add
+	dup.RequestID = "ext-task-2"
+	if got := c.executePeer(ctx, op, dup, who, valid); got.Changed || !strings.Contains(got.Reply, "already tracked") {
+		t.Fatal("same issue admitted twice", got)
+	}
+	if q := wake("MEL-300"); q.Owner.Key() != boss.Key() || q.Route != bossDM || !q.Private || q.OAuthActor != "" || q.OAuthInstallation != "" {
+		t.Fatalf("wake not bound to the external owner: %+v", q)
+	}
+	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_list"}, who, valid); strings.Count(got.Reply, "MEL-300") != 1 {
+		t.Fatal("list", got)
+	}
+	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_show", ID: "MEL-300"}, who, valid); got.Error != "" || !strings.Contains(got.Reply, "MEL-300") {
+		t.Fatal("show", got)
+	}
+	if outs := r.sent(); len(outs) != 0 {
+		t.Fatal("task admission posted chat output", outs)
+	}
+
+	slack := core.SlackPrincipal("owner@example.test", "Ttest", "")
+	slackDM := core.ConvKey{Interface: core.PlatformSlack, Chat: "D1", Thread: "1000.1"}
+	r.s.access.Owners[slack.Key()] = true
+	if _, _, err := r.st.AddInbound(core.Inbound{Conv: slackDM, From: slack, Origin: core.OriginLive, Private: true, MsgID: "slack-binding", Text: "synthetic"}); err != nil {
+		t.Fatal(err)
+	}
+	r.s.External[0].People["person:slack"] = ExternalPerson{Principal: slack.Key()}
+	f.set(vouch(run, "person:slack", "human"))
+	verified := Verified{Principal: slack}
+	r.s.Reverify = func(context.Context, core.Principal) (Verified, bool, error) { return verified, true, nil }
+	who, valid = bind()
+	noActor := ControlRequest{Action: "task_add", ID: "MEL-301", Title: "Reply to the vendor", RequestID: "slack-task-1"}
+	if got := c.executePeer(ctx, op, noActor, who, valid); !strings.Contains(got.Error, "no native OAuth actor") {
+		t.Fatal("Slack task admitted without a verified actor", got)
+	}
+	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_show", ID: "MEL-301"}, who, valid); !strings.Contains(got.Reply, "not tracked") {
+		t.Fatal("refused task recorded", got)
+	}
+	verified.OAuthActor, verified.OAuthInstallation = "sl_user_U1", "sl_user_B1"
+	noActor.RequestID = "slack-task-2"
+	if got := c.executePeer(ctx, op, noActor, who, valid); got.Error != "" || !got.Changed {
+		t.Fatal(got)
+	}
+	if q := wake("MEL-301"); q.Owner.Key() != slack.Key() || q.Route != slackDM || !q.Private || q.OAuthActor != "sl_user_U1" || q.OAuthInstallation != "sl_user_B1" {
+		t.Fatalf("Slack wake not bound to the live-verified actor: %+v", q)
 	}
 }
 
@@ -318,6 +414,10 @@ func TestExternalOriginEndToEndOverControlSocket(t *testing.T) {
 	defer os.RemoveAll(dir)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// Configured once before listening, as main does; each run switches
+	// the launcher's answer under its lock.
+	f := newFakeLauncher(t, func(externalQuery) externalAnswer { return externalAnswer{V: 1, Error: "no run yet"} })
+	r.s.External = []ExternalOrigin{f.origin()}
 	l, err := r.s.ListenControl(ctx, boss.Key(), uint32(os.Getuid()), filepath.Join(dir, "ctl"))
 	if err != nil {
 		t.Fatal(err)
@@ -329,11 +429,10 @@ func TestExternalOriginEndToEndOverControlSocket(t *testing.T) {
 		var out strings.Builder
 		run.Stdout = &out
 		started := make(chan struct{})
-		f := newFakeLauncher(t, func(q externalQuery) externalAnswer {
+		f.set(func(q externalQuery) externalAnswer {
 			<-started
 			return vouch(run, "person:sergey", author)(q)
 		})
-		r.s.External = []ExternalOrigin{f.origin()}
 		if err := run.Start(); err != nil {
 			t.Fatal(err)
 		}
