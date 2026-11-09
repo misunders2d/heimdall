@@ -1,4 +1,6 @@
 // Protocol decoding compared with AgentNet cabe5c3c81893a85f9e236c29b1cde37b3440035.
+// thread/resume excludeTurns checked against the installed codex-cli 0.167.0
+// `codex app-server generate-json-schema` (2026-11-09).
 // Progress telemetry compared with AgentNet 3b14cf7d56c78de62c311587409cc6db925e1af5.
 package harness
 
@@ -254,7 +256,11 @@ func (b *codexBridge) event(raw []byte) {
 			b.send(map[string]any{"method": "initialized"})
 			method, params := "thread/start", map[string]any{"cwd": b.cwd, "ephemeral": false}
 			if b.resume != "" {
-				method, params = "thread/resume", map[string]any{"cwd": b.cwd, "threadId": b.resume}
+				// Only thread.id is read: never hydrate the stored history
+				// (codex 0.167.0 ThreadResumeParams.excludeTurns). A long
+				// thread's turns exceed one protocol line and kill the run
+				// before its session starts.
+				method, params = "thread/resume", map[string]any{"cwd": b.cwd, "threadId": b.resume, "excludeTurns": true}
 			}
 			// Select native automatic review without changing the native sandbox.
 			if b.instructions != "" {

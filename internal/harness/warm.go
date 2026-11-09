@@ -144,6 +144,9 @@ func (o *workerOutput) Write(p []byte) (int, error) {
 			i = len(rest)
 		}
 		if len(o.w.buf)+i > lineMax {
+			if b, ok := o.w.current.bridge.(*codexBridge); ok {
+				b.fail("Codex sent a protocol line over the size bound") // not "exited before starting"
+			}
 			o.w.lossLocked("native protocol line exceeded the size bound")
 			o.w.current.Stop("oversized native output")
 			o.w.buf = nil
