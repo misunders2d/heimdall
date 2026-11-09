@@ -194,8 +194,8 @@ func run(args []string) error {
 			// The scheduler control's task actions: only a bound live owner
 			// person turn or a verified external human owner reaches here
 			// (scheduled runs are refused there).
-			jobs.Tasks = func(who scheduler.Caller, action, issue, title string) (string, bool) {
-				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered}, action, issue, title)
+			jobs.Tasks = func(who scheduler.Caller, action, issue, title, requestID string) (string, bool) {
+				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered}, action, issue, title, requestID)
 			}
 			// Owner turns admit accepted work themselves only when the
 			// control is configured and wakes work it (no owner babysitting).
@@ -238,7 +238,7 @@ func run(args []string) error {
 				if err != nil { // T3 registration stays off; live turns keep control
 					logger.Printf("scheduler control: trusted T3 launcher unavailable: %v", err)
 				} else {
-					jobs.TrustedT3 = &scheduler.TrustedLauncher{Path: t.Launcher, UID: uint32(luid)}
+					jobs.TrustedT3 = &scheduler.TrustedLauncher{Path: t.Launcher, UID: uint32(luid), Manage: t.Manage}
 				}
 			}
 			return jobs.ListenControl(ctx, cfg.Scheduler.Control.Owner, uint32(uid), filepath.Join(cfg.DataDir, "scheduler-control"), cfg.Scheduler.Control.Source)

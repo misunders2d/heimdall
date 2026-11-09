@@ -47,11 +47,11 @@ func TestControlTaskAdmission(t *testing.T) {
 	}
 	defer work.Close()
 	adds := 0
-	r.s.Tasks = func(who Caller, action, issue, title string) (string, bool) {
+	r.s.Tasks = func(who Caller, action, issue, title, requestID string) (string, bool) {
 		if action == "add" {
 			adds++
 		}
-		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title)
+		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title, requestID)
 	}
 	live := Caller{Principal: boss, Role: core.RoleOwner, Conv: bossDM, Private: true, OAuthActor: "tg_1"}
 	add := ControlRequest{Action: "task_add", ID: "MEL-200", Title: "Confirm the supplier PO", RequestID: "task-1"}

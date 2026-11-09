@@ -60,15 +60,28 @@ Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into rep
 
 // Task is the durable-task surface of the scheduler control for a bound
 // live owner turn: "add" (a plain title only: no worker, resource, gate or
-// next step can come from a tool call), "list" and "show". It is the same
-// path as !work, with the same live-owner rule; admitted reports a new
-// commitment.
-func (r *Runtime) Task(c Caller, action, issue, title string) (reply string, admitted bool) {
+// next step can come from a tool call), "list", "show", and the creator's
+// own "pause", "resume" and "close" (no note). It is the same path as !work,
+// with the same live-owner and creator rules; changed reports a new
+// commitment or an applied pause, resume or close. requestID is the
+// control's stable request id: a close is keyed by it as a chat close is by
+// its message, so a retried request is one event.
+func (r *Runtime) Task(c Caller, action, issue, title, requestID string) (reply string, changed bool) {
 	switch action {
 	case "list":
 		return r.Command(c, "list"), false
 	case "show":
 		return r.Command(c, "show "+issue), false
+	case "pause", "resume", "close":
+		if strings.ContainsAny(issue, " \t\r\n") || requestID == "" {
+			return "Unsupported task action.", false
+		}
+		if action == "close" {
+			c.MsgID = "control:" + requestID
+		}
+		reply = r.Command(c, action+" "+issue)
+		up := strings.ToUpper(issue)
+		return reply, reply == "Sent close to "+up+"." || strings.HasPrefix(reply, up+" paused by owner.") || reply == up+" resumed."
 	case "add":
 		f := strings.Fields(title)
 		if len(f) == 0 || strings.Contains(f[0], "=") || strings.Contains(title, "| next:") || strings.ContainsAny(issue, " \t\r\n") {

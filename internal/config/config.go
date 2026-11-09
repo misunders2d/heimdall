@@ -95,7 +95,8 @@ type SchedulerControl struct {
 	// (docs/external-origin.md). Tried only when no Heimdall turn owns the peer.
 	External []ExternalOrigin `json:"external,omitempty"`
 	// TrustedT3: the owner-trusted T3 launcher; its descendants may only
-	// register durable tasks (task_add/list/show) for Owner. Absent = off.
+	// register durable tasks (task_add/list/show) for Owner and, with
+	// Manage, manage Owner's existing jobs and tasks. Absent = off.
 	TrustedT3 *TrustedLauncher `json:"trusted_t3,omitempty"`
 }
 
@@ -104,6 +105,10 @@ type SchedulerControl struct {
 type TrustedLauncher struct {
 	Launcher string `json:"launcher"`
 	User     string `json:"user"`
+	// Manage (owner opt-in, default off): also list/show/history/run/pause/
+	// resume/stop Owner's existing jobs and task_pause/task_resume/task_close
+	// Owner's tasks. Never create, edit, remove, confirm or reroute.
+	Manage bool `json:"manage,omitempty"`
 }
 
 // ExternalOrigin is one trusted local launcher and the people it may vouch

@@ -374,8 +374,8 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	if strings.HasPrefix(req.Action, "task_") {
 		return c.task(uid, req, who, valid)
 	}
-	if who.Registered != "" {
-		return fail(errors.New(who.Registered + " may only task_add, task_list and task_show"))
+	if who.Registered != "" && !c.manages(who, req.Action) {
+		return fail(errors.New(who.Registered + " may only task_add, task_list and task_show" + c.managed()))
 	}
 	if req.Title != "" {
 		return fail(errors.New("title is only valid for task_add"))
@@ -411,7 +411,7 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		return fail(errors.New("receipt fields require acknowledge"))
 	}
 	if req.Action == "discover" {
-		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
+		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show, task_pause, task_resume, task_close for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there. Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
 	}
 	var job store.Job
 	if req.ID != "" {
@@ -537,13 +537,34 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	return result
 }
 
-// CallControl is shared by the CLI and stdio adapter. It never opens the store.
-// task admits or reads durable tasks for a bound live owner turn only:
-// add/list/show, nothing else (no verdicts, retries, pauses or worker).
-// The creator, conversation, privacy and OAuth actor are the bound
-// caller's; task_add needs a stable request_id and is answered once per
-// request (the existing control response record); a changed request under
-// the same id is refused.
+// manages: a registration origin (trusted T3) manages only with the owner's
+// Manage opt-in, and then only the bound creator's existing jobs (exact
+// creator via readable) and tasks (creator via durable controls): never
+// create, edit, remove, checkpoint, acknowledge or confirm.
+func (c *Control) manages(who Caller, action string) bool {
+	if who.Registered != trustedT3 || c.s.TrustedT3 == nil || !c.s.TrustedT3.Manage {
+		return false
+	}
+	switch action {
+	case "list", "show", "history", "run", "pause", "resume", "stop", "task_pause", "task_resume", "task_close":
+		return true
+	}
+	return false
+}
+
+func (c *Control) managed() string {
+	if c.s.TrustedT3 != nil && c.s.TrustedT3.Manage {
+		return "; with manage: list, show, history, run, pause, resume, stop of existing jobs and task_pause, task_resume, task_close"
+	}
+	return ""
+}
+
+// task admits, reads or changes durable tasks for a bound live owner turn
+// only: add/list/show, and the creator's own pause/resume/close; nothing
+// else (no verdicts, retries, notes or worker). The creator, conversation,
+// privacy and OAuth actor are the bound caller's; a mutation needs a stable
+// request_id and is answered once per request (the existing control
+// response record); a changed request under the same id is refused.
 func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func() bool) ControlResult {
 	fail := func(msg string) ControlResult { return ControlResult{Error: msg} }
 	if c.s.Tasks == nil {
@@ -561,26 +582,33 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 		if req.ID != "" || req.Title != "" || req.RequestID != "" {
 			return fail("task_list takes no arguments")
 		}
-		reply, _ := c.s.Tasks(who, "list", "", "")
+		reply, _ := c.s.Tasks(who, "list", "", "", "")
 		return ControlResult{Reply: reply}
 	case "task_show":
 		if req.ID == "" || bad(req.ID, 64) || strings.ContainsAny(req.ID, " \t") || req.Title != "" || req.RequestID != "" {
 			return fail("task_show takes only an issue id")
 		}
-		reply, _ := c.s.Tasks(who, "show", req.ID, "")
+		reply, _ := c.s.Tasks(who, "show", req.ID, "", "")
 		return ControlResult{Reply: reply}
 	case "task_add":
+		if req.ID == "" || bad(req.ID, 64) || strings.ContainsAny(req.ID, " \t") || strings.TrimSpace(req.Title) == "" || bad(req.Title, 500) {
+			return fail("task_add needs an issue id and a one-line title (up to 500 bytes)")
+		}
+	case "task_pause", "task_resume", "task_close":
+		if who.Registered != "" && !c.manages(who, req.Action) {
+			return fail(who.Registered + " may only task_add, task_list and task_show")
+		}
+		if req.ID == "" || bad(req.ID, 64) || strings.ContainsAny(req.ID, " \t") || req.Title != "" {
+			return fail(req.Action + " takes only an issue id and request_id")
+		}
 	default:
-		return fail("unsupported task action (task_add, task_list, task_show only)")
-	}
-	if req.ID == "" || bad(req.ID, 64) || strings.ContainsAny(req.ID, " \t") || strings.TrimSpace(req.Title) == "" || bad(req.Title, 500) {
-		return fail("task_add needs an issue id and a one-line title (up to 500 bytes)")
+		return fail("unsupported task action (task_add, task_list, task_show, task_pause, task_resume, task_close)")
 	}
 	if req.RequestID == "" || bad(req.RequestID, 128) {
 		return fail("mutation requires a stable request_id (1-128 bytes); reuse only for the same request")
 	}
 	if who.External != "" && who.Principal.Platform == core.PlatformSlack && (who.OAuthActor == "" || who.OAuthInstallation == "") {
-		return fail("live Slack verification gave no native OAuth actor; the task was not admitted")
+		return fail("live Slack verification gave no native OAuth actor; the task was not admitted or changed")
 	}
 	raw, _ := json.Marshal(struct {
 		Request ControlRequest
@@ -596,20 +624,23 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 		return result
 	}
 	if len(valid) > 0 && !valid[0]() {
-		return fail("request origin expired before admission")
+		return fail("request origin expired before the task change")
 	}
 	// Admission is idempotent by issue: a crash before the record below
-	// leaves a retry of the same request answering "already tracked".
-	reply, admitted := c.s.Tasks(who, "add", req.ID, req.Title)
-	result := ControlResult{Reply: reply, Changed: admitted}
+	// leaves a retry of the same request answering "already tracked". A
+	// close is keyed by the request_id (one event per request); pause and
+	// resume are idempotent states.
+	reply, changed := c.s.Tasks(who, strings.TrimPrefix(req.Action, "task_"), req.ID, req.Title, req.RequestID)
+	result := ControlResult{Reply: reply, Changed: changed}
 	response, _ := json.Marshal(result)
 	if err := c.s.st.ControlCommit(who.Principal.Key(), req.RequestID, digest, req.Action, req.ID, string(response), uid, nil, nil); err != nil {
 		return fail(err.Error())
 	}
-	c.s.log.Printf("scheduler control: operator uid %d, action %s, changed %t", uid, req.Action, admitted)
+	c.s.log.Printf("scheduler control: operator uid %d, action %s, changed %t", uid, req.Action, changed)
 	return result
 }
 
+// CallControl is shared by the CLI and stdio adapter. It never opens the store.
 func CallControl(ctx context.Context, socket string, req ControlRequest) (ControlResult, error) {
 	var out ControlResult
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)

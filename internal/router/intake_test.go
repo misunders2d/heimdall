@@ -47,8 +47,8 @@ func intakeStart(t *testing.T, e *env, durablePath, ctlDir string) (rt *durable.
 	}
 	e.st, e.f = st, newFakeIface()
 	jobs := scheduler.New(*e.sched, st, e.opt.Access, e.opt.Log)
-	jobs.Tasks = func(who scheduler.Caller, action, issue, title string) (string, bool) {
-		return rt.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title)
+	jobs.Tasks = func(who scheduler.Caller, action, issue, title, requestID string) (string, bool) {
+		return rt.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title, requestID)
 	}
 	jobs.TaskIntake = true
 	e.opt.Jobs, e.opt.Work = jobs, rt
@@ -135,7 +135,7 @@ func TestOwnerRequestAdmitsDurableTaskWithoutWork(t *testing.T) {
 		t.Fatalf("durable record %+v %v", views, err)
 	}
 	ownerView := durable.Caller{Principal: tgBoss, Role: core.RoleOwner, Conv: ownerDM, Live: true, Private: true}
-	if list, _ := rt.Task(ownerView, "list", "", ""); !strings.Contains(list, "MEL-300") {
+	if list, _ := rt.Task(ownerView, "list", "", "", ""); !strings.Contains(list, "MEL-300") {
 		t.Fatalf("not visible to its creator: %q", list)
 	}
 	wakes := func() (n int) {

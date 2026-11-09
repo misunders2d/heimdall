@@ -66,7 +66,9 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
   only a real human reply there confirms (unchanged removal rule).
 - Reads, `run`, `pause`, `resume`, `stop`, `acknowledge`: as for a live owner
   turn.
-- `task_add`, `task_list`, `task_show`: as for a live owner turn. The task's
+- `task_add`, `task_list`, `task_show`, and the creator's own `task_pause`,
+  `task_resume`, `task_close` (id and `request_id` only; a close is one event
+  per `request_id`): as for a live owner turn. The task's
   creator, route and privacy are the mapped principal's registered private
   conversation. A Slack owner's native OAuth actor and installation come only
   from the live Slack verification of that same principal and team; without
@@ -167,6 +169,14 @@ The process must run as `user`, and the ancestry must be unchanged at commit.
 The owner trusts T3 as a registration source; this is not a human
 attestation. Wakes say "Registered through trusted T3". A Heimdall process
 tree, a stale turn or a launcher that refused never falls through to this.
+
+`"manage":true` in `trusted_t3` (owner opt-in, default off) also lets that
+same bound owner `list`, `show`, `history`, `run`, `pause`, `resume` and
+`stop` their own existing jobs (exact creator) and `task_pause`,
+`task_resume`, `task_close` their own tasks, with the same binding, lineage
+recheck and `request_id` record. It never creates, edits, removes,
+checkpoints, acknowledges, confirms or reroutes, and is still a trusted
+agent source, not human attestation.
 
 ## Threats
 

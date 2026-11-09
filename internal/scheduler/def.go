@@ -93,7 +93,8 @@ type Caller struct {
 	External string
 	// Registered: a task-only registration origin ("trusted T3"): the peer
 	// descends from the configured trusted T3 launcher. It may only
-	// task_add/list/show; set only by the control resolver.
+	// task_add/list/show and, with TrustedLauncher.Manage, manage existing
+	// jobs and tasks of its creator; set only by the control resolver.
 	Registered string
 }
 

@@ -16,12 +16,16 @@ import (
 // TrustedLauncher is the owner-trusted T3 launcher (owner, 2026-11-09:
 // "just make T3 auto accepted"). A control peer that descends from the
 // running process of exactly this executable may register durable tasks
-// for the deployment owner, and nothing else. It is a registration source
-// the owner trusts, not an attestation that a human typed the request.
+// for the deployment owner and, only with Manage (opt-in), manage that
+// owner's existing jobs (list/show/history/run/pause/resume/stop) and tasks
+// (pause/resume/close); never create, edit, remove, confirm or reroute. It
+// is a source the owner trusts, not an attestation that a human typed the
+// request.
 type TrustedLauncher struct {
-	Path string // configured launcher path (a stable symlink is fine); resolved per request
-	UID  uint32 // the OS user the launcher process runs as
-	root string // tests only: where path protection checks start ("/" when empty)
+	Path   string // configured launcher path (a stable symlink is fine); resolved per request
+	UID    uint32 // the OS user the launcher process runs as
+	Manage bool   // owner opt-in: existing-job and task management as above
+	root   string // tests only: where path protection checks start ("/" when empty)
 }
 
 const trustedT3 = "trusted T3"

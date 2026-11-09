@@ -62,13 +62,15 @@ type Scheduler struct {
 	// (docs/external-origin.md); tried only when no Heimdall turn owns the peer.
 	External []ExternalOrigin
 	// TrustedT3: the owner-trusted T3 launcher whose descendants may
-	// register durable tasks only (task_add/list/show) for the deployment
-	// owner; tried last, only when no Heimdall turn or launcher owns the peer.
+	// register durable tasks (task_add/list/show) for the deployment owner
+	// and, with Manage, manage that owner's existing jobs and tasks; tried
+	// last, only when no Heimdall turn or launcher owns the peer.
 	TrustedT3 *TrustedLauncher
-	// Tasks admits (action "add") or reads ("list", "show") durable tasks
-	// for a bound live owner caller; nil: durable tasks are off. admitted
-	// reports a new commitment.
-	Tasks func(who Caller, action, issue, title string) (reply string, admitted bool)
+	// Tasks admits (action "add"), reads ("list", "show") or, for its
+	// creator, pauses, resumes or closes durable tasks for a bound live owner
+	// caller; nil: durable tasks are off. changed reports a new commitment or
+	// an applied change; requestID is the control's stable request id.
+	Tasks func(who Caller, action, issue, title, requestID string) (reply string, changed bool)
 	// TaskIntake: Tasks is reachable through the control and admitted tasks
 	// are worked by assistant wakes, so a live owner turn is told to admit
 	// accepted follow-through work itself (TaskNote).

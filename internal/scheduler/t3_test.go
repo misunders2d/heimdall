@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -158,8 +159,8 @@ func TestTrustedT3TaskAdmission(t *testing.T) {
 		if err := work.Launch(); err != nil {
 			t.Fatal(err)
 		}
-		r.s.Tasks = func(who Caller, action, issue, title string) (string, bool) {
-			return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered}, action, issue, title)
+		r.s.Tasks = func(who Caller, action, issue, title, requestID string) (string, bool) {
+			return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered}, action, issue, title, requestID)
 		}
 		return work
 	}
@@ -420,4 +421,205 @@ func TestTrustedT3PathProtection(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// Management (owner opt-in "manage"): off, trusted T3 stays task-only; on,
+// the same bound deployment owner lists, reads, runs, pauses, resumes and
+// stops only their own existing jobs and pauses, resumes and closes only
+// their own tasks, with request_id replay; never create, edit, remove,
+// checkpoint, acknowledge or confirm.
+func TestTrustedT3Management(t *testing.T) {
+	r, c, f, _ := t3Rig(t)
+	ctx := context.Background()
+	work, err := durable.Open(durable.Options{Path: filepath.Join(t.TempDir(), "durable.db"), Outbox: r.st, Assistant: &waitAssistant{wait: time.Hour}, Silence: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := work.Launch(); err != nil {
+		t.Fatal(err)
+	}
+	defer work.Close()
+	r.s.Tasks = func(who Caller, action, issue, title, requestID string) (string, bool) {
+		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered}, action, issue, title, requestID)
+	}
+	other := core.Principal{Platform: core.PlatformTelegram, ID: "3", Name: "other owner"}
+	otherDM := core.ConvKey{Interface: core.PlatformTelegram, Chat: "3"}
+	r.s.access.Owners[other.Key()] = true
+	mine := r.add(asBoss, `{"name":"slack monitor","schedule":{"every":"1h"},"prompt":"synthetic"}`)
+	theirs := r.add(Caller{Principal: other, Role: core.RoleOwner, Conv: otherDM, Private: true}, `{"name":"their job","schedule":{"every":"1h"},"prompt":"synthetic"}`)
+	if _, ok := work.Task(durable.Caller{Principal: other, Role: core.RoleOwner, Conv: otherDM, Live: true, Private: true, MsgID: "m1"}, "add", "MEL-401", "Their task", ""); !ok {
+		t.Fatal("other owner's task not admitted")
+	}
+	op := &syscall.Ucred{Uid: 1234}
+	who, valid, err := c.resolvePeer(t3Peer, alwaysAlive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(req ControlRequest) ControlResult { t.Helper(); return c.executePeer(ctx, op, req, who, valid) }
+	ok := func(req ControlRequest) ControlResult {
+		t.Helper()
+		got := do(req)
+		if got.Error != "" || got.Reply == "" {
+			t.Fatalf("%s refused: %+v", req.Action, got)
+		}
+		return got
+	}
+	refused := func(req ControlRequest, want string) {
+		t.Helper()
+		if got := do(req); !strings.Contains(got.Error, want) {
+			t.Fatalf("%s: got %+v, want %q", req.Action, got, want)
+		}
+	}
+	if got := ok(ControlRequest{Action: "task_add", ID: "MEL-755", Title: "Activate the Slack monitor", RequestID: "add-755"}); !got.Changed {
+		t.Fatal(got)
+	}
+
+	// Baseline: without the opt-in, management is the existing refusal.
+	manage := []ControlRequest{
+		{Action: "list"}, {Action: "show", ID: mine}, {Action: "history", ID: mine},
+		{Action: "pause", ID: mine, RequestID: "off-p"}, {Action: "run", ID: mine, RequestID: "off-r"},
+		{Action: "task_pause", ID: "MEL-755", RequestID: "off-tp"}, {Action: "task_close", ID: "MEL-755", RequestID: "off-tc"},
+	}
+	for _, req := range manage {
+		refused(req, "may only task_add, task_list and task_show")
+	}
+	if r.job(mine).State != store.JobActive {
+		t.Fatal("refused pause changed the job")
+	}
+
+	r.s.TrustedT3.Manage = true
+	// Jobs: the bound owner's own, exact creator, with request_id replay.
+	if got := ok(ControlRequest{Action: "list"}); !strings.Contains(got.Reply, "slack monitor") || strings.Contains(got.Reply, "their job") {
+		t.Fatal("list", got)
+	}
+	ok(ControlRequest{Action: "show", ID: mine})
+	ok(ControlRequest{Action: "history", ID: mine})
+	pause := ControlRequest{Action: "pause", ID: mine, RequestID: "pause-1"}
+	got := ok(pause)
+	if !got.Changed || r.job(mine).State != store.JobPaused {
+		t.Fatal("pause", got, r.job(mine).State)
+	}
+	if again := do(pause); again != got {
+		t.Fatal("pause replay changed result", again)
+	}
+	if got := ok(ControlRequest{Action: "resume", ID: mine, RequestID: "resume-1"}); !got.Changed || r.job(mine).State != store.JobActive {
+		t.Fatal("resume", got)
+	}
+	if got := ok(ControlRequest{Action: "run", ID: mine, RequestID: "run-1"}); !got.Changed || len(r.runs(mine)) != 1 {
+		t.Fatal("run", got, r.runs(mine))
+	}
+	ok(ControlRequest{Action: "stop", ID: mine, RequestID: "stop-1"})
+	for _, req := range []ControlRequest{{Action: "show", ID: theirs}, {Action: "pause", ID: theirs, RequestID: "theirs-p"}, {Action: "stop", ID: theirs, RequestID: "theirs-s"}} {
+		refused(req, "no job of the bound creator")
+	}
+	if r.job(theirs).State != store.JobActive {
+		t.Fatal("other owner's job changed")
+	}
+	refused(ControlRequest{Action: "pause", ID: mine}, "stable request_id")
+	// Never create, edit, remove, checkpoint, acknowledge, confirm or discover.
+	for _, req := range []ControlRequest{
+		daily,
+		{Action: "edit", ID: mine, RequestID: "e1", Definition: json.RawMessage(`{"prompt":"changed"}`)},
+		{Action: "remove", ID: mine, RequestID: "x1"},
+		{Action: "checkpoint", ID: mine},
+		{Action: "acknowledge", ID: mine, RequestID: "a1", Key: "k", Revision: "v", Outbound: 1},
+		{Action: "confirm", ID: mine, RequestID: "c1"},
+		{Action: "discover"},
+	} {
+		refused(req, "may only task_add, task_list and task_show; with manage")
+	}
+	if jobs, _ := r.st.Jobs(store.JobFilter{}); len(jobs) != 2 {
+		t.Fatal("management created or removed a job", jobs)
+	}
+
+	// Tasks: the creator's own pause, resume and close; close is one event
+	// per request_id and its replay is the recorded answer.
+	tp := ok(ControlRequest{Action: "task_pause", ID: "MEL-755", RequestID: "tp-1"})
+	if !tp.Changed || !strings.Contains(tp.Reply, "paused by owner") {
+		t.Fatal("task_pause", tp)
+	}
+	if again := do(ControlRequest{Action: "task_pause", ID: "MEL-755", RequestID: "tp-1"}); again != tp {
+		t.Fatal("task_pause replay", again)
+	}
+	if got := ok(ControlRequest{Action: "task_resume", ID: "MEL-755", RequestID: "tr-1"}); !got.Changed || got.Reply != "MEL-755 resumed." {
+		t.Fatal("task_resume", got)
+	}
+	refused(ControlRequest{Action: "task_close", ID: "MEL-755"}, "stable request_id")
+	refused(ControlRequest{Action: "task_close", ID: "MEL-755", Title: "done", RequestID: "tc-x"}, "takes only an issue id and request_id")
+	closeReq := ControlRequest{Action: "task_close", ID: "MEL-755", RequestID: "tc-1"}
+	tc := ok(closeReq)
+	if !tc.Changed || tc.Reply != "Sent close to MEL-755." {
+		t.Fatal("task_close", tc)
+	}
+	if again := do(closeReq); again != tc {
+		t.Fatal("task_close replay", again)
+	}
+	status := func(issue string) string {
+		vs, _ := work.Views()
+		for _, v := range vs {
+			if v.Issue == issue {
+				return v.Status
+			}
+		}
+		return ""
+	}
+	var notices []core.Outbound
+	for end := time.Now().Add(20 * time.Second); status("MEL-755") != "SUCCESS"; time.Sleep(20 * time.Millisecond) {
+		notices = append(notices, r.sent()...) // the closed notice's receipt ends it
+		if time.Now().After(end) {
+			t.Fatal("close did not end the task", status("MEL-755"))
+		}
+	}
+	closedNotices := 0
+	for _, o := range notices {
+		if strings.Contains(o.Text, "MEL-755 closed (closed by "+boss.Key()+")") {
+			closedNotices++
+			if o.Conv != bossDM {
+				t.Fatal("closed notice routed elsewhere", o)
+			}
+		}
+	}
+	if closedNotices != 1 {
+		t.Fatal("closed notices", notices)
+	}
+	if got := do(ControlRequest{Action: "task_close", ID: "MEL-755", RequestID: "tc-2"}); got.Error != "" || status("MEL-755") != "SUCCESS" {
+		t.Fatal("second close of a closed task", got)
+	}
+	// Another owner's task: not visible, never changed.
+	for _, a := range []string{"task_pause", "task_close"} {
+		if got := do(ControlRequest{Action: a, ID: "MEL-401", RequestID: "theirs-" + a}); got.Changed || !strings.Contains(got.Reply, "not tracked here") {
+			t.Fatal(a, got)
+		}
+	}
+	if s := status("MEL-401"); s == "SUCCESS" || s == "CANCELLED" {
+		t.Fatal("other owner's task changed", s)
+	}
+
+	// Binding negatives stay: foreign UID, unknown registration origin,
+	// employee and scheduled callers, stale lineage.
+	if got := c.executePeer(ctx, &syscall.Ucred{Uid: 9999}, ControlRequest{Action: "pause", ID: mine, RequestID: "uid"}, who, valid); got.Error != "operator not authorized" {
+		t.Fatal("foreign peer UID", got)
+	}
+	unknown := who
+	unknown.Registered = "other registrar"
+	if got := c.executePeer(ctx, op, ControlRequest{Action: "pause", ID: mine, RequestID: "unk"}, unknown, valid); !strings.Contains(got.Error, "may only task_add") {
+		t.Fatal("unknown registration origin managed", got)
+	}
+	emp := who
+	emp.Role = core.RoleEmployee
+	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_close", ID: "MEL-401", RequestID: "emp"}, emp, valid); !strings.Contains(got.Error, "origin required") {
+		t.Fatal("employee managed", got)
+	}
+	sched := who
+	sched.Job, sched.Run = mine, 1
+	if got := c.task(1234, ControlRequest{Action: "task_close", ID: "MEL-401", RequestID: "sched"}, sched, nil); !strings.Contains(got.Error, "scheduled runs cannot") {
+		t.Fatal("scheduled run managed a task", got)
+	}
+	if got := c.executePeer(ctx, op, ControlRequest{Action: "pause", ID: mine, RequestID: "sched-p"}, sched, valid); got.Error == "" {
+		t.Fatal("scheduled origin managed a job", got)
+	}
+	f.set(func() { f.stat[t3Server] = procEntry{t3Server, t3Launcher, 21} }) // reused pid
+	if got := do(ControlRequest{Action: "pause", ID: mine, RequestID: "stale"}); got.Error == "" || r.job(mine).State != store.JobActive {
+		t.Fatal("stale lineage managed a job", got)
+	}
 }

@@ -195,7 +195,9 @@ and reason until the owner checks its effects and sends `!work retry`.
 Admission without typing `!work add`: during a live owner request, the
 assistant can call the existing `heimdall_scheduler` control with
 `task_add` (Linear issue id, one-line title, stable `request_id`),
-`task_list` or `task_show`. The control binds the caller as for jobs
+`task_list` or `task_show`, and change its own task with `task_pause`,
+`task_resume` or `task_close` (issue id and stable `request_id`; a close is
+keyed by that `request_id`, as a chat close is by its message). The control binds the caller as for jobs
 (kernel peer, the active turn's generation, matching stored live ingress,
 owner now, Slack re-verified): creator, conversation, privacy and OAuth
 actor are that turn's, never arguments. The same `request_id` is answered

@@ -182,8 +182,8 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer work.Close()
-	r.s.Tasks = func(who Caller, action, issue, title string) (string, bool) {
-		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title)
+	r.s.Tasks = func(who Caller, action, issue, title, requestID string) (string, bool) {
+		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title, requestID)
 	}
 	op := &syscall.Ucred{Uid: 1234}
 	bind := func() (Caller, func() bool) {
