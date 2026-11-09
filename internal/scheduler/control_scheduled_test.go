@@ -159,3 +159,56 @@ func TestAliasReadsOnlyForScheduledOrigin(t *testing.T) {
 		t.Fatal("scheduled alias mutation admitted", got)
 	}
 }
+
+// A Slack-created job delivering to the same person's Telegram DM: the
+// scheduled run reads private details only when that exact target has a
+// live private ingress from the creator or its current-owner alias; no
+// ingress, another person's ingress or a group target stays denied.
+func TestScheduledControlPrivateLinkedTarget(t *testing.T) {
+	ctx := context.Background()
+	r, _, self, _ := destRig(t)
+	c := &Control{s: r.s, owner: boss.Key(), uid: 1234}
+	r.s.Reverify = func(_ context.Context, p core.Principal) (Verified, bool, error) {
+		return Verified{Principal: p}, true, nil
+	}
+	slackDM := core.ConvKey{Interface: "slack", Chat: "DSELF", Thread: "1000.3"}
+	byself := Caller{Principal: self, Role: core.RoleOwner, Conv: slackDM, Private: true}
+	scheduled := func(id string) Caller {
+		t.Helper()
+		r.run(id)
+		for _, run := range r.runs(id) {
+			if run.State == store.RunRunning {
+				return Caller{Principal: self, Role: core.RoleOwner, Conv: slackDM, Job: id, Run: run.ID}
+			}
+		}
+		t.Fatal("no running run")
+		return Caller{}
+	}
+	private := "private originating conversation"
+	dm := r.add(byself, `{"name":"tg dm job","schedule":{"every":"1h"},"to":"tg:1","prompt":"p"}`)
+	who := scheduled(dm)
+	// No live private ingress at the target yet; another person's does not count.
+	if got := c.execute(ctx, 1234, ControlRequest{Action: "show", ID: dm}, who); !strings.Contains(got.Error, private) {
+		t.Fatal("no ingress: details exposed", got)
+	}
+	ingress(t, r, bossDM, worker, true, core.OriginLive)
+	if got := c.execute(ctx, 1234, ControlRequest{Action: "show", ID: dm}, who); !strings.Contains(got.Error, private) {
+		t.Fatal("another person's ingress: details exposed", got)
+	}
+	ingress(t, r, bossDM, boss, true, core.OriginLive) // the creator's linked Telegram identity, live and private
+	for _, a := range []string{"show", "checkpoint"} {
+		if got := c.execute(ctx, 1234, ControlRequest{Action: a, ID: dm}, who); got.Error != "" {
+			t.Fatalf("linked private target %s refused: %+v", a, got)
+		}
+	}
+	if got := c.execute(ctx, 1234, ControlRequest{Action: "pause", ID: dm, RequestID: "lp"}, who); !strings.Contains(got.Error, "scheduled runs may only read") {
+		t.Fatal("scheduled mutation admitted", got)
+	}
+	// A group target never becomes private, even with the creator's live ingress there.
+	ingress(t, r, team, boss, false, core.OriginLive)
+	r.finish("done", Outcome{Harness: "codex"})
+	group := r.add(byself, `{"name":"tg group job","schedule":{"every":"1h"},"to":"tg:-100","prompt":"p"}`)
+	if got := c.execute(ctx, 1234, ControlRequest{Action: "show", ID: group}, scheduled(group)); !strings.Contains(got.Error, private) {
+		t.Fatal("group target exposed details", got)
+	}
+}

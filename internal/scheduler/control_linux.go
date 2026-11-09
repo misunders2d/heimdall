@@ -260,7 +260,18 @@ func (c *Control) scheduledCaller(ctx context.Context, who Caller) (Caller, erro
 	if r, _, ok := c.s.access.Decide(v.Principal, tgt.Conv); !ok || r != core.RoleOwner {
 		return Caller{}, refused
 	}
-	return Caller{Principal: v.Principal, Role: core.RoleOwner, Conv: tgt.Conv, Private: tgt.Private && tgt.AgentNet == "", Job: j.ID, Run: run.ID}, nil
+	// Private when the stored target is the creator's private chat, or when
+	// that exact target is the creator's own current-owner identity's live
+	// private conversation (e.g. a Slack creator's linked Telegram DM): the
+	// same verified owner-ingress check as alert destinations. Never from the
+	// request or the harness.
+	private := tgt.Private && tgt.AgentNet == ""
+	if !private && tgt.AgentNet == "" {
+		if senders := c.s.senders(j.ID); len(senders) > 0 && c.s.st.OwnerIngress(tgt.Conv, senders) == nil {
+			private = true
+		}
+	}
+	return Caller{Principal: v.Principal, Role: core.RoleOwner, Conv: tgt.Conv, Private: private, Job: j.ID, Run: run.ID}, nil
 }
 
 // readable is a job the bound caller may read: its own (exact creator), or,
