@@ -144,7 +144,13 @@ func (ch *JobChange) apply(tx *sql.Tx) error {
 		}
 		return nil
 	case ch.Add != nil:
-		return insertJob(tx, *ch.Add)
+		if err := insertJob(tx, *ch.Add); err != nil {
+			return err
+		}
+		if ch.Confirm != nil { // a draft applied at once (external owner origin)
+			return confirmDraft(tx, *ch.Confirm, ch.Set)
+		}
+		return nil
 	case ch.Update != "":
 		if err := updateJob(tx, ch.Update, ch.Set); err != nil {
 			return err

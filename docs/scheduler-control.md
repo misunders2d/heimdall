@@ -26,6 +26,10 @@ commit. Kernel pidfds bind both socket peer and harness process lifetime, preven
 PID reuse from selecting another conversation. Linux SO_PEERPIDFD support (6.5+)
 is required; unsupported/restricted kernels disable controls by failing closed.
 
+A run started by a configured trusted local launcher (for example the AgentNet
+daemon) instead of Heimdall is bound only through
+[external-origin.md](external-origin.md).
+
 Unknown, employee, revoked, idle and passive continuation callers fail closed.
 A scheduled run (2026-11-08) is a **read-only** origin: only the owner job's own
 router-started run, bound by the same pidfd/ancestry/generation to its harness

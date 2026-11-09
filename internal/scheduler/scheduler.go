@@ -58,6 +58,9 @@ type Verified struct {
 type Scheduler struct {
 	// ResolveControl maps kernel peer PID to a currently active trusted person turn.
 	ResolveControl func(int) (Caller, func() bool, error)
+	// External launchers that may vouch for runs Heimdall did not start
+	// (docs/external-origin.md); tried only when no Heimdall turn owns the peer.
+	External []ExternalOrigin
 	// Tasks admits (action "add") or reads ("list", "show") durable tasks
 	// for a bound live owner caller; nil: durable tasks are off. admitted
 	// reports a new commitment.

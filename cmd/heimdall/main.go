@@ -212,6 +212,22 @@ func run(args []string) error {
 			if err != nil {
 				return nil, err
 			}
+			for _, o := range cfg.Scheduler.Control.External {
+				lu, err := user.Lookup(o.User)
+				var luid uint64
+				if err == nil {
+					luid, err = strconv.ParseUint(lu.Uid, 10, 32)
+				}
+				if err != nil { // that launcher stays unusable; live turns keep control
+					logger.Printf("scheduler control: external origin %s unavailable: %v", o.Name, err)
+					continue
+				}
+				people := map[string]scheduler.ExternalPerson{}
+				for person, m := range o.People {
+					people[person] = scheduler.ExternalPerson{Principal: m.Principal, Source: m.Source}
+				}
+				jobs.External = append(jobs.External, scheduler.ExternalOrigin{Name: o.Name, Socket: o.Socket, UID: uint32(luid), People: people})
+			}
 			return jobs.ListenControl(ctx, cfg.Scheduler.Control.Owner, uint32(uid), filepath.Join(cfg.DataDir, "scheduler-control"), cfg.Scheduler.Control.Source)
 		}()
 		if err != nil {
