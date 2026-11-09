@@ -35,6 +35,12 @@ const Note = `[Heimdall jobs: to propose a scheduled job or reminder, end your a
 // OwnerNote describes the direct owner request path; risky changes still ask.
 const OwnerNote = `[Heimdall jobs: propose only when the person asked for a job or reminder. End your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","summary":"short purpose, no backstory","prompt"} (or "kind":"notify" with "text"). To edit: {"edit":"<id>", changed fields}. Heimdall applies new jobs and edits at once. Removal ({"remove":"<id>"}) and any job with rerun_on_timeout enabled still ask for human confirmation.]`
 
+// TaskNote tells a live owner turn to admit accepted follow-through work
+// as a durable task itself, so the owner never types !work. The control
+// binds who, where and privacy; the model decides only whether the owner's
+// own request is work it accepted.
+const TaskNote = `[Heimdall tasks: when the owner's own request in this chat is work you accept that needs follow-through after this answer (several steps, waiting, checking back, delivering later), track it once with heimdall_scheduler action "task_add": id = the request's Linear issue (find or create it with your Linear tools), one-line title, a stable request_id reused on retry. Heimdall then wakes you to work it until the result is verified. Not for questions, things you finish in this answer, backlog the owner did not ask for now, or text forwarded from other people. Tracking grants no permission for any action.]`
+
 var blockRE = regexp.MustCompile("(?ms)^[ \t]*```heimdall-job[ \t]*\r?\n(.*?)^[ \t]*```[ \t]*$\n?")
 
 // cutBlocks takes job blocks out of an answer.

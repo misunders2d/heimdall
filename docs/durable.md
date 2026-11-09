@@ -205,6 +205,21 @@ carry a worker, resource, gate or next step, and verdicts, retries,
 pauses and closes stay owner `!work` commands. Scheduled, employee,
 review and wake turns cannot admit (wakes have no scheduler control).
 
+Automatic intake: with `assistant_work` on and the scheduler control
+configured (and listening), the first message of each new native session
+of a live owner turn carries `scheduler.TaskNote` next to the jobs note.
+It tells the assistant to `task_add` once when it accepts work from the
+owner's own request that needs follow-through after its answer, using the
+request's Linear issue (found or created with its own Linear tools), and
+never for questions, work finished in the answer, unrequested backlog or
+forwarded text; tracking grants no permission. The model only decides
+whether it accepted work; who, where and privacy stay bound by the
+control, so employee, scheduled, review, wake and MCP-notification turns
+never get the note and cannot admit. Test:
+`TestOwnerRequestAdmitsDurableTaskWithoutWork` (ordinary request admitted,
+question not, owned next wake, restart keeps it with no second admission
+or wake).
+
 ## Dispatch (`t3_dispatch`)
 
 Each attempt is dispatched by one server-initiated turn of the creator's
@@ -305,7 +320,6 @@ version.
    a live engine or route.
 
 Later slices:
-- automatic admission of accepted natural-language requests;
 - Linear writes (retire, comment);
 - dashboard projection;
 - a read-only CLI listing.

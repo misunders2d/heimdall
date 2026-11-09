@@ -196,6 +196,9 @@ func run(args []string) error {
 			jobs.Tasks = func(who scheduler.Caller, action, issue, title string) (string, bool) {
 				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title)
 			}
+			// Owner turns admit accepted work themselves only when the
+			// control is configured and wakes work it (no owner babysitting).
+			jobs.TaskIntake = cfg.Scheduler.On() && cfg.Scheduler.Control != nil && cfg.Durable.Assistant
 		}
 	}
 	r := router.New(router.Options{Work: work, Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
@@ -213,6 +216,7 @@ func run(args []string) error {
 		}()
 		if err != nil {
 			logger.Printf("scheduler control unavailable (router continues): %v", err)
+			jobs.TaskIntake = false // task_add is unreachable: never tell turns to use it
 		} else {
 			defer listener.Close()
 		}

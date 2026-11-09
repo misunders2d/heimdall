@@ -1531,6 +1531,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			note := scheduler.Note
 			if t.role == core.RoleOwner {
 				note = scheduler.OwnerNote
+				if c.r.opt.Jobs.TaskIntake && c.r.opt.Work != nil {
+					note += "\n" + scheduler.TaskNote
+				}
 			}
 			// A new native session learns once how to propose a job. Pi
 			// reads it after the prompt in the message: as turn context,

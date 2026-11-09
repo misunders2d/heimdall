@@ -62,6 +62,10 @@ type Scheduler struct {
 	// for a bound live owner caller; nil: durable tasks are off. admitted
 	// reports a new commitment.
 	Tasks func(who Caller, action, issue, title string) (reply string, admitted bool)
+	// TaskIntake: Tasks is reachable through the control and admitted tasks
+	// are worked by assistant wakes, so a live owner turn is told to admit
+	// accepted follow-through work itself (TaskNote).
+	TaskIntake bool
 
 	cfg    Config
 	st     *store.Store
