@@ -1348,3 +1348,51 @@ func TestForwardsSentWithAComment(t *testing.T) {
 		t.Fatalf("addressed %v, context %v", ids, ambient)
 	}
 }
+
+// The forward window belongs to one forum topic and to the comment that
+// addressed the bot itself: a comment in topic 77 admits that sender's
+// forwards in topic 77 only, and admitted forwards never extend the window
+// (a chain of forwards each within 3s of the last stays bounded by the
+// comment's time).
+func TestForwardWindowIsPerTopicAndAnchored(t *testing.T) {
+	api := newFakeAPI(t)
+	c := &collector{}
+	var logs syncBuffer
+	topic := func(m map[string]any, id int) map[string]any {
+		m["is_topic_message"], m["message_thread_id"] = true, id
+		return m
+	}
+	fwd := func(id, thread, date int) map[string]any {
+		m := topic(msg(id, -1002, "supergroup", 42, ""), thread)
+		m["date"] = date
+		m["forward_origin"] = map[string]any{"type": "user", "date": 1690000000, "sender_user": map[string]any{"id": 9, "first_name": "Sender"}}
+		m["video"] = map[string]any{"file_id": fmt.Sprintf("id:v/%d.mp4", id), "file_unique_id": fmt.Sprintf("u%d", id), "mime_type": "video/mp4", "file_name": "video.mp4"}
+		api.files[fmt.Sprintf("v/%d.mp4", id)] = []byte("mp4")
+		return m
+	}
+	i := newIface(t, api.srv.URL, botName, &logs)
+	i.opt.UploadDir = filepath.Join(t.TempDir(), "uploads")
+	api.push(
+		upd(1, topic(msg(1, -1002, "supergroup", 42, "@heimdall_test_bot look at these"), 77)), // date 1700000000
+		upd(2, fwd(2, 77, 1700000001)), // same topic, in window
+		upd(3, fwd(3, 88, 1700000001)), // other topic
+		upd(4, fwd(4, 77, 1700000003)), // same topic, edge of window
+		upd(5, fwd(5, 77, 1700000005)), // within 3s of #4, not of the comment
+	)
+	stop := run(t, i, c.accept)
+	eventually(t, "offset past all", func() bool { return api.lastOffset() == 6 })
+	stop()
+	var ids, ambient []string
+	for _, in := range c.list() {
+		switch {
+		case in.Ambient:
+			ambient = append(ambient, in.MsgID)
+		case in.Announce:
+		default:
+			ids = append(ids, in.MsgID)
+		}
+	}
+	if !slices.Equal(ids, []string{"1", "2", "4"}) || !slices.Equal(ambient, []string{"3", "5"}) {
+		t.Fatalf("addressed %v, context %v", ids, ambient)
+	}
+}

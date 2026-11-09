@@ -84,7 +84,7 @@ type Interface struct {
 	// caption, are addressed too. Touched only by Run.
 	albums map[string]time.Time
 	// addressedAt is the send time (unix) of each sender's last group
-	// message that addressed the bot, by chat:sender. A client sending a
+	// message that addressed the bot, by chat:topic:sender. A client sending a
 	// comment with forwards delivers the forwards as separate messages in
 	// the same moment; they belong to the comment's turn.
 	addressedAt map[string]int64
@@ -390,14 +390,17 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		text = m.Caption
 	}
 	replied := repliedTo(m)
-	addressed := private || router.UnmentionedCommand(text, t.command(text), t.botName, t.opt.UnmentionedCommands) || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m) || !private && t.forwardAddressed(m)
+	direct := private || router.UnmentionedCommand(text, t.command(text), t.botName, t.opt.UnmentionedCommands) || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
+	addressed := direct || !private && t.forwardAddressed(m)
 	if !addressed {
 		return t.ambient(u, m, text)
 	}
 	if m.MediaGroupID != "" && !private {
 		t.rememberAlbum(m)
 	}
-	if !private {
+	if !private && direct {
+		// Only a message that addressed the bot itself opens the window:
+		// an inherited forward never extends it.
 		t.rememberAddressed(m)
 	}
 	text = t.command(text)
@@ -463,8 +466,14 @@ func (t *Interface) rememberAlbum(m *message) {
 // its sender's addressed comment to join that comment's turn.
 const forwardWindow = 3
 
+// senderKey is chat, forum topic (0 outside topics, as the conversation
+// key) and sender: a comment in one topic never admits a forward in another.
 func senderKey(m *message) string {
-	return fmt.Sprintf("%d:%d", m.Chat.ID, m.From.ID)
+	var topic int64
+	if m.IsTopicMessage {
+		topic = m.MessageThreadID
+	}
+	return fmt.Sprintf("%d:%d:%d", m.Chat.ID, topic, m.From.ID)
 }
 
 // forwardAddressed reports whether m is a forward sent together with its
