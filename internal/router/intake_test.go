@@ -85,12 +85,13 @@ func intakeStart(t *testing.T, e *env, durablePath, ctlDir string) (rt *durable.
 
 // An ordinary owner request (no !work, no manual registration) that the
 // assistant accepts as follow-through work enters durable.db through the
-// assistant's own native task_add call: the turn is told how once per new
-// session, the record carries the goal and the owner's route, and the first
-// wake persists its owned next action and a durable wake. A plain question
-// creates nothing. After a restart the task is still there, still waiting
-// (no new wake), and a retried tool call under the same request_id is
-// answered from the record without a second admission.
+// assistant's own native task_add call: every owner request turn is told
+// how, resumed sessions included; the record carries the goal and the
+// owner's route, and the first wake persists its owned next action and a
+// durable wake. A plain question creates nothing. After a restart the task
+// is still there, still waiting (no new wake); a retried tool call under
+// the same request_id is answered from the record, and the same issue under
+// a new request_id is the existing task: no second admission.
 func TestOwnerRequestAdmitsDurableTaskWithoutWork(t *testing.T) {
 	ctlDir := filepath.Join(t.TempDir(), "ctl")
 	t.Setenv("FAKE_CONTROL_SOCKET", filepath.Join(ctlDir, "control.sock"))
@@ -160,6 +161,16 @@ func TestOwnerRequestAdmitsDurableTaskWithoutWork(t *testing.T) {
 	if len(recs) != 2 || recs[1].Text != recs[0].Text {
 		t.Fatalf("retried request not answered from its record: %+v", recs)
 	}
+	if in := fakeharness.Inputs(e.state); !strings.Contains(in[len(in)-1].Context, scheduler.TaskNote) {
+		t.Fatalf("resumed owner request not told about tasks: %+v", in[len(in)-1])
+	}
+	// The same commitment under a new request_id is the existing task, not
+	// a second one.
+	again, _ := json.Marshal(map[string]string{"action": "task_add", "id": "MEL-300", "title": "Confirm the supplier PO", "request_id": "req-301"})
+	e.askBoss("track the PO confirmation " + control(string(again)))
+	if recs = controlRecords(t, e.state); len(recs) != 3 || !strings.Contains(recs[2].Text, "already tracked") {
+		t.Fatalf("same issue, new request_id: %+v", recs)
+	}
 	time.Sleep(300 * time.Millisecond)
 	if n := wakes(); n != 1 {
 		t.Fatalf("wakes after restart %d", n)
@@ -169,9 +180,9 @@ func TestOwnerRequestAdmitsDurableTaskWithoutWork(t *testing.T) {
 	}
 }
 
-// Only a live owner turn of a new native session is told about tasks, and
-// only when task intake is wired: an owner without intake, employees and
-// resumed sessions never are.
+// Every live owner request turn, resumed sessions included, is told about
+// tasks, and only when task intake is wired: an owner without intake and
+// employees never are.
 func TestTaskNoteOnlyForOwnerIntake(t *testing.T) {
 	e := schedEnv(t, []string{"claude"}, "claude")
 	e.ask(ownerDM, "hello")
@@ -200,7 +211,9 @@ func TestTaskNoteOnlyForOwnerIntake(t *testing.T) {
 	if s := in[1].Text + in[1].Context; strings.Contains(s, "Heimdall tasks:") || !strings.Contains(s, "Heimdall jobs:") {
 		t.Fatalf("employee told about tasks: %q", s)
 	}
-	if s := in[2].Text + in[2].Context; strings.Contains(s, "Heimdall tasks:") {
-		t.Fatalf("resumed session told again: %q", s)
+	// The same session's next owner request is told again (sessions from
+	// before intake must not miss it); the jobs note stays first-only.
+	if s := in[2].Text + in[2].Context; !strings.Contains(s, scheduler.TaskNote) || strings.Contains(s, "Heimdall jobs:") {
+		t.Fatalf("resumed owner request: %q", s)
 	}
 }

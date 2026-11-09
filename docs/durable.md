@@ -206,8 +206,9 @@ pauses and closes stay owner `!work` commands. Scheduled, employee,
 review and wake turns cannot admit (wakes have no scheduler control).
 
 Automatic intake: with `assistant_work` on and the scheduler control
-configured (and listening), the first message of each new native session
-of a live owner turn carries `scheduler.TaskNote` next to the jobs note.
+configured (and listening), every live owner request turn carries
+`scheduler.TaskNote`, resumed native sessions included (sessions from
+before intake still learn it); the jobs note stays first-message only.
 It tells the assistant to `task_add` once when it accepts work from the
 owner's own request that needs follow-through after its answer, using the
 request's Linear issue (found or created with its own Linear tools), and
@@ -218,7 +219,9 @@ control, so employee, scheduled, review, wake and MCP-notification turns
 never get the note and cannot admit. Test:
 `TestOwnerRequestAdmitsDurableTaskWithoutWork` (ordinary request admitted,
 question not, owned next wake, restart keeps it with no second admission
-or wake).
+or wake, same issue under a new request_id is the existing task) and
+`TestTaskNoteOnlyForOwnerIntake`. The note is a model instruction: it is
+best-effort, not mechanical detection of every request.
 
 ## Dispatch (`t3_dispatch`)
 

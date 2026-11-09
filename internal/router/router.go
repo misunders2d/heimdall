@@ -1527,22 +1527,30 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				nativePrompt = prompt
 			}
 		}
-		if c.r.opt.Jobs != nil && t.job == nil && t.review == nil && !sess.Resume && !batch[0].row.MCPControl {
-			note := scheduler.Note
-			if t.role == core.RoleOwner {
-				note = scheduler.OwnerNote
-				if c.r.opt.Jobs.TaskIntake && c.r.opt.Work != nil {
-					note += "\n" + scheduler.TaskNote
+		if c.r.opt.Jobs != nil && t.job == nil && t.review == nil && !t.detached && !batch[0].row.MCPControl {
+			// A new native session learns once how to propose a job.
+			note := ""
+			if !sess.Resume {
+				note = scheduler.Note
+				if t.role == core.RoleOwner {
+					note = scheduler.OwnerNote
 				}
 			}
-			// A new native session learns once how to propose a job. Pi
-			// reads it after the prompt in the message: as turn context,
-			// live Pi ignored it.
-			if h == "pi" {
+			// Every live owner request turn, resumed sessions included,
+			// learns how to track accepted work: sessions started before
+			// intake existed must not miss it.
+			if t.role == core.RoleOwner && batch[0].row.Origin == core.OriginLive && c.r.opt.Jobs.TaskIntake && c.r.opt.Work != nil {
+				note = strings.TrimSpace(note + "\n" + scheduler.TaskNote)
+			}
+			// Pi reads notes after the prompt in the message: as turn
+			// context, live Pi ignored them.
+			switch {
+			case note == "":
+			case h == "pi":
 				nativePrompt = strings.TrimSpace(nativePrompt + "\n\n" + note)
-			} else if turnContext != "" || nativePrompt != prompt {
+			case turnContext != "" || nativePrompt != prompt:
 				turnContext = strings.TrimSpace(note + "\n\n" + turnContext)
-			} else {
+			default:
 				nativePrompt = note + "\n\n" + nativePrompt
 			}
 		}
