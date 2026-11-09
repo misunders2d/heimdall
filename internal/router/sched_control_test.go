@@ -153,7 +153,7 @@ func TestScheduledRunReadsSchedulerThroughNativeMCPProcess(t *testing.T) {
 	// Wrong PID: this test process is no scheduled run's descendant; the run
 	// has also ended, so no generation remains for anyone.
 	res, err := scheduler.CallControl(ctx, socket, scheduler.ControlRequest{Action: "show", ID: id})
-	if err == nil || res.Error != "trusted active request origin unavailable" {
+	if err == nil || !strings.HasPrefix(res.Error, "trusted active request origin unavailable: ") {
 		t.Fatal("non-descendant peer admitted", res, err)
 	}
 }
