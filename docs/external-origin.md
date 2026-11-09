@@ -80,7 +80,8 @@ authored by the person themself; the mapped identity is not a current owner.
 ## Contract a launcher must provide (AgentNet side)
 
 1. **Socket.** A Unix stream socket at a fixed path the launcher owns (for
-   AgentNet, for example `$AGENTNET_HOME/run-origin.sock`). Directory owned by
+   AgentNet, for example `<agentnet home>/run-origin.sock`; on the server the
+   daemon home is `/root/.config/agentnet`, root, 0700). Directory owned by
    the launcher user and not group/other writable (0700 recommended); socket
    0600. Listened on by the long-running launcher process itself (the process
    whose direct children are the runs), never by a helper or child. Remove a
@@ -102,13 +103,21 @@ authored by the person themself; the mapped identity is not a current owner.
    person's current, unrevoked keys. Never a display name, handle the sender
    can choose, or message text. Heimdall compares it as an exact string, so it
    must not change for the same person. Document which identifier it is.
-7. **`author`.** `human` only when the request was authored directly by that
+7. **Lineage.** Each run must stay a direct child of the process that serves
+   the socket for its whole lifetime. If the daemon restarts or re-execs (for
+   example on auto-update) with a new PID, runs it started earlier are no
+   longer vouched for and their control calls are refused; keep the serving
+   PID stable across updates or accept that.
+8. **`author`.** `human` only when the request was authored directly by that
    person on one of their own verified human devices. A request from an agent
    (including the person's own agents), a relay, a guest, a continuation,
    a scheduled or automatic run is `agent`. Heimdall acts only on `human`.
-8. **Stability.** The answer for a run must not change during its lifetime;
+   This is AgentNet's existing distinction between a person's own request
+   from their verified human device (`OwnHumanRequest`, roster human check)
+   and everything else; no new concept is needed.
+9. **Stability.** The answer for a run must not change during its lifetime;
    Heimdall asks again before commit and refuses any difference.
-9. **No identity in the environment.** Nothing the launcher passes to the run
+10. **No identity in the environment.** Nothing the launcher passes to the run
    is used by Heimdall. The run reaches Heimdall's control the usual way (its
    MCP/CLI adapter is a descendant of the run).
 
@@ -119,7 +128,7 @@ authored by the person themself; the mapped identity is not a current owner.
   "owner":"slack:OWNER_EMAIL",
   "external":[{
     "name":"agentnet",
-    "socket":"/root/.agentnet/run-origin.sock",
+    "socket":"/root/.config/agentnet/run-origin.sock",
     "user":"root",
     "people":{"<AgentNet person id>":{"principal":"slack:OWNER_EMAIL"}}
   }]
@@ -129,8 +138,9 @@ authored by the person themself; the mapped identity is not a current owner.
 `people` maps a launcher person to an existing Heimdall principal. An
 optional `source` (`{"interface","chat","thread"}`) selects which of that
 principal's registered private conversations jobs are created in; without it
-the most recent one is used. Unmapped people are refused. Removing an entry
-revokes at once (on restart).
+the most recent one is used. Unmapped people are refused. Config is read at
+startup: removing an entry revokes it when Heimdall restarts. Revoking the
+person's owner role or keys in AgentNet takes effect on the next call.
 
 ## Threats
 
