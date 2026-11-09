@@ -128,6 +128,9 @@ func TestExternalOwnerRunCreatesScheduleAtOnce(t *testing.T) {
 	if got.Error != "" || !got.Changed || got.DraftID != "" || got.JobID == "" || !strings.Contains(got.Reply, "created") {
 		t.Fatal(got)
 	}
+	if !strings.Contains(got.Reply, "Your private Telegram conversation") || strings.Contains(got.Reply, "This private conversation") {
+		t.Fatal("external receipt hides the actual delivery platform", got.Reply)
+	}
 	jobs, _ := r.st.Jobs(store.JobFilter{Creator: boss.Key()})
 	if len(jobs) != 1 || jobs[0].State != store.JobActive || jobs[0].CreatedIn != bossDM || jobs[0].NextDue.IsZero() {
 		t.Fatal("schedule not created active for the mapped owner", jobs)

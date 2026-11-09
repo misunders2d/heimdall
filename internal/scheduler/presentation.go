@@ -80,6 +80,20 @@ func (s *Scheduler) destination(c Caller, j store.Job, d Def) string {
 		return "AgentNet recipient; agent delivers"
 	}
 	if t.Conv == c.Conv {
+		if c.External != "" && j.CreatedPrivate {
+			platform := "Heimdall"
+			switch t.Conv.Interface {
+			case core.PlatformSlack:
+				platform = "Slack"
+			case core.PlatformTelegram:
+				platform = "Telegram"
+			}
+			where := "Your private " + platform + " conversation"
+			if t.Conv.Thread != "" {
+				where += " topic"
+			}
+			return where
+		}
 		if j.CreatedPrivate {
 			if t.Conv.Thread != "" {
 				return "This private conversation topic"
