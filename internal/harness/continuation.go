@@ -5,7 +5,13 @@ package harness
 // (2026-11-07); task types also compared with anthropics/claude-agent-sdk-python
 // src/claude_agent_sdk/types.py. task_updated.patch.status and optional run_id
 // checked against https://code.claude.com/docs/en/agent-sdk/typescript
-// (SDKTaskUpdatedMessage, 2026-11-08). No task output_file is opened or delivered.
+// (SDKTaskUpdatedMessage, 2026-11-08). Foreground Bash lifecycle read from the
+// installed Claude Code 2.1.319 bundle (2026-11-09): every foreground command
+// is a local_bash task (task_started is_backgrounded false); when it returns
+// in its own tool call it is removed and only task_notification{status} is
+// emitted (no terminal task_updated, no model notification, so no
+// task-notification result); backgrounding sends task_updated
+// patch.is_backgrounded true. No task output_file is opened or delivered.
 import (
 	"encoding/json"
 	"strings"
@@ -69,6 +75,7 @@ func (w *worker) lossLocked(why string) {
 	w.tasks = nil
 	w.finished = nil
 	w.notified = nil
+	w.foreground = nil
 	w.continuing = nil
 	w.background = nil
 	w.frames = nil
@@ -189,6 +196,31 @@ func terminalStatus(old, next string) string {
 	return old
 }
 
+// settleTaskLocked ends one owned task with a terminal status and settles its
+// decoder's group once no task of that group is still running.
+func (w *worker) settleTaskLocked(key, status string) {
+	source := w.tasks[key]
+	delete(w.tasks, key)
+	delete(w.foreground, key)
+	w.rememberFinishedLocked(key, source)
+	nativeKey := taskOrigin(key)
+	p := w.continuing[nativeKey]
+	if p != nil {
+		p.terminal = terminalStatus(p.terminal, status)
+	}
+	// Settle only this decoder's group, with the aggregate outcome.
+	for k := range w.tasks {
+		if taskOrigin(k) == nativeKey {
+			return
+		}
+	}
+	if p != nil {
+		delete(w.continuing, nativeKey)
+		close(p.done)
+		w.emitLocked(p.source, Continuation{ID: p.id, Phase: "settled", Notice: p.terminal, Result: Result{SessionID: source.SessionID()}})
+	}
+}
+
 func (w *worker) claudeLineLocked(raw []byte) {
 	var e struct {
 		Type    string          `json:"type"`
@@ -199,8 +231,11 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		Parent  json.RawMessage `json:"parent_tool_use_id"`
 		Task    string          `json:"task_id"`
 		RunID   string          `json:"run_id"`
+		Status  string          `json:"status"` // task_notification
+		Fore    *bool           `json:"is_backgrounded"`
 		Patch   struct {
 			Status string `json:"status"`
+			Fore   *bool  `json:"is_backgrounded"`
 		} `json:"patch"`
 		Message json.RawMessage `json:"message"`
 		Origin  struct {
@@ -247,11 +282,6 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		key := e.RunID + "\x00" + e.Task
 		switch e.Subtype {
 		case "task_updated":
-			switch e.Patch.Status {
-			case "completed", "failed", "killed":
-			default:
-				return
-			}
 			// Older native updates omit run_id. Resolve only a unique owned
 			// task; an ambiguous task ID cannot settle another run.
 			matched := ""
@@ -266,24 +296,12 @@ func (w *worker) claudeLineLocked(raw []byte) {
 			if matched == "" || w.notified[matched] {
 				return
 			}
-			source := w.tasks[matched]
-			delete(w.tasks, matched)
-			w.rememberFinishedLocked(matched, source)
-			nativeKey := taskOrigin(matched)
-			p := w.continuing[nativeKey]
-			if p != nil {
-				p.terminal = terminalStatus(p.terminal, e.Patch.Status)
+			if e.Patch.Fore != nil && *e.Patch.Fore {
+				delete(w.foreground, matched) // now background work: its result follows
 			}
-			// Settle only this decoder's group, with the aggregate outcome.
-			for k := range w.tasks {
-				if taskOrigin(k) == nativeKey {
-					return
-				}
-			}
-			if p != nil {
-				delete(w.continuing, nativeKey)
-				close(p.done)
-				w.emitLocked(p.source, Continuation{ID: p.id, Phase: "settled", Notice: p.terminal, Result: Result{SessionID: source.SessionID()}})
+			switch e.Patch.Status {
+			case "completed", "failed", "killed":
+				w.settleTaskLocked(matched, e.Patch.Status)
 			}
 		case "task_started":
 			if w.tasks[key] != nil || w.notified[key] || w.finished[key] != nil {
@@ -303,6 +321,12 @@ func (w *worker) claudeLineLocked(raw []byte) {
 				source = p.source
 			}
 			w.tasks[key] = source
+			if e.Fore != nil && !*e.Fore {
+				if w.foreground == nil {
+					w.foreground = map[string]bool{}
+				}
+				w.foreground[key] = true
+			}
 			if w.continuing[nativeKey] == nil {
 				w.continuing[nativeKey] = w.passiveLocked(source)
 			}
@@ -321,6 +345,16 @@ func (w *worker) claudeLineLocked(raw []byte) {
 				}
 				if match != "" {
 					key = match
+				}
+			}
+			// A still-foreground task's notification is its tool call's own
+			// completion: nothing autonomous follows, so it settles here.
+			if w.foreground[key] && w.tasks[key] != nil && !w.notified[key] {
+				status := map[string]string{"completed": "completed", "failed": "failed", "stopped": "killed"}[e.Status]
+				if status != "" {
+					w.settleTaskLocked(key, status)
+					w.notified[key] = true // fence a repeated notification on the tombstone
+					return
 				}
 			}
 			nativeKey := taskOrigin(key)

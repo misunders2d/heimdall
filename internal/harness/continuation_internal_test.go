@@ -293,3 +293,73 @@ func TestSharedOriginRetainsFirstSource(t *testing.T) {
 		t.Fatal("shared origin changed source with foreground run")
 	}
 }
+
+// Claude Code 2.1.319 registers every foreground Bash command as a
+// local_bash task (task_started, is_backgrounded false) and, when the
+// command returns in the same tool call, removes it and emits only
+// task_notification with its status: no terminal task_updated and no
+// model notification, so no task-notification result follows. That
+// notification settles the task. A backgrounded task keeps waiting for its
+// attributed result.
+func TestForegroundTaskNotificationSettles(t *testing.T) {
+	for native, want := range map[string]string{"completed": "completed", "failed": "failed", "stopped": "killed"} {
+		t.Run(native, func(t *testing.T) {
+			w, _, events := asyncFixture(t)
+			out := &workerOutput{w}
+			sys := func(sub, id string, extra map[string]any) {
+				e := map[string]any{"type": "system", "subtype": sub, "session_id": "owned", "task_id": id, "run_id": "run-" + id}
+				for k, v := range extra {
+					e[k] = v
+				}
+				out.Write(protocolLine(e))
+			}
+			sys("task_started", "bg", map[string]any{"task_type": "local_bash", "is_backgrounded": false})
+			sys("task_updated", "bg", map[string]any{"patch": map[string]any{"is_backgrounded": true}})
+			sys("task_started", "fg", map[string]any{"task_type": "local_bash", "is_backgrounded": false, "tool_use_id": "toolu_1"})
+			sys("task_notification", "fg", map[string]any{"tool_use_id": "toolu_1", "status": native, "output_file": "", "summary": "ls"})
+			out.Write(protocolLine(map[string]any{"type": "result", "session_id": "owned", "uuid": "person", "result": "DONE"}))
+			if w.tasks["run-fg\x00fg"] != nil || w.continuing["run-fg"] != nil {
+				t.Fatalf("foreground task left running: tasks=%v passive=%v", w.tasks, w.continuing)
+			}
+			var fgStart uint64
+			settled := 0
+			for _, e := range *events {
+				if e.Phase == "start" && fgStart == 0 && e.ID != 0 {
+					fgStart = e.ID
+				}
+				if e.Phase == "settled" {
+					settled++
+					if e.Notice != want {
+						t.Fatalf("settled %q, want %q", e.Notice, want)
+					}
+				}
+			}
+			if settled != 1 {
+				t.Fatalf("foreground settled %d times: %+v", settled, *events)
+			}
+			// Replay of the notification neither reopens nor settles again.
+			n := len(*events)
+			sys("task_notification", "fg", map[string]any{"tool_use_id": "toolu_1", "status": native})
+			if len(*events) != n || w.tasks["run-fg\x00fg"] != nil {
+				t.Fatal("foreground notification replay reopened work")
+			}
+			// The backgrounded task still runs, then reaches its own result.
+			if w.tasks["run-bg\x00bg"] == nil || w.continuing["run-bg"] == nil {
+				t.Fatal("background task settled by a foreground notification")
+			}
+			sys("task_updated", "bg", map[string]any{"patch": map[string]any{"status": "completed"}})
+			sys("task_notification", "bg", map[string]any{"status": "completed"})
+			out.Write(protocolLine(map[string]any{"type": "result", "session_id": "owned", "uuid": "auto", "result": "BG DONE", "origin": map[string]any{"kind": "task-notification", "runId": "run-bg"}}))
+			last := (*events)[len(*events)-1]
+			if last.Phase != "result" || last.Result.Answer != "BG DONE" || len(w.tasks) != 0 || len(w.continuing) != 0 {
+				t.Fatalf("background result not attributed: %+v", last)
+			}
+			w.lossLocked("expiry")
+			for _, e := range *events {
+				if e.Interrupted {
+					t.Fatal("completed work reported interrupted")
+				}
+			}
+		})
+	}
+}

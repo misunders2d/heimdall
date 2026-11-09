@@ -126,6 +126,7 @@ type worker struct {
 	activity    time.Time
 	tasks       map[string]*Run
 	notified    map[string]bool
+	foreground  map[string]bool // owned tasks the native start marked foreground, not since backgrounded
 	seq         uint64
 	retiring    bool
 	telemetry   progressTracker
