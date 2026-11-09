@@ -838,7 +838,7 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 		} else {
 			run.State, run.Cause = store.RunUnverified, "AGENTNET_SENT marker missing"
 		}
-	case t.Def.Quiet && text == QuietToken:
+	case len(o.Files) == 0 && quietAnswer(text):
 		run.State = store.RunQuiet
 	case text == "" && len(o.Files) == 0:
 		fail("empty answer")

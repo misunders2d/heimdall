@@ -373,6 +373,24 @@ func TestEndOutcomes(t *testing.T) {
 	if !strings.Contains(r.cmd(asBoss, "job history "+quiet), "quiet") {
 		t.Fatal("history")
 	}
+	// Narration before the token is still quiet, for any job (MEL-764).
+	plain := r.add(asBoss, `{"name":"n","schedule":{"every":"1h"},"prompt":"p"}`)
+	for _, answer := range []string{"Marker exists.\n\nNO_UPDATE", "NO_UPDATE\n", "checked x\n  NO_UPDATE  "} {
+		r.run(plain)
+		if e := r.finish(answer, Outcome{Harness: "claude"}); e.Reply != nil || e.Run.State != store.RunQuiet {
+			t.Fatalf("narrated quiet %q: %+v", answer, e)
+		}
+	}
+	// A real result that only mentions the token mid-text is delivered.
+	r.run(plain)
+	if e := r.finish("NO_UPDATE was wrong before.\nNew result: X", Outcome{Harness: "claude"}); e.Reply == nil || e.Run.State == store.RunQuiet {
+		t.Fatalf("mention delivered: %+v", e)
+	}
+	// The marker never suppresses a real attachment.
+	r.run(plain)
+	if e := r.finish("Marker exists.\n\nNO_UPDATE", Outcome{Harness: "claude", Files: []core.File{{Path: "report.csv", Name: "report.csv"}}}); e.Reply == nil || e.Run.State == store.RunQuiet || len(e.Files) != 1 {
+		t.Fatalf("attachment suppressed: %+v", e)
+	}
 	// The job's own blocks are dropped (jobs never create jobs); [job: done]
 	// ends the job.
 	once := r.add(asBoss, `{"name":"o","schedule":{"every":"1h"},"prompt":"p"}`)
@@ -1452,14 +1470,15 @@ func TestPrepareRefusesInvalidMultipleAndCap(t *testing.T) {
 	}
 }
 
-func TestQuietControlIsWholeAnswerOnly(t *testing.T) {
+func TestQuietControlUsesFinalLine(t *testing.T) {
 	for _, text := range []string{"NO_UPDATE", "Marker exists → already reported.\n\nNO_UPDATE", "The user asked what NO_UPDATE means.", "NO_UPDATE\nUseful result"} {
 		t.Run(text, func(t *testing.T) {
 			r := newRig(t)
 			id := r.add(asBoss, `{"name":"q","schedule":{"every":"1h"},"quiet":true,"prompt":"p"}`)
 			r.run(id)
 			e := r.finish(text, Outcome{Harness: "claude"})
-			if text == "NO_UPDATE" {
+			// Owner (MEL-764): narration ending in the token is quiet too.
+			if quietAnswer(text) {
 				if e.Run.State != store.RunQuiet || e.Reply != nil {
 					t.Fatal("quiet control leaked")
 				}

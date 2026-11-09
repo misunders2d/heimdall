@@ -26,8 +26,16 @@ const (
 	KindNotify = "notify"
 )
 
-// QuietToken is the whole answer of a quiet job with nothing to report.
+// QuietToken is the final non-empty line of an answer with nothing to report.
 const QuietToken = "NO_UPDATE"
+
+// quietAnswer reports a scheduled answer with nothing to deliver: its last
+// non-empty line is exactly QuietToken. Models often narrate before the token
+// ("Marker exists.\n\nNO_UPDATE"); the owner never wants those delivered.
+func quietAnswer(text string) bool {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	return strings.TrimSpace(lines[len(lines)-1]) == QuietToken
+}
 
 // Def is a job definition (docs/scheduler.md §2.2): what !job add, !job
 // edit and model drafts carry, checked by one validator.
