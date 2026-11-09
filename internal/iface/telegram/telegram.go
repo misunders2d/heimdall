@@ -83,6 +83,11 @@ type Interface struct {
 	// chat, sender and media_group_id: their later parts, which carry no
 	// caption, are addressed too. Touched only by Run.
 	albums map[string]time.Time
+	// addressedAt is the send time (unix) of each sender's last group
+	// message that addressed the bot, by chat:sender. A client sending a
+	// comment with forwards delivers the forwards as separate messages in
+	// the same moment; they belong to the comment's turn.
+	addressedAt map[string]int64
 }
 
 // albumMemory is how long an addressed album's later parts are taken.
@@ -385,12 +390,15 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		text = m.Caption
 	}
 	replied := repliedTo(m)
-	addressed := private || router.UnmentionedCommand(text, t.command(text), t.botName, t.opt.UnmentionedCommands) || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
+	addressed := private || router.UnmentionedCommand(text, t.command(text), t.botName, t.opt.UnmentionedCommands) || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m) || !private && t.forwardAddressed(m)
 	if !addressed {
 		return t.ambient(u, m, text)
 	}
 	if m.MediaGroupID != "" && !private {
 		t.rememberAlbum(m)
+	}
+	if !private {
+		t.rememberAddressed(m)
 	}
 	text = t.command(text)
 	own := contentContext(m)
@@ -449,6 +457,40 @@ func (t *Interface) rememberAlbum(m *message) {
 		}
 	}
 	t.albums[albumKey(m)] = time.Now()
+}
+
+// forwardWindow is how far (seconds) a forward's send time may trail
+// its sender's addressed comment to join that comment's turn.
+const forwardWindow = 3
+
+func senderKey(m *message) string {
+	return fmt.Sprintf("%d:%d", m.Chat.ID, m.From.ID)
+}
+
+// forwardAddressed reports whether m is a forward sent together with its
+// sender's comment that addressed the bot (Telegram delivers the comment
+// and each forwarded message separately).
+func (t *Interface) forwardAddressed(m *message) bool {
+	if m.ForwardOrigin == nil || m.From == nil {
+		return false
+	}
+	at, ok := t.addressedAt[senderKey(m)]
+	return ok && m.Date >= at && m.Date-at <= forwardWindow
+}
+
+func (t *Interface) rememberAddressed(m *message) {
+	if m.From == nil {
+		return
+	}
+	if t.addressedAt == nil {
+		t.addressedAt = map[string]int64{}
+	}
+	for k, at := range t.addressedAt {
+		if m.Date-at > forwardWindow {
+			delete(t.addressedAt, k)
+		}
+	}
+	t.addressedAt[senderKey(m)] = m.Date
 }
 
 // ambient is a group message not addressed to the bot, kept by the router

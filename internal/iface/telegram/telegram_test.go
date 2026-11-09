@@ -1301,3 +1301,50 @@ func TestPiAccessChatWhitelistAndRevocation(t *testing.T) {
 		t.Fatal("blacklisted user admitted")
 	}
 }
+
+// A comment that mentions the bot, sent with forwards, arrives as separate
+// messages: the comment, then each forward, from the same sender in the
+// same moment. Those forwards are addressed too (MEL: forwarded video
+// reached the turn only as a label). Someone else's forward, a late
+// forward and a plain unaddressed message stay context.
+func TestForwardsSentWithAComment(t *testing.T) {
+	api := newFakeAPI(t)
+	c := &collector{}
+	var logs syncBuffer
+	fwd := func(id int, from int64, date int) map[string]any {
+		m := msg(id, -1002, "group", from, "")
+		m["date"] = date
+		m["forward_origin"] = map[string]any{"type": "user", "date": 1690000000, "sender_user": map[string]any{"id": 9, "first_name": "Sender"}}
+		m["video"] = map[string]any{"file_id": fmt.Sprintf("id:v/%d.mp4", id), "file_unique_id": fmt.Sprintf("u%d", id), "mime_type": "video/mp4", "file_name": "video.mp4"}
+		api.files[fmt.Sprintf("v/%d.mp4", id)] = []byte("mp4")
+		return m
+	}
+	i := newIface(t, api.srv.URL, botName, &logs)
+	i.opt.UploadDir = filepath.Join(t.TempDir(), "uploads")
+	api.push(
+		upd(1, msg(1, -1002, "group", 42, "@heimdall_test_bot what does she say?")),
+		upd(2, fwd(2, 42, 1700000001)),
+		upd(3, fwd(3, 43, 1700000001)),
+		upd(4, fwd(4, 42, 1700000060)),
+		upd(5, msg(5, -1002, "group", 42, "just chatting")),
+	)
+	stop := run(t, i, c.accept)
+	eventually(t, "offset past all", func() bool { return api.lastOffset() == 6 })
+	stop()
+	var ids, ambient []string
+	for _, in := range c.list() {
+		switch {
+		case in.Ambient:
+			ambient = append(ambient, in.MsgID)
+		case in.Announce:
+		default:
+			if in.MsgID == "2" && (len(in.Attachments) != 1 || in.Attachments[0].Stored == "") {
+				t.Errorf("forward without its file: %+v", in)
+			}
+			ids = append(ids, in.MsgID)
+		}
+	}
+	if !slices.Equal(ids, []string{"1", "2"}) || !slices.Equal(ambient, []string{"3", "4", "5"}) {
+		t.Fatalf("addressed %v, context %v", ids, ambient)
+	}
+}
