@@ -241,7 +241,7 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 	if !ok || r != core.RoleOwner {
 		return Caller{}, errors.New("bound caller is not a current owner")
 	}
-	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: actor, OAuthInstallation: installation, External: who.External}, nil
+	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: actor, OAuthInstallation: installation, External: who.External, Registered: who.Registered}, nil
 }
 
 // scheduledCaller binds a router-started scheduled run. The router already
@@ -335,7 +335,11 @@ func (c *Control) resolvePeer(pid int, alive func() bool) (Caller, func() bool, 
 			return Caller{}, nil, errors.New("no active origin")
 		}
 	}
-	return c.resolveExternal(pid, alive)
+	who, valid, err := c.resolveExternal(pid, alive)
+	if err == nil || c.s.TrustedT3 == nil || (len(c.s.External) > 0 && !errors.Is(err, errNotLaunched) && !errors.Is(err, errLauncherDown)) {
+		return who, valid, err // a launcher in the ancestry that refused never falls through
+	}
+	return c.resolveTrustedT3(pid, alive)
 }
 
 // Capture an eligible native input before waiting; never upgrade a queued idle
@@ -369,6 +373,9 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	}
 	if strings.HasPrefix(req.Action, "task_") {
 		return c.task(uid, req, who, valid)
+	}
+	if who.Registered != "" {
+		return fail(errors.New(who.Registered + " may only task_add, task_list and task_show"))
 	}
 	if req.Title != "" {
 		return fail(errors.New("title is only valid for task_add"))

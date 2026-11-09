@@ -99,21 +99,30 @@ func processChain(pid int) ([]procEntry, error) {
 // errNotLaunched: no configured launcher is an ancestor of the peer.
 var errNotLaunched = errors.New("no active Heimdall turn and no configured launcher started this process")
 
+// errLauncherDown wraps failures before the launcher's run could be looked
+// up (its socket unusable or unanswered): it neither vouched nor refused.
+var errLauncherDown = errors.New("launcher unavailable")
+
 // resolveExternal binds a peer that no Heimdall turn owns to a configured
 // launcher's verified run. Errors name what is missing.
 func (c *Control) resolveExternal(pid int, alive func() bool) (Caller, func() bool, error) {
 	if len(c.s.External) == 0 {
 		return Caller{}, nil, errors.New("no active Heimdall turn owns this process and no external origin is configured")
 	}
-	err := errNotLaunched
+	err, refused := errNotLaunched, error(nil)
 	for _, o := range c.s.External {
 		who, valid, e := c.externalOrigin(o, pid, alive)
-		if e == nil {
+		switch {
+		case e == nil:
 			return who, valid, nil
+		case errors.Is(e, errLauncherDown):
+			err = e // explains more than "none"
+		case !errors.Is(e, errNotLaunched) && refused == nil:
+			refused = e // a launcher in the ancestry that refused wins
 		}
-		if !errors.Is(e, errNotLaunched) {
-			err = e // a launcher in the ancestry explains more than "none"
-		}
+	}
+	if refused != nil {
+		return Caller{}, nil, refused
 	}
 	return Caller{}, nil, err
 }
@@ -156,11 +165,11 @@ func (c *Control) externalOrigin(o ExternalOrigin, pid int, alive func() bool) (
 func askLauncher(o ExternalOrigin, pid int) (externalAnswer, error) {
 	var none externalAnswer
 	if err := launcherSocket(o); err != nil {
-		return none, fmt.Errorf("%s origin socket unusable: %v", o.Name, err)
+		return none, fmt.Errorf("%s origin socket unusable: %v (%w)", o.Name, err, errLauncherDown)
 	}
 	conn, err := net.DialTimeout("unix", o.Socket, externalTimeout)
 	if err != nil {
-		return none, fmt.Errorf("%s origin socket unavailable: %v", o.Name, err)
+		return none, fmt.Errorf("%s origin socket unavailable: %v (%w)", o.Name, err, errLauncherDown)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(externalTimeout))

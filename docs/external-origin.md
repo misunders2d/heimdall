@@ -154,6 +154,20 @@ the most recent one is used. Unmapped people are refused. Config is read at
 startup: removing an entry revokes it when Heimdall restarts. Revoking the
 person's owner role or keys in AgentNet takes effect on the next call.
 
+### Trusted T3 task registration (owner, 2026-11-09)
+
+`"trusted_t3":{"launcher":"/ABSOLUTE/PATH/TO/t3","user":"T3_OS_USER"}` (absent = off)
+lets a peer that no Heimdall turn or configured launcher owns, and that
+descends from the running process of the executable `launcher` resolves to
+(resolved per request, so no version pin), run `task_add`, `task_list` and
+`task_show` only, as `owner` in its registered private conversation. Every
+path component must be owned by root or `user` and not group/other writable;
+below such a directory that others cannot search, another owner is allowed.
+The process must run as `user`, and the ancestry must be unchanged at commit.
+The owner trusts T3 as a registration source; this is not a human
+attestation. Wakes say "Registered through trusted T3". A Heimdall process
+tree, a stale turn or a launcher that refused never falls through to this.
+
 ## Threats
 
 - **Forgery by another local process.** Non-root, non-owner UIDs are refused

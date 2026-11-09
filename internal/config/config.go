@@ -94,6 +94,16 @@ type SchedulerControl struct {
 	// External trusted local launchers that vouch for the runs they start
 	// (docs/external-origin.md). Tried only when no Heimdall turn owns the peer.
 	External []ExternalOrigin `json:"external,omitempty"`
+	// TrustedT3: the owner-trusted T3 launcher; its descendants may only
+	// register durable tasks (task_add/list/show) for Owner. Absent = off.
+	TrustedT3 *TrustedLauncher `json:"trusted_t3,omitempty"`
+}
+
+// TrustedLauncher names the trusted T3 launcher executable (a stable path
+// such as its installed symlink, resolved per request) and its OS user.
+type TrustedLauncher struct {
+	Launcher string `json:"launcher"`
+	User     string `json:"user"`
 }
 
 // ExternalOrigin is one trusted local launcher and the people it may vouch
@@ -350,6 +360,9 @@ func (c *Config) fill(staged bool) error {
 			}
 			if k := s.Control.Source; k != nil && (k.Interface != p.Platform || k.Chat == "" || strings.ContainsAny(k.Chat+k.Thread, "\r\n")) {
 				return errors.New("scheduler.control.source must name an owner platform conversation")
+			}
+			if t := s.Control.TrustedT3; t != nil && (!filepath.IsAbs(t.Launcher) || filepath.Clean(t.Launcher) != t.Launcher || t.User == "") {
+				return errors.New("scheduler.control.trusted_t3 needs a clean absolute launcher path and its user")
 			}
 			names := map[string]bool{}
 			for i, o := range s.Control.External {

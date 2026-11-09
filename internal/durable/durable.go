@@ -377,10 +377,11 @@ type Commitment struct {
 	Private           bool         `json:"private,omitempty"` // admitted in the creator's private chat
 	ReplyTo           string       `json:"reply_to"`
 	Resource          string       `json:"resource"`
-	Worker            string       `json:"worker"`          // owner-selected worker reference; also the partition
-	Brief             string       `json:"brief,omitempty"` // dispatched when a Dispatcher is configured
-	Gates             []string     `json:"gates,omitempty"` // evidence prechecks, e.g. git:/repo
-	Next              string       `json:"next,omitempty"`  // authorized work left after acceptance; "" = single step
+	Worker            string       `json:"worker"`           // owner-selected worker reference; also the partition
+	Brief             string       `json:"brief,omitempty"`  // dispatched when a Dispatcher is configured
+	Gates             []string     `json:"gates,omitempty"`  // evidence prechecks, e.g. git:/repo
+	Next              string       `json:"next,omitempty"`   // authorized work left after acceptance; "" = single step
+	Origin            string       `json:"origin,omitempty"` // registration source when not a live message, e.g. "trusted T3"
 }
 
 // Event is an attributed signal to a commitment. By is the verified
@@ -946,6 +947,9 @@ func workPrompt(w *run, action string) string {
 	c, st := w.c, w.st
 	var b strings.Builder
 	fmt.Fprintf(&b, "Durable commitment %s %q, attempt %d (a wake from Heimdall's durable runtime, not a live message).\n", c.Issue, c.Title, st.Attempt)
+	if c.Origin != "" {
+		fmt.Fprintf(&b, "Registered through %s, not a live chat message.\n", c.Origin)
+	}
 	fmt.Fprintf(&b, "Goal: %s\n", brief(w))
 	if action != "" {
 		fmt.Fprintf(&b, "Your persisted next action: %s\n", action)

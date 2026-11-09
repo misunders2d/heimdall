@@ -91,6 +91,10 @@ type Caller struct {
 	// vouched for this peer's run (docs/external-origin.md). Set only by the
 	// control resolver, never from a request; empty otherwise.
 	External string
+	// Registered: a task-only registration origin ("trusted T3"): the peer
+	// descends from the configured trusted T3 launcher. It may only
+	// task_add/list/show; set only by the control resolver.
+	Registered string
 }
 
 // Target is where a job delivers.

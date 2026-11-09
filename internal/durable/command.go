@@ -28,6 +28,9 @@ type Caller struct {
 	// The interface-verified native OAuth actor of the stored message: the
 	// creator's own native sign-ins (as for !job runs); never role authority.
 	OAuthActor, OAuthInstallation string
+	// Origin names a registration source that is not a live chat message
+	// (the owner-trusted T3 launcher); empty for messages and person turns.
+	Origin string
 }
 
 // sees reports whether c may see cm. As for !job: in the creator's private
@@ -151,7 +154,7 @@ func (r *Runtime) Command(c Caller, text string) string {
 }
 
 func parseAdd(c Caller, issue string, args []string) (Commitment, error) {
-	cm := Commitment{Issue: issue, Creator: c.Principal.Key(), Owner: c.Principal, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Route: c.Conv, Private: c.Private, ReplyTo: c.MsgID, Resource: defaultRes}
+	cm := Commitment{Issue: issue, Creator: c.Principal.Key(), Owner: c.Principal, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Route: c.Conv, Private: c.Private, ReplyTo: c.MsgID, Resource: defaultRes, Origin: c.Origin}
 	var title []string
 	for i, a := range args {
 		k, v, ok := strings.Cut(a, "=")

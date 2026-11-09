@@ -61,6 +61,10 @@ type Scheduler struct {
 	// External launchers that may vouch for runs Heimdall did not start
 	// (docs/external-origin.md); tried only when no Heimdall turn owns the peer.
 	External []ExternalOrigin
+	// TrustedT3: the owner-trusted T3 launcher whose descendants may
+	// register durable tasks only (task_add/list/show) for the deployment
+	// owner; tried last, only when no Heimdall turn or launcher owns the peer.
+	TrustedT3 *TrustedLauncher
 	// Tasks admits (action "add") or reads ("list", "show") durable tasks
 	// for a bound live owner caller; nil: durable tasks are off. admitted
 	// reports a new commitment.
