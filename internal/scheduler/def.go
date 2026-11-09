@@ -87,6 +87,10 @@ type Caller struct {
 	// router from the active turn, never from a request): carried into a
 	// durable task so its wakes use the creator's own native sign-ins.
 	OAuthActor, OAuthInstallation string
+	// External: "<launcher> <run>" when a configured trusted local launcher
+	// vouched for this peer's run (docs/external-origin.md). Set only by the
+	// control resolver, never from a request; empty otherwise.
+	External string
 }
 
 // Target is where a job delivers.

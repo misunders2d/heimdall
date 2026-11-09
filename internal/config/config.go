@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -90,6 +91,26 @@ type Scheduler struct {
 type SchedulerControl struct {
 	Owner  string        `json:"owner"`
 	Source *core.ConvKey `json:"source,omitempty"` // protected source conversation, never tool arguments
+	// External trusted local launchers that vouch for the runs they start
+	// (docs/external-origin.md). Tried only when no Heimdall turn owns the peer.
+	External []ExternalOrigin `json:"external,omitempty"`
+}
+
+// ExternalOrigin is one trusted local launcher and the people it may vouch
+// for, each mapped to an existing Heimdall principal (role evaluated live).
+type ExternalOrigin struct {
+	Name   string                    `json:"name"`
+	Socket string                    `json:"socket"` // absolute path of the launcher's own socket
+	User   string                    `json:"user"`   // OS user the launcher runs as
+	People map[string]ExternalPerson `json:"people"`
+}
+
+var externalName = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+
+// ExternalPerson is the Heimdall identity a launcher person maps to.
+type ExternalPerson struct {
+	Principal string        `json:"principal"`        // platform:id (telegram or slack)
+	Source    *core.ConvKey `json:"source,omitempty"` // which registered private conversation
 }
 
 // On reports whether the scheduler runs.
@@ -329,6 +350,32 @@ func (c *Config) fill(staged bool) error {
 			}
 			if k := s.Control.Source; k != nil && (k.Interface != p.Platform || k.Chat == "" || strings.ContainsAny(k.Chat+k.Thread, "\r\n")) {
 				return errors.New("scheduler.control.source must name an owner platform conversation")
+			}
+			names := map[string]bool{}
+			for i, o := range s.Control.External {
+				at := fmt.Sprintf("scheduler.control.external[%d]", i)
+				if !externalName.MatchString(o.Name) || names[o.Name] {
+					return fmt.Errorf("%s.name must be a unique word (a-z, 0-9, _ or -)", at)
+				}
+				names[o.Name] = true
+				if !filepath.IsAbs(o.Socket) || filepath.Clean(o.Socket) != o.Socket || len(o.Socket) > 107 {
+					return fmt.Errorf("%s.socket must be a clean absolute path", at)
+				}
+				if o.User == "" {
+					return fmt.Errorf("%s.user is required", at)
+				}
+				if len(o.People) == 0 {
+					return fmt.Errorf("%s.people must map at least one person", at)
+				}
+				for person, m := range o.People {
+					q, err := core.ParsePrincipalKey(m.Principal)
+					if person == "" || len(person) > 128 || strings.ContainsFunc(person, func(r rune) bool { return r < 0x20 || r == 0x7f }) || err != nil || (q.Platform != core.PlatformTelegram && q.Platform != core.PlatformSlack) {
+						return fmt.Errorf("%s.people: %q must map to a telegram or slack principal", at, person)
+					}
+					if k := m.Source; k != nil && (k.Interface != q.Platform || k.Chat == "" || strings.ContainsAny(k.Chat+k.Thread, "\r\n")) {
+						return fmt.Errorf("%s.people: %q source must name that principal's platform conversation", at, person)
+					}
+				}
 			}
 		}
 		for _, d := range []struct {

@@ -231,3 +231,31 @@ func TestSchedulerBlock(t *testing.T) {
 		}
 	}
 }
+
+func TestSchedulerExternalOrigins(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"corporate","owners":["telegram:1"],"max_parallel":3,"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
+	wrap := func(external string) string {
+		return `{` + base + `,"scheduler":{"enabled":true,"default_tz":"UTC","control":{"owner":"telegram:1","external":` + external + `}}}`
+	}
+	c, err := Parse([]byte(wrap(`[{"name":"agentnet","socket":"/root/.agentnet/run-origin.sock","user":"root","people":{"person:sergey":{"principal":"slack:Owner@Example.test"}}}]`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := c.Scheduler.Control.External; len(o) != 1 || o[0].People["person:sergey"].Principal != "slack:Owner@Example.test" {
+		t.Fatalf("%+v", o)
+	}
+	for _, bad := range []string{
+		`[{"name":"Agent Net","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
+		`[{"name":"a","socket":"relative.sock","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
+		`[{"name":"a","socket":"/s","people":{"p":{"principal":"telegram:1"}}}]`,
+		`[{"name":"a","socket":"/s","user":"root","people":{}}]`,
+		`[{"name":"a","socket":"/s","user":"root","people":{"p":{"principal":"agentnet:p"}}}]`,
+		`[{"name":"a","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1","role":"owner"}}}]`,
+		`[{"name":"a","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1","source":{"interface":"slack","chat":"D1"}}}}]`,
+		`[{"name":"a","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}},{"name":"a","socket":"/t","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
+	} {
+		if _, err := Parse([]byte(wrap(bad))); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}

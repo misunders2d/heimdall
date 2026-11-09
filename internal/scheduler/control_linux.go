@@ -41,6 +41,7 @@ type ControlRequest struct {
 type ControlResult struct {
 	Reply   string `json:"reply,omitempty"`
 	DraftID string `json:"draft_id,omitempty"`
+	JobID   string `json:"job_id,omitempty"` // a job applied at once (external owner origin)
 	Changed bool   `json:"changed"`
 	Error   string `json:"error,omitempty"`
 }
@@ -183,7 +184,7 @@ func (c *Control) serve(ctx context.Context, conn *net.UnixConn) {
 			result.Error = "invalid control request"
 		} else {
 			if originErr != nil {
-				result.Error = "trusted active request origin unavailable"
+				result.Error = "trusted active request origin unavailable: " + originErr.Error()
 			} else {
 				result = c.executePeer(ctx, cred, req, who, valid)
 			}
@@ -213,8 +214,12 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 		return c.scheduledCaller(ctx, who)
 	}
 	p, k := who.Principal, who.Conv
-	if err := c.s.st.ControlOrigin(p, k, who.Private); err != nil {
-		return Caller{}, err
+	// An external origin's conversation is the mapped principal's registered
+	// private ingress (ControlBinding at resolution), not an active turn.
+	if who.External == "" {
+		if err := c.s.st.ControlOrigin(p, k, who.Private); err != nil {
+			return Caller{}, err
+		}
 	}
 	if p.Platform == core.PlatformSlack {
 		if c.s.Reverify == nil {
@@ -230,7 +235,7 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 	if !ok || r != core.RoleOwner {
 		return Caller{}, errors.New("bound caller is not a current owner")
 	}
-	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, nil
+	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, External: who.External}, nil
 }
 
 // scheduledCaller binds a router-started scheduled run. The router already
@@ -308,15 +313,23 @@ func peerAlive(fd int) bool {
 	n, err := unix.Poll(fds, 0)
 	return err == nil && n == 0
 }
+
+// resolvePeer: a Heimdall-started live turn first; only a peer no Heimdall
+// turn owns may be vouched for by a configured external launcher.
 func (c *Control) resolvePeer(pid int, alive func() bool) (Caller, func() bool, error) {
-	if c.s.ResolveControl == nil || !alive() {
+	if !alive() {
 		return Caller{}, nil, errors.New("no active peer")
 	}
-	who, current, err := c.s.ResolveControl(pid)
-	if err != nil || current == nil || !alive() || !current() {
-		return Caller{}, nil, errors.New("no active origin")
+	if c.s.ResolveControl != nil {
+		who, current, err := c.s.ResolveControl(pid)
+		if err == nil && current != nil && alive() && current() {
+			return who, func() bool { return alive() && current() }, nil
+		}
+		if err == nil {
+			return Caller{}, nil, errors.New("no active origin")
+		}
 	}
-	return who, func() bool { return alive() && current() }, nil
+	return c.resolveExternal(pid, alive)
 }
 
 // Capture an eligible native input before waiting; never upgrade a queued idle
@@ -349,6 +362,9 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		return fail(errors.New("request origin expired during verification"))
 	}
 	if strings.HasPrefix(req.Action, "task_") {
+		if who.External != "" {
+			return fail(errors.New("durable tasks are admitted only from a live Heimdall chat turn; an external origin manages scheduled jobs"))
+		}
 		return c.task(uid, req, who, valid)
 	}
 	if req.Title != "" {
@@ -467,6 +483,21 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		}
 		result = ControlResult{Reply: c.s.card(who, j), DraftID: j.ID, Changed: true}
 		change = &store.JobChange{Add: &j}
+		// An external owner origin has no Heimdall chat to confirm in: like a
+		// direct owner chat request, create/edit apply at once. Removal and
+		// rerun_on_timeout keep the draft and its human confirmation.
+		if d, _, _ := parse(j); who.External != "" && req.Action != "remove" && !d.RerunOnTimeout {
+			msg, applied := c.s.confirmJob(who, j)
+			if applied == nil {
+				return fail(errors.New(strings.ReplaceAll(msg, "\n", " ")))
+			}
+			applied.Add = &j
+			id := j.ID
+			if j.EditOf != "" {
+				id = j.EditOf
+			}
+			result, change = ControlResult{Reply: msg + "\n— heimdall", JobID: id, Changed: true}, applied
+		}
 		outs = []core.Outbound{{Conv: who.Conv, Text: result.Reply, Formatted: true}}
 	case "acknowledge":
 		change = &store.JobChange{Acknowledge: &store.AlertAcknowledgement{Job: req.ID, Creator: who.Principal.Key(), Key: req.Key, Revision: req.Revision, Outbound: req.Outbound}}

@@ -62,6 +62,16 @@ the `heimdall-live` unit.
   hub's identity variables (`docs/hub-parity.md`), including scheduled jobs
   (later phase), which store their creator and run under that creator's
   role and mode evaluated at fire time.
+- **External verified origins** (owner, 2026-11-09): Heimdall is not coupled
+  to AgentNet but receives identity from it. Scheduler control may also bind a
+  run that a configured trusted local launcher started, only through
+  [docs/external-origin.md](docs/external-origin.md): Heimdall connects to the
+  launcher's own socket, checks its kernel credentials and that the peer
+  descends from its direct child, and asks live (again before commit). Only
+  `author: human` runs of people explicitly mapped to an existing principal
+  that is a current owner count; environment variables are never identity;
+  no AgentNet code or import. Create/edit apply at once; removal and
+  `rerun_on_timeout` keep human confirmation; durable tasks are refused.
 - **Roles.**
   - *Owner (root)*: `ADMIN_USER_IDS` authority only. File admins are admitted employees.
     Config owners are only an explicit non-hub fallback.
