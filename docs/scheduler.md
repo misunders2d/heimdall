@@ -20,7 +20,7 @@ Principles:
   - The scheduler adds a store, a due loop, commands and notices.
 - **Runs as its creator.** The creator's role, capabilities and mode are evaluated at every fire, never only at creation.
 - **Never twice.** Enqueue is exactly-once per scheduled slot. Delivery is at-least-once: one duplicate message is possible after a crash, and Heimdall never claims exactly-once.
-- **The model proposes only when asked.** Direct owner person turns apply new jobs and edits with the reply in one transaction. Non-owners, removals and jobs with `rerun_on_timeout` enabled still require confirmation. Scheduled turns never apply blocks; MCP controls never auto-apply.
+- **The model proposes only when asked.** Direct owner person turns in a private chat (a live owner message) apply new jobs and edits with the reply in one transaction; in a group the owner confirms. Non-owners, removals and jobs with `rerun_on_timeout` enabled still require confirmation. Scheduled turns never apply blocks; MCP controls never auto-apply.
 - **No new service.** One new dependency, `adhocore/gronx`, for cron parsing; the IANA zone data is stdlib `time/tzdata`.
 - **Deterministic detection.** Watches use scripts and cursors; the LLM runs only on a match.
 - **Long work goes elsewhere.** Multi-hour work is delegated to laptops through T3. A job only starts it, and a watch tracks it.
@@ -685,7 +685,7 @@ For 3b, add:
   - a fresh session by default;
   - no progress messages.
 - Retry only before the ready signal. Interrupted runs are never re-run, except `idempotent` jobs (once).
-- Models propose jobs only when asked, through the answer block. Direct owner new jobs and edits apply atomically with the reply; non-owners, removals and `rerun_on_timeout` jobs require confirmation in the same conversation within 24 h. Blocks from scheduled turns are ignored; MCP controls never auto-apply.
+- Models propose jobs only when asked, through the answer block. Direct owner new jobs and edits from a live private-chat message apply atomically with the reply (in a group the owner confirms); non-owners, removals and `rerun_on_timeout` jobs require confirmation in the same conversation within 24 h. Blocks from scheduled turns are ignored; MCP controls never auto-apply.
 - Notices are fixed templates ending `— heimdall`; no model text in shared channels.
 - AgentNet: owner jobs may name an address; the agent delivers; Heimdall never talks to AgentNet.
 - Watches: deterministic checkers from config only, running as the creator, with an expiry. One Slack consumer and one Telegram poller.

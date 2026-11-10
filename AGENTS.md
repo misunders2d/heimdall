@@ -65,6 +65,8 @@ the `heimdall-live` unit.
   reliable, disruption- and restart-surviving system that continues
   interrupted tasks. Off by default in code. Production runs it with
   `supervisor_review` and `assistant_work` on and `t3_dispatch` off.
+  Wake rules, caps, the one owner line and T3 intake (`deploy/t3-intake`):
+  [docs/durable.md](docs/durable.md).
 - **Identity comes from the interface, never from text.** Callers never log
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack
@@ -75,7 +77,11 @@ the `heimdall-live` unit.
   (auth.test team ID). Slack Connect guests from other workspaces, and
   emails remembered from earlier lookups, never count. Display names,
   usernames and message text are never identity. A caller the interface
-  cannot identify is ignored and logged, fail closed. The verified identity is carried on
+  cannot identify is ignored and logged, fail closed. When the access files
+  cannot be read nobody is admitted, and messages wait instead of being
+  dropped (`core.ErrAccessUnavailable`): the router holds and retries every
+  1 s in order, Telegram keeps its offset (backoff), Slack leaves the event
+  pending within its retry window. The verified identity is carried on
   every message handed to a harness, and to the harness process in the
   hub's identity variables (`docs/hub-parity.md`), including scheduled jobs
   (later phase), which store their creator and run under that creator's
@@ -133,6 +139,9 @@ the `heimdall-live` unit.
   Employees, scheduled jobs and MCP controls receive no pointer.
 - **Conversations.** Key = interface + chat + thread. Same key: one turn at a
   time. Different keys run in parallel up to `max_parallel` running turns. Idle warm processes use no turn slot.
+  With `max_parallel` > 1 one of those slots is reserved for the owner's live
+  turns, which take it first (none at 1). A caller who must wait for a slot
+  is told once: "Queued — starting when a slot frees. — heimdall".
 - **Telegram** (as the hub's connector). A private chat is always handled.
   In a group, exact controls allowed by `commands.unmentioned` work without
   addressing. Other messages are handled only if they mention `@<bot username>`, replies to one of the bot's
@@ -140,7 +149,9 @@ the `heimdall-live` unit.
   group message from a person is never run or answered; it is kept only as
   bounded, untrusted context for that conversation's later turns (the newest
   1000 kept, 40 shown, 4000 chars each and 16000 in all, scrubbed; files
-  only by label). `/start` is `!help`. The text, else the caption. Files
+  only by label). `/start` is `!help`. The text, else the caption. A
+  forward's text is quoted untrusted context ("Telegram forwarded message"),
+  never a command or the sender's own words. Files
   (the message's and the replied-to message's, at most 20 MB) are downloaded
   into Heimdall's 0700 upload directory and, at turn start, copied into a
   per-turn directory owned by the turn's OS user; pictures also go natively
@@ -223,9 +234,16 @@ the `heimdall-live` unit.
   starts and the reply says so. Outbound delivery is at-least-once: a crash
   between a successful platform send and its local acknowledgement can repeat
   that one message. Say so; never claim exactly-once.
+  A failed turn-end write is retried 5 times (backoff from 250 ms); if it
+  never succeeds the answer text is sent once directly (no files) and the
+  turn is left for restart recovery; its "sent" record is retried until it
+  succeeds. A crash (panic) is contained to its chat: one notice, the turn
+  is not re-run. An interface failing within 30 s of its first start stops
+  Heimdall; a later failure restarts only that interface, backoff 2 s to
+  5 min (Telegram and Slack are restartable).
 - **Commands** use the `!` prefix on every interface (Slack forbids `/` in
   threads): `!help`, `!status`, `!which`, `!stop`, `!cancel`, `!reset`, `!chatid`,
-  `!use <harness>` (sticky per conversation: chat + thread), `!use default`,
+  `!use <harness>` (owner only; sticky per conversation: chat + thread), `!use default`,
   `!jobs`, `!job …` (scheduler),
   `!<harness> <msg>` (that message only), `!next <msg>`. The hub's control
   words work alone in a message without the `!`: `stop`, `cancel`
@@ -258,7 +276,8 @@ the `heimdall-live` unit.
     Other interrupted runs are never re-run, except `idempotent` jobs (once).
   - Models propose jobs only when asked, through the answer block. Direct owner
     person turns apply new jobs and edits with the reply in one transaction,
-    without a card. Non-owners, removals and any `rerun_on_timeout` job still
+    without a card, only in a private chat from a live owner message; in a
+    group the owner confirms it. Non-owners, removals and any `rerun_on_timeout` job still
     require a human confirmation in
     the same conversation within 24 h (`!job confirm`, or a bare yes/no that
     Heimdall matches itself, ignoring surrounding whitespace and trailing

@@ -20,13 +20,15 @@ Heimdall then:
   launcher lineage, bound to its owner (see `docs/external-origin.md`);
 - reads the thread itself with the configured `durable.t3_command`
   (`thread show <id> --json --messages 50`) and takes the latest message with
-  `createdBy: "user"`. If the CLI is missing, fails, or marks no message
-  `createdBy`, the request is refused with one metadata-only log line; prompt
+  `createdBy: "user"`. When no message carries a mark (t3 v0.1.5), the latest
+  user message counts if the thread itself is `createdBy: "user"` (weaker; the
+  task's brief says so). If the CLI is missing or fails, or neither mark
+  applies, the request is refused with one metadata-only log line; prompt
   text and environment are never used instead;
 - stores one `T3-<n>` per (thread, message, run) in `durable.db`; a repeat is
   ignored, a newer request in the same thread supersedes the older one;
 - tracks it silently: it closes quietly when the run completes or is
-  cancelled, and becomes an ordinary assistant task (with a "check what was
+  cancelled or rolled back, and becomes an ordinary assistant task (with a "check what was
   already done" brief) when the run ends interrupted or failed;
 - `!work list` hides closed T3 rows; `!work show T3-<n>` shows the thread and run.
 
@@ -43,7 +45,8 @@ Heimdall then:
 ## Known gaps
 
 - t3 v0.1.5 `thread show --json` marks only the thread with `createdBy`, not
-  each message, so every intake is refused until T3 exposes a per-message mark
+  each message, so intake there relies on the thread mark (an agent message in
+  an owner thread counts as the owner's) until T3 exposes a per-message mark
   (and ideally a message id; without one dedupe is per thread + run).
 - Not checked live: that Codex runs these hooks under T3's app-server mode,
   and that `T3CODE_THREAD_ID` reaches the hook environment of either harness.

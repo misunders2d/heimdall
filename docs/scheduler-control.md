@@ -80,6 +80,11 @@ with the same arguments:
 {"action":"discover|list|show|history|checkpoint|create|edit|run|pause|resume|stop|remove|acknowledge","id":"optional job id","definition":{},"request_id":"stable unique mutation id"}
 ```
 
+Two more actions, `task_intake` and `task_intake_done`, exist only for the T3
+intake hooks (`deploy/t3-intake`, [durable.md](durable.md)): accepted from the
+trusted T3 launcher only, with `request_id` `prompt_submit` or `stop`; they
+are not listed in discovery or the MCP enum.
+
 Use `definition` only for create or edit. Create uses the existing full job
 definition; edit uses changed fields. Canonical schedule/role/target/timeout
 validation is shared with chat commands. `id` is required for operations on a

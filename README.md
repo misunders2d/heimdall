@@ -14,7 +14,8 @@ the turn in that conversation's native session, steers the running turn
 with mid-turn messages, and delivers the reply back to the same chat.
 It also keeps owner tasks as durable commitments that survive restarts
 (DBOS + SQLite, [docs/durable.md](docs/durable.md)); the hub is the only
-orchestrator of owner tasks.
+orchestrator of owner tasks. Hooks in [deploy/t3-intake](deploy/t3-intake/README.md)
+track each owner request in a T3 thread as a task.
 
 Goal (owner, 2026-11-10): Heimdall is the gateway. Harnesses stay
 unconstrained except by their own tool guards and limits. Switching harness
@@ -132,8 +133,9 @@ not reach it: make it a group admin, or turn privacy off in BotFather and
 add it to the group again. `/start` shows the help; `/help`, `/status`,
 `/stop`, `/cancel`, `/reset` and `/chatid` work too.
 
-The text, else the caption, is used, with the replied-to or forwarded
-message as context. Files (the message's and the replied-to message's, up
+The text, else the caption, is used, with the replied-to message as
+context. A forward's text is quoted as untrusted context ("Telegram
+forwarded message"), never run as a command or taken as the sender's own. Files (the message's and the replied-to message's, up
 to 20 MB) are downloaded and copied, when the turn starts, into a directory
 of that turn's own owned by its OS user; pictures also reach the harnesses
 that take images (Pi, OMP, Claude, Codex) natively. The parts of an album
@@ -215,8 +217,8 @@ Commands work the same on every interface:
 !cancel            clear your queued messages; the turn keeps running
 !reset             your next message here starts fresh native sessions
 !chatid            show the conversation's and your IDs as tools see them
-!use <harness>     this conversation uses <harness> until !use default
-!use default       back to the default order
+!use <harness>     this conversation uses <harness> until !use default (owner only)
+!use default       back to the default order (owner only)
 !<harness> <msg>   only this message goes to <harness>
 !next <msg>        queue as follow-up instead of steering
 !jobs, !job …      scheduled jobs (see below)
@@ -247,7 +249,9 @@ message work without the `!`. Only the turn's sender or the owner can stop
 a turn; the owner's `stop` and `cancel` clear everyone's queued messages.
 A turn's reply goes out at its native result. Pi/OMP, Claude and Codex keep
 session processes warm for 15 idle minutes; AGY stays per-turn. `max_parallel`
-counts running turns. Optional `harness` limits: `idle_timeout_seconds` (900),
+counts running turns; above 1, one slot is reserved for the owner's live
+turns. A caller who must wait for a slot is told once ("Queued — starting
+when a slot frees. — heimdall"). Optional `harness` limits: `idle_timeout_seconds` (900),
 `max_lifetime_seconds` (14400), `max_warm` (8 idle workers, LRU),
 `run_timeout_seconds` (1200). Changed launch identity/settings, reset or
 harness selection discards workers. `!status` shows warm harnesses and idle ages.
@@ -293,7 +297,9 @@ timeout from due time; stop/pause/delete/restart cancel it. See
 [retry limits](docs/scheduler.md#38-retries-and-result-checks). Employees: at most every
 hour, here or their private chat, 10 jobs. Asked in plain language, a harness proposes a
 job, an edit, or removal (`{"remove":"<id>"}` in a `heimdall-job` block);
-Heimdall shows a card and only the person confirms. Removal follows `!job rm`
+Heimdall shows a card and only the person confirms (an owner's new job or edit
+from a live private-chat message applies at once; in a group the owner confirms
+it too). Removal follows `!job rm`
 authority and running-run behavior; discard leaves the job untouched.
 
 Runs deliver to their target with no typing or progress, never capture
@@ -323,6 +329,15 @@ whoever types, so list `local:...` owners only in test configs.
 - Native sessions are resumed only after a cleanly finished turn.
 - Delivery is at-least-once: a crash right after a platform accepted a reply
   but before Heimdall recorded it can repeat that reply.
+- Unreadable access files admit nobody; messages wait (the router retries
+  every second, in order) instead of being dropped.
+- A failed turn-end write is retried 5 times; if it never succeeds, the
+  answer text is still sent once (without files) and restart recovery
+  handles the turn.
+- A crash in one chat is contained there: one notice, the turn is not
+  re-run. An interface that fails in its first 30 s stops Heimdall; later
+  failures restart only that interface (Telegram, Slack), backoff 2 s to
+  5 min.
 
 ## License
 

@@ -178,6 +178,12 @@ recheck and `request_id` record. It never creates, edits, removes,
 checkpoints, acknowledges, confirms or reroutes, and is still a trusted
 agent source, not human attestation.
 
+The same trusted T3 caller may also send the intake hooks' `task_intake`
+(`request_id` `prompt_submit`) and `task_intake_done` (`stop`), with only a
+thread id; `manage` is not needed, they are not in discovery or the MCP
+enum, and `mcp:launch:` threads are skipped. Heimdall reads the thread
+itself to find the owner's request ([durable.md](durable.md), T3 intake).
+
 ## Threats
 
 - **Forgery by another local process.** Non-root, non-owner UIDs are refused
