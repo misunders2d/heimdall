@@ -88,8 +88,13 @@ type Router struct {
 	opt         Options
 	store       *store.Store
 	ifaces      map[string]Interface
-	sem         chan struct{}
-	log         *log.Logger
+	// sem holds the general turn slots; reserved is one more slot only the
+	// owner's live turns may take, so the owner never waits behind others.
+	// With max_parallel = 1 there is no reserved slot (reserved is nil):
+	// the single slot is general.
+	sem      chan struct{}
+	reserved chan struct{}
+	log      *log.Logger
 	// guardLog records messages the hub's prompt-injection scoring flags.
 	guardLog *guardLog
 
@@ -134,7 +139,11 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.GuardLogMax <= 0 {
 		opt.GuardLogMax = DefaultGuardLogMax
 	}
-	r := &Router{accessRetry: time.Second, warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	general, reserved := opt.MaxParallel, chan struct{}(nil)
+	if opt.MaxParallel > 1 {
+		general, reserved = opt.MaxParallel-1, make(chan struct{}, 1)
+	}
+	r := &Router{accessRetry: time.Second, warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, general), reserved: reserved, log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.Jobs != nil {
 		opt.Jobs.ResolveControl = r.schedulerCaller
 	}
@@ -385,7 +394,7 @@ func (r *Router) dispatch(row store.InboundRow) {
 	r.mu.Lock()
 	c := r.convs[row.Conv]
 	if c == nil {
-		c = &conv{r: r, key: row.Conv, signal: make(chan struct{}, 1), events: make(chan any), slot: make(chan struct{})}
+		c = &conv{r: r, key: row.Conv, signal: make(chan struct{}, 1), events: make(chan any), slot: make(chan chan struct{})}
 		r.convs[row.Conv] = c
 		go c.loop(r.ctx)
 	}
@@ -522,7 +531,10 @@ type conv struct {
 	inbox  []store.InboundRow
 	signal chan struct{}
 	events chan any
-	slot   chan struct{}
+	slot   chan chan struct{} // a waiter hands over the semaphore it took a slot of
+	// slotSem is the semaphore whose slot this conversation holds, nil when
+	// none (loop-owned); releaseSlot gives it back exactly once.
+	slotSem chan struct{}
 
 	queue   []item
 	turn    *turn
@@ -723,37 +735,89 @@ func (c *conv) loop(ctx context.Context) {
 					c.finish(ctx, ev.t)
 				}
 			}
-		case <-c.slot:
+		case sem := <-c.slot:
 			c.waiting = false
+			c.slotSem = sem
 			c.start(ctx)
 		}
 		if c.turn == nil && len(c.queue) > 0 && !c.waiting {
 			c.waiting = true
 			// Reuse a warm transport immediately; wait for cleanup when a
 			// turn could not retain its transport.
-			exited := c.exited
-			go func() {
-				if exited != nil {
-					select {
-					case <-exited:
-					case <-ctx.Done():
-						return
-					}
-				}
-				select {
-				case c.r.sem <- struct{}{}:
-					select {
-					case c.slot <- struct{}{}:
-					case <-ctx.Done():
-						<-c.r.sem
-					}
-				case <-ctx.Done():
-				}
-			}()
+			head := c.queue[0]
+			var note *store.InboundRow
+			if head.row.Origin == core.OriginLive && head.row.Run == nil && head.row.Review == nil {
+				note = &head.row
+			}
+			go c.waitSlot(ctx, c.exited, ownerLive(head), note)
 		}
 		c.mu.Lock()
 		c.busy.Store(c.turn != nil || len(c.nativeTurns) > 0 || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0 || len(c.held) > 0)
 		c.mu.Unlock()
+	}
+}
+
+// queuedNotice tells a live caller, once per wait, that every turn slot
+// they may take is busy.
+const queuedNotice = "Queued — starting when a slot frees. — heimdall"
+
+// ownerLive reports whether it may take the owner's reserved slot: the
+// owner's own live message, never a scheduled run or a review.
+func ownerLive(it item) bool {
+	return it.role == core.RoleOwner && it.row.Origin == core.OriginLive && it.row.Run == nil && it.row.Review == nil
+}
+
+// waitSlot waits for the last turn's process to exit, then for a turn slot:
+// a general one, or for the owner's live turn the reserved one. If none is
+// free at once, note's sender is told once. The slot is handed to the loop.
+func (c *conv) waitSlot(ctx context.Context, exited <-chan struct{}, owner bool, note *store.InboundRow) {
+	if exited != nil {
+		select {
+		case <-exited:
+		case <-ctx.Done():
+			return
+		}
+	}
+	reserved := c.r.reserved
+	if !owner {
+		reserved = nil // a nil channel is never ready
+	}
+	var sem chan struct{}
+	select {
+	case c.r.sem <- struct{}{}:
+		sem = c.r.sem
+	default:
+		select {
+		case reserved <- struct{}{}:
+			sem = reserved
+		default:
+		}
+	}
+	if sem == nil {
+		if note != nil {
+			c.reply(*note, queuedNotice)
+		}
+		select {
+		case c.r.sem <- struct{}{}:
+			sem = c.r.sem
+		case reserved <- struct{}{}:
+			sem = reserved
+		case <-ctx.Done():
+			return
+		}
+	}
+	select {
+	case c.slot <- sem:
+	case <-ctx.Done():
+		<-sem
+	}
+}
+
+// releaseSlot gives back the conversation's turn slot, if it holds one.
+func (c *conv) releaseSlot() {
+	if c.slotSem != nil {
+		<-c.slotSem
+		c.slotSem = nil
 	}
 }
 
@@ -1225,7 +1289,13 @@ func (c *conv) which(role core.Role, who string) string {
 // parallelism slot.
 func (c *conv) start(ctx context.Context) {
 	if c.turn != nil || len(c.queue) == 0 {
-		<-c.r.sem
+		c.releaseSlot()
+		return
+	}
+	if c.slotSem != nil && c.slotSem == c.r.reserved && !ownerLive(c.queue[0]) {
+		// The owner's message this slot was taken for is gone: the reserved
+		// slot is not for anyone else. Wait again for a general one.
+		c.releaseSlot()
 		return
 	}
 	first := c.queue[0]
@@ -1242,7 +1312,7 @@ func (c *conv) start(ctx context.Context) {
 		if !ok {
 			c.queue = c.queue[1:]
 			c.r.release(first.row.Inbound)
-			<-c.r.sem
+			c.releaseSlot()
 			return
 		}
 		first.job = job.Name
@@ -1255,7 +1325,7 @@ func (c *conv) start(ctx context.Context) {
 		_ = c.r.store.SetInbound(first.row.ID, store.InCancelled, "held: review refused at launch: creator no longer an admitted owner on the route, or the commitment is paused, cancelled or no longer waits for this attempt's verdict")
 		c.queue = c.queue[1:]
 		c.r.release(first.row.Inbound)
-		<-c.r.sem
+		c.releaseSlot()
 		return
 	}
 	for job == nil && review == nil && n < len(c.queue) && !first.row.MCPControl && !c.queue[n].row.MCPControl && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
@@ -1277,7 +1347,7 @@ func (c *conv) start(ctx context.Context) {
 			run, readErr := c.r.store.Run(job.Run)
 			cancelled = readErr == nil && run.State == store.RunCancelled
 		}
-		<-c.r.sem
+		c.releaseSlot()
 		c.queue = c.queue[n:]
 		for _, it := range batch {
 			if !cancelled {
@@ -2166,7 +2236,7 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 	}
 	c.turn = nil
 	// A native result ends the running turn; idle/cleanup processes hold no slot.
-	<-c.r.sem
+	c.releaseSlot()
 	c.flushContinuations(ctx)
 }
 

@@ -118,7 +118,13 @@ func TestMessageWaitsForUnreadableAccessFiles(t *testing.T) {
 		e.sendIn(accessBoss, accessChat, "second")
 		time.Sleep(300 * time.Millisecond)
 		write(`{"users":[`)
-		want(t, e.reply(), `last="busy LINGER=1"`)
+		// The one slot is busy: this chat is told it waits (item 10).
+		if out := e.reply(); out.Conv != accessChat || !strings.HasPrefix(out.Text, "Queued") {
+			want(t, out, `last="busy LINGER=1"`)
+			want(t, e.reply(), "Queued")
+		} else {
+			want(t, e.reply(), `last="busy LINGER=1"`)
+		}
 		eventuallyTrue(t, "turn waits for access", func() bool { return strings.Contains(e.logs.String(), "waits: access files unavailable") })
 		e.noReply(200 * time.Millisecond)
 		write(`{"users":[]}`)

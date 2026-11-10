@@ -507,7 +507,7 @@ func TestMCPControlProposalNeverAutoApplies(t *testing.T) {
 	}
 	tr := &turn{id: id, role: core.RoleOwner, from: tgOwner, who: tgOwner.Key(), private: true, started: time.Now(), batch: []item{{row: row}}}
 	tr.done = &doneEvent{harness: "pi", res: harness.Result{Answer: "```heimdall-job\n" + `{"name":"control","schedule":{"every":"1h"},"prompt":"p"}` + "\n```"}}
-	c := &conv{r: e.r, key: ownerDM, turn: tr}
+	c := &conv{r: e.r, key: ownerDM, turn: tr, slotSem: e.r.sem}
 	e.r.sem <- struct{}{}
 	c.finish(context.Background(), tr)
 	jobs, err := e.st.Jobs(store.JobFilter{})
