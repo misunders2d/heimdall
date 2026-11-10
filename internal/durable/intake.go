@@ -76,8 +76,11 @@ type IntakeReader interface {
 // is refused, never guessed.
 var ErrNoCreatedBy = errors.New("t3 thread show: messages carry no createdBy")
 
-// intakeTimeout bounds one CLI read for intake.
-const intakeTimeout = 10 * time.Second
+// intakeTimeout bounds one CLI read for intake and tracking (a variable
+// for tests). `thread show` of a large thread (about 9,000 items) takes
+// about 20 s whatever --messages asks; the read runs in the durable
+// probe or tracking step, never in the hook.
+var intakeTimeout = 90 * time.Second
 
 // ReadIntake runs `thread show <id> --json --messages 50` and reads the
 // thread and the latest owner message. Output is parsed defensively: the

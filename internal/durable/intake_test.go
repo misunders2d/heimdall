@@ -3,6 +3,9 @@ package durable
 import (
 	"context"
 	"errors"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -108,5 +111,90 @@ func TestIntakeTrackingSurvivesRestart(t *testing.T) {
 	e.phase("T3-1", PhaseReported, 1)
 	if got := a.seen("T3-1/"); len(got) != 1 || !strings.Contains(a.prompt(got[0]), "ended interrupted") {
 		t.Fatalf("%q", got)
+	}
+}
+
+// lockedLog is a log destination tests read while the runtime writes.
+type lockedLog struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedLog) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
+// slowT3 is a T3 CLI that shows an owner thread after a pause: thread
+// "hang" after 5 s, any other thread after pause. The sleep holds no pipe
+// of Heimdall's, so a kill at the limit ends the read at once.
+func slowT3(t *testing.T, pause string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "t3")
+	body := `#!/bin/sh
+p=` + pause + `
+[ "$3" = hang ] && p=5
+sleep "$p" </dev/null >/dev/null 2>&1
+cat <<'J'
+{"thread":{"threadId":"T","title":"x","createdBy":"user","status":"running","latestRunId":"r1","activeRunId":"r1"},"messages":[{"role":"user","runId":"r1","text":"Email the PO"}]}
+J
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// A large T3 thread takes about 20 s to read (measured on the hub,
+// 2026-11-10): the read limit leaves room for it. Scaled 1:30 here: a
+// 0.85 s read (25 s) is admitted under a 3 s limit (90 s), and a read
+// past the limit is still refused with one metadata-only line. The hook
+// answers the "hang" thread within 2 s, before its read is killed at the
+// 3 s limit: a hook held by the read could answer only after that, so the
+// check does not depend on how fast the scheduler starts the probe.
+func TestIntakeToleratesSlowCLI(t *testing.T) {
+	if intakeTimeout < 90*time.Second {
+		t.Fatalf("intake read limit %s is below a large thread's read", intakeTimeout)
+	}
+	defer func(d time.Duration) { intakeTimeout = d }(intakeTimeout)
+	intakeTimeout = 3 * time.Second
+	defer SetIntakePause(10 * time.Millisecond)()
+	logs := &lockedLog{}
+	opt := Options{Observer: T3{Command: []string{slowT3(t, "0.85")}}, Observe: time.Hour, Silence: -1, Log: log.New(logs, "", 0)}
+	e := open(t, t.TempDir(), opt)
+	defer e.close()
+	t3 := Caller{Principal: owner.Principal, Role: core.RoleOwner, Conv: owner.Conv, Live: true, Private: true, Origin: OriginTrustedT3}
+	if reply, _ := e.rt.Task(t3, "intake", "slow", "", "prompt_submit"); reply != "T3 request noted." {
+		t.Fatal(reply)
+	}
+	e.phase("T3-1", PhaseTracking, 0)
+	const line = "durable: T3 intake refused (cli), thread hang\n"
+	start := time.Now()
+	reply, _ := e.rt.Task(t3, "intake", "hang", "", "prompt_submit")
+	if took := time.Since(start); reply != "T3 request noted." || took > 2*time.Second || strings.Contains(logs.String(), line) {
+		t.Fatal("hook held by the read:", reply, took)
+	}
+	waitFor(t, 10*time.Second, "refusal line", func() bool { return strings.Contains(logs.String(), line) })
+	if got := logs.String(); strings.Count(got, "T3 intake refused") != 1 || strings.Contains(got, "Email the PO") {
+		t.Fatalf("log %q", got)
+	}
+	if _, err := e.rt.State("T3-2"); err == nil {
+		t.Fatal("a read past the limit was admitted")
+	}
+}
+
+// A configured T3 timeout never lifts a read past the intake limit.
+func TestReadIntakeClampsTimeout(t *testing.T) {
+	defer func(d time.Duration) { intakeTimeout = d }(intakeTimeout)
+	intakeTimeout = 300 * time.Millisecond
+	script := slowT3(t, "0")
+	for _, d := range []time.Duration{0, 5 * time.Minute} {
+		start := time.Now()
+		if _, err := (T3{Command: []string{script}, Timeout: d}).ReadIntake(context.Background(), "hang"); err == nil || time.Since(start) > 3*time.Second {
+			t.Fatalf("timeout %s: %v after %s", d, err, time.Since(start))
+		}
 	}
 }
