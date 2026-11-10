@@ -125,7 +125,7 @@ func TestTurnDirCollect(t *testing.T) {
 	done := make(chan struct{})
 	var files []OutFile
 	var skipped []string
-	go func() { files, skipped = d.Collect(dst, 3, 10); close(done) }()
+	go func() { files, skipped, _ = d.Collect(dst, 3, 10); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -148,5 +148,56 @@ func TestTurnDirCollect(t *testing.T) {
 	}
 	if st, _ := os.Stat(dst); st.Mode().Perm() != 0o700 {
 		t.Fatalf("outbox copy dir mode %v", st.Mode())
+	}
+}
+
+// A file's .caption sidecar becomes its Caption, read with a file's checks;
+// sidecars never count as files, and one without its file is ignored.
+func TestTurnDirCollectCaptions(t *testing.T) {
+	home, outside, dst := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "outbox")
+	d, err := NewTurnDir(Launch{Home: home}, "4-cap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := d.Outbox()
+	write := func(p, body string) {
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(out, "a.gif"), "gif")
+	write(filepath.Join(out, "a.gif.caption"), "  *Hi* ||there||\n")
+	write(filepath.Join(out, "b.txt"), "b")
+	write(filepath.Join(outside, "secret"), "secret")
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(out, "b.txt.caption")); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(out, "c.txt"), "c")
+	write(filepath.Join(out, "c.txt.caption"), strings.Repeat("x", MaxCaption+1))
+	write(filepath.Join(out, "ghost.png.caption"), "nobody")
+	write(filepath.Join(out, "x.caption.caption"), "nested")
+	write(filepath.Join(out, "x.caption"), "not a file")
+
+	// Three files fill a limit of 3: the five sidecars take no place.
+	files, skipped, ignored := d.Collect(dst, 3, 100)
+	var got []string
+	for _, f := range files {
+		got = append(got, f.Name+"="+f.Caption)
+	}
+	if strings.Join(got, ",") != "a.gif=*Hi* ||there||,b.txt=,c.txt=" {
+		t.Fatalf("collected %q", got)
+	}
+	want := []string{"b.txt.caption: cannot be opened", "c.txt.caption: larger than 16384 bytes"}
+	if strings.Join(skipped, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("skipped %q", skipped)
+	}
+	if strings.Join(ignored, ",") != "ghost.png.caption,x.caption,x.caption.caption" {
+		t.Fatalf("ignored %q", ignored)
+	}
+	// A second collect in the same turn sends nothing again and never
+	// calls the sent file's caption an orphan.
+	files, skipped, ignored = d.Collect(dst, 3, 100)
+	if len(files) != 0 || len(skipped) != 0 || strings.Join(ignored, ",") != "ghost.png.caption,x.caption,x.caption.caption" {
+		t.Fatalf("second collect: %v %q %q", files, skipped, ignored)
 	}
 }

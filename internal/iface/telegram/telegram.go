@@ -682,7 +682,13 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 				body["reply_parameters"] = map[string]any{"message_id": id, "allow_sending_without_reply": true}
 			}
 		}
-		if out.Formatted {
+		switch {
+		case out.Formatted && hasSpoiler(part):
+			// Legacy Markdown has no spoiler: Heimdall renders the same
+			// markup itself (render), the spoiler included.
+			plain, ents := render(part)
+			body["text"], body["entities"] = plain, ents
+		case out.Formatted:
 			body["parse_mode"] = "Markdown"
 		}
 		send := func() error { return t.call(ctx, "sendMessage", body, nil, 30*time.Second) }
@@ -694,6 +700,8 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 			// Logged, so how often it happens can be counted.
 			t.logf("reply in %s: part %d/%d sent as plain text: Telegram could not parse its Markdown", out.Conv, i+1, len(parts))
 			delete(body, "parse_mode")
+			delete(body, "entities")
+			body["text"] = part
 			err = t.sendRetrying(ctx, send)
 		}
 		if err != nil {
@@ -774,8 +782,13 @@ func (t *Interface) CleanAnswer(text, inDir, outDir string) string {
 }
 
 // sendFile uploads one file a harness left, as the hub's sendLocalArtifact:
-// a JPEG, PNG or WebP picture up to 10 MB as a photo, anything else as a
-// document, in the conversation's topic, replying to the turn's message.
+// a JPEG, PNG or WebP picture up to 10 MB as a photo, a GIF as an
+// animation, anything else as a document, in the conversation's topic,
+// replying to the turn's message. The file's caption goes in the same
+// message, rendered to entities (render); a caption Telegram would refuse
+// for its entities is sent again as its plain text. A caption too long
+// for the message (the router normally splits it off first) follows as a
+// normal reply.
 func (t *Interface) sendFile(ctx context.Context, out core.Outbound) error {
 	data, err := os.ReadFile(out.File.Path)
 	if err != nil {
@@ -783,33 +796,67 @@ func (t *Interface) sendFile(ctx context.Context, out core.Outbound) error {
 		return router.PermanentError{Err: fmt.Errorf("file to send unreadable: %w", err)}
 	}
 	method, field := "sendDocument", "document"
-	if photoMIME[out.File.MIME] && len(data) <= 10<<20 {
+	switch {
+	case photoMIME[out.File.MIME] && len(data) <= 10<<20:
 		method, field = "sendPhoto", "photo"
+	case out.File.MIME == "image/gif":
+		method, field = "sendAnimation", "animation"
 	}
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	for k, v := range target(out.Conv) {
-		_ = w.WriteField(k, fmt.Sprint(v))
+	caption, follow := out.File.Caption, ""
+	if caption != "" && !t.CaptionFits(caption) {
+		caption, follow = "", caption
 	}
-	if id, err := strconv.ParseInt(out.ReplyTo, 10, 64); err == nil {
-		rp, _ := json.Marshal(map[string]any{"message_id": id, "allow_sending_without_reply": true})
-		_ = w.WriteField("reply_parameters", string(rp))
+	plain, ents := render(caption)
+	form := func(entities bool) (string, []byte, error) {
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		for k, v := range target(out.Conv) {
+			_ = w.WriteField(k, fmt.Sprint(v))
+		}
+		if id, err := strconv.ParseInt(out.ReplyTo, 10, 64); err == nil {
+			rp, _ := json.Marshal(map[string]any{"message_id": id, "allow_sending_without_reply": true})
+			_ = w.WriteField("reply_parameters", string(rp))
+		}
+		if plain != "" {
+			_ = w.WriteField("caption", plain)
+			if entities && len(ents) > 0 {
+				raw, _ := json.Marshal(ents)
+				_ = w.WriteField("caption_entities", string(raw))
+			}
+		}
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, field, safeName(out.File.Name)))
+		h.Set("Content-Type", or(out.File.MIME, "application/octet-stream"))
+		part, err := w.CreatePart(h)
+		if err != nil {
+			return "", nil, err
+		}
+		if _, err := part.Write(data); err != nil {
+			return "", nil, err
+		}
+		if err := w.Close(); err != nil {
+			return "", nil, err
+		}
+		return w.FormDataContentType(), buf.Bytes(), nil
 	}
-	h := textproto.MIMEHeader{}
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, field, safeName(out.File.Name)))
-	h.Set("Content-Type", or(out.File.MIME, "application/octet-stream"))
-	part, err := w.CreatePart(h)
+	upload := func(entities bool) error {
+		ctype, body, err := form(entities)
+		if err != nil {
+			return err
+		}
+		return t.sendRetrying(ctx, func() error { return t.post(ctx, method, ctype, body, nil, 2*time.Minute) })
+	}
+	err = upload(true)
+	var api *apiError
+	if len(ents) > 0 && errors.As(err, &api) && api.status == http.StatusBadRequest {
+		t.logf("file in %s: caption sent as plain text: Telegram refused its entities", out.Conv)
+		err = upload(false)
+	}
 	if err != nil {
-		return err
-	}
-	if _, err := part.Write(data); err != nil {
-		return err
-	}
-	if err := w.Close(); err != nil {
-		return err
-	}
-	if err := t.sendRetrying(ctx, func() error { return t.post(ctx, method, w.FormDataContentType(), buf.Bytes(), nil, 2*time.Minute) }); err != nil {
 		return t.sendError(err)
+	}
+	if follow != "" {
+		return t.Send(ctx, core.Outbound{Conv: out.Conv, ReplyTo: out.ReplyTo, Text: follow, Formatted: true})
 	}
 	return nil
 }
@@ -844,7 +891,7 @@ func (t *Interface) ReactionNote(ref string) string {
 // PromptNote is the hub's Telegram transport note (extensions/telegram
 // buildContent): answers are sent as Telegram's legacy Markdown.
 func (t *Interface) PromptNote() string {
-	return "[Transport note: final answer renders in Telegram Markdown. Use *bold*, _italic_, `code`, ```code```, and [label](https://url). Do not use regular Markdown bold like **text**, Markdown headings, or tables.]"
+	return "[Transport note: final answer renders in Telegram Markdown. Use *bold*, _italic_, `code`, ```code```, ||spoiler||, and [label](https://url). Do not use regular Markdown bold like **text**, Markdown headings, or tables.]"
 }
 
 // target is the Bot API chat (and forum topic) a conversation's messages go to.

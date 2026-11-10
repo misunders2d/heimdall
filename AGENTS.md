@@ -161,7 +161,11 @@ the `heimdall-live` unit.
   `[react: <ref> <emoji>]` lines to react. A harness sends
   files by leaving them in its turn's `out/` directory; Heimdall checks and
   copies them itself (never a path the model names) and sends them after
-  the answer. Before polling,
+  the answer. A checked `<file>.caption` sidecar (never sent or counted as
+  a file; one without its file is ignored and logged) goes with its file as
+  one message, rendered by Heimdall to entities (`||spoiler||` included);
+  over 1024 characters after formatting, it follows the bare file as a
+  normal message. A GIF goes as an animation. Before polling,
   `getMe` must report the configured `telegram.bot_username`; Heimdall never
   calls `deleteWebhook` or `setWebhook`. The token comes only from
   `HEIMDALL_TELEGRAM_TOKEN` and never appears in errors or logs.
@@ -195,7 +199,8 @@ the `heimdall-live` unit.
   outbound row IDs reconcile ambiguous sends. Delivery remains at-least-once.
   Status is deleted after confirmed text/reaction delivery, compacted if
   deletion fails, and recovered after restart. Files out use checked outboxes
-  and the supported external-upload flow; reactions use Slack names.
+  and the supported external-upload flow, a `.caption` sidecar as the
+  initial comment; reactions use Slack names.
 - **Harness choice.** Default order `codex → claude → pi`
   (configurable). Fall back to the next harness only when the previous one
   failed before its turn started (before any side effect is possible).

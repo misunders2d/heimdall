@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/router"
 )
 
 type slackFile struct {
@@ -217,7 +218,26 @@ func (s *Slack) upload(ctx context.Context, out core.Outbound) error {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("slack: file upload rejected")
 	}
-	return api.call(ctx, "files.completeUploadExternal", map[string]any{"files": []map[string]string{{"id": grant.ID, "title": out.File.Name}}, "channel_id": out.Conv.Chat, "thread_ts": out.Conv.Thread}, nil)
+	complete := map[string]any{"files": []map[string]string{{"id": grant.ID, "title": out.File.Name}}, "channel_id": out.Conv.Chat, "thread_ts": out.Conv.Thread}
+	if c := slackCaption(out.File.Caption); c != "" {
+		complete["initial_comment"] = c
+	}
+	return api.call(ctx, "files.completeUploadExternal", complete, nil)
+}
+
+// slackCaption is a file's caption as a Slack reply formats a harness's
+// answer.
+func slackCaption(caption string) string {
+	if caption == "" {
+		return ""
+	}
+	return mrkdwn(router.Scrub(caption))
+}
+
+// CaptionFits reports whether a caption fits in its upload's initial
+// comment: one reply part, as splitReply cuts them (router.CaptionFitter).
+func (s *Slack) CaptionFits(caption string) bool {
+	return len(splitReply(slackCaption(caption))) <= 1
 }
 
 func uploadReason(err error) string {

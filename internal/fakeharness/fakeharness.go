@@ -41,6 +41,7 @@
 //	               STATE/terminated and exits, unless NOTERM ignores it
 //
 //	SAY=BASE64     answer exactly the decoded text (standard encoding)
+//	WRITE64=NAME:BASE64 save NAME in the outbox with the decoded content
 //	T3SEND=BASE64  (claude) before answering, report a native
 //	               mcp__t3__t3_thread_send tool call: the decoded JSON's
 //	               "args" as its input, "result" as its tool_result content
@@ -482,7 +483,8 @@ func (f *fake) answer() string {
 
 var outbox = regexp.MustCompile(`save them in (\S+) before`)
 
-// writeOut saves WRITE=<name>:<content> files (no spaces) into the outbox
+// writeOut saves WRITE=<name>:<content> files (no spaces) and
+// WRITE64=<name>:<base64> files into the outbox
 // the prompt names, as a harness's own tools would.
 func (f *fake) writeOut() {
 	m := outbox.FindStringSubmatch(f.metadata + "\n" + f.prompt)
@@ -493,6 +495,12 @@ func (f *fake) writeOut() {
 		if spec, ok := strings.CutPrefix(w, "WRITE="); ok {
 			name, body, _ := strings.Cut(spec, ":")
 			_ = os.WriteFile(filepath.Join(m[1], name), []byte(body), 0o600)
+		}
+		if spec, ok := strings.CutPrefix(w, "WRITE64="); ok {
+			name, enc, _ := strings.Cut(spec, ":")
+			if body, err := base64.StdEncoding.DecodeString(enc); err == nil {
+				_ = os.WriteFile(filepath.Join(m[1], name), body, 0o600)
+			}
 		}
 	}
 }

@@ -334,6 +334,10 @@ type File struct {
 	Path string `json:"path"`
 	Name string `json:"name"` // as the harness named it; display only
 	MIME string `json:"mime,omitempty"`
+	// Caption is the harness's caption for the file, in the interface's
+	// reply markup (as a Formatted reply), sent with the file as one
+	// message. Scrubbed like the reply.
+	Caption string `json:"caption,omitempty"`
 }
 
 // Reaction is an emoji reaction on one interface message.

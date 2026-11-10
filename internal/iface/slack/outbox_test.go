@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -87,5 +88,46 @@ func TestSlackOutboxFilesReachTheTurnsThread(t *testing.T) {
 				t.Fatalf("a file was sent to another caller's turn: %d uploads", n)
 			}
 		})
+	}
+}
+
+// A file's .caption sidecar becomes the upload's initial comment in the
+// turn's thread, formatted as a normal Slack reply; the sidecar is never
+// uploaded itself.
+func TestSlackOutboxCaptionIsInitialComment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MEMENTO_PROCESSING", "1")
+	f := newSlackFake(t)
+	s, st := testSlack(t, f)
+	bin, _ := fakeharness.Install(t, "claude")
+	u, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbox := s.opt.DataDir + "/outbox"
+	r := router.New(router.Options{Access: core.Access{Mode: core.ModeCorporate, Owners: map[string]bool{"slack:uowner@example.test": true}}, Order: []string{"claude"}, MaxParallel: 2, Accounts: sameUser{harness.Accounts{RunAs: map[core.Role]core.RunAs{core.RoleOwner: {User: u.Username, Path: bin}}}}, Log: log.New(io.Discard, "", 0), OutboxDir: outbox}, st, s)
+	cancel, done := startRouter(t, r)
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-f.connected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("socket did not start")
+	}
+	caption := "**Draft** post <@U1> ||hidden||"
+	f.push(f.event("C1", "channel", "Uowner", "<@Ubot> make WRITE=post.gif:GIF89a WRITE64=post.gif.caption:"+base64.StdEncoding.EncodeToString([]byte(caption)), "1000.000099"))
+	waitFor(t, "upload completed", func() bool { return len(f.all("files.completeUploadExternal")) == 1 })
+	waitFor(t, "router idle", r.Idle)
+	grants, completes := f.all("files.getUploadURLExternal"), f.all("files.completeUploadExternal")
+	if len(grants) != 1 || len(completes) != 1 || grants[0].Body["filename"] != "post.gif" {
+		t.Fatalf("uploads: %v %v", grants, completes)
+	}
+	c := completes[0].Body
+	if c["channel_id"] != "C1" || c["thread_ts"] != "1000.000099" || c["initial_comment"] != mrkdwn(caption) || !strings.Contains(str(c["initial_comment"]), "&lt;@U1&gt;") {
+		t.Fatalf("complete: %v (want comment %q)", c, mrkdwn(caption))
 	}
 }

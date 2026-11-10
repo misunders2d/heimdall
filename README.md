@@ -143,7 +143,11 @@ run as one message. Answers are sent as Telegram Markdown (plain text if
 Telegram cannot parse it), cut into parts of 3500 characters. A harness may
 react to a message with an emoji, and can send files back by saving them in
 its turn's outbox (`out/`, named in its prompt): Heimdall sends up to 5
-files of at most 50 MB after the answer.
+files of at most 50 MB after the answer. A sidecar `<file>.caption` beside a
+file (not counted as a file) is its caption, written like an answer, and
+`||text||` is a spoiler: Telegram sends file and caption as one message (a
+GIF as an animation); a caption over Telegram's 1024 characters after
+formatting follows the bare file as a normal message.
 
 ## Shared-chat commands
 
@@ -197,7 +201,8 @@ where the native protocol supplies them. Final answers are fresh thread messages
 escaped against pings and chunked with code fences preserved. Stable outbound
 row metadata reconciles uncertain posts and retries; delivery remains
 at-least-once. Files enter through allowlisted Slack file hosts and leave
-through the checked per-turn outbox using Slack's external-upload flow.
+through the checked per-turn outbox using Slack's external-upload flow; a
+file's `.caption` sidecar becomes the upload's initial comment.
 
 Development uses fakes only. The production app is shared with the hub:
 only the orchestrator arranges a live window with a single consumer. Never

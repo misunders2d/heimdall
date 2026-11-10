@@ -2290,6 +2290,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 // settle records a turn's end, with its reply, files and notices, and
 // frees its slot.
 func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
+	e.Files = c.r.splitCaptions(e.Files)
 	if t.detached {
 		e.PreserveSession = true
 	} // never overwrite a newer running session binding
@@ -2385,7 +2386,7 @@ func (c *conv) jobEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEnd {
 	t.mu.Unlock()
 	files := make([]core.File, len(d.files))
 	for i, f := range d.files {
-		files[i] = core.File{Path: f.Path, Name: f.Name, MIME: mimeOf(f.Name)}
+		files[i] = core.File{Path: f.Path, Name: f.Name, MIME: mimeOf(f.Name), Caption: f.Caption}
 	}
 	// Structured checkpoint state is persisted too; apply the same existing
 	// secret/callback redaction before the scheduler parses any result fields.
