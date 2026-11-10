@@ -515,7 +515,9 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		}
 		// The outcome is recorded before the next reply: a row left as
 		// sending would block its chat until a restart, which resends it.
-		for attempt := 0; ctx.Err() == nil; attempt++ {
+		// The first write happens even once stopping began: the send may
+		// have reached the chat, so only retries stop with ctx.
+		for attempt := 0; attempt == 0 || ctx.Err() == nil; attempt++ {
 			err := record()
 			if err == nil {
 				break
