@@ -315,6 +315,11 @@ func Open(opt Options) (*Runtime, error) {
 		r.Close()
 		return nil, fmt.Errorf("durable: dispatch claims: %w", err)
 	}
+	// T3 request intakes: numbers T3-<n>, one per thread, T3 message and run.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS heimdall_t3_intakes(n INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, message TEXT NOT NULL, run TEXT NOT NULL, creator TEXT NOT NULL, probe TEXT NOT NULL, at INTEGER NOT NULL, UNIQUE(thread,message,run))`); err != nil {
+		r.Close()
+		return nil, fmt.Errorf("durable: t3 intakes: %w", err)
+	}
 	for name, res := range opt.Resources {
 		per := res.PerWorker
 		if per <= 0 {
@@ -337,6 +342,7 @@ func Open(opt Options) (*Runtime, error) {
 	dbos.RegisterWorkflow(ctx, r.commitment, dbos.WithWorkflowName(workflowName))
 	dbos.RegisterWorkflow(ctx, r.dispatch, dbos.WithWorkflowName(dispatchName))
 	dbos.RegisterWorkflow(ctx, r.workTurn, dbos.WithWorkflowName(workTurnName))
+	dbos.RegisterWorkflow(ctx, r.probe, dbos.WithWorkflowName(intakeName))
 	return r, nil
 }
 
@@ -419,6 +425,7 @@ type Commitment struct {
 	Gates             []string     `json:"gates,omitempty"`  // evidence prechecks, e.g. git:/repo
 	Next              string       `json:"next,omitempty"`   // authorized work left after acceptance; "" = single step
 	Origin            string       `json:"origin,omitempty"` // registration source when not a live message, e.g. "trusted T3"
+	Intake            *Intake      `json:"intake,omitempty"` // a T3 request this follows (T3-<n>); no Linear issue
 }
 
 // Event is an attributed signal to a commitment. By is the verified
@@ -453,6 +460,7 @@ type State struct {
 
 // Phases. Only closed is terminal.
 const (
+	PhaseTracking    = "tracking" // a T3 request's run is followed; nothing is woken or sent
 	PhaseDispatching = "dispatching"
 	PhaseWorking     = "working"
 	PhaseWaiting     = "worker_waiting" // the worker asked a question in its own host
@@ -498,6 +506,16 @@ func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {
 			return w.st, err
 		}
 		w.v2 = v2
+	}
+	if w.v2 && c.Intake != nil {
+		done, err := r.track(ctx, w)
+		var cl closed
+		if errors.As(err, &cl) {
+			return r.close(ctx, w, cl.ev)
+		}
+		if err != nil || done {
+			return w.st, err
+		}
 	}
 	err := r.supervise(ctx, w)
 	var cl closed

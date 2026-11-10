@@ -578,6 +578,8 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 	}
 	bad := func(s string, n int) bool { return len(s) > n || strings.ContainsAny(s, "\r\n") }
 	switch req.Action {
+	case "task_intake", "task_intake_done":
+		return c.intake(uid, req, who, valid)
 	case "task_list":
 		if req.ID != "" || req.Title != "" || req.RequestID != "" {
 			return fail("task_list takes no arguments")
@@ -638,6 +640,38 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 	}
 	c.s.log.Printf("scheduler control: operator uid %d, action %s, changed %t", uid, req.Action, changed)
 	return result
+}
+
+// intake is a T3 session hook's call (deploy/t3-intake): task_intake on
+// prompt submit, task_intake_done on stop, with the T3 thread id (a
+// pointer) and the hook event as request_id. Only the trusted T3 lineage
+// bound to the owner reaches it; manage is not needed, and done only
+// touches that owner's own T3 intakes. Agent-delegated threads
+// (mcp:launch:*) are skipped: a filter, never identity. Nothing here is
+// recorded as a control response: the same hook event repeats for every
+// prompt, so dedupe is the T3 message and run (internal/durable). The
+// thread is read and checked after this answer, so a slow CLI never
+// outlives the hook.
+func (c *Control) intake(uid uint32, req ControlRequest, who Caller, valid []func() bool) ControlResult {
+	fail := func(msg string) ControlResult { return ControlResult{Error: msg} }
+	if who.Registered != trustedT3 {
+		return fail(req.Action + " is only for trusted T3 session hooks")
+	}
+	if req.ID == "" || len(req.ID) > 128 || strings.ContainsAny(req.ID, " \t\r\n") || strings.HasPrefix(req.ID, "-") || req.Title != "" {
+		return fail(req.Action + " takes only a T3 thread id and the hook event as request_id")
+	}
+	if want := map[string]string{"task_intake": "prompt_submit", "task_intake_done": "stop"}[req.Action]; req.RequestID != want {
+		return fail(req.Action + " needs the hook event " + want + " as request_id")
+	}
+	if strings.HasPrefix(req.ID, "mcp:launch:") {
+		return ControlResult{Reply: "Delegated T3 thread: skipped."}
+	}
+	if len(valid) > 0 && !valid[0]() {
+		return fail("request origin expired before the intake")
+	}
+	reply, changed := c.s.Tasks(who, strings.TrimPrefix(req.Action, "task_"), req.ID, "", req.RequestID)
+	c.s.log.Printf("scheduler control: operator uid %d, action %s, event %s", uid, req.Action, req.RequestID)
+	return ControlResult{Reply: reply, Changed: changed}
 }
 
 // CallControl is shared by the CLI and stdio adapter. It never opens the store.
