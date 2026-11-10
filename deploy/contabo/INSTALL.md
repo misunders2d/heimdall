@@ -52,10 +52,13 @@ Never touch `heimdall-live` or `heimdall-slack-test`.
 
 Owner rule, 2026-11-10: only the main branch may run in production. A release is a
 `main` commit whose CI run (`.github/workflows/ci.yml`: vet, race tests,
-static build) passed, and which passed a real-engine check: one trivial
-prompt per installed engine (`!codex`, `!claude`, `!pi`) through
-`heimdall local` with a scratch config and data dir and
-`MEMENTO_PROCESSING=1`. CI uses fake harnesses only.
+static build) passed, and which passed the real-engine check on the host,
+as the owner OS user, with the candidate binary:
+`deploy/contabo/engine-check.sh "$RELEASE"`. It sends one trivial prompt per
+installed engine (`!codex`, `!claude`, `!pi`) through `heimdall local` with
+a scratch config and data dir and `MEMENTO_PROCESSING=1`, and prints only
+`pass`, `fail` or `skipped` per engine. CI uses fake harnesses only. The
+check does not cover owner_slack launches.
 
 Only `heimdall run` upgrades the database schema. `heimdall sched` and
 `heimdall drain` never migrate. They serve schemas from
