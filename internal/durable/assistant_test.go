@@ -94,7 +94,12 @@ func TestAssistantWorksWithoutT3(t *testing.T) {
 // have acted: it is held with its key, turn and reason, never replayed
 // under a new key while waiting or across a restart; only !work retry
 // wakes the assistant again.
+//
+// That is the old path (before patchWakeRules), kept for workflows that
+// started before it; TestWakeClassesAreBounded covers the new rules.
 func TestAssistantAmbiguousWakeHolds(t *testing.T) {
+	forceOldPath = true
+	defer func() { forceOldPath = false }()
 	dir := t.TempDir()
 	a := &fakeAssistant{prompts: map[string]string{}, plan: map[string]WorkResult{
 		"MEL-72/1/work/1": {Turn: 7, Failure: "failed: harness exited after sending the email"},

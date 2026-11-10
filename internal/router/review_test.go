@@ -383,13 +383,15 @@ func TestCommitmentDispatchReceipt(t *testing.T) {
 	if n := count(t, e.dbPath, `SELECT count(*) FROM inbound WHERE chat=? AND msg_id=? AND text LIKE '%runId: run:thread:thread-X:ordinal:2%timeoutMs: 5000%'`, conv.Chat, "MEL-80/1/wait/1"); n != 1 {
 		t.Fatalf("wait prompt not bound: %d", n)
 	}
+	// The stop is told to the owner once, in one plain line.
+	e.replyIn("c8", "(MEL-80) needs you: it could not check on its worker.")
 	e.noReply(300 * time.Millisecond)
 }
 
 // The model's answer cannot manufacture a dispatch: a receipt in its text
 // with no native call, a native error or denial, a call bound to another
 // key, or a native approval request all hold on the stored turn: one turn,
-// never replayed, nothing sent to the chat.
+// never replayed; the chat gets only the owner's one-line stop notice.
 func TestCommitmentDispatchHeld(t *testing.T) {
 	e, rt := workEnv(t, true)
 	fabricated := "RECEIPT\n" + `{"threadId":"thread-X","messageId":"message:mcp:c:thread-send:k","runId":"run:2","delivery":"queued"}`
@@ -413,6 +415,7 @@ func TestCommitmentDispatchHeld(t *testing.T) {
 		if n := count(t, e.dbPath, `SELECT count(*) FROM turns WHERE chat=?`, core.ReviewChat(issue)); n != 1 {
 			t.Fatalf("%s: dispatch turns %d", issue, n)
 		}
+		e.replyIn(chat, "("+issue+") needs you: it could not hand the work to its worker.")
 	}
 	e.noReply(300 * time.Millisecond)
 }

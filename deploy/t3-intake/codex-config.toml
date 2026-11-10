@@ -1,0 +1,7 @@
+# Merge into the T3-run Codex user's config.toml. Codex reads hooks from
+# hooks.json next to config.toml (codex-hooks.json here) only with:
+[features]
+hooks = true
+# Codex runs a new or changed hook only after it is trusted (it records a
+# [hooks.state."<hook key>"] trusted_hash entry). Trust it once from an
+# interactive Codex session as that user; Heimdall never writes this.
