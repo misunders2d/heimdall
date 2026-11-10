@@ -118,6 +118,11 @@ type Router struct {
 	// accessRetry is how long a stored message whose caller could not be
 	// checked (access files unavailable) waits before it is checked again.
 	accessRetry time.Duration
+
+	// endRetry and endAttempts bound how a turn's end is recorded again
+	// after a failed write (backoff doubling from endRetry).
+	endRetry    time.Duration
+	endAttempts int
 }
 
 func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
@@ -143,7 +148,7 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.MaxParallel > 1 {
 		general, reserved = opt.MaxParallel-1, make(chan struct{}, 1)
 	}
-	r := &Router{accessRetry: time.Second, warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, general), reserved: reserved, log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	r := &Router{endRetry: 250 * time.Millisecond, endAttempts: 5, accessRetry: time.Second, warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, general), reserved: reserved, log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.Jobs != nil {
 		opt.Jobs.ResolveControl = r.schedulerCaller
 	}
@@ -467,31 +472,42 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		row.Outbound.ID, row.Outbound.Attempt = row.ID, row.Attempts
 		err = i.Send(ctx, row.Outbound)
 		var perm PermanentError
+		var record func() error
 		switch {
 		case err == nil:
-			err = r.store.Sent(row.ID)
+			record = func() error { return r.store.Sent(row.ID) }
 			if row.File != nil {
 				os.Remove(row.File.Path)
 			}
 		case errors.As(err, &perm):
 			r.log.Printf("reply %d to %s failed permanently: %v", row.ID, row.Conv, err)
-			err = r.store.Failed(row.ID, err.Error())
+			msg := err.Error()
+			record = func() error { return r.store.Failed(row.ID, msg) }
 			if row.File != nil {
 				os.Remove(row.File.Path)
 			}
 		case row.Attempts+1 >= r.opt.MaxAttempts:
 			r.log.Printf("reply %d to %s failed after %d attempts: %v", row.ID, row.Conv, row.Attempts+1, err)
-			err = r.store.Failed(row.ID, fmt.Sprintf("gave up after %d attempts: %v", row.Attempts+1, err))
+			msg := fmt.Sprintf("gave up after %d attempts: %v", row.Attempts+1, err)
+			record = func() error { return r.store.Failed(row.ID, msg) }
 			if row.File != nil {
 				os.Remove(row.File.Path)
 			}
 		default:
 			backoff := min(time.Second<<min(row.Attempts, 9), 5*time.Minute)
 			r.log.Printf("reply %d to %s: retry in %s: %v", row.ID, row.Conv, backoff, err)
-			err = r.store.Retry(row.ID, time.Now().Add(backoff), err.Error())
+			at, msg := time.Now().Add(backoff), err.Error()
+			record = func() error { return r.store.Retry(row.ID, at, msg) }
 		}
-		if err != nil {
-			r.log.Printf("outbound %d: %v", row.ID, err)
+		// The outcome is recorded before the next reply: a row left as
+		// sending would block its chat until a restart, which resends it.
+		for attempt := 0; ctx.Err() == nil; attempt++ {
+			err := record()
+			if err == nil {
+				break
+			}
+			r.log.Printf("outbound %d: outcome not recorded, retrying: %v", row.ID, err)
+			sleep(ctx, min(100*time.Millisecond<<min(attempt, 6), 5*time.Second))
 		}
 	}
 }
@@ -1322,7 +1338,9 @@ func (c *conv) start(ctx context.Context) {
 	if review != nil && (first.role != core.RoleOwner || c.r.opt.Work == nil || !current(c.r.opt.Work, review)) {
 		// Revalidated as the turn actually starts: the creator is still an
 		// admitted owner on the route and the attempt still waits.
-		_ = c.r.store.SetInbound(first.row.ID, store.InCancelled, "held: review refused at launch: creator no longer an admitted owner on the route, or the commitment is paused, cancelled or no longer waits for this attempt's verdict")
+		if err := c.r.store.SetInbound(first.row.ID, store.InCancelled, "held: review refused at launch: creator no longer an admitted owner on the route, or the commitment is paused, cancelled or no longer waits for this attempt's verdict"); err != nil {
+			c.r.log.Printf("message %d: refused review not recorded: %v", first.row.ID, err)
+		}
 		c.queue = c.queue[1:]
 		c.r.release(first.row.Inbound)
 		c.releaseSlot()
@@ -2199,9 +2217,7 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 	if t.detached {
 		e.PreserveSession = true
 	} // never overwrite a newer running session binding
-	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
-		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
-	}
+	c.endTurn(ctx, t, e)
 	if t.startCancel != nil {
 		t.startCancel()
 	}
@@ -2238,6 +2254,51 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 	// A native result ends the running turn; idle/cleanup processes hold no slot.
 	c.releaseSlot()
 	c.flushContinuations(ctx)
+}
+
+// endTurn records a turn's end with its reply. A failed write is retried
+// with backoff, each time only while the turn is still recorded as running,
+// so the reply is never queued twice. If it still cannot be recorded, the
+// reply text is sent once straight to its chat (best effort, outside the
+// outbox) and the turn is left running for restart recovery to report.
+func (c *conv) endTurn(ctx context.Context, t *turn, e store.TurnEnd) {
+	_, err := c.r.store.EndTurn(t.id, c.key, t.who, e)
+	for attempt := 0; err != nil && attempt < c.r.endAttempts && ctx.Err() == nil; attempt++ {
+		c.r.log.Printf("turn %d: end not recorded, retrying: %v", t.id, err)
+		sleep(ctx, c.r.endRetry<<attempt)
+		running, rerr := c.r.store.TurnIsRunning(t.id)
+		switch {
+		case rerr != nil:
+			err = rerr
+		case !running:
+			return // the earlier write was recorded after all
+		default:
+			_, err = c.r.store.EndTurn(t.id, c.key, t.who, e)
+		}
+	}
+	if err == nil {
+		return
+	}
+	c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
+	if ctx.Err() != nil || e.Reply == nil || strings.TrimSpace(e.Reply.Text) == "" {
+		return
+	}
+	if running, rerr := c.r.store.TurnIsRunning(t.id); rerr != nil || !running {
+		return // unknown, or recorded: the outbox has (or may have) the reply
+	}
+	i := c.r.ifaces[e.Reply.Conv.Interface]
+	if i == nil {
+		return
+	}
+	out := *e.Reply
+	out.ID, out.TurnID, out.File = 0, 0, nil
+	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := i.Send(sctx, out); err != nil {
+		c.r.log.Printf("turn %d: unrecorded reply not sent directly: %v", t.id, err)
+		return
+	}
+	c.r.log.Printf("turn %d: reply sent directly, end left for restart recovery", t.id)
 }
 
 // jobEnd is a scheduled turn's end as its job decides it: the reply and
