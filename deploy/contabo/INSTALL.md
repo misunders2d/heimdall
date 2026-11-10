@@ -47,6 +47,46 @@ Never touch `heimdall-live` or `heimdall-slack-test`.
    This does not validate tokens, logins, binaries or bot username ownership.
 9. Recheck inactive and static/disabled state. Old `pi-hub.service` stays serving.
 
+## Release, upgrade and rollback (2026-11-10)
+
+Owner, 2026-11-10: only the main branch runs in production. A release is a
+`main` commit whose CI run (`.github/workflows/ci.yml`: vet, race tests,
+static build) passed, and which passed a real-engine check: one trivial
+prompt per installed engine (`!codex`, `!claude`, `!pi`) through
+`heimdall local` with a scratch config and data dir and
+`MEMENTO_PROCESSING=1`. CI uses fake harnesses only.
+
+Only `heimdall run` upgrades the database schema. `heimdall sched` and
+`heimdall drain` never migrate. They serve schemas from
+`store.AdminMinSchema` up to their own, and refuse any other schema with a
+message that names both versions. `heimdall version` prints the schema the
+binary applies.
+
+Upgrade (root, on the host):
+
+1. Verify the new binary in staging (`sha256sum -c`, `"$RELEASE" version`).
+2. Drain with the **installed** binary:
+   `/usr/local/bin/heimdall drain -config /etc/heimdall/config.json`.
+   Exit 0 means idle. Exit 75 means timeout: do not stop, try again later.
+3. `systemctl stop heimdall.service`, then confirm it is inactive and its
+   cgroup has exited.
+4. Back up the state while the service is stopped: copy
+   `/var/lib/heimdall/heimdall.db` and `/var/lib/heimdall/durable.db` with
+   their `-wal`/`-shm` files, together, and the old binary, into a new 0700
+   directory outside the data dir. Do this before every release that adds a
+   schema step (the new `version` prints a higher schema) or changes the DBOS
+   version. Backups hold message text, so delete them once the release is
+   accepted.
+5. `install -m 0755 "$RELEASE" /usr/local/bin/heimdall`, then start the
+   service. The first `run` applies the new schema steps.
+
+Rollback: stop the service and reinstall the old binary. If the new release
+added schema steps, the old binary refuses to start ("database schema N is
+newer than this Heimdall"). In that case restore `heimdall.db` and
+`durable.db` from the same backup, together, before starting. Messages and
+replies stored after the backup are lost with it. Turns that a stop cut off
+are reported, never re-run.
+
 ## Launch findings
 
 Source inspected: Pi pack `origin/hub`, revision

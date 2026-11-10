@@ -241,7 +241,9 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate() error {
+func (s *Store) migrate() error { return s.migrateTo(len(steps)) }
+
+func (s *Store) migrateTo(n int) error {
 	var v int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
@@ -249,7 +251,7 @@ func (s *Store) migrate() error {
 	if v > len(steps) {
 		return fmt.Errorf("database schema %d is newer than this Heimdall (%d)", v, len(steps))
 	}
-	for ; v < len(steps); v++ {
+	for ; v < n; v++ {
 		tx, err := s.db.Begin()
 		if err != nil {
 			return err

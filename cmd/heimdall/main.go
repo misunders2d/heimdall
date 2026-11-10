@@ -56,7 +56,9 @@ const usage = `usage:
   heimdall drain -config FILE [-timeout 30m]
       hold new scheduled runs and wait until no turn runs and every reply is
       delivered: exit 0 when idle, 75 on timeout (run before a restart)
-  heimdall version`
+      sched and drain never create or migrate the database; only run does
+  heimdall version
+      the build and the database schema it applies`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -88,7 +90,7 @@ func main() {
 	case "drain":
 		err = drain(os.Args[2:])
 	case "version":
-		fmt.Println("heimdall", version)
+		fmt.Println("heimdall", version, "schema", store.Schema())
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -118,6 +120,12 @@ func openStore(cfg *config.Config) (*store.Store, error) {
 		return nil, err
 	}
 	return store.Open(filepath.Join(cfg.DataDir, "heimdall.db"))
+}
+
+// openAdminStore is the store for operator commands (sched, drain): an
+// existing database, never created and never migrated (store.OpenAdmin).
+func openAdminStore(cfg *config.Config) (*store.Store, error) {
+	return store.OpenAdmin(filepath.Join(cfg.DataDir, "heimdall.db"))
 }
 
 // run routes the configured chat interfaces until a signal or an interface
@@ -402,7 +410,7 @@ func sched(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := openStore(cfg)
+	st, err := openAdminStore(cfg)
 	if err != nil {
 		return err
 	}
@@ -439,7 +447,7 @@ func drain(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := openStore(cfg)
+	st, err := openAdminStore(cfg)
 	if err != nil {
 		return err
 	}
