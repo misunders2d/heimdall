@@ -123,6 +123,10 @@ type Router struct {
 	// after a failed write (backoff doubling from endRetry).
 	endRetry    time.Duration
 	endAttempts int
+
+	// ifaceGrace is how long after its first start an interface's failure
+	// stays fatal; ifaceBackoff is the first delay before a later restart.
+	ifaceGrace, ifaceBackoff time.Duration
 }
 
 func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
@@ -148,7 +152,7 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.MaxParallel > 1 {
 		general, reserved = opt.MaxParallel-1, make(chan struct{}, 1)
 	}
-	r := &Router{endRetry: 250 * time.Millisecond, endAttempts: 5, accessRetry: time.Second, warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, general), reserved: reserved, log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	r := &Router{ifaceGrace: 30 * time.Second, ifaceBackoff: 2 * time.Second, endRetry: 250 * time.Millisecond, endAttempts: 5, accessRetry: time.Second, warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, general), reserved: reserved, log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.Jobs != nil {
 		opt.Jobs.ResolveControl = r.schedulerCaller
 	}
@@ -205,10 +209,10 @@ func (r *Router) Run(parent context.Context) error {
 	r.pruneOutbox()
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { defer wg.Done(); r.callerNotices(ctx) }()
+	go func() { defer wg.Done(); r.keepRunning(ctx, "caller notices", func() { r.callerNotices(ctx) }) }()
 	for _, i := range r.ifaces {
 		wg.Add(1)
-		go func() { defer wg.Done(); r.deliver(ctx, i) }()
+		go func() { defer wg.Done(); r.keepRunning(ctx, "delivery for "+i.Name(), func() { r.deliver(ctx, i) }) }()
 	}
 	pending, err := r.store.Pending()
 	if err != nil {
@@ -229,9 +233,7 @@ func (r *Router) Run(parent context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := i.Run(ctx, r.accept); err != nil && ctx.Err() == nil {
-				errs <- fmt.Errorf("interface %s: %w", i.Name(), err)
-			}
+			r.runInterface(ctx, i, errs)
 		}()
 	}
 	select {
@@ -328,7 +330,19 @@ func waitExited(runs []*harness.Run, d time.Duration) int {
 
 // accept persists one verified message and hands it to its conversation.
 // Senders who cannot be identified are ignored without storing their text.
-func (r *Router) accept(ctx context.Context, in core.Inbound) error {
+func (r *Router) accept(ctx context.Context, in core.Inbound) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			// Acknowledged and dropped: re-offering it would fail the same
+			// way and hold up every later message of the interface.
+			r.log.Printf("recovered panic (%T) accepting a message in %s; message dropped", p, in.Conv)
+			err = nil
+		}
+	}()
+	return r.acceptMessage(ctx, in)
+}
+
+func (r *Router) acceptMessage(ctx context.Context, in core.Inbound) error {
 	if in.Origin == "" {
 		in.Origin = core.OriginLive
 	}
@@ -470,7 +484,7 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 			continue
 		}
 		row.Outbound.ID, row.Outbound.Attempt = row.ID, row.Attempts
-		err = i.Send(ctx, row.Outbound)
+		err = r.sendSafely(ctx, i, row.Outbound)
 		var perm PermanentError
 		var record func() error
 		switch {
@@ -562,6 +576,8 @@ type conv struct {
 	// (access files unavailable), in arrival order; a retry is armed.
 	held      []store.InboundRow
 	heldArmed bool
+
+	routing int64 // the stored message being routed, failed if routing panics
 }
 
 // accessRetryEvent asks the loop to check its held messages again.
@@ -618,6 +634,10 @@ type turn struct {
 	nativeInvalid bool
 	startCtx      context.Context
 	startCancel   context.CancelFunc
+
+	abandoned     bool        // loop-owned: dropped after a recovered panic; its events are ignored
+	typingStopped bool        // loop-owned: typing was closed
+	doneSent      atomic.Bool // the runner handed over its end (sendDone)
 
 	interruption string // native process loss; separate from user stop/reset
 	detached     bool   // native continuation: no inbound batch or parallelism reservation
@@ -682,6 +702,7 @@ type doneEvent struct {
 	skipped  []string          // outbox files not taken, "name: reason"
 	refused  bool              // the caller's admission or role changed: refused before any harness
 	identity error             // a scheduled turn's creator check failed (scheduler.Admit): no harness ran
+	panicked bool              // the turn runner panicked: Heimdall's own failure
 }
 
 func (c *conv) push(row store.InboundRow) {
@@ -697,80 +718,107 @@ func (c *conv) push(row store.InboundRow) {
 
 func (c *conv) loop(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		done := false
+		if c.r.safely("conversation "+c.key.String(), func() { done = c.step(ctx) }) {
+			c.afterPanic(ctx)
+		}
+		if done {
 			return
-		case <-c.signal:
-			c.mu.Lock()
-			rows := c.inbox
-			c.inbox = nil
-			c.mu.Unlock()
+		}
+		c.arm(ctx)
+	}
+}
+
+// step handles one inbox signal or event; it reports whether ctx ended.
+func (c *conv) step(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-c.signal:
+		c.mu.Lock()
+		rows := c.inbox
+		c.inbox = nil
+		c.mu.Unlock()
+		for _, row := range rows {
+			c.take(ctx, row)
+		}
+	case ev := <-c.events:
+		switch ev := ev.(type) {
+		case accessRetryEvent:
+			rows := c.held
+			c.held, c.heldArmed = nil, false
 			for _, row := range rows {
 				c.take(ctx, row)
 			}
-		case ev := <-c.events:
-			switch ev := ev.(type) {
-			case accessRetryEvent:
-				rows := c.held
-				c.held, c.heldArmed = nil, false
-				for _, row := range rows {
-					c.take(ctx, row)
+			if c.turn != nil {
+				c.steerNext(ctx, c.turn)
+			}
+		case continuationEvent:
+			c.continuation(ctx, ev)
+		case albumEvent:
+			if a := c.albums[ev.key]; a != nil && a.gen == ev.gen {
+				delete(c.albums, ev.key)
+				// A harness choice or !next in one part's caption is the
+				// album's: the parts stay one message.
+				var choice *command
+				for _, row := range a.rows {
+					if cmd := parseCommand(row.Text); cmd.Kind == cmdMessage && (cmd.Harness != "" || cmd.Next) {
+						choice = &cmd
+						break
+					}
+				}
+				for _, row := range a.rows {
+					c.route(row, choice)
 				}
 				if c.turn != nil {
 					c.steerNext(ctx, c.turn)
 				}
-			case continuationEvent:
-				c.continuation(ctx, ev)
-			case albumEvent:
-				if a := c.albums[ev.key]; a != nil && a.gen == ev.gen {
-					delete(c.albums, ev.key)
-					// A harness choice or !next in one part's caption is the
-					// album's: the parts stay one message.
-					var choice *command
-					for _, row := range a.rows {
-						if cmd := parseCommand(row.Text); cmd.Kind == cmdMessage && (cmd.Harness != "" || cmd.Next) {
-							choice = &cmd
-							break
-						}
-					}
-					for _, row := range a.rows {
-						c.route(row, choice)
-					}
-					if c.turn != nil {
-						c.steerNext(ctx, c.turn)
-					}
-				}
-			case readyEvent:
-				ev.t.harness, ev.t.ready = ev.harness, true
-				c.steerNext(ctx, ev.t)
-			case steerEvent:
-				c.steerDone(ctx, ev)
-			case doneEvent:
-				ev.t.done = &ev
-				if !ev.t.steering {
-					c.finish(ctx, ev.t)
-				}
 			}
-		case sem := <-c.slot:
-			c.waiting = false
-			c.slotSem = sem
-			c.start(ctx)
-		}
-		if c.turn == nil && len(c.queue) > 0 && !c.waiting {
-			c.waiting = true
-			// Reuse a warm transport immediately; wait for cleanup when a
-			// turn could not retain its transport.
-			head := c.queue[0]
-			var note *store.InboundRow
-			if head.row.Origin == core.OriginLive && head.row.Run == nil && head.row.Review == nil {
-				note = &head.row
+		case readyEvent:
+			if ev.t.abandoned {
+				break
 			}
-			go c.waitSlot(ctx, c.exited, ownerLive(head), note)
+			ev.t.harness, ev.t.ready = ev.harness, true
+			c.steerNext(ctx, ev.t)
+		case steerEvent:
+			if ev.t.abandoned {
+				break
+			}
+			c.steerDone(ctx, ev)
+		case doneEvent:
+			if ev.t.abandoned {
+				break
+			}
+			ev.t.done = &ev
+			if !ev.t.steering {
+				c.finish(ctx, ev.t)
+			}
 		}
-		c.mu.Lock()
-		c.busy.Store(c.turn != nil || len(c.nativeTurns) > 0 || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0 || len(c.held) > 0)
-		c.mu.Unlock()
+	case sem := <-c.slot:
+		c.waiting = false
+		c.slotSem = sem
+		c.start(ctx)
 	}
+	return false
+}
+
+// arm starts waiting for a turn slot when messages wait and no turn runs,
+// and updates busy.
+func (c *conv) arm(ctx context.Context) {
+	if c.turn == nil && len(c.queue) > 0 && !c.waiting {
+		c.waiting = true
+		// Reuse a warm transport immediately; wait for cleanup when a
+		// turn could not retain its transport.
+		head := c.queue[0]
+		var note *store.InboundRow
+		if head.row.Origin == core.OriginLive && head.row.Run == nil && head.row.Review == nil {
+			note = &head.row
+		}
+		go c.waitSlot(ctx, c.exited, ownerLive(head), note)
+	}
+	c.mu.Lock()
+	c.busy.Store(c.turn != nil || len(c.nativeTurns) > 0 || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0 || len(c.held) > 0)
+	c.mu.Unlock()
 }
 
 // queuedNotice tells a live caller, once per wait, that every turn slot
@@ -916,6 +964,13 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 // now, so a revoked principal (or, later, a scheduled job's creator) fails
 // closed.
 func (c *conv) route(row store.InboundRow, choice *command) bool {
+	c.routing = row.ID
+	steer := c.routeRow(row, choice)
+	c.routing = 0
+	return steer
+}
+
+func (c *conv) routeRow(row store.InboundRow, choice *command) bool {
 	if row.Review != nil {
 		// A commitment review: like a scheduled run, never a command or a
 		// steer; the creator is decided against the commitment's route.
@@ -1489,7 +1544,9 @@ func (c *conv) startTyping(ctx context.Context, t *turn) {
 				return
 			default:
 			}
-			ty.Typing(ctx, c.key)
+			if c.r.safely("typing", func() { ty.Typing(ctx, c.key) }) {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1504,7 +1561,7 @@ func (c *conv) startTyping(ctx context.Context, t *turn) {
 // typedOnce shows the typing indicator once, without waiting for it.
 func (c *conv) typedOnce(ctx context.Context) {
 	if ty, ok := c.r.ifaces[c.key.Interface].(Typer); ok {
-		go ty.Typing(ctx, c.key)
+		go c.r.safely("typing", func() { ty.Typing(ctx, c.key) })
 	}
 }
 
@@ -1519,6 +1576,7 @@ func (c *conv) send(ctx context.Context, ev any) {
 // turn is ready did nothing, so the next one may take over; once a harness
 // is ready the turn is committed to it.
 func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
+	defer c.recoverTurn(ctx, t)
 	c.observe(ctx, t, "start", harness.Progress{})
 	var notes []string
 	// gated holds employee-gate skips. They only reach the reply when no
@@ -1653,7 +1711,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		caller := harness.Caller{Capabilities: caps, Principal: from, Role: t.role, Conv: target, Private: t.private, OAuthActor: actor, OAuthInstallation: installation}
 		caller.SlackRead = harness.SlackReadAllowed(c.r.opt.OwnerSlack, batch[0].row.Inbound, t.role, h, c.r.opt.SlackTeam)
-		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
+		logf := guarded(c.r, "harness log", func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) })
 		var progress func(harness.Progress)
 		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok && t.job == nil && t.review == nil {
 			progress = func(p harness.Progress) { c.observe(ctx, t, "progress", p) }
@@ -1745,6 +1803,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				}
 			}
 		}
+		progress, notify = guarded(c.r, "harness progress", progress), guarded(c.r, "harness notice", notify)
 		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive || t.job != nil && t.role == core.RoleOwner, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
 		if t.review != nil {
 			// One bounded turn; no scheduler or MCP control, no progress,
@@ -1759,15 +1818,21 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				} else if t.review.Run != "" {
 					tool = t3WaitTool
 				}
-				spec.NativeCalls = &harness.NativeCalls{Tools: []string{tool}, Done: func(n harness.NativeCall) {
+				spec.NativeCalls = &harness.NativeCalls{Tools: []string{tool}, Done: guarded(c.r, "harness native call", func(n harness.NativeCall) {
 					t.mu.Lock()
 					t.native = append(t.native, n)
 					t.mu.Unlock()
-				}}
+				})}
 			}
 		}
 		if t.job == nil && t.review == nil {
-			spec.Continuation = func(ev harness.Continuation) bool {
+			spec.Continuation = func(ev harness.Continuation) (ok bool) {
+				defer func() {
+					if p := recover(); p != nil {
+						c.r.log.Printf("recovered panic (%T) in harness continuation", p)
+						ok = false
+					}
+				}()
 				e := continuationEvent{source: t, harness: h, native: ev}
 				if ev.Phase == "start" {
 					e.accepted = make(chan bool, 1)
@@ -1802,7 +1867,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				}
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
-					c.send(ctx, doneEvent{t: t, harness: h, res: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}, notes: notes})
+					c.sendDone(ctx, doneEvent{t: t, harness: h, res: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}, notes: notes})
 					return
 				}
 				spec.Timeout = min(spec.Timeout, remaining)
@@ -1858,7 +1923,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if res.Cancelled {
 			// Preserve a pre-ready limit result. It must not become a generic
 			// startup failure (or a scheduler startup retry).
-			c.send(ctx, doneEvent{t: t, harness: h, res: res, notes: notes})
+			c.sendDone(ctx, doneEvent{t: t, harness: h, res: res, notes: notes})
 			return
 		}
 		why := res.Failure
@@ -1868,7 +1933,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		notes = append(notes, h+" failed before starting: "+why)
 	}
 	notes = append(gated, notes...)
-	c.send(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes, refused: refused, identity: identity})
+	c.sendDone(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes, refused: refused, identity: identity})
 }
 
 // commit ends the turn with harness h's outcome: h took the turn, so no
@@ -1892,7 +1957,7 @@ func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, 
 	if r := done.res; r.Failure == "" && r.NeedsHuman == "" && !r.Cancelled {
 		done.files, done.skipped = c.collect(t)
 	}
-	c.send(ctx, done)
+	c.sendDone(ctx, done)
 }
 
 // sessionPointer uses only existing bindings, before BindTurn overwrites them.
@@ -1952,9 +2017,17 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 	run := t.run
 	t.mu.Unlock()
 	go func() {
+		var refs []string
+		defer func() {
+			if p := recover(); p != nil {
+				// Whether the harness got it is unknown: never replayed.
+				c.r.log.Printf("recovered panic (%T) in turn %d steer", p, t.id)
+				c.send(ctx, steerEvent{t: t, items: items, refs: refs, outcome: harness.SteerUnknown})
+			}
+		}()
 		var parts, contextParts []string
 		var images []harness.Image
-		refs := c.react(t, items)
+		refs = c.react(t, items)
 		for _, it := range items {
 			blocks, ims := c.files(t, it)
 			if t.harness == "codex" || t.harness == "claude" || t.harness == "pi" {
@@ -2049,9 +2122,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		// Shutdown: leave the turn recorded as running; the next start reports it.
 		return
 	}
-	if t.typing != nil {
-		close(t.typing)
-	}
+	c.stopTyping(t)
 	t.mu.Lock()
 	run := t.run
 	t.mu.Unlock()
@@ -2158,6 +2229,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	case res.Cancelled && res.Cause.Limited():
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, string(res.Cause)
 		text = "⏱ This turn hit its " + string(res.Cause) + " limit and was stopped. Work may be unfinished and was not re-run. Anything it already did may stand; check existing task IDs, results and sends before resending. Your next message starts a fresh session.\n— heimdall"
+	case d.panicked:
+		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "internal error"
+		text = "⚠ Something went wrong in Heimdall during this turn. It was stopped and not re-run; resend if still needed."
 	case d.harness == "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "no harness could start"
 		text = "⚠ No harness could take this turn."

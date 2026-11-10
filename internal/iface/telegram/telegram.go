@@ -578,6 +578,10 @@ func (t *Interface) ambient(u update, m *message, text string) (core.Inbound, *m
 	return in, m, true
 }
 
+// Restartable reports that Run may be called again after it returned: the
+// router restarts a poller that failed after start-up.
+func (t *Interface) Restartable() bool { return true }
+
 // GroupContext reports that Telegram group messages not addressed to the
 // bot are sent as Ambient, for context.
 func (t *Interface) GroupContext() bool { return true }

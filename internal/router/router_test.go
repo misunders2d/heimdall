@@ -165,7 +165,8 @@ type env struct {
 	r        *Router           // the running router
 	sched    *scheduler.Config // the scheduler, when enabled
 	reverify func(context.Context, core.Principal) (scheduler.Verified, bool, error)
-	tune     func(*Router) // adjusts the router before it runs
+	tune     func(*Router)              // adjusts the router before it runs
+	wrap     func(*fakeIface) Interface // the interface the router gets, if not the fake itself
 }
 
 // syncBuffer is a log destination tests can read while the router writes.
@@ -253,6 +254,9 @@ func (e *env) start() {
 	var iface Interface = e.f
 	if e.platform != "" {
 		iface = namedFakeIface{e.f, e.platform}
+	}
+	if e.wrap != nil {
+		iface = e.wrap(e.f)
 	}
 	if e.sched != nil {
 		e.opt.Jobs = scheduler.New(*e.sched, st, e.opt.Access, e.opt.Log)
@@ -2047,6 +2051,7 @@ func TestTurnRechecksRoleAndAdmissionBeforeLaunch(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "whitelist.json"), []byte(`{"users":["7"]}`), 0600); err != nil {
 					t.Fatal(err)
 				}
+				tr.doneSent.Store(false) // the same turn runs a second time here
 				c.runTurn(context.Background(), tr, nil)
 				ev = (<-c.events).(doneEvent)
 				if !strings.Contains(strings.Join(ev.notes, " "), "caller admission or role changed") {
