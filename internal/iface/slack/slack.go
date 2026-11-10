@@ -50,6 +50,7 @@ type Slack struct {
 	bot, app      *apiClient
 	socket        socketTransport
 	ready         chan struct{}
+	readyOnce     sync.Once // Run may run again after a failure (router restart)
 	botID, name   string
 	mu            sync.Mutex
 	rejectedUsers map[string]bool
@@ -186,6 +187,14 @@ func (s *Slack) initialize(ctx context.Context) error {
 			}
 		}
 	}
+	if s.started() {
+		// A restart keeps the identity readers already use; only the same
+		// bot user may reconnect.
+		if auth.UserID != s.botID {
+			return errors.New("slack: auth.test bot user changed; refusing Socket Mode")
+		}
+		return nil
+	}
 	s.botID = auth.UserID
 	s.name = safeName(auth.User)
 	var bot struct {
@@ -199,6 +208,20 @@ func (s *Slack) initialize(ctx context.Context) error {
 	}
 	return nil
 }
+
+// started reports whether an earlier Run finished start-up.
+func (s *Slack) started() bool {
+	select {
+	case <-s.ready:
+		return true
+	default:
+		return false
+	}
+}
+
+// Restartable reports that Run may be called again after it returned: the
+// router restarts Slack when it fails after start-up.
+func (s *Slack) Restartable() bool { return true }
 func safeName(s string) string {
 	s = unsafeName.ReplaceAllString(router.Scrub(s), "")
 	s = strings.Join(strings.Fields(s), " ")
@@ -236,10 +259,14 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 	if err = s.initialize(ctx); err != nil {
 		return err
 	}
-	if err = s.recoverProgress(ctx); err != nil {
-		return err
+	// Status recovery is for a process restart only: on an in-process
+	// restart the router's turns are still live.
+	if !s.started() {
+		if err = s.recoverProgress(ctx); err != nil {
+			return err
+		}
 	}
-	close(s.ready)
+	s.readyOnce.Do(func() { close(s.ready) })
 	jobs := make(chan store.InterfaceEvent, 1) // wakeups only; SQLite owns backlog
 	done := make(chan error, 1)
 	go func() { done <- s.processEvents(ctx, jobs, accept) }()

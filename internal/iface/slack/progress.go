@@ -341,3 +341,4 @@ func (s *Slack) recoverProgress(ctx context.Context) error {
 
 // Compile-time adapter hook and transport checks.
 var _ router.TurnObserver = (*Slack)(nil)
+var _ router.Restartable = (*Slack)(nil)
