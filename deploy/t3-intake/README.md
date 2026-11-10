@@ -24,7 +24,9 @@ Heimdall then:
   user message counts if the thread itself is `createdBy: "user"` (weaker; the
   task's brief says so). If the CLI is missing or fails, or neither mark
   applies, the request is refused with one metadata-only log line; prompt
-  text and environment are never used instead;
+  text and environment are never used instead. One read may take up to 90 s
+  (in the durable probe, not the hook): a large thread (about 9,000 items)
+  takes about 20 s to show, whatever `--messages` asks;
 - stores one `T3-<n>` per (thread, message, run) in `durable.db`; a repeat is
   ignored, a newer request in the same thread supersedes the older one;
 - tracks it silently: it closes quietly when the run completes or is
