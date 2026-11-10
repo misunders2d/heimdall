@@ -832,7 +832,7 @@ func ownerLive(it item) bool {
 }
 
 // waitSlot waits for the last turn's process to exit, then for a turn slot:
-// a general one, or for the owner's live turn the reserved one. If none is
+// a general one, or for the owner's live turn the reserved one (first). If none is
 // free at once, note's sender is told once. The slot is handed to the loop.
 func (c *conv) waitSlot(ctx context.Context, exited <-chan struct{}, owner bool, note *store.InboundRow) {
 	if exited != nil {
@@ -846,14 +846,16 @@ func (c *conv) waitSlot(ctx context.Context, exited <-chan struct{}, owner bool,
 	if !owner {
 		reserved = nil // a nil channel is never ready
 	}
+	// The owner takes the reserved slot first, leaving general ones to
+	// others; anyone else only ever takes a general one.
 	var sem chan struct{}
 	select {
-	case c.r.sem <- struct{}{}:
-		sem = c.r.sem
+	case reserved <- struct{}{}:
+		sem = reserved
 	default:
 		select {
-		case reserved <- struct{}{}:
-			sem = reserved
+		case c.r.sem <- struct{}{}:
+			sem = c.r.sem
 		default:
 		}
 	}
