@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
 
@@ -283,6 +284,7 @@ type View struct {
 	Issue, Title, Status, Worker string
 	State                        State
 	PausedBy                     string
+	Created                      time.Time // the workflow's creation
 	cm                           Commitment
 }
 
@@ -302,7 +304,7 @@ func (r *Runtime) Views() ([]View, error) {
 	}
 	var out []View
 	for _, w := range ws {
-		v := View{Issue: w.ID, Status: string(w.Status)}
+		v := View{Issue: w.ID, Status: string(w.Status), Created: w.CreatedAt}
 		if cm, ok := decodeInput(w.Input); ok {
 			v.Title, v.Worker, v.cm = cm.Title, cm.Worker, cm
 		}
@@ -316,6 +318,89 @@ func (r *Runtime) Views() ([]View, error) {
 		return boolInt(a.State.Phase == PhaseClosed) - boolInt(b.State.Phase == PhaseClosed)
 	})
 	return out, nil
+}
+
+// TaskRow is one task of the admin export (heimdall sched tasks -json):
+// fixed fields only, never a brief, note, evidence, verdict, next step or
+// other free text.
+type TaskRow struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`  // whitespace collapsed, at most 80 characters
+	Origin     string `json:"origin"` // chat | t3 | external
+	Phase      string `json:"phase"`  // the published phase, or paused, queued, cancelled, failed
+	Since      string `json:"since"`  // RFC3339
+	Attempt    int    `json:"attempt"`
+	NeedsOwner bool   `json:"needs_owner"` // held: stopped waiting for the owner
+	NextWake   string `json:"next_wake"`   // RFC3339 or empty; no wake time is published yet
+}
+
+const (
+	exportRows   = 200
+	exportClosed = 7 * 24 * time.Hour
+	exportTitle  = 80
+)
+
+// Export is the task queue for a local admin reader (the scheduler
+// control's task_export): every open task and those closed in the last
+// 7 days, newest since first, at most 200. It only reads.
+func (r *Runtime) Export(now time.Time) ([]byte, error) {
+	vs, err := r.Views()
+	if err != nil {
+		return nil, err
+	}
+	return exportJSON(vs, now), nil
+}
+
+func exportJSON(vs []View, now time.Time) []byte {
+	rows := []TaskRow{}
+	at := map[string]time.Time{}
+	for _, v := range vs {
+		since := v.State.Since
+		if since.IsZero() {
+			since = v.Created
+		}
+		if v.State.Phase == PhaseClosed && now.Sub(since) > exportClosed {
+			continue
+		}
+		origin := "chat"
+		if v.cm.Intake != nil || v.cm.Origin == OriginTrustedT3 {
+			origin = "t3"
+		} else if v.cm.Origin != "" {
+			origin = "external"
+		}
+		// The same precedence as the human status line.
+		phase := v.State.Phase
+		switch {
+		case phase == PhaseHeld:
+		case v.PausedBy != "":
+			phase = "paused"
+		case v.Status == string(dbos.WorkflowStatusEnqueued) || phase == "":
+			phase = "queued"
+		case v.Status == string(dbos.WorkflowStatusCancelled):
+			phase = "cancelled"
+		case v.Status == string(dbos.WorkflowStatusError) || v.Status == string(dbos.WorkflowStatusMaxRecoveryAttemptsExceeded):
+			phase = "failed"
+		}
+		title := strings.Join(strings.FieldsFunc(v.Title, func(c rune) bool { return unicode.IsSpace(c) || unicode.IsControl(c) }), " ")
+		if t := []rune(title); len(t) > exportTitle {
+			title = strings.TrimSpace(string(t[:exportTitle]))
+		}
+		at[v.Issue] = since
+		rows = append(rows, TaskRow{ID: v.Issue, Title: title, Origin: origin, Phase: phase, Since: since.UTC().Format(time.RFC3339), Attempt: v.State.Attempt, NeedsOwner: phase == PhaseHeld})
+	}
+	slices.SortStableFunc(rows, func(a, b TaskRow) int {
+		if c := at[b.ID].Compare(at[a.ID]); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	if len(rows) > exportRows {
+		rows = rows[:exportRows]
+	}
+	out, _ := json.Marshal(struct {
+		Tasks []TaskRow `json:"tasks"`
+	}{rows})
+	return out
 }
 
 // input reads commitment issue's stored input.
