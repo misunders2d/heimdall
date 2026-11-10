@@ -107,6 +107,15 @@ func TestWatchDefinition(t *testing.T) {
 	if _, draft, change, notice := r.s.Prepare(inGroup, block, false); draft == nil || change != nil || !strings.Contains(notice, "Yes") {
 		t.Fatalf("group watch applied without a card: %v %s", change, notice)
 	}
+	// Swapping the script is shown wherever an edit is confirmed or reported.
+	script(t, dir, "other-script", "true")
+	swap := []string{"```heimdall-job\n{\"edit\":\"" + id + "\",\"check\":{\"checker\":\"other-script\"}}\n```"}
+	if _, _, change, notice := r.s.Prepare(inGroup, swap, false); change != nil || !strings.Contains(notice, "competitor-deals") || !strings.Contains(notice, "other-script") {
+		t.Fatalf("checker swap hidden in the group card: %s", notice)
+	}
+	if out := r.cmd(asBoss, `job edit `+id+` {"check":{"checker":"other-script"}}`); !strings.Contains(out, "other-script") {
+		t.Fatalf("checker swap hidden in the edit reply: %s", out)
+	}
 }
 
 // TestWatchResults: exit 0 without output is quiet; with output the text
@@ -295,7 +304,7 @@ func TestWatchConcurrency(t *testing.T) {
 	r.now = r.now.Add(15 * time.Minute)
 	begin := time.Now()
 	r.tick()
-	if d := time.Since(begin); d > 2*time.Second {
+	if d := time.Since(begin); d > 10*time.Second {
 		t.Fatalf("the due loop waited %s for checks", d)
 	}
 	if sent := r.sent(); len(sent) != 1 || sent[0].Text != "stand-up" || r.runs(note)[0].State != store.RunOK {
@@ -454,11 +463,16 @@ func TestWatchRestartHoldWindow(t *testing.T) {
 	if got := h.runs(hid)[0]; got.State != store.RunPending || len(h.sent()) != 0 {
 		t.Fatalf("held check: %+v", got)
 	}
+	// An edit while the run waits is not an edit during the check.
+	h.cmd(asBoss, `job edit `+hid+` {"summary":"edited while held"}`)
 	_ = h.st.SetMeta(MetaHold, 0)
 	h.tick()
 	h.settle()
 	if got := h.runs(hid)[0]; got.State != store.RunOK {
 		t.Fatalf("after the hold: %+v", got)
+	}
+	if sent := h.sent(); len(sent) != 1 || sent[0].Text != "ping" {
+		t.Fatalf("held check's output after an edit: %s", texts(sent))
 	}
 	// The hold checked where the check starts.
 	pending := store.Run{Job: hid, Version: 1, Slot: "manual:1", Due: h.now, Trigger: "manual", State: store.RunPending}

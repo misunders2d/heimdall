@@ -713,7 +713,7 @@ func (s *Scheduler) show(c Caller, id string) string {
 	// The options are the definition without what describe showed.
 	var opts map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(mustJSON(d)), &opts)
-	for _, k := range []string{"name", "kind", "schedule", "tz", "to", "prompt", "text", "harness"} {
+	for _, k := range []string{"name", "kind", "schedule", "tz", "to", "prompt", "text", "harness", "check"} {
 		delete(opts, k)
 	}
 	fmt.Fprintf(&b, "Options: %s\n", mustJSON(opts))

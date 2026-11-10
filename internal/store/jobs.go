@@ -578,7 +578,10 @@ func (s *Store) StartLocalRun(holdKey string, now time.Time, id int64) (held, ok
 			held = true
 			return nil
 		}
-		res, err := tx.Exec(`UPDATE job_runs SET state=?,started_at=? WHERE id=? AND state=?`, RunRunning, now.UnixMilli(), id, RunPending)
+		// The check runs the job's current definition: its version is
+		// taken now, so an edit while the run waited is not mistaken for an
+		// edit during the check.
+		res, err := tx.Exec(`UPDATE job_runs SET state=?,started_at=?,version=(SELECT version FROM jobs WHERE id=job_id) WHERE id=? AND state=?`, RunRunning, now.UnixMilli(), id, RunPending)
 		if err != nil {
 			return err
 		}
