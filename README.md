@@ -31,11 +31,12 @@ business connectors or tool restrictions (each harness's native configuration).
 native sessions, steering and file delivery are implemented. Slack is tested
 against fake Web API/Socket Mode servers and fake native harnesses; the live
 Slack window is arranged separately by the orchestrator. The scheduler
-(phase 3a) and durable tasks are built. Production runs Heimdall from the
-main branch, with durable tasks enabled (`supervisor_review` and
+(phase 3a) and durable tasks are built. Production runs Heimdall with
+durable tasks enabled (`supervisor_review` and
 `assistant_work` on, `t3_dispatch` off; all three are off by default in
 code). CI runs vet and race tests on every change; engine upgrades are
-checked by hand against real harnesses before a release
+checked by hand against real harnesses before a release. Owner rule
+(2026-11-10): only the main branch may run in production
 ([INSTALL.md](deploy/contabo/INSTALL.md)). Linux only.
 
 ## Build

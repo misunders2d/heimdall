@@ -1,5 +1,5 @@
 [Unit]
-Description=Heimdall chat router (staged; do not start before cutover approval)
+Description=Heimdall chat router
 After=network-online.target
 Wants=network-online.target
 

@@ -12,8 +12,9 @@ Heimdall's verified platform identity and the Mellanni signed per-turn caller
 token (MEL-724, not built yet). Keep `employee_harnesses: []` until native
 isolation, skill reading, credential denial and caller-bound tools are validated.
 
-Run these steps yourself on the production hub. This release has not been
-run there. Existing Pi hub remains responsible for Slack, Telegram and scheduling.
+Run these steps yourself on the production hub. Since cutover Heimdall serves
+production there; this section records the first staged install. For later
+releases use "Release, upgrade and rollback" below.
 Never touch `heimdall-live` or `heimdall-slack-test`.
 
 ## Install only
@@ -49,7 +50,7 @@ Never touch `heimdall-live` or `heimdall-slack-test`.
 
 ## Release, upgrade and rollback (2026-11-10)
 
-Owner, 2026-11-10: only the main branch runs in production. A release is a
+Owner rule, 2026-11-10: only the main branch may run in production. A release is a
 `main` commit whose CI run (`.github/workflows/ci.yml`: vet, race tests,
 static build) passed, and which passed a real-engine check: one trivial
 prompt per installed engine (`!codex`, `!claude`, `!pi`) through
@@ -73,8 +74,9 @@ Upgrade (root, on the host):
 4. Back up the state while the service is stopped: copy
    `/var/lib/heimdall/heimdall.db` and `/var/lib/heimdall/durable.db` with
    their `-wal`/`-shm` files, together, and the old binary, into a new 0700
-   directory outside the data dir. Do this before every release that adds a
-   schema step (the new `version` prints a higher schema) or changes the DBOS
+   directory outside the data dir. Do this before every release: it is the
+   only way back if the release adds a schema step (`heimdall version`
+   prints the schema of builds from 2026-11-10 on) or changes the DBOS
    version. Backups hold message text, so delete them once the release is
    accepted.
 5. `install -m 0755 "$RELEASE" /usr/local/bin/heimdall`, then start the

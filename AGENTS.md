@@ -357,7 +357,7 @@ thinking stream and live-session reply registration.
   tasks, owner-approved 2026-11-08/09; it brings its own indirect modules).
 - CI (`.github/workflows/ci.yml`) runs vet, race tests and the static build
   on every push and pull request; the repository is public, so CI uses no
-  secrets. Owner, 2026-11-10: only the main branch runs in production; before
+  secrets. Owner, 2026-11-10: only the main branch may run in production; before
   a release, check it against the real engines through `heimdall local`
   (release steps: [INSTALL.md](deploy/contabo/INSTALL.md)).
 - Tests: `go vet ./...` and `go test -race ./...` (fake harnesses speak each
