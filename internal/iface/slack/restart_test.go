@@ -61,8 +61,25 @@ func TestRunAgainAfterFailureServesEvents(t *testing.T) {
 		}()
 		second <- s.Run(ctx, accept)
 	}()
-	f.push(f.event("D1", "im", "Uowner", "after", ""))
-	waitFor(t, "message after restart", func() bool { return count() == 2 })
+	waitFor(t, "second socket", func() bool { return len(f.all("apps.connections.open")) >= 2 })
+	// The old fake socket may still take an event before it notices the
+	// close; Slack redelivers unacknowledged envelopes, so do the same.
+	after := f.event("D1", "im", "Uowner", "after", "")
+	f.push(after)
+	until := time.Now().Add(8 * time.Second)
+	for next := time.Now().Add(time.Second); count() < 2; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(until) {
+			t.Fatal("timed out: message after restart")
+		}
+		if time.Now().After(next) {
+			f.push(after)
+			next = time.Now().Add(time.Second)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if count() != 2 {
+		t.Fatalf("redelivery repeated processing: %d", count())
+	}
 	if s.botID != botID {
 		t.Fatal("bot identity changed across restart")
 	}

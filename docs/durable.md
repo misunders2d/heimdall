@@ -215,8 +215,8 @@ Task "<title>" (<id>) needs you: <reason>. Reply "!work retry <id>" or "!work cl
 ```
 
 sent once per stop under a fixed key; a failed send never stops the task
-again. A stopped wake may already have acted, so it is never replayed under
-the same key: the owner checks its effects before `!work retry`.
+again. A stopped wake may have acted: the owner checks its effects before
+`!work retry`.
 
 **T3 intake** (hooks in [deploy/t3-intake](../deploy/t3-intake/README.md)).
 A T3 session's hooks call the scheduler control actions `task_intake`
@@ -341,6 +341,8 @@ version.
   that position. Put patches before steps that old workflows have passed
   (see the test).
 - Run only one Heimdall process per data dir.
+- `wake-rules-v2` is such a patch: workflows started before it keep the old
+  hold-until-retry path until `!work retry` moves them onto the wake rules.
 
 ## Not qualified (what still blocks autonomous follow-through)
 
