@@ -33,11 +33,12 @@ type fakeT3 struct {
 	t     *testing.T
 	dir   string
 	state string
+	by    string // the thread's createdBy mark; "" leaves it out
 }
 
 func newFakeT3(t *testing.T) *fakeT3 {
 	dir := t.TempDir()
-	f := &fakeT3{t: t, dir: dir, state: filepath.Join(dir, "state.json")}
+	f := &fakeT3{t: t, dir: dir, state: filepath.Join(dir, "state.json"), by: "user"}
 	script := `#!/bin/sh
 [ -f "` + dir + `/delay" ] && sleep "$(cat "` + dir + `/delay")"
 printf '%s\n' "$@" >> "` + dir + `/argv"
@@ -59,7 +60,10 @@ type msg struct {
 
 func (f *fakeT3) set(status, latest, active string, msgs ...msg) {
 	f.t.Helper()
-	th := map[string]any{"threadId": "thread-A", "title": "Supplier work", "createdBy": "user", "status": status, "latestRunId": latest, "activeRunId": nil, "runCount": len(msgs)}
+	th := map[string]any{"threadId": "thread-A", "title": "Supplier work", "status": status, "latestRunId": latest, "activeRunId": nil, "runCount": len(msgs)}
+	if f.by != "" {
+		th["createdBy"] = f.by
+	}
 	if active != "" {
 		th["activeRunId"] = active
 	}
@@ -83,7 +87,11 @@ func (f *fakeT3) delay(s string) {
 // T3 lineage binds the owner, T3's own createdBy=user mark is the owner
 // check, read through the configured CLI after the hook has its answer.
 // One prompt gives one tracking task (T3-<n>), a repeat gives none, an
-// agent's prompt or unmarked output gives none, an untrusted caller is
+// agent's prompt gives none. T3 v0.1.5 marks only the thread: an
+// owner-created thread's latest message gives one tracking-only task that
+// closes quietly however its run ends; an agent-created or unmarked
+// thread gives none and one log line; message marks still win over the
+// thread's. An untrusted caller is
 // refused, the stop hook closes it quietly, a newer prompt supersedes an
 // older one, and a run that ends interrupted becomes an active task that
 // the owner's assistant continues. Nothing reaches the owner's chat
@@ -178,7 +186,10 @@ func TestT3IntakeEndToEnd(t *testing.T) {
 	cli.set("running", "run-2", "run-2", owner1, owner2)
 	call(prompt)
 	phase("T3-2", durable.PhaseTracking)
-	cli.set("running", "run-3", "run-3", owner1, owner2, owner3)
+	// T3 shows run-3 active while run-2 is still the latest: T3-2's own
+	// watch cannot close it ("a later run followed" would race the
+	// supersede), so only the newer request's supersede can.
+	cli.set("running", "run-2", "run-3", owner1, owner2, owner3)
 	call(prompt)
 	phase("T3-3", durable.PhaseTracking)
 	if st := phase("T3-2", durable.PhaseClosed); !strings.Contains(st.Verdict, "superseded") {
@@ -207,32 +218,64 @@ func TestT3IntakeEndToEnd(t *testing.T) {
 	if _, err := work.State("T3-4"); err == nil {
 		t.Fatal("agent prompt admitted")
 	}
-	// Output without createdBy marks: refused, one metadata-only log line.
-	cli.set("running", "run-5", "run-5", msg{Role: "user", RunID: "run-5", Text: "SECRET-REQUEST-TEXT"})
+	// T3 v0.1.5: messages carry no createdBy, only the thread does. An
+	// owner-created thread's latest user message gives exactly one T3-<n>,
+	// tracking only: even an interrupted run closes it quietly, no wake.
+	weak := msg{Role: "user", RunID: "run-5", Text: "Order more sheets"}
+	cli.set("running", "run-5", "run-5", msg{Role: "user", RunID: "run-0", Text: "older"}, weak)
 	call(prompt)
-	end := time.Now().Add(10 * time.Second)
-	for !strings.Contains(logs.String(), "T3 intake refused (created_by), thread thread-A") && time.Now().Before(end) {
-		time.Sleep(20 * time.Millisecond)
+	phase("T3-4", durable.PhaseTracking)
+	call(prompt)
+	time.Sleep(700 * time.Millisecond)
+	if _, err := work.State("T3-5"); err == nil {
+		t.Fatal("repeat of a thread-marked request admitted a second task")
 	}
-	if n := strings.Count(logs.String(), "T3 intake refused"); n != 1 || strings.Contains(logs.String(), "SECRET-REQUEST-TEXT") {
+	cli.set("interrupted", "run-5", "", weak)
+	call(stop)
+	if st := phase("T3-4", durable.PhaseClosed); !strings.Contains(st.Verdict, "ended interrupted") || !strings.Contains(st.Verdict, "tracking only") {
+		t.Fatalf("%+v", st)
+	}
+	// An agent-created thread, then a thread with no createdBy anywhere:
+	// none, and one metadata-only log line each.
+	refused := func(n int) {
+		t.Helper()
+		end := time.Now().Add(10 * time.Second)
+		for strings.Count(logs.String(), "T3 intake refused (created_by), thread thread-A") < n && time.Now().Before(end) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if got := strings.Count(logs.String(), "T3 intake refused"); got != n {
+			t.Fatalf("refusal lines %d, want %d: %q", got, n, logs.String())
+		}
+	}
+	cli.by = "agent"
+	cli.set("running", "run-6", "run-6", msg{Role: "user", RunID: "run-6", Text: "SECRET-AGENT-TEXT"})
+	call(prompt)
+	refused(1)
+	cli.by = ""
+	cli.set("running", "run-7", "run-7", msg{Role: "user", RunID: "run-7", Text: "SECRET-REQUEST-TEXT"})
+	call(prompt)
+	refused(2)
+	if strings.Contains(logs.String(), "SECRET-") {
 		t.Fatalf("logs %q", logs.String())
 	}
-	if _, err := work.State("T3-4"); err == nil {
-		t.Fatal("unmarked output admitted")
+	if _, err := work.State("T3-5"); err == nil {
+		t.Fatal("agent-created or unmarked thread admitted")
 	}
 
 	// A slow CLI never holds the hook: the answer is immediate, the task
-	// comes after.
+	// comes after. Message marks win over the thread's: the owner's marked
+	// message in an agent-created thread is admitted.
+	cli.by = "agent"
 	cli.delay("2")
-	owner6 := msg{Role: "user", CreatedBy: "user", RunID: "run-6", Text: "Check the stock"}
-	cli.set("running", "run-6", "run-6", owner1, owner6)
+	owner6 := msg{Role: "user", CreatedBy: "user", RunID: "run-8", Text: "Check the stock"}
+	cli.set("running", "run-8", "run-8", owner1, owner6)
 	began := time.Now()
 	call(prompt)
 	if d := time.Since(began); d > time.Second {
 		t.Fatalf("control answer took %s", d)
 	}
 	cli.delay("")
-	phase("T3-4", durable.PhaseTracking)
+	phase("T3-5", durable.PhaseTracking)
 
 	// A delegated thread is skipped; untrusted callers are refused.
 	if got := call(ControlRequest{Action: "task_intake", ID: "mcp:launch:abc", RequestID: "prompt_submit"}); !strings.Contains(got.Reply, "skipped") {

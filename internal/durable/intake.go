@@ -23,12 +23,15 @@ import (
 // pointer only. The control binds the caller to the owner through the
 // trusted T3 lineage. Here the owner check is T3's own record: the
 // thread's latest message T3 marks createdBy=user, read through the
-// configured T3 CLI. Each owner request becomes a tracking-only task
+// configured T3 CLI, or, when no message carries a mark (T3 v0.1.5), the
+// thread's own createdBy=user (see parseIntake). Each owner request
+// becomes a tracking-only task
 // T3-<n> (no wake, dispatch or message). It closes quietly when its T3 run
 // ends completed or cancelled (the stop hook asks for a look), or when a
 // newer owner request in the same thread supersedes it. A run that ends
 // interrupted or failed makes it an active assistant task carrying the
-// request and the thread pointer, under the wake rules.
+// request and the thread pointer, under the wake rules; a request admitted
+// by the thread's mark only closes quietly then too.
 
 // OriginTrustedT3 is the registration source of the trusted T3 launcher.
 const OriginTrustedT3 = "trusted T3"
@@ -40,6 +43,9 @@ type Intake struct {
 	Thread  string `json:"thread"`
 	Message string `json:"message,omitempty"` // T3's message id, when its CLI shows one
 	Run     string `json:"run"`
+	// ByThread: admitted by the thread's createdBy=user mark alone (no
+	// message mark); tracking only, it never becomes an active task.
+	ByThread bool `json:"by_thread,omitempty"`
 }
 
 // IntakeThread is a T3 thread as its host CLI shows it.
@@ -48,14 +54,15 @@ type IntakeThread struct {
 	Status    string         `json:"status"`
 	LatestRun string         `json:"latest_run,omitempty"`
 	ActiveRun string         `json:"active_run,omitempty"`
-	Request   *IntakeMessage `json:"request,omitempty"` // the latest message T3 marks createdBy=user
+	Request   *IntakeMessage `json:"request,omitempty"` // the latest owner message (see parseIntake)
 	Agent     bool           `json:"agent,omitempty"`   // the latest user-role message is not the owner's
 }
 
 type IntakeMessage struct {
-	ID   string `json:"id,omitempty"`
-	Run  string `json:"run"`
-	Text string `json:"text"`
+	ID       string `json:"id,omitempty"`
+	Run      string `json:"run"`
+	Text     string `json:"text"`
+	ByThread bool   `json:"by_thread,omitempty"` // owner's only by the thread's mark
 }
 
 // IntakeReader reads a T3 thread for intake, read-only. Implemented by T3
@@ -64,8 +71,9 @@ type IntakeReader interface {
 	ReadIntake(ctx context.Context, thread string) (IntakeThread, error)
 }
 
-// ErrNoCreatedBy: the CLI's messages carry no createdBy mark, so no owner
-// request can be told apart; the intake is refused, never guessed.
+// ErrNoCreatedBy: neither the CLI's messages nor the thread carry a
+// createdBy=user mark, so no owner request can be told apart; the intake
+// is refused, never guessed.
 var ErrNoCreatedBy = errors.New("t3 thread show: messages carry no createdBy")
 
 // intakeTimeout bounds one CLI read for intake.
@@ -90,10 +98,22 @@ func (t T3) ReadIntake(ctx context.Context, thread string) (IntakeThread, error)
 	return parseIntake(out)
 }
 
+// parseIntake finds the latest owner request. When any message carries a
+// createdBy mark, the marks alone decide: the latest user-role message
+// counts only when marked createdBy=user. T3 v0.1.5 marks only the thread:
+// with no message mark, the latest user-role message counts when the
+// thread itself is createdBy=user (an agent-delegated thread is still
+// skipped by its id and title); any other thread is refused.
+//
+// The thread mode is weaker: an agent's message posted into an
+// owner-created thread is tracked as the owner's. So such a row is
+// tracking only and closes quietly however its run ends; it adds no
+// authority beyond the T3 turn that already ran.
 func parseIntake(out []byte) (IntakeThread, error) {
 	var v struct {
 		Thread *struct {
 			Title       string  `json:"title"`
+			CreatedBy   string  `json:"createdBy"`
 			Status      string  `json:"status"`
 			LatestRunID *string `json:"latestRunId"`
 			ActiveRunID *string `json:"activeRunId"`
@@ -120,6 +140,21 @@ func parseIntake(out []byte) (IntakeThread, error) {
 		if _, ok := m["createdBy"]; ok {
 			marked = true
 		}
+	}
+	if !marked && len(v.Messages) > 0 {
+		if v.Thread.CreatedBy != "user" {
+			return IntakeThread{}, ErrNoCreatedBy
+		}
+		for _, m := range v.Messages {
+			if role, _ := str(m, "role"); role == "user" {
+				run, _ := str(m, "runId")
+				text, _ := str(m, "text")
+				th.Request = &IntakeMessage{Run: run, Text: text, ByThread: true}
+			}
+		}
+		return th, nil
+	}
+	for _, m := range v.Messages {
 		if role, _ := str(m, "role"); role != "user" {
 			continue
 		}
@@ -135,9 +170,6 @@ func parseIntake(out []byte) (IntakeThread, error) {
 			mid, _ = str(m, "messageId")
 		}
 		th.Agent, th.Request = false, &IntakeMessage{ID: mid, Run: run, Text: text}
-	}
-	if !marked && len(v.Messages) > 0 {
-		return IntakeThread{}, ErrNoCreatedBy
 	}
 	return th, nil
 }
@@ -227,7 +259,7 @@ type intakeRead struct {
 }
 
 // probe reads the thread once the control has answered, and admits the
-// latest owner request (createdBy=user) as T3-<n>, once per T3 message and
+// latest owner request (see parseIntake) as T3-<n>, once per T3 message and
 // run. Anything it cannot verify is refused with one metadata-only log
 // line, never a task.
 func (r *Runtime) probe(ctx dbos.Context, in intakeProbe) (string, error) {
@@ -329,7 +361,7 @@ func (r *Runtime) admitIntake(in intakeProbe, m IntakeMessage, probe string) (st
 	issue := fmt.Sprintf("T3-%d", n)
 	text := strings.Join(strings.Fields(m.Text), " ")
 	cm := Commitment{Issue: issue, Title: or(clip(text, 80), "T3 request"), Creator: in.Creator, Owner: in.Owner, OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInst,
-		Route: in.Route, Private: in.Private, Resource: defaultRes, Origin: OriginTrustedT3, Intake: &Intake{Thread: in.Thread, Message: m.ID, Run: m.Run},
+		Route: in.Route, Private: in.Private, Resource: defaultRes, Origin: OriginTrustedT3, Intake: &Intake{Thread: in.Thread, Message: m.ID, Run: m.Run, ByThread: m.ByThread},
 		Brief: fmt.Sprintf("%s: the owner's request in T3 thread %s (run %s): %s", issue, in.Thread, m.Run, clip(m.Text, 4000))}
 	if _, err := r.Admit(cm); err != nil {
 		return "", err
@@ -387,7 +419,8 @@ func (r *Runtime) intakeDone(c Caller, thread string) (string, bool) {
 // dispatched or sent. It closes quietly when the run ends completed,
 // cancelled or rolled back, when a later run follows in the thread, or
 // when superseded; done=false with no error means the run ended
-// interrupted or failed and the request becomes an active task.
+// interrupted or failed and the request becomes an active task (never for
+// a request admitted by the thread's mark only: that one closes quietly).
 func (r *Runtime) track(ctx dbos.Context, w *run) (done bool, err error) {
 	in := w.c.Intake
 	rd, _ := r.opt.Observer.(IntakeReader)
@@ -445,6 +478,8 @@ func (r *Runtime) track(ctx dbos.Context, w *run) (done bool, err error) {
 			return true, r.quiet(ctx, w, "a later run followed in the T3 thread")
 		case slices.Contains([]string{"completed", "cancelled", "rolled_back"}, th.Status):
 			return true, r.quiet(ctx, w, "finished in T3 ("+th.Status+")")
+		case (th.Status == "failed" || th.Status == "interrupted") && in.ByThread:
+			return true, r.quiet(ctx, w, "T3 run ended "+th.Status+"; owner's only by the thread's mark, so tracking only")
 		case th.Status == "failed" || th.Status == "interrupted":
 			w.c.Brief += fmt.Sprintf("\nIts T3 run %s ended %s before finishing, so part of it may already be done: read the thread first, do not repeat what was done, then finish the request.", in.Run, th.Status)
 			w.st.Note = ""

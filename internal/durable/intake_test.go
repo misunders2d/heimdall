@@ -13,23 +13,47 @@ import (
 
 // The real t3 v0.1.5 `thread show --json` output (laptop, 2026-11-10):
 // a multi-line log block (whose last line is "}") before the JSON, and
-// messages with only role, runId and text. Without createdBy marks no
-// owner request can be told apart: refused, never guessed.
+// messages with only role, runId and text; only the thread carries
+// createdBy. Without message marks the thread's own createdBy=user mark
+// admits the latest user-role message (the weaker thread mode); a thread
+// not marked user, or not marked at all, is refused, never guessed.
+// Message marks, when any message carries one, still decide alone.
 func TestParseIntakeRealShape(t *testing.T) {
 	logBlock := "[13:04:35.205] WARN (#20): Database migration history diverges from this build {\n  divergent: [\n    '73:ActiveTurnItemIndexes (unknown to this build)'\n  ]\n}\n"
-	thread := `{"thread":{"threadId":"T","title":"x","createdBy":"user","creationSource":"web","status":"running","latestRunId":"r2","activeRunId":"r2","runCount":2}`
-	unmarked := logBlock + thread + `,"messages":[{"role":"user","runId":"r2","text":"do it"},{"role":"assistant","runId":"r2","text":"ok"}]}` + "\n"
-	if _, err := parseIntake([]byte(unmarked)); !errors.Is(err, ErrNoCreatedBy) {
-		t.Fatalf("unmarked output: %v", err)
+	threadBy := func(by string) string {
+		mark := ""
+		if by != "" {
+			mark = `"createdBy":"` + by + `",`
+		}
+		return `{"thread":{"threadId":"T","title":"x",` + mark + `"creationSource":"web","status":"running","latestRunId":"r2","activeRunId":"r2","runCount":2}`
+	}
+	thread := threadBy("user")
+	unmarkedMsgs := `,"messages":[{"role":"user","runId":"r1","text":"first"},{"role":"assistant","runId":"r1","text":"ok"},{"role":"user","runId":"r2","text":"do  it\nnow"},{"role":"assistant","runId":"r2","text":"ok"}]}` + "\n"
+	// v0.1.5 owner thread: the latest user message, by the thread's mark.
+	th, err := parseIntake([]byte(logBlock + thread + unmarkedMsgs))
+	if err != nil || th.Agent || th.Request == nil || *th.Request != (IntakeMessage{Run: "r2", Text: "do  it\nnow", ByThread: true}) || th.ActiveRun != "r2" {
+		t.Fatalf("owner thread: %+v %v", th, err)
+	}
+	// An agent-created thread, and a thread with no createdBy at all: refused.
+	for _, by := range []string{"agent", "assistant", ""} {
+		if th, err := parseIntake([]byte(logBlock + threadBy(by) + unmarkedMsgs)); !errors.Is(err, ErrNoCreatedBy) {
+			t.Fatalf("thread createdBy %q: %+v %v", by, th, err)
+		}
 	}
 	marked := logBlock + thread + `,"messages":[{"role":"user","createdBy":"user","id":"m1","runId":"r1","text":"first"},{"role":"user","createdBy":"user","messageId":"m2","runId":"r2","text":"second"},{"role":"assistant","runId":"r2","text":"ok"}]}` + "\n"
-	th, err := parseIntake([]byte(marked))
+	th, err = parseIntake([]byte(marked))
 	if err != nil || th.Request == nil || *th.Request != (IntakeMessage{ID: "m2", Run: "r2", Text: "second"}) || th.ActiveRun != "r2" || th.Status != "running" || th.Agent {
 		t.Fatalf("%+v %v", th, err)
 	}
+	// Message marks win over the thread's: an agent's message in an owner
+	// thread is not admitted, an owner's message in an agent thread is.
 	agent := logBlock + thread + `,"messages":[{"role":"user","createdBy":"user","runId":"r1","text":"first"},{"role":"user","createdBy":"agent","runId":"r2","text":"delegated"}]}`
 	if th, err := parseIntake([]byte(agent)); err != nil || !th.Agent || th.Request != nil {
 		t.Fatalf("agent prompt: %+v %v", th, err)
+	}
+	ownerInAgentThread := logBlock + threadBy("agent") + `,"messages":[{"role":"user","createdBy":"user","runId":"r2","text":"mine"}]}`
+	if th, err := parseIntake([]byte(ownerInAgentThread)); err != nil || th.Agent || th.Request == nil || *th.Request != (IntakeMessage{Run: "r2", Text: "mine"}) {
+		t.Fatalf("owner message in agent thread: %+v %v", th, err)
 	}
 	if _, err := parseIntake([]byte(logBlock)); err == nil {
 		t.Fatal("no JSON accepted")
