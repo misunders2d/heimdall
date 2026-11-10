@@ -152,29 +152,9 @@ func (a Accounts) Prepare(role core.Role, memory bool, bin string) (Launch, erro
 		}
 	case int(acct.uid) == self || self == 0:
 		if int(acct.uid) != self {
-			groupIDs := a.GroupIDs
-			if groupIDs == nil {
-				groupIDs = (*user.User).GroupIds
-			}
-			var groups []uint32
-			ids, err := groupIDs(u)
-			if err != nil {
-				// Fewer privileges, never more: the turn runs with the
-				// account's primary group only, and the owner is told why.
-				a.logf("OS user %q: supplementary groups not found, so this turn runs with its primary group only: %v", r.User, err)
-			}
-			for _, id := range ids {
-				if g, err := strconv.ParseUint(id, 10, 32); err == nil {
-					groups = append(groups, uint32(g))
-				}
-			}
-			l.Cred = &syscall.Credential{Uid: acct.uid, Gid: acct.gid, Groups: groups}
+			l.Cred = a.credential(r, acct)
 		}
-		path := r.Path
-		if path == "" {
-			path = strings.Join([]string{filepath.Join(u.HomeDir, ".local", "bin"), filepath.Join(u.HomeDir, ".local", "share", "mise", "shims"), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}, ":")
-		}
-		l.Env = []string{"HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username, "SHELL=" + loginShell(u.Username), "PATH=" + path}
+		l.Env = []string{"HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username, "SHELL=" + loginShell(u.Username), "PATH=" + runPath(r, u)}
 		for _, name := range []string{"LANG", "LC_ALL", "TZ"} {
 			if v, ok := os.LookupEnv(name); ok {
 				l.Env = append(l.Env, name+"="+v)
@@ -202,6 +182,35 @@ func (a Accounts) Prepare(role core.Role, memory bool, bin string) (Launch, erro
 		return Launch{}, fmt.Errorf("%s not found on the PATH of OS user %q", bin, r.User)
 	}
 	return l, nil
+}
+
+// credential is acct's uid, primary group and supplementary groups.
+func (a Accounts) credential(r core.RunAs, acct account) *syscall.Credential {
+	groupIDs := a.GroupIDs
+	if groupIDs == nil {
+		groupIDs = (*user.User).GroupIds
+	}
+	var groups []uint32
+	ids, err := groupIDs(acct.u)
+	if err != nil {
+		// Fewer privileges, never more: the turn runs with the
+		// account's primary group only, and the owner is told why.
+		a.logf("OS user %q: supplementary groups not found, so this turn runs with its primary group only: %v", r.User, err)
+	}
+	for _, id := range ids {
+		if g, err := strconv.ParseUint(id, 10, 32); err == nil {
+			groups = append(groups, uint32(g))
+		}
+	}
+	return &syscall.Credential{Uid: acct.uid, Gid: acct.gid, Groups: groups}
+}
+
+// runPath is the run-as PATH: configured, else derived from the account.
+func runPath(r core.RunAs, u *user.User) string {
+	if r.Path != "" {
+		return r.Path
+	}
+	return strings.Join([]string{filepath.Join(u.HomeDir, ".local", "bin"), filepath.Join(u.HomeDir, ".local", "share", "mise", "shims"), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}, ":")
 }
 
 func (a Accounts) logf(format string, args ...any) {
