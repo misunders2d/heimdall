@@ -232,7 +232,9 @@ counts as the owner's, and the task's brief says so). It closes quietly
 when the run completes, is cancelled or rolled back, or a newer request
 supersedes it; an interrupted or failed run makes it an active task under
 the wake rules. `mcp:launch:` and agent-created threads are never admitted.
-Requires `durable.t3_command`. Laptop-local T3 sessions are not covered.
+Requires `durable.t3_command`; one intake or tracking read may take up to
+90 s (a large thread takes about 20 s to show). Laptop-local T3 sessions
+are not covered.
 
 Admission without typing `!work add`: during a live owner request, the
 assistant can call the existing `heimdall_scheduler` control with
