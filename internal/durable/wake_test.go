@@ -221,9 +221,16 @@ func TestOwnerLineFailureDoesNotStop(t *testing.T) {
 	if got := outbound(t, e.dir, "(MEL-98) needs you"); len(got) != 1 || !strings.HasPrefix(got[0], "failed:") {
 		t.Fatalf("%q", got)
 	}
+	// The chat works again before the retry, so the report's own (blocking)
+	// delivery succeeds and "reported" is not a transient phase.
+	chatMode.Store("nofeed", "ok")
 	c.MsgID = "r98"
 	e.rt.Command(c, "retry MEL-98")
 	e.phase("MEL-98", PhaseReported, 1)
+	waitFor(t, 20*time.Second, "report sent", func() bool {
+		got := outbound(t, e.dir, "MEL-98 attempt 1: UNACCEPTED")
+		return len(got) == 1 && strings.HasPrefix(got[0], "sent:")
+	})
 }
 
 // fileAssistant models the router across processes: a key started before
