@@ -13,8 +13,9 @@ import (
 )
 
 // A harness child that starts its own session leaves the process group, so
-// the group signal alone never reached it: stopping the turn must kill it.
-func TestStopKillsChildThatLeftTheGroup(t *testing.T) {
+// the group signal never reaches it. Cancellation (explicit stop, time limit)
+// kills it; a graceful retirement leaves a deliberately detached job running.
+func TestCancelKillsDetachedChildRetireKeepsIt(t *testing.T) {
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skip("setsid not installed")
 	}
@@ -61,17 +62,20 @@ func TestStopKillsChildThatLeftTheGroup(t *testing.T) {
 			}
 			stop(cmd, cancel)
 			if name == "term" {
-				// The shell ignores TERM; the escaped child must already be gone.
-				defer syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				// Graceful retirement: the group goes, the detached job stays.
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				cmd.Wait()
+				time.Sleep(200 * time.Millisecond)
+				if !alive(child) {
+					t.Fatalf("detached child %d killed by a graceful retirement", child)
+				}
+				return
 			}
 			for deadline := time.Now().Add(5 * time.Second); alive(child); {
 				if time.Now().After(deadline) {
-					t.Fatalf("escaped child %d survived stop", child)
+					t.Fatalf("detached child %d survived cancellation", child)
 				}
 				time.Sleep(10 * time.Millisecond)
-			}
-			if name == "term" {
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			}
 			cmd.Wait()
 		})

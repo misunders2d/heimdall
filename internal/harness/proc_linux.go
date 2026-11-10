@@ -13,10 +13,15 @@ import (
 // setProcAttr starts cmd in its own process group as cred (nil: Heimdall's
 // own user) and makes cancellation kill the whole group, so helpers the
 // harness started stop too. The harness also dies with Heimdall (Pdeathsig).
-// A descendant that starts its own session or group is killed too when
-// the turn is stopped while the harness still runs (killEscaped); one that
-// outlives a harness that exited on its own is reparented away and is left
-// to the service's cgroup (KillMode=control-group) at unit stop.
+//
+// A descendant that started its own session or group gets no group signal.
+// Cancellation (an explicit stop, the turn's time limit, or SIGKILL after a
+// stop's TERM grace ran out) kills those too, from a /proc snapshot taken
+// while the harness still runs. A graceful retirement (termGroup: idle,
+// lifetime, engine switch, drain) signals only the group: harnesses stay
+// unconstrained (owner, 2026-11-10), and an agent may deliberately detach a
+// long job (nohup/setsid) to outlive its turn. Detached processes end with
+// the service's cgroup (KillMode=control-group) at unit stop.
 func setProcAttr(cmd *exec.Cmd, cred *syscall.Credential) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL, Credential: cred}
 	cmd.Cancel = func() error {
@@ -27,14 +32,11 @@ func setProcAttr(cmd *exec.Cmd, cred *syscall.Credential) {
 	}
 }
 
-// termGroup asks cmd's process group to exit, and kills the harness's
-// descendants that left its group: they would not get the group's signal
-// and would outlive the harness.
+// termGroup asks cmd's process group to exit. Descendants that left the
+// group are left alone (see setProcAttr).
 func termGroup(cmd *exec.Cmd) {
 	if cmd.Process != nil {
-		escaped := escapedDescendants(cmd.Process.Pid)
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		killAll(escaped)
 	}
 }
 
