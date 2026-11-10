@@ -1945,7 +1945,11 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 			answers = []string{res.Answer}
 		}
 		var clean []string
-		if clean, draft, jobChange, card = j.Prepare(scheduler.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}, answers, t.job == nil && !t.batch[0].row.MCPControl && t.batch[0].row.Origin == core.OriginLive); card != "" {
+		// Only a live request in the owner's private chat applies at once: in a
+		// shared chat other people's text reached the model, so a proposal
+		// there waits for the owner's confirmation card.
+		direct := t.private && t.job == nil && !t.batch[0].row.MCPControl && t.batch[0].row.Origin == core.OriginLive
+		if clean, draft, jobChange, card = j.Prepare(scheduler.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}, answers, direct); card != "" {
 			res.Answers, res.Answer = clean, strings.Join(slices.DeleteFunc(slices.Clone(clean), func(a string) bool { return a == "" }), "\n\n")
 		}
 	}
