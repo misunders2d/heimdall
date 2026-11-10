@@ -858,6 +858,12 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		c.answer(row, store.CommandEnd{Detail: "which"}, c.which(role, row.From.Key()))
 		return false
 	case cmdUse:
+		if role != core.RoleOwner {
+			// The conversation's harness is the owner's setup: refused before
+			// any session, worker or binding changes.
+			c.answer(row, store.CommandEnd{Detail: "use refused"}, "Only the owner can change this conversation's harness.")
+			return false
+		}
 		if c.turn != nil {
 			c.turn.nativeInvalid = true
 		}
