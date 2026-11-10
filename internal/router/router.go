@@ -109,6 +109,10 @@ type Router struct {
 	runs     map[*harness.Run]struct{}
 	procCtx  context.Context // harness processes' context: ends only after shutdown waited for them
 	stopping bool            // shutdown began: no harness process starts any more
+
+	// accessRetry is how long a stored message whose caller could not be
+	// checked (access files unavailable) waits before it is checked again.
+	accessRetry time.Duration
 }
 
 func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
@@ -130,7 +134,7 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.GuardLogMax <= 0 {
 		opt.GuardLogMax = DefaultGuardLogMax
 	}
-	r := &Router{warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	r := &Router{accessRetry: time.Second, warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.Jobs != nil {
 		opt.Jobs.ResolveControl = r.schedulerCaller
 	}
@@ -323,7 +327,13 @@ func (r *Router) accept(ctx context.Context, in core.Inbound) error {
 		r.release(in)
 		return errors.New("interface message claims a commitment review")
 	}
-	role, _, ok := r.opt.Access.Decide(in.From, in.Conv)
+	role, _, ok, err := r.opt.Access.Check(in.From, in.Conv)
+	if err != nil {
+		// Not acknowledged: the interface offers the message again later.
+		r.log.Printf("message from a %s caller in %s not accepted yet: %v", in.From.Platform, in.Conv, err)
+		r.release(in)
+		return fmt.Errorf("caller admission: %w", err)
+	}
 	if !ok {
 		r.log.Printf("ignored message from an unidentified %s caller in %s", in.From.Platform, in.Conv)
 		r.release(in)
@@ -519,6 +529,43 @@ type conv struct {
 	waiting bool // a goroutine is waiting for the last process to exit, then for a parallelism slot
 	albums  map[string]*album
 	exited  <-chan struct{} // the last turn's harness process has exited
+
+	// held are stored messages whose caller could not be checked yet
+	// (access files unavailable), in arrival order; a retry is armed.
+	held      []store.InboundRow
+	heldArmed bool
+}
+
+// accessRetryEvent asks the loop to check its held messages again.
+type accessRetryEvent struct{}
+
+// holdForAccess keeps a stored message whose caller could not be checked
+// and checks it again after accessRetry: never rejected for a moment's
+// unreadable access files.
+func (c *conv) holdForAccess(row store.InboundRow) {
+	c.held = append(c.held, row)
+	if c.heldArmed {
+		return
+	}
+	c.heldArmed = true
+	ctx := c.r.ctx
+	time.AfterFunc(c.r.accessRetry, func() { c.send(ctx, accessRetryEvent{}) })
+}
+
+// take handles one row from the inbox: album announcements and parts are
+// held for their group, other rows routed now. While messages wait for
+// access, later ones wait behind them, in order.
+func (c *conv) take(ctx context.Context, row store.InboundRow) {
+	switch {
+	case row.Announce:
+		c.expect(ctx, row)
+	case len(c.held) > 0:
+		c.held = append(c.held, row)
+	case row.Group != "":
+		c.hold(ctx, row)
+	default:
+		c.handle(ctx, row)
+	}
 }
 
 // album is a caller's parts of one grouped message, held until none has
@@ -631,18 +678,19 @@ func (c *conv) loop(ctx context.Context) {
 			c.inbox = nil
 			c.mu.Unlock()
 			for _, row := range rows {
-				if row.Announce {
-					c.expect(ctx, row)
-					continue
-				}
-				if row.Group != "" {
-					c.hold(ctx, row)
-					continue
-				}
-				c.handle(ctx, row)
+				c.take(ctx, row)
 			}
 		case ev := <-c.events:
 			switch ev := ev.(type) {
+			case accessRetryEvent:
+				rows := c.held
+				c.held, c.heldArmed = nil, false
+				for _, row := range rows {
+					c.take(ctx, row)
+				}
+				if c.turn != nil {
+					c.steerNext(ctx, c.turn)
+				}
 			case continuationEvent:
 				c.continuation(ctx, ev)
 			case albumEvent:
@@ -704,7 +752,7 @@ func (c *conv) loop(ctx context.Context) {
 			}()
 		}
 		c.mu.Lock()
-		c.busy.Store(c.turn != nil || len(c.nativeTurns) > 0 || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0)
+		c.busy.Store(c.turn != nil || len(c.nativeTurns) > 0 || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0 || len(c.held) > 0)
 		c.mu.Unlock()
 	}
 }
@@ -791,7 +839,11 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 	if row.Review != nil {
 		// A commitment review: like a scheduled run, never a command or a
 		// steer; the creator is decided against the commitment's route.
-		role, _, _ := c.r.opt.Access.Decide(row.From, row.Review.Target)
+		role, _, _, err := c.r.opt.Access.Check(row.From, row.Review.Target)
+		if err != nil {
+			c.holdForAccess(row)
+			return false
+		}
 		c.queue = append(c.queue, item{row: row, role: role, next: true, text: row.Text})
 		return false
 	}
@@ -799,11 +851,20 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		// A scheduled run: never a command, never a steer, one turn of its
 		// own. The creator's admission is decided against the job's target
 		// as the turn starts (runTurn), which settles the run either way.
-		role, _, _ := c.r.opt.Access.Decide(row.From, row.Run.Target)
+		role, _, _, err := c.r.opt.Access.Check(row.From, row.Run.Target)
+		if err != nil {
+			c.holdForAccess(row)
+			return false
+		}
 		c.queue = append(c.queue, item{row: row, role: role, next: true, text: row.Text})
 		return false
 	}
-	role, _, ok := c.r.opt.Access.Decide(row.From, c.key)
+	role, _, ok, err := c.r.opt.Access.Check(row.From, c.key)
+	if err != nil {
+		c.r.log.Printf("message %d in %s held: %v; checked again shortly", row.ID, c.key, err)
+		c.holdForAccess(row)
+		return false
+	}
 	if !ok {
 		c.r.log.Printf("message %d from %s in %s rejected: caller no longer authorized", row.ID, row.From.Key(), c.key)
 		_ = c.r.store.SetInbound(row.ID, store.InRejected, "caller not authorized")
@@ -1409,7 +1470,23 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if ctx.Err() != nil || t.stopped.Load() || identity != nil {
 			break
 		}
-		current, caps, admitted := c.r.opt.Access.Decide(from, target)
+		current, caps, admitted, err := c.r.opt.Access.Check(from, target)
+		if err != nil {
+			// Unreadable access files are not a refusal: the turn waits
+			// for them, before any harness, unless it is stopped.
+			c.r.log.Printf("turn %d in %s waits: %v", t.id, c.key, err)
+			wait := t.startCtx
+			if wait == nil {
+				wait = ctx
+			}
+			for err != nil && wait.Err() == nil && !t.stopped.Load() {
+				sleep(wait, c.r.accessRetry)
+				current, caps, admitted, err = c.r.opt.Access.Check(from, target)
+			}
+			if err != nil {
+				break
+			}
+		}
 		if !admitted || current != t.role {
 			notes = append(notes, "caller admission or role changed; turn refused")
 			refused = true

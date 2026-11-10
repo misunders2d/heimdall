@@ -363,9 +363,24 @@ func TestPiAccessDeniesBeforeAmbientIntake(t *testing.T) {
 	f := newSlackFake(t)
 	s, _ := testSlack(t, f)
 	s.botID = "Ubot"
-	// Missing synthetic access files fail closed, despite a valid workspace identity.
+	// Missing synthetic access files fail closed, despite a valid workspace
+	// identity: nothing is admitted, and the event stays pending for retry.
 	s.opt.Access = &core.Access{Dir: t.TempDir()}
-	directEvent(t, s, f.event("C1", "channel", "Uowner", "PRIVATE_UNKNOWN_TEXT", ""), func(context.Context, core.Inbound) error { t.Fatal("unknown caller admitted"); return nil })
+	m := f.event("C1", "channel", "Uowner", "PRIVATE_UNKNOWN_TEXT", "")
+	raw, _ := json.Marshal(map[string]any{"type": "event_callback", "event_id": "E" + m.TS, "event": m})
+	if err := s.opt.Store.StageEvent("slack", "E"+m.TS, raw); err != nil {
+		t.Fatal(err)
+	}
+	e, _, err := s.opt.Store.Event("slack", "E"+m.TS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.process(context.Background(), e, func(context.Context, core.Inbound) error { t.Fatal("unknown caller admitted"); return nil }); !errors.Is(err, core.ErrAccessUnavailable) {
+		t.Fatalf("process = %v, want access unavailable (retried)", err)
+	}
+	if pending, err := s.opt.Store.EventPending(e.ID); err != nil || !pending {
+		t.Fatalf("event finished without admission: pending %v %v", pending, err)
+	}
 	rows, err := s.opt.Store.RecentAmbient(core.ConvKey{Interface: "slack", Chat: "C1"}, nil, 10)
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("unknown ambient persisted: %v %v", rows, err)

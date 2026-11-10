@@ -292,7 +292,7 @@ func (t *Interface) Run(ctx context.Context, accept func(context.Context, core.I
 	t.pruneUploads()
 	pruned := time.Now()
 	var offset int64
-	backoff := t.backoffMin
+	backoff, held := t.backoffMin, t.backoffMin
 	for ctx.Err() == nil {
 		if time.Since(pruned) >= t.pruneEvery {
 			t.pruneUploads()
@@ -330,7 +330,17 @@ func (t *Interface) Run(ctx context.Context, accept func(context.Context, core.I
 			if u.UpdateID < offset {
 				continue
 			}
-			if in, m, ok := t.inbound(u); ok {
+			in, m, ok, err := t.admit(u)
+			if err != nil {
+				// The caller cannot be checked yet: not acknowledged, so
+				// polled again from this update.
+				t.logf("update %d not admitted yet; retry in %s: %v", u.UpdateID, held, err)
+				sleep(ctx, held)
+				held = min(held*2, t.backoffMax)
+				break
+			}
+			held = t.backoffMin
+			if ok {
 				if in.Group != "" && !in.Ambient {
 					// The album waits for this part while it downloads.
 					_ = accept(ctx, core.Inbound{Conv: in.Conv, MsgID: in.MsgID, From: in.From, Origin: in.Origin, At: in.At, Group: in.Group, Announce: true})
@@ -367,21 +377,33 @@ func sleep(ctx context.Context, d time.Duration) {
 // inbound turns an update into a message for the router (attachments not
 // yet downloaded), or reports that Heimdall ignores it.
 func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
+	in, m, ok, _ := t.admit(u)
+	return in, m, ok
+}
+
+// admit is inbound that also reports when the caller could not be checked
+// (core.ErrAccessUnavailable): the update is then neither ignored nor
+// acknowledged.
+func (t *Interface) admit(u update) (core.Inbound, *message, bool, error) {
 	m := u.Message
 	switch {
 	case m == nil:
-		return core.Inbound{}, nil, false
+		return core.Inbound{}, nil, false, nil
 	case m.From == nil || m.From.IsBot || m.SenderChat != nil || m.IsAutomaticForward || m.Chat.Type == "channel":
 		// Not a person writing as themselves: channel posts, anonymous
 		// admins, linked-channel forwards and bots.
-		return core.Inbound{}, nil, false
+		return core.Inbound{}, nil, false, nil
 	}
 	if t.opt.Access != nil {
 		principal := core.Principal{Platform: core.PlatformTelegram, ID: strconv.FormatInt(m.From.ID, 10)}
 		conv := core.ConvKey{Interface: core.PlatformTelegram, Chat: strconv.FormatInt(m.Chat.ID, 10)}
-		if _, _, admitted := t.opt.Access.Decide(principal, conv); !admitted {
+		_, _, admitted, err := t.opt.Access.Check(principal, conv)
+		if err != nil {
+			return core.Inbound{}, nil, false, err
+		}
+		if !admitted {
 			t.logf("update %d in chat %d ignored: caller not admitted", u.UpdateID, m.Chat.ID)
-			return core.Inbound{}, nil, false
+			return core.Inbound{}, nil, false, nil
 		}
 	}
 	private := m.Chat.Type == "private"
@@ -398,7 +420,8 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 	direct := private || router.UnmentionedCommand(commandText, t.command(commandText), t.botName, t.opt.UnmentionedCommands) || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
 	addressed := direct || !private && t.forwardAddressed(m)
 	if !addressed {
-		return t.ambient(u, m, text)
+		in, m, ok := t.ambient(u, m, text)
+		return in, m, ok, nil
 	}
 	if m.MediaGroupID != "" && !private {
 		t.rememberAlbum(m)
@@ -420,7 +443,7 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 	own := contentContext(m)
 	if strings.TrimSpace(text) == "" && own == "" && forwarded == "" && detect(replied) == nil {
 		t.logf("update %d in chat %d ignored: no text, caption or attachment", u.UpdateID, m.Chat.ID)
-		return core.Inbound{}, nil, false
+		return core.Inbound{}, nil, false, nil
 	}
 	context := messageContext(m)
 	if forwarded != "" {
@@ -447,9 +470,9 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 	}
 	if err := in.Validate(); err != nil {
 		t.logf("update %d in chat %d ignored: %v", u.UpdateID, m.Chat.ID, err)
-		return core.Inbound{}, nil, false
+		return core.Inbound{}, nil, false, nil
 	}
-	return in, m, true
+	return in, m, true, nil
 }
 
 func albumKey(m *message) string {
