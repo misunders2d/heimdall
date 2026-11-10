@@ -392,7 +392,8 @@ func schedulerConfig(cfg *config.Config, interfaces []string) scheduler.Config {
 	}
 	return scheduler.Config{DefaultTZ: c.DefaultTZ, MaxConcurrent: c.MaxConcurrent, PerCreator: c.PerCreator,
 		GraceRecurring: time.Duration(c.GraceRecurringSeconds) * time.Second, GraceOneOff: time.Duration(c.GraceOneOffSeconds) * time.Second,
-		PauseAfter: c.PauseAfter, EmployeeHarnesses: cfg.EmployeeHarnesses, Interfaces: interfaces}
+		PauseAfter: c.PauseAfter, EmployeeHarnesses: cfg.EmployeeHarnesses, Interfaces: interfaces,
+		Checkers: harness.Checkers{Dir: c.CheckersDir, Accounts: harness.Accounts{RunAs: cfg.RunAs}}}
 }
 
 // sched is the operator's view of scheduled jobs. It works whether the

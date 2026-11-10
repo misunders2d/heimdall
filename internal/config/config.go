@@ -100,6 +100,10 @@ type Scheduler struct {
 	GraceRecurringSeconds int               `json:"grace_recurring_seconds,omitempty"` // default 7200
 	GraceOneOffSeconds    int               `json:"grace_oneoff_seconds,omitempty"`    // default 86400
 	PauseAfter            int               `json:"pause_after,omitempty"`             // failed or unverified runs in a row; default 3
+	// CheckersDir: the owner-installed directory of watch checkers
+	// (docs/scheduler.md §6). A watch job names a file in it, resolved at
+	// every run. Unset: watch jobs are refused.
+	CheckersDir string `json:"checkers_dir,omitempty"`
 }
 
 // SchedulerControl binds local owner tools to one existing platform identity.
@@ -425,6 +429,9 @@ func (c *Config) fill(staged bool) error {
 			if *d.v < 1 {
 				return errors.New("scheduler: counts and seconds must be positive")
 			}
+		}
+		if s.CheckersDir != "" && (!filepath.IsAbs(s.CheckersDir) || filepath.Clean(s.CheckersDir) != s.CheckersDir) {
+			return errors.New("scheduler.checkers_dir must be a clean absolute path")
 		}
 		if s.Enabled {
 			if _, err := schedule.Zone(s.DefaultTZ); err != nil {

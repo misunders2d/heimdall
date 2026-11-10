@@ -33,7 +33,7 @@ const draftTTL = 24 * time.Hour
 const Note = `[Heimdall jobs: to propose a scheduled job or reminder, end your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","summary":"short purpose, no backstory","prompt"} (or "kind":"notify" with "text"). To change a job: {"edit":"<id>", changed fields}. To remove a job: {"remove":"<id>"}. Removal also requires human confirmation. Heimdall shows a card and the person confirms; you cannot.]`
 
 // OwnerNote describes the direct owner request path; risky changes still ask.
-const OwnerNote = `[Heimdall jobs: propose only when the person asked for a job or reminder. End your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","summary":"short purpose, no backstory","prompt"} (or "kind":"notify" with "text"). To edit: {"edit":"<id>", changed fields}. Heimdall applies new jobs and edits at once. Removal ({"remove":"<id>"}) and any job with rerun_on_timeout enabled still ask for human confirmation.]`
+const OwnerNote = `[Heimdall jobs: propose only when the person asked for a job or reminder. End your answer with one fenced block ` + "```heimdall-job" + ` holding JSON: {"name","schedule":{"cron":["0 9 * * MON"]} or {"every":"15m"} or {"at":"YYYY-MM-DDTHH:MM"},"tz","to":"here","summary":"short purpose, no backstory","prompt"} (or "kind":"notify" with "text"; or "kind":"watch" with "check":{"checker":"<installed checker name>"}, no prompt: Heimdall runs that script and sends its output only when it prints something). To edit: {"edit":"<id>", changed fields}. Heimdall applies new jobs and edits at once. Removal ({"remove":"<id>"}) and any job with rerun_on_timeout enabled still ask for human confirmation.]`
 
 // TaskNote tells a live owner turn to admit accepted follow-through work
 // as a durable task itself, so the owner never types !work. The control
@@ -229,6 +229,13 @@ func (s *Scheduler) validate(d *Def, c Caller, anchor, now time.Time) (*schedule
 	if until, err := time.Parse(time.RFC3339, d.Until); err == nil && !until.After(now) {
 		return nil, errors.New(untilUsage)
 	}
+	if d.Kind == KindWatch {
+		// Resolved again at every run: a checker that goes away later fails
+		// its runs (pause_after), it does not refuse the creator.
+		if _, err := s.cfg.Checkers.Resolve(d.Check.Checker); err != nil {
+			return nil, fmt.Errorf("check.checker %q: %v", d.Check.Checker, err)
+		}
+	}
 	return sched, nil
 }
 
@@ -251,7 +258,11 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 // preview the content everywhere (§5.3); other replies show it in full only
 // in private chats (§4).
 func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, sched *schedule.Schedule, card bool) {
-	fmt.Fprintf(b, "Kind: %s, harness %s\n", d.Kind, or(d.Harness, "default order"))
+	if d.Kind == KindWatch {
+		fmt.Fprintf(b, "Kind: %s\n", d.Kind)
+	} else {
+		fmt.Fprintf(b, "Kind: %s, harness %s\n", d.Kind, or(d.Harness, "default order"))
+	}
 	if d.RerunOnTimeout {
 		fmt.Fprintf(b, "Repeat-safe timeout rerun: ENABLED. Confirming asserts the whole prompt and its effects are safe to repeat (idempotent). One rerun, fresh session; timeout %s; rerun deadline twice timeout from due time.\n", d.Timeout)
 	}
@@ -275,8 +286,11 @@ func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, s
 	}
 	fmt.Fprintf(b, "To: %s (created in %s)\n", d.To, j.CreatedIn)
 	body, label := d.Prompt, "Prompt"
-	if d.Kind == KindNotify {
+	switch d.Kind {
+	case KindNotify:
 		body, label = d.Text, "Text"
+	case KindWatch:
+		fmt.Fprintf(b, "Checker: %s, time limit %s; its output is sent as is, nothing when it prints nothing\n", d.Check.Checker, or(d.Timeout, "60s"))
 	}
 	switch {
 	case !card && !c.Private:
@@ -284,9 +298,11 @@ func (s *Scheduler) describe(b *strings.Builder, c Caller, j store.Job, d Def, s
 	case card && len([]rune(body)) > 200:
 		body = string([]rune(body)[:200]) + "…"
 	}
-	fmt.Fprintf(b, "%s: %s\n", label, body)
-	if card {
-		fmt.Fprintf(b, "Full prompt: !job show %s\n", j.ID)
+	if d.Kind != KindWatch {
+		fmt.Fprintf(b, "%s: %s\n", label, body)
+		if card {
+			fmt.Fprintf(b, "Full prompt: !job show %s\n", j.ID)
+		}
 	}
 }
 
@@ -630,8 +646,12 @@ func (s *Scheduler) manage(c Caller, sub, id, arg string) (string, *store.JobCha
 
 func (s *Scheduler) stopRun(id string) bool {
 	s.mu.Lock()
-	stop := s.stop
+	stop, c := s.stop, s.checks[id]
 	s.mu.Unlock()
+	if c != nil {
+		c.cancel()
+		return true
+	}
 	return stop != nil && stop(id)
 }
 
@@ -693,7 +713,7 @@ func (s *Scheduler) show(c Caller, id string) string {
 	// The options are the definition without what describe showed.
 	var opts map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(mustJSON(d)), &opts)
-	for _, k := range []string{"name", "kind", "schedule", "tz", "to", "prompt", "text", "harness"} {
+	for _, k := range []string{"name", "kind", "schedule", "tz", "to", "prompt", "text", "harness", "check"} {
 		delete(opts, k)
 	}
 	fmt.Fprintf(&b, "Options: %s\n", mustJSON(opts))

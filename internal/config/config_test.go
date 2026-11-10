@@ -233,6 +233,29 @@ func TestSchedulerBlock(t *testing.T) {
 	}
 }
 
+// TestSchedulerCheckersDir: one key names the watch checkers directory; it
+// must be a clean absolute path. The older checkers map stays refused.
+func TestSchedulerCheckersDir(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"corporate","owners":["telegram:1"],"max_parallel":3,"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
+	c, err := Parse([]byte(`{` + base + `,"scheduler":{"enabled":true,"default_tz":"UTC","checkers_dir":"/etc/heimdall/checkers"}}`))
+	if err != nil || c.Scheduler.CheckersDir != "/etc/heimdall/checkers" {
+		t.Fatalf("checkers_dir: %v", err)
+	}
+	if c, err = Parse([]byte(`{` + base + `,"scheduler":{"enabled":true,"default_tz":"UTC"}}`)); err != nil || c.Scheduler.CheckersDir != "" {
+		t.Fatalf("unset checkers_dir: %v", err)
+	}
+	for _, bad := range []string{
+		`"checkers_dir":"checkers"`,
+		`"checkers_dir":"/etc/heimdall/../checkers"`,
+		`"checkers_dir":"/etc/heimdall/checkers/"`,
+		`"checkers":{"x":{"argv":["/bin/true"]}}`,
+	} {
+		if _, err := Parse([]byte(`{` + base + `,"scheduler":{"enabled":true,"default_tz":"UTC",` + bad + `}}`)); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}
+
 func TestSchedulerExternalOrigins(t *testing.T) {
 	base := `"data_dir":"/tmp/h","mode":"corporate","owners":["telegram:1"],"max_parallel":3,"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
 	wrap := func(external string) string {

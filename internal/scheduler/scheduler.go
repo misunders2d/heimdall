@@ -42,9 +42,24 @@ type Config struct {
 	PerCreator        int // running runs per creator
 	GraceRecurring    time.Duration
 	GraceOneOff       time.Duration
-	PauseAfter        int      // failed or unverified runs in a row that pause a job
-	EmployeeHarnesses []string // harnesses employee jobs may name
-	Interfaces        []string // configured interfaces, for targets
+	PauseAfter        int              // failed or unverified runs in a row that pause a job
+	EmployeeHarnesses []string         // harnesses employee jobs may name
+	Interfaces        []string         // configured interfaces, for targets
+	Checkers          harness.Checkers // watch checkers (§6); Dir "" = watch jobs are off
+}
+
+// checkerCap is how many watch checks run at once. Checks count neither
+// towards max_concurrent nor per_creator: an agent turn never blocks a
+// check, and a slow check never delays another job.
+const checkerCap = 2
+
+// watchTextMax is how much of a checker's output is delivered.
+const watchTextMax = 3500
+
+// check is a watch check running in its own goroutine.
+type check struct {
+	run    int64
+	cancel context.CancelFunc
 }
 
 // Verified is a Slack creator verified live, with the OAuth scope of their
@@ -95,13 +110,17 @@ type Scheduler struct {
 	dispatch func(store.InboundRow)
 	deliver  func(iface string)
 	stop     func(job string) bool
+	checks   map[string]*check // running watch checks by job
+	running  sync.WaitGroup    // their goroutines
+	// runChecker runs one check (harness.RunChecker; tests replace it).
+	runChecker func(context.Context, string, harness.Launch, time.Duration) harness.CheckResult
 }
 
 func New(cfg Config, st *store.Store, access core.Access, logger *log.Logger) *Scheduler {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Scheduler{cfg: cfg, st: st, access: access, log: logger, now: time.Now, wake: make(chan struct{}, 1)}
+	return &Scheduler{cfg: cfg, st: st, access: access, log: logger, now: time.Now, wake: make(chan struct{}, 1), checks: map[string]*check{}, runChecker: harness.RunChecker}
 }
 
 // Attach connects the router: dispatch hands it a run's message, deliver
@@ -132,8 +151,11 @@ func (s *Scheduler) notify(outs ...core.Outbound) {
 }
 
 // Run is the due loop: it sleeps until the earliest due slot or retry, at
-// most a minute, and wakes early on any change.
+// most a minute, and wakes early on any change. When ctx ends it waits for
+// running checks, which are killed and left running in the store for
+// Recover.
 func (s *Scheduler) Run(ctx context.Context) {
+	defer s.running.Wait()
 	for ctx.Err() == nil {
 		next := s.tick(ctx)
 		timer := time.NewTimer(max(time.Until(next), 50*time.Millisecond))
@@ -159,6 +181,7 @@ func (s *Scheduler) tick(ctx context.Context) time.Time {
 	if err := s.st.SetMeta(MetaTick, now.UnixMilli()); err != nil {
 		s.log.Printf("scheduler: tick not recorded: %v", err)
 	}
+	s.cancelStale()
 	jobs, err := s.st.Jobs(store.JobFilter{States: []string{store.JobActive}})
 	if err != nil {
 		s.log.Printf("scheduler: jobs not read: %v", err)
@@ -271,9 +294,13 @@ func (s *Scheduler) start(ctx context.Context, now time.Time) (wake time.Time) {
 		}
 		return j, ok && j.ID != ""
 	}
-	total, byJob, byCreator := 0, map[string]int{}, map[string]int{}
+	total, checks, byJob, byCreator := 0, 0, map[string]int{}, map[string]int{}
 	for _, r := range runs {
-		if j, _ := load(r.Job); r.State == store.RunRunning {
+		switch j, _ := load(r.Job); {
+		case r.State != store.RunRunning:
+		case j.Kind == KindWatch:
+			checks, byJob[r.Job] = checks+1, byJob[r.Job]+1
+		default:
 			total, byJob[r.Job], byCreator[j.Creator.Key()] = total+1, byJob[r.Job]+1, byCreator[j.Creator.Key()]+1
 		}
 	}
@@ -297,8 +324,13 @@ func (s *Scheduler) start(ctx context.Context, now time.Time) (wake time.Time) {
 			s.endRun(j, d, store.RunEnd{ID: r.ID, Job: r.Job, State: store.RunMissed, Cause: "not started within grace"},
 				s.notices(j, d, true, s.text(j, d, "missed a run", r.Due, "not started within grace", r.Attempt))...)
 			continue
+		case d.Kind == KindWatch:
+			if checks < checkerCap && byJob[j.ID] == 0 && s.launchWatch(ctx, j, d, sched, r, now) {
+				checks, byJob[j.ID] = checks+1, byJob[j.ID]+1
+			}
+			continue
 		case total >= s.cfg.MaxConcurrent:
-			return wake
+			continue // a pending check further on may still start
 		case byJob[j.ID] > 0 || byCreator[j.Creator.Key()] >= s.cfg.PerCreator:
 			continue
 		}
@@ -506,6 +538,14 @@ func (s *Scheduler) endNotices(j store.Job, d Def, end store.RunEnd) []core.Outb
 	if end.JobState != "" {
 		j.State = end.JobState // show the resulting state, not a stale next slot
 	}
+	if d.Kind == KindWatch && end.State == store.RunFailed && end.Cause != "identity" {
+		// A watch speaks once: when pause_after failures in a row pause it.
+		if end.JobState != store.JobPaused {
+			return nil
+		}
+		run, _ := s.st.Run(end.ID)
+		return s.withDetail(j, d, s.notices(j, d, true, s.text(j, d, "was paused: "+end.JobReason, run.Due, cause, 0)), cause, detail)
+	}
 	if (end.State == store.RunFailed || end.State == store.RunPartial && !end.Progress || !end.Retry.IsZero() && !end.Held) && end.Cause != "identity" {
 		run, _ := s.st.Run(end.ID)
 		what, retry := "failed."+hint, "no"
@@ -517,23 +557,30 @@ func (s *Scheduler) endNotices(j store.Job, d Def, end store.RunEnd) []core.Outb
 			retry = fmt.Sprintf("queued for %s (attempt %d)", when(d, end.Retry), run.Attempt+2)
 		}
 		body := s.text(j, d, what, run.Due, cause, run.Attempt+1, retry)
-		outs = s.notices(j, d, true, body)
-		if detail != "" {
-			private := map[core.ConvKey]bool{}
-			k, ok := s.noticeChat(j)
-			private[k] = ok
-			if tgt, err := s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate}); err == nil && tgt.AgentNet == "" && tgt.Private {
-				private[tgt.Conv] = true
-			}
-			for i := range outs {
-				if private[outs[i].Conv] {
-					outs[i].Text = strings.Replace(outs[i].Text, "\nCause: "+cause, "\nCause: "+cause+"\nError: "+literal(detail), 1)
-				}
-			}
-		}
+		outs = s.withDetail(j, d, s.notices(j, d, true, body), cause, detail)
 	}
 	if end.JobState == store.JobPaused && end.Cause != "identity" {
 		outs = append(outs, s.notices(j, d, false, s.text(j, d, "was paused: "+end.JobReason+"."+hint, time.Time{}, "", 0))...)
+	}
+	return outs
+}
+
+// withDetail adds a sanitized error detail to the notices in outs that go
+// to private destinations; shared chats keep the fixed cause only.
+func (s *Scheduler) withDetail(j store.Job, d Def, outs []core.Outbound, cause, detail string) []core.Outbound {
+	if detail == "" {
+		return outs
+	}
+	private := map[core.ConvKey]bool{}
+	k, ok := s.noticeChat(j)
+	private[k] = ok
+	if tgt, err := s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate}); err == nil && tgt.AgentNet == "" && tgt.Private {
+		private[tgt.Conv] = true
+	}
+	for i := range outs {
+		if private[outs[i].Conv] {
+			outs[i].Text = strings.Replace(outs[i].Text, "\nCause: "+cause, "\nCause: "+cause+"\nError: "+literal(detail), 1)
+		}
 	}
 	return outs
 }
@@ -608,6 +655,12 @@ func (s *Scheduler) Recover() error {
 		}
 		j, _, _ := s.st.Job(h.Job)
 		d, sched, _ := parse(j)
+		if j.Kind == KindWatch {
+			// A check Heimdall ran itself: never re-run.
+			s.endRun(j, d, store.RunEnd{ID: h.ID, Job: h.Job, State: store.RunInterrupted, Cause: "Heimdall restarted during the check"},
+				s.notices(j, d, true, s.text(j, d, "was interrupted by a restart and was not re-run", h.Due, "restart", h.Attempt+1))...)
+			continue
+		}
 		if d.RerunOnTimeout && (h.Replayed || h.Ready && h.InState == store.InInterrupted) {
 			if h.Replayed {
 				continue

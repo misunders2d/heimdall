@@ -20,10 +20,11 @@ import (
 	"github.com/misunders2d/heimdall/internal/schedule"
 )
 
-// Job kinds. Watches arrive in phase 3b.
+// Job kinds.
 const (
 	KindAgent  = "agent"
 	KindNotify = "notify"
+	KindWatch  = "watch" // an owner-installed checker, no AI turn (§6)
 )
 
 // QuietToken is the final non-empty line of an answer with nothing to report.
@@ -50,6 +51,7 @@ type Def struct {
 	To             string               `json:"to"`
 	Prompt         string               `json:"prompt,omitempty"`
 	Text           string               `json:"text,omitempty"`
+	Check          *Check               `json:"check,omitempty"` // watch jobs only
 	Harness        string               `json:"harness,omitempty"`
 	Quiet          bool                 `json:"quiet,omitempty"`
 	Grace          string               `json:"grace,omitempty"`
@@ -62,6 +64,12 @@ type Def struct {
 	Requires       []string             `json:"requires,omitempty"`
 	Timeout        string               `json:"timeout,omitempty"`
 	Paused         bool                 `json:"paused,omitempty"` // creation only: the job starts paused (§7.5); never stored
+}
+
+// Check is a watch job's checker: only its name, a file in
+// scheduler.checkers_dir, never arguments or a path.
+type Check struct {
+	Checker string `json:"checker"`
 }
 
 // Expect are deterministic result checks (§3.8).
@@ -210,10 +218,24 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 		if strings.TrimSpace(d.Text) == "" || len(d.Text) > 4000 || d.Prompt != "" {
 			return fail("a notify job needs a text (at most 4000 bytes) and no prompt")
 		}
-	case "watch":
-		return fail("watches are not available yet")
+	case KindWatch:
+		if !owner {
+			return fail("watch: owner jobs only")
+		}
+		if d.Check == nil || !harness.CheckerName.MatchString(d.Check.Checker) {
+			return fail(`a watch job needs "check": {"checker": "<name>"}, a file name in scheduler.checkers_dir (a-z, 0-9, -)`)
+		}
+		if d.Prompt != "" || d.Text != "" {
+			return fail("a watch job takes no prompt or text: its checker's output is the message")
+		}
+		if d.Harness != "" || d.Quiet || d.Checkpoint || d.Idempotent || d.RerunOnTimeout || d.Session == "job" || len(d.Expect.Tools) > 0 || d.Expect.Files > 0 || d.Expect.Prefix != "" {
+			return fail("a watch job runs no agent: harness, quiet, checkpoint, idempotent, rerun_on_timeout, session job and expect do not apply")
+		}
 	default:
-		return fail("kind: agent or notify")
+		return fail("kind: agent, notify or watch")
+	}
+	if d.Check != nil && d.Kind != KindWatch {
+		return fail("check: watch jobs only")
 	}
 	if d.TZ == "" {
 		d.TZ = s.cfg.DefaultTZ
@@ -299,7 +321,11 @@ func (s *Scheduler) check(d *Def, c Caller, anchor, now time.Time) (Target, *sch
 			return fail("requires: short lowercase names such as mellanni or google")
 		}
 	}
-	if d.Timeout != "" {
+	if d.Timeout != "" && d.Kind == KindWatch {
+		if to, err := span(d.Timeout); err != nil || to < 10*time.Second || to > 10*time.Minute {
+			return fail("timeout: 10s to 10m for a watch job")
+		}
+	} else if d.Timeout != "" {
 		if to, err := span(d.Timeout); !owner || err != nil || to < time.Minute || to > 2*time.Hour {
 			return fail("timeout: 1m to 2h, owner jobs only")
 		} else if d.RerunOnTimeout && s.grace(*d, sched) < to {
