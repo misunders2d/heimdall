@@ -12,6 +12,13 @@ harnesses. Heimdall receives a message, attaches the caller identity its
 interface verified, picks a harness (OMP, Codex, Claude, Pi or AGY), runs
 the turn in that conversation's native session, steers the running turn
 with mid-turn messages, and delivers the reply back to the same chat.
+It also keeps owner tasks as durable commitments that survive restarts
+(DBOS + SQLite, [docs/durable.md](docs/durable.md)); the hub is the only
+orchestrator of owner tasks.
+
+Goal (owner, 2026-11-10): Heimdall is the gateway. Harnesses stay
+unconstrained except by their own tool guards and limits. Switching harness
+or provider must not affect jobs, reminders, tasks or memory.
 
 ```
 Telegram ─┐                      ┌─ OMP
@@ -27,8 +34,14 @@ business connectors or tool restrictions (each harness's native configuration).
 **Status:** Telegram and Slack interfaces, durable queues, caller identity,
 native sessions, steering and file delivery are implemented. Slack is tested
 against fake Web API/Socket Mode servers and fake native harnesses; the live
-Slack window is arranged separately by the orchestrator. Scheduler is phase 3.
-Linux only.
+Slack window is arranged separately by the orchestrator. The scheduler
+(phase 3a) and durable tasks are built. Production runs Heimdall with
+durable tasks enabled (`supervisor_review` and
+`assistant_work` on, `t3_dispatch` off; all three are off by default in
+code). CI runs vet and race tests on every change; engine upgrades are
+checked by hand against real harnesses before a release. Owner rule
+(2026-11-10): only the main branch may run in production
+([INSTALL.md](deploy/contabo/INSTALL.md)). Linux only.
 
 ## Build
 
@@ -44,6 +57,7 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | Key | Meaning |
 |---|---|
 | `data_dir` | SQLite queues and state |
+| `retention_days` | days stored message text is kept (default `30`, `0` = forever). The running service then removes the text of finished inbound and outbound messages, their thread context, ended turns' details and group context. IDs, callers, states, timestamps, receipts and job history stay, so dedupe, identity bindings and history keep working. Unfinished rows, live workflow-alert receipts and durable review turns are kept. `durable.db`, harness transcripts, files on disk and backups are not pruned. |
 | `mode` | `corporate` or `personal`; Memento is owner-only in both |
 | `access_dir` | Pi access files; default `/root/.pi/agent/access`, read by Heimdall before UID drop |
 | `owners` | legacy fallback only when `standalone_access: true` on non-hub installs |

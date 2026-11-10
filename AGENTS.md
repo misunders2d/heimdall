@@ -14,6 +14,15 @@ are gated per user, so the core requirement is conveying the
 interface-verified caller identity to each harness process reliably, in the
 form those tools read, never only as prompt text.
 
+**Goal confirmed by the owner, 2026-11-10:** Heimdall is the gateway.
+Harnesses stay unconstrained except by their own tool guards and limits.
+Switching harness or provider must not affect jobs, reminders, tasks or
+memory. In his words: "heimdall is the gateway, but harnesses remain
+unconstrained, only by their own internal tool guards, limitations etc. I am
+free to switch to whatever harness/provider I want without having to worry
+about anytihng else - jobs, reminders, memories etc continue as if never
+happened."
+
 Its whole job, per message:
 
 1. receive it from an interface;
@@ -47,6 +56,15 @@ the `heimdall-live` unit.
   in private Telegram chats or live-verified same-workspace Slack 1:1 DMs,
   on Pi/Claude/Codex; never ambient or scheduled turns. Other turns have
   Slack disabled. See [setup runbook](docs/owner-slack-read.md).
+  Exception, durable tasks (owner, approved 2026-11-08/09): owner tasks are
+  durable commitments on embedded DBOS Transact Go with its SQLite system
+  database (`internal/durable`, `<data_dir>/durable.db`,
+  [docs/durable.md](docs/durable.md)). The hub orchestrates all owner tasks:
+  only Hub (root) is an orchestrator, and the orchestration stays on the
+  Heimdall swarm. Owner, 2026-11-10: follow the "Pi Durable" path, a
+  reliable, disruption- and restart-surviving system that continues
+  interrupted tasks. Off by default in code. Production runs it with
+  `supervisor_review` and `assistant_work` on and `t3_dispatch` off.
 - **Identity comes from the interface, never from text.** Callers never log
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack
@@ -316,6 +334,7 @@ thinking stream and live-session reply registration.
 | `internal/store` | SQLite: inbound/outbound queues, turns, sessions, chat settings, jobs and runs |
 | `internal/schedule` | cron, interval and one-off slots in a zone, the DST rule |
 | `internal/scheduler` | due loop, job rules, commands, drafts, outcomes, notices, `sched`/`drain` |
+| `internal/durable` | durable owner tasks on DBOS + SQLite (`durable.db`): admission, review, assistant work, dispatch |
 | `internal/harness` | ported native adapters, launch as an OS user |
 | `internal/router` | conversations, `!` commands, steer/follow-up, fallback, delivery |
 | `internal/iface/local` | local stdin/stdout interface for end-to-end tests |
@@ -341,6 +360,15 @@ thinking stream and live-session reply registration.
 - Keep it lean: standard library, pure-Go SQLite, pinned coder/websocket
   and owner-approved x/text for NFKC (static binary,
   `CGO_ENABLED=0`). Add a dependency only when a requirement needs it.
+  Direct dependencies today (`go.mod`): `modernc.org/sqlite`,
+  `coder/websocket`, `golang.org/x/text`, `golang.org/x/sys` (Linux peer
+  credentials), `adhocore/gronx` (cron) and DBOS Transact Go v1.8.0 (durable
+  tasks, owner-approved 2026-11-08/09; it brings its own indirect modules).
+- CI (`.github/workflows/ci.yml`) runs vet, race tests and the static build
+  on every push and pull request; the repository is public, so CI uses no
+  secrets. Owner, 2026-11-10: only the main branch may run in production; before
+  a release, run `deploy/contabo/engine-check.sh` against the real engines
+  (release steps: [INSTALL.md](deploy/contabo/INSTALL.md)).
 - Tests: `go vet ./...` and `go test -race ./...` (fake harnesses speak each
   real protocol). Live harness checks are manual: `heimdall local` (or
   `heimdall run` with a separate test bot's token, never the production
@@ -360,4 +388,4 @@ thinking stream and live-session reply registration.
 2. Slack interface. AgentNet stays separate and is never a Heimdall interface.
 3. Scheduler (jobs carry and run as their creator): 3a built (jobs,
    drafts, Pi tool switch); 3b watches next.
-4. Production cutover.
+4. Production cutover (done: production runs Heimdall).

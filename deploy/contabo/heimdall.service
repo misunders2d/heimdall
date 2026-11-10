@@ -1,5 +1,5 @@
 [Unit]
-Description=Heimdall chat router (staged; do not start before cutover approval)
+Description=Heimdall chat router
 After=network-online.target
 Wants=network-online.target
 
@@ -18,6 +18,15 @@ RestartSec=5s
 # Native exit grace 60s + TERM grace 5s + pipe wait 5s; allow delivery drain.
 TimeoutStopSec=180s
 KillMode=control-group
+# Limits cover Heimdall and every harness process it starts (one cgroup).
+# Size them to the host: MemoryHigh well above the normal working set
+# (throttles and reclaims first), MemoryMax below what the host can spare
+# beside its other services. OOMPolicy=continue: an OOM-killed harness
+# child fails only its own turn instead of stopping the whole unit.
+MemoryHigh=6G
+MemoryMax=7G
+TasksMax=4096
+OOMPolicy=continue
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=heimdall

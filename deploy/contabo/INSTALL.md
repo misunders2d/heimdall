@@ -12,8 +12,9 @@ Heimdall's verified platform identity and the Mellanni signed per-turn caller
 token (MEL-724, not built yet). Keep `employee_harnesses: []` until native
 isolation, skill reading, credential denial and caller-bound tools are validated.
 
-Run these steps yourself on the production hub. This release has not been
-run there. Existing Pi hub remains responsible for Slack, Telegram and scheduling.
+Run these steps yourself on the production hub. Since cutover Heimdall serves
+production there; this section records the first staged install. For later
+releases use "Release, upgrade and rollback" below.
 Never touch `heimdall-live` or `heimdall-slack-test`.
 
 ## Install only
@@ -46,6 +47,50 @@ Never touch `heimdall-live` or `heimdall-slack-test`.
    warning and exit 0; malformed config or an employee aliasing root/owner fails.
    This does not validate tokens, logins, binaries or bot username ownership.
 9. Recheck inactive and static/disabled state. Old `pi-hub.service` stays serving.
+
+## Release, upgrade and rollback (2026-11-10)
+
+Owner rule, 2026-11-10: only the main branch may run in production. A release is a
+`main` commit whose CI run (`.github/workflows/ci.yml`: vet, race tests,
+static build) passed, and which passed the real-engine check on the host,
+as the owner OS user, with the candidate binary:
+`deploy/contabo/engine-check.sh "$RELEASE"`. It sends one trivial prompt per
+installed engine (`!codex`, `!claude`, `!pi`) through `heimdall local` with
+a scratch config and data dir and `MEMENTO_PROCESSING=1`, and prints only
+`pass`, `fail` or `skipped` per engine. CI uses fake harnesses only. The
+check does not cover owner_slack launches.
+
+Only `heimdall run` upgrades the database schema. `heimdall sched` and
+`heimdall drain` never migrate. They serve schemas from
+`store.AdminMinSchema` up to their own, and refuse any other schema with a
+message that names both versions. `heimdall version` prints the schema the
+binary applies.
+
+Upgrade (root, on the host):
+
+1. Verify the new binary in staging (`sha256sum -c`, `"$RELEASE" version`).
+2. Drain with the **installed** binary:
+   `/usr/local/bin/heimdall drain -config /etc/heimdall/config.json`.
+   Exit 0 means idle. Exit 75 means timeout: do not stop, try again later.
+3. `systemctl stop heimdall.service`, then confirm it is inactive and its
+   cgroup has exited.
+4. Back up the state while the service is stopped: copy
+   `/var/lib/heimdall/heimdall.db` and `/var/lib/heimdall/durable.db` with
+   their `-wal`/`-shm` files, together, and the old binary, into a new 0700
+   directory outside the data dir. Do this before every release: it is the
+   only way back if the release adds a schema step (`heimdall version`
+   prints the schema of builds from 2026-11-10 on) or changes the DBOS
+   version. Backups hold message text, so delete them once the release is
+   accepted.
+5. `install -m 0755 "$RELEASE" /usr/local/bin/heimdall`, then start the
+   service. The first `run` applies the new schema steps.
+
+Rollback: stop the service and reinstall the old binary. If the new release
+added schema steps, the old binary refuses to start ("database schema N is
+newer than this Heimdall"). In that case restore `heimdall.db` and
+`durable.db` from the same backup, together, before starting. Messages and
+replies stored after the backup are lost with it. Turns that a stop cut off
+are reported, never re-run.
 
 ## Launch findings
 

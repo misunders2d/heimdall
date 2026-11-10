@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 )
@@ -257,5 +258,25 @@ func TestSchedulerExternalOrigins(t *testing.T) {
 		if _, err := Parse([]byte(wrap(bad))); err == nil {
 			t.Errorf("accepted %s", bad)
 		}
+	}
+}
+
+func TestRetentionDays(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"corporate","owners":["telegram:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}}`
+	for doc, want := range map[string]time.Duration{
+		`{` + base + `}`:                    30 * 24 * time.Hour,
+		`{` + base + `,"retention_days":0}`: 0,
+		`{` + base + `,"retention_days":7}`: 7 * 24 * time.Hour,
+	} {
+		c, err := Parse([]byte(doc))
+		if err != nil {
+			t.Fatal(doc, err)
+		}
+		if got := c.Retention(); got != want {
+			t.Fatalf("%s: retention %v, want %v", doc, got, want)
+		}
+	}
+	if _, err := Parse([]byte(`{` + base + `,"retention_days":-1}`)); err == nil {
+		t.Fatal("negative retention_days accepted")
 	}
 }
