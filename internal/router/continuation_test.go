@@ -220,13 +220,7 @@ func TestNativeBackgroundSurvivesRestartAsInterruption(t *testing.T) {
 			if err != nil || id == "" || clean {
 				t.Fatalf("background binding was clean: %q %v %v", id, clean, err)
 			}
-			// Stop only after the status reply is recorded as sent, as a
-			// production restart drains first: a stop between its send and
-			// that record resends it after the restart (at-least-once).
-			eventuallyTrue(t, "replies recorded", func() bool {
-				n, err := e.st.Undelivered()
-				return err == nil && n == 0
-			})
+			e.waitRecorded()
 			e.stop()
 			stopOnce.Delete(e.st)
 			e.start()
