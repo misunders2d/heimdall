@@ -149,8 +149,11 @@ func t3Lineage(t *TrustedLauncher, exe string, pid int) ([]procEntry, int, error
 		}
 		return chain, i, nil
 	}
-	return nil, 0, errors.New("no active Heimdall turn, configured launcher or trusted T3 launcher started this process")
+	return nil, 0, errNoT3Launcher
 }
+
+// errNoT3Launcher: the trusted T3 launcher is not an ancestor of the peer.
+var errNoT3Launcher = errors.New("no active Heimdall turn, configured launcher or trusted T3 launcher started this process")
 
 // trustedExecutable resolves the configured launcher to its real file and
 // checks that neither path can be changed by anyone but root or the

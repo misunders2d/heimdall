@@ -374,12 +374,14 @@ func exportJSON(vs []View, now time.Time) []byte {
 		case phase == PhaseHeld:
 		case v.PausedBy != "":
 			phase = "paused"
-		case v.Status == string(dbos.WorkflowStatusEnqueued) || phase == "":
+		case v.Status == string(dbos.WorkflowStatusEnqueued):
 			phase = "queued"
 		case v.Status == string(dbos.WorkflowStatusCancelled):
 			phase = "cancelled"
 		case v.Status == string(dbos.WorkflowStatusError) || v.Status == string(dbos.WorkflowStatusMaxRecoveryAttemptsExceeded):
 			phase = "failed"
+		case phase == "":
+			phase = "queued" // not started yet: no state published
 		}
 		title := strings.Join(strings.FieldsFunc(v.Title, func(c rune) bool { return unicode.IsSpace(c) || unicode.IsControl(c) }), " ")
 		if t := []rune(title); len(t) > exportTitle {
@@ -388,14 +390,28 @@ func exportJSON(vs []View, now time.Time) []byte {
 		at[v.Issue] = since
 		rows = append(rows, TaskRow{ID: v.Issue, Title: title, Origin: origin, Phase: phase, Since: since.UTC().Format(time.RFC3339), Attempt: v.State.Attempt, NeedsOwner: phase == PhaseHeld})
 	}
-	slices.SortStableFunc(rows, func(a, b TaskRow) int {
-		if c := at[b.ID].Compare(at[a.ID]); c != 0 {
-			return c
-		}
-		return strings.Compare(a.ID, b.ID)
-	})
+	newest := func(rows []TaskRow) {
+		slices.SortStableFunc(rows, func(a, b TaskRow) int {
+			if c := at[b.ID].Compare(at[a.ID]); c != 0 {
+				return c
+			}
+			return strings.Compare(a.ID, b.ID)
+		})
+	}
+	newest(rows)
 	if len(rows) > exportRows {
-		rows = rows[:exportRows]
+		// Over the cap, closed rows go first: an open or held task is
+		// never pushed out by recently closed ones.
+		var open, closed []TaskRow
+		for _, r := range rows {
+			if r.Phase == PhaseClosed {
+				closed = append(closed, r)
+			} else {
+				open = append(open, r)
+			}
+		}
+		rows = append(open, closed...)[:exportRows]
+		newest(rows)
 	}
 	out, _ := json.Marshal(struct {
 		Tasks []TaskRow `json:"tasks"`

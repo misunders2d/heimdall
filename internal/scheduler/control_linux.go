@@ -684,10 +684,11 @@ const taskExport = "task_export"
 // (no free text) for a local admin process such as the dashboard's feed
 // exporter. It only reads. The peer must run, with its whole process
 // ancestry, as Heimdall's own user (root on the hub), outside Heimdall's
-// process tree, with no turn, launcher or session bound to it, and ask
-// with no arguments. Where such a peer could not be told apart from an
-// owner turn or a launcher's session (either runs as Heimdall's user),
-// it is refused. Nothing a turn, T3 or harness caller may do changes.
+// process tree (every turn, worker and checker), with no turn, launcher
+// or session bound to it, and ask with no arguments. A launcher running
+// as Heimdall's user too must show the peer is not its descendant: the
+// trusted T3 launcher by lineage, an external launcher by its own socket
+// (down: refused). Nothing a turn, T3 or harness caller may do changes.
 func (c *Control) export(uid uint32, pid int, req ControlRequest, bound bool, alive func() bool) ControlResult {
 	refuse := func(why string) ControlResult { return ControlResult{Error: "task_export refused: " + why} }
 	self := uint32(os.Geteuid())
@@ -720,15 +721,21 @@ func (c *Control) export(uid uint32, pid int, req ControlRequest, bound bool, al
 			return refuse("the peer's ancestry changed during verification")
 		}
 	}
-	if c.uid == self {
-		return refuse("owner turns run as Heimdall's own user")
-	}
 	if t := c.s.TrustedT3; t != nil && t.UID == self {
-		return refuse("the trusted T3 launcher runs as Heimdall's own user")
+		exe, err := trustedExecutable(t)
+		if err != nil {
+			return refuse("trusted T3 launcher lineage unverifiable")
+		}
+		if _, _, err := t3Lineage(t, exe, pid); !errors.Is(err, errNoT3Launcher) {
+			return refuse("the peer descends from the trusted T3 launcher or its lineage is unverifiable")
+		}
 	}
 	for _, o := range c.s.External {
-		if o.UID == self {
-			return refuse("external launcher " + o.Name + " runs as Heimdall's own user")
+		if o.UID != self {
+			continue // its sessions have an ancestor of another user
+		}
+		if _, err := askLauncher(o, pid); !errors.Is(err, errNotLaunched) {
+			return refuse("the peer descends from external launcher " + o.Name + " or that launcher is unavailable")
 		}
 	}
 	if c.s.TaskExport == nil {

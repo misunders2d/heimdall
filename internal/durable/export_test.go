@@ -107,6 +107,21 @@ func TestExportRows(t *testing.T) {
 	if len(out.Tasks) != 200 || out.Tasks[0].ID != "MEL-100" || out.Tasks[199].ID != "MEL-299" {
 		t.Fatalf("%d rows, first %s", len(out.Tasks), out.Tasks[0].ID)
 	}
+	// Recently closed rows never push out an old open or held task.
+	many = nil
+	for i := range 250 {
+		many = append(many, full(fmt.Sprintf("T3-%d", i+1), "Done", PhaseClosed, now.Add(-time.Duration(i)*time.Minute)))
+	}
+	many = append(many, full("MEL-50", "Old held", PhaseHeld, now.Add(-20*24*time.Hour)))
+	_ = json.Unmarshal(exportJSON(many, now), &out)
+	if n := len(out.Tasks); n != 200 || out.Tasks[0].ID != "T3-1" || out.Tasks[199].ID != "MEL-50" || !out.Tasks[199].NeedsOwner {
+		t.Fatalf("%d rows, last %+v", n, out.Tasks[n-1])
+	}
+	// A cancelled or failed workflow that never published state is not queued.
+	_ = json.Unmarshal(exportJSON([]View{{Issue: "MEL-60", Status: string(dbos.WorkflowStatusCancelled), Created: now}, {Issue: "MEL-61", Status: string(dbos.WorkflowStatusError), Created: now}}, now), &out)
+	if len(out.Tasks) != 2 || out.Tasks[0].Phase != "cancelled" || out.Tasks[1].Phase != "failed" {
+		t.Fatalf("%+v", out.Tasks)
+	}
 	if got := string(exportJSON(nil, now)); got != `{"tasks":[]}` {
 		t.Fatalf("empty export %s", got)
 	}

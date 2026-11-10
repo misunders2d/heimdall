@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,18 +92,47 @@ func TestControlTaskExportGate(t *testing.T) {
 		refused("arguments", c.export(me, adminPeer, extra, false, live))
 	}
 
-	// Fail closed where an admin peer cannot be told apart.
+	// Owner turns as Heimdall's user (root on the hub): turns stay in
+	// Heimdall's process tree, so an admin peer outside it still passes.
 	c.uid = me
-	refused("owner turns as Heimdall's uid", c.export(me, adminPeer, req, false, live))
+	if got := c.export(me, adminPeer, req, false, live); got.Error != "" {
+		t.Fatalf("owner turns as Heimdall's uid: %+v", got)
+	}
+	refused("owner turn as Heimdall's uid", c.export(me, turnPeer, req, false, live))
 	c.uid = me + 1
+	// A launcher as Heimdall's user must show the peer is not its own.
 	r.s.TrustedT3 = &TrustedLauncher{Path: "/nonexistent/t3", UID: me}
-	refused("T3 launcher as Heimdall's uid", c.export(me, adminPeer, req, false, live))
+	refused("T3 lineage unverifiable", c.export(me, adminPeer, req, false, live))
 	r.s.TrustedT3 = &TrustedLauncher{Path: "/nonexistent/t3", UID: me + 7}
 	if got := c.export(me, adminPeer, req, false, live); got.Error != "" {
 		t.Fatalf("T3 launcher as another user: %+v", got)
 	}
-	r.s.External = []ExternalOrigin{{Name: "agentnet", UID: me}}
-	refused("external launcher as Heimdall's uid", c.export(me, adminPeer, req, false, live))
+	r.s.TrustedT3 = nil
+	dir := filepath.Join(t.TempDir(), "agentnet")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r.s.External = []ExternalOrigin{{Name: "agentnet", UID: me, Socket: filepath.Join(dir, "launcher.sock")}}
+	refused("external launcher down", c.export(me, adminPeer, req, false, live))
+	l, err := net.Listen("unix", r.s.External[0].Socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	// The launcher's server is this process: an admin peer is not its
+	// child, a peer under it is.
+	if got := c.export(me, adminPeer, req, false, live); got.Error != "" {
+		t.Fatalf("external launcher up, admin peer: %+v", got)
+	}
 	r.s.External = nil
 
 	r.s.TaskExport = nil
@@ -148,5 +178,29 @@ func TestControlTaskExportSocketRefusesHeimdallProcesses(t *testing.T) {
 	result, err = CallControl(ctx, socket, ControlRequest{Action: "task_export"})
 	if err == nil || result.Reply != "" || !strings.Contains(result.Error, "bound") {
 		t.Fatalf("bound turn: %+v %v", result, err)
+	}
+}
+
+// With the trusted T3 launcher running as Heimdall's user, a peer under
+// it (a T3 session's CLI) is refused task_export by lineage; an admin
+// peer beside it passes.
+func TestControlTaskExportT3Lineage(t *testing.T) {
+	r, c, f, _ := t3Rig(t)
+	me := uint32(os.Geteuid())
+	c.uid = me + 1
+	r.s.TaskExport = func() ([]byte, error) { return []byte(`{"tasks":[]}`), nil }
+	live := func() bool { return true }
+	req := ControlRequest{Action: "task_export"}
+	if got := c.export(me, t3Peer, req, false, live); !strings.Contains(got.Error, "trusted T3 launcher") || got.Reply != "" {
+		t.Fatalf("T3 session: %+v", got)
+	}
+	f.set(func() {
+		f.stat[adminPeer] = procEntry{adminPeer, adminScript, 50}
+		f.stat[adminScript] = procEntry{adminScript, 1, 40}
+		f.exe[adminPeer], f.exe[adminScript] = "/usr/bin/heimdall", "/usr/bin/bash"
+		f.uid[adminPeer], f.uid[adminScript] = me, me
+	})
+	if got := c.export(me, adminPeer, req, false, live); got.Error != "" {
+		t.Fatalf("admin beside T3: %+v", got)
 	}
 }
