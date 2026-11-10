@@ -899,8 +899,20 @@ reading a path the model chose.
   (`core.Outbound.File`: the copy, a display name, MIME by extension) are
   stored in the turn's end transaction, in that order. A file not sent is a
   footer note on the answer: `file <name> not sent: <reason>`.
+- **Captions.** `out/<name>.caption` is `<name>`'s caption, read with the
+  same checks (at most 16 KiB), stored in the file's row
+  (`core.File.Caption`, cleaned of turn paths and scrubbed like the answer)
+  and never sent or counted as a file; a sidecar without its file is
+  ignored and logged by count only. An interface that cannot fit a caption
+  in the file's message (`router.CaptionFitter`; Telegram: 1024 UTF-16
+  units after rendering) gets the bare file row and then a formatted text
+  row with the whole caption. Telegram renders the reply markup itself
+  (`internal/iface/telegram/format.go`: legacy Markdown plus `||spoiler||`)
+  into `caption_entities`; replies containing a spoiler use the same
+  renderer, other replies keep `parse_mode` Markdown. Slack sends the
+  caption as `initial_comment`, formatted like a reply (no spoiler there).
 - **Delivery.** Telegram sends a file as `sendPhoto` (JPEG/PNG/WebP up to
-  10 MB) or else `sendDocument`, multipart, replying to the turn's first
+  10 MB), `sendAnimation` (GIF) or else `sendDocument`, multipart, replying to the turn's first
   message in its topic, as the hub's `sendLocalArtifact`. The retry rules
   are those of text: 429, 5xx and network errors are transient, other 4xx
   permanent. The copy is removed once its row is sent or failed; copies
@@ -908,8 +920,7 @@ reading a path the model chose.
 - **Harness-agnostic.** The harness writes files with its own tools as the
   turn's OS user. Interfaces opt in (`router.FileSender`); others get no
   note and no outbox.
-- **Not done:** files sent mid-turn, files from failed or stopped turns,
-  captions.
+- **Not done:** files sent mid-turn, files from failed or stopped turns.
 - **Hub difference:** the hub sends the artifacts OMP and Pi tools report in
   their telemetry (path, device, inode, SHA-256; at most 5). That is
   harness-specific and is not ported.

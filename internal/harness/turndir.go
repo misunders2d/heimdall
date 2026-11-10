@@ -106,10 +106,19 @@ func (d *TurnDir) Outbox() string { return filepath.Join(d.Path(), "out") }
 
 // OutFile is a file collected from out/: Heimdall's own copy.
 type OutFile struct {
-	Path string // the copy, in Heimdall's directory
-	Name string // the name the harness gave it
-	Size int64
+	Path    string // the copy, in Heimdall's directory
+	Name    string // the name the harness gave it
+	Size    int64
+	Caption string // from the file's CaptionSuffix sidecar, if any; in reply markup
 }
+
+// CaptionSuffix names a caption sidecar: out/<name>.caption holds the
+// caption of out/<name>. A sidecar is never a file to send and never
+// counts toward the file limit.
+const CaptionSuffix = ".caption"
+
+// MaxCaption is the largest caption sidecar Collect reads.
+const MaxCaption = 16 << 10
 
 // Collect copies the files the harness left in out/ into dst, Heimdall's
 // own directory: top level only, in name order, at most max files, each 1
@@ -117,8 +126,11 @@ type OutFile struct {
 // within the user's home), it is a regular file owned by the turn's user
 // with a single link: never a hard link to a file the user cannot read.
 // Dot files are ignored; every other file not taken is listed in skipped
-// as "name: reason".
-func (d *TurnDir) Collect(dst string, max int, limit int64) (files []OutFile, skipped []string) {
+// as "name: reason". A file's caption sidecar (CaptionSuffix) is read with
+// the same checks, at most MaxCaption bytes, and set as its Caption; a
+// sidecar that fails them is listed in skipped and its file goes without a
+// caption. Sidecars whose file is not in out/ are listed in ignored.
+func (d *TurnDir) Collect(dst string, max int, limit int64) (files []OutFile, skipped, ignored []string) {
 	d.collectMu.Lock()
 	defer d.collectMu.Unlock()
 	if d.collected == nil {
@@ -126,26 +138,36 @@ func (d *TurnDir) Collect(dst string, max int, limit int64) (files []OutFile, sk
 	}
 	root, err := os.OpenRoot(d.home)
 	if err != nil {
-		return nil, []string{"outbox: " + err.Error()}
+		return nil, []string{"outbox: " + err.Error()}, nil
 	}
 	defer root.Close()
 	dir, err := root.Open(path.Join(d.rel, "out"))
 	if err != nil {
-		return nil, []string{"outbox: " + err.Error()}
+		return nil, []string{"outbox: " + err.Error()}, nil
 	}
 	entries, err := dir.ReadDir(-1)
 	dir.Close()
 	if err != nil {
-		return nil, []string{"outbox: " + err.Error()}
+		return nil, []string{"outbox: " + err.Error()}, nil
 	}
 	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	uid := d.uid
 	if uid < 0 {
 		uid = os.Getuid()
 	}
+	present := map[string]bool{}
+	for _, e := range entries {
+		present[e.Name()] = true
+	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
+		if base, ok := strings.CutSuffix(name, CaptionSuffix); ok && !strings.HasPrefix(name, ".") && (base == "" || strings.HasPrefix(base, ".") || strings.HasSuffix(base, CaptionSuffix) || !present[base]) {
+			ignored = append(ignored, name)
+		}
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, CaptionSuffix) {
 			continue
 		}
 		if len(files) == max {
@@ -181,9 +203,50 @@ func (d *TurnDir) Collect(dst string, max int, limit int64) (files []OutFile, sk
 			continue
 		}
 		d.collected[name] = sum
+		if present[name+CaptionSuffix] {
+			caption, err := d.caption(root, name+CaptionSuffix, uid)
+			if err != nil {
+				skipped = append(skipped, name+CaptionSuffix+": "+err.Error())
+			}
+			f.Caption = caption
+		}
 		files = append(files, f)
 	}
-	return files, skipped
+	return files, skipped, ignored
+}
+
+// caption reads a caption sidecar with the checks collect makes of a file:
+// a regular file owned by the turn's user with a single link, opened
+// within the user's home. Surrounding whitespace is dropped.
+func (d *TurnDir) caption(root *os.Root, name string, uid int) (string, error) {
+	in, err := root.OpenFile(path.Join(d.rel, "out", name), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", errors.New("cannot be opened")
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return "", err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	switch {
+	case !info.Mode().IsRegular():
+		return "", errors.New("not a regular file")
+	case !ok || int(st.Uid) != uid:
+		return "", errors.New("not owned by the turn's user")
+	case st.Nlink != 1:
+		return "", errors.New("has more than one link")
+	case info.Size() > MaxCaption:
+		return "", errors.New("larger than " + sizeLabel(MaxCaption))
+	}
+	b, err := io.ReadAll(io.LimitReader(in, MaxCaption+1))
+	if err != nil {
+		return "", err
+	}
+	if len(b) > MaxCaption {
+		return "", errors.New("larger than " + sizeLabel(MaxCaption))
+	}
+	return strings.TrimSpace(strings.ToValidUTF8(string(b), "\uFFFD")), nil
 }
 
 func (d *TurnDir) collect(root *os.Root, dst, name string, uid int, limit int64) (OutFile, error) {
