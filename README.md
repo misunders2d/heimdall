@@ -53,6 +53,7 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | Key | Meaning |
 |---|---|
 | `data_dir` | SQLite queues and state |
+| `retention_days` | days stored message text is kept (default `30`, `0` = forever). The running service then removes the text of finished inbound and outbound messages, their thread context, ended turns' details and group context. IDs, callers, states, timestamps, receipts and job history stay, so dedupe, identity bindings and history keep working. Unfinished rows, live workflow-alert receipts and durable review turns are kept. `durable.db`, harness transcripts, files on disk and backups are not pruned. |
 | `mode` | `corporate` or `personal`; Memento is owner-only in both |
 | `access_dir` | Pi access files; default `/root/.pi/agent/access`, read by Heimdall before UID drop |
 | `owners` | legacy fallback only when `standalone_access: true` on non-hub installs |

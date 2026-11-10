@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/googleoauth"
@@ -46,6 +47,21 @@ type Config struct {
 	PromptGuard       *PromptGuard             `json:"prompt_guard,omitempty"`
 	Scheduler         *Scheduler               `json:"scheduler,omitempty"`
 	Durable           *Durable                 `json:"durable,omitempty"`
+	RetentionDays     *int                     `json:"retention_days,omitempty"` // stored message text kept this long; default 30, 0 = forever
+}
+
+// DefaultRetentionDays is how long stored message text is kept when
+// retention_days is not set.
+const DefaultRetentionDays = 30
+
+// Retention is how long stored message text and context are kept before
+// the running service removes them; 0 keeps them forever.
+func (c *Config) Retention() time.Duration {
+	days := DefaultRetentionDays
+	if c.RetentionDays != nil {
+		days = *c.RetentionDays
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 // Durable configures durable commitments (docs/durable.md). Disabled by
@@ -356,6 +372,9 @@ func (c *Config) fill(staged bool) error {
 	}
 	if c.MaxParallel < 1 {
 		return errors.New("max_parallel must be at least 1")
+	}
+	if c.RetentionDays != nil && (*c.RetentionDays < 0 || *c.RetentionDays > 36500) {
+		return errors.New("retention_days must be 0 (keep forever) to 36500")
 	}
 	if s := c.Scheduler; s != nil {
 		if s.Control != nil {

@@ -273,6 +273,9 @@ func run(args []string) error {
 			return fmt.Errorf("durable commitments: %w", err)
 		}
 	}
+	// Message text and context older than retention_days are removed;
+	// identity, dedupe and history metadata stay (internal/store/retention.go).
+	go st.KeepText(ctx, cfg.Retention(), logger.Printf)
 	logger.Printf("started %s: mode %s, harness order %s, data in %s", version, cfg.Mode, strings.Join(cfg.HarnessOrder, " → "), cfg.DataDir)
 	err = r.Run(ctx)
 	logger.Printf("stopped")
