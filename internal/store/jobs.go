@@ -563,6 +563,66 @@ func (s *Store) EndRunUnlessHeld(holdKey string, now time.Time, e RunEnd, outs .
 	return held, err
 }
 
+// StartLocalRun marks a pending run running without a message: a watch
+// check, which Heimdall runs itself rather than through the router. Unless
+// the scheduler value holdKey (a drain's hold, unix ms) is later than now:
+// then nothing changes and held is true. ok false: the run was no longer
+// pending.
+func (s *Store) StartLocalRun(holdKey string, now time.Time, id int64) (held, ok bool, err error) {
+	err = s.tx(func(tx *sql.Tx) error {
+		var hold int64
+		if err := tx.QueryRow(`SELECT value FROM sched_meta WHERE key=?`, holdKey).Scan(&hold); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if hold > now.UnixMilli() {
+			held = true
+			return nil
+		}
+		res, err := tx.Exec(`UPDATE job_runs SET state=?,started_at=? WHERE id=? AND state=?`, RunRunning, now.UnixMilli(), id, RunPending)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		ok = n == 1
+		return nil
+	})
+	return held, ok, err
+}
+
+// How SettleLocalRun ended.
+const (
+	LocalSettled = "settled" // e and its outbound messages were stored
+	LocalGone    = "gone"    // the run was no longer running (stopped, settled): nothing written
+	LocalDropped = "dropped" // the job was edited, paused or removed meanwhile: cancelled, nothing sent
+)
+
+// SettleLocalRun ends a running local run with e and outs, in one
+// transaction, only while the run is still running and its job unchanged:
+// the same version, and active (or paused, for a manual run).
+func (s *Store) SettleLocalRun(e RunEnd, outs ...core.Outbound) (outcome string, err error) {
+	err = s.tx(func(tx *sql.Tx) error {
+		var state, trigger, jobState string
+		var version, jobVersion int
+		if err := tx.QueryRow(`SELECT r.state,r.version,r.trigger,j.version,j.state FROM job_runs r JOIN jobs j ON j.id=r.job_id WHERE r.id=?`, e.ID).Scan(&state, &version, &trigger, &jobVersion, &jobState); err != nil {
+			return err
+		}
+		if state != RunRunning {
+			outcome = LocalGone
+			return nil
+		}
+		if version != jobVersion || jobState != JobActive && !(jobState == JobPaused && trigger == "manual") {
+			outcome = LocalDropped
+			return endRun(tx, RunEnd{ID: e.ID, Job: e.Job, State: RunCancelled, Cause: "job changed during the run; output dropped"})
+		}
+		outcome = LocalSettled
+		if err := endRun(tx, e); err != nil {
+			return err
+		}
+		return enqueueRunNotices(tx, e, outs)
+	})
+	return outcome, err
+}
+
 // enqueueRunNotices runs after endRun in the same transaction. A stop,
 // edit or restart fence may have vetoed the proposed retry; never announce
 // one unless that same-slot retry was actually queued. No retry rules change.
