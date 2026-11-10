@@ -3,6 +3,7 @@ package core
 // Pi access-control.ts semantics. Files are read by Heimdall, never the child UID.
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -89,7 +90,7 @@ func (a Access) files() (accessFiles, bool) {
 			e = json.Unmarshal(raw, dst)
 		}
 		if e != nil {
-			log.Printf("access: cannot load %s; admission denied", name)
+			log.Printf("access: cannot load %s; nobody admitted until it reads again", name)
 			return f, false
 		}
 	}
@@ -105,22 +106,35 @@ func platformID(p Principal) string {
 	return ""
 }
 
+// ErrAccessUnavailable reports that the access files could not be read or
+// parsed (for example mid-rewrite). Nobody is admitted meanwhile, the owner
+// included; a caller may retry the same message once they read again.
+var ErrAccessUnavailable = errors.New("access files unavailable")
+
 // Decide includes conversation admission and capabilities in one root-side snapshot.
+// It fails closed: unavailable access files admit nobody.
 func (a Access) Decide(p Principal, conv ConvKey) (Role, []string, bool) {
+	r, caps, ok, _ := a.Check(p, conv)
+	return r, caps, ok
+}
+
+// Check is Decide that tells unavailable access files (ErrAccessUnavailable,
+// not admitted) apart from a denial (nil error, not admitted).
+func (a Access) Check(p Principal, conv ConvKey) (Role, []string, bool, error) {
 	if _, ok := (Access{}).Role(p); !ok {
-		return "", nil, false
+		return "", nil, false, nil
 	}
 	if a.Dir == "" {
 		r, ok := a.Role(p)
-		return r, nil, ok
+		return r, nil, ok, nil
 	}
 	platform := platformID(p)
 	if platform == "" {
-		return "", nil, false
+		return "", nil, false, nil
 	}
 	f, ok := a.files()
 	if !ok {
-		return "", nil, false
+		return "", nil, false, ErrAccessUnavailable
 	}
 	ids := f.ids(platform, p.ID)
 	if p.Platform == PlatformSlack && p.SlackUserID != "" {
@@ -138,15 +152,15 @@ func (a Access) Decide(p Principal, conv ConvKey) (Role, []string, bool) {
 	admins := strings.Split(os.Getenv("ADMIN_USER_IDS"), ",")
 	for _, admin := range admins {
 		if overlap(ids, variants(platform, admin)) {
-			return RoleOwner, nil, true
+			return RoleOwner, nil, true, nil
 		}
 	}
 	fileAdmin := has(f.Admins.Users, ids)
 	if !fileAdmin && (has(f.Black.Users, ids) || has(f.Black.Chats, chats)) {
-		return "", nil, false
+		return "", nil, false, nil
 	}
 	if !fileAdmin && !has(f.White.Users, ids) && !has(f.White.Chats, chats) {
-		return "", nil, false
+		return "", nil, false, nil
 	}
 	var caps []string
 	for _, id := range ids {
@@ -157,7 +171,7 @@ func (a Access) Decide(p Principal, conv ConvKey) (Role, []string, bool) {
 		}
 	}
 	slices.Sort(caps)
-	return RoleEmployee, caps, true
+	return RoleEmployee, caps, true, nil
 }
 func (a Access) Capabilities(p Principal, conv ConvKey) []string {
 	_, caps, _ := a.Decide(p, conv)

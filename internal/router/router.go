@@ -88,8 +88,13 @@ type Router struct {
 	opt         Options
 	store       *store.Store
 	ifaces      map[string]Interface
-	sem         chan struct{}
-	log         *log.Logger
+	// sem holds the general turn slots; reserved is one more slot only the
+	// owner's live turns may take, so the owner never waits behind others.
+	// With max_parallel = 1 there is no reserved slot (reserved is nil):
+	// the single slot is general.
+	sem      chan struct{}
+	reserved chan struct{}
+	log      *log.Logger
 	// guardLog records messages the hub's prompt-injection scoring flags.
 	guardLog *guardLog
 
@@ -109,6 +114,19 @@ type Router struct {
 	runs     map[*harness.Run]struct{}
 	procCtx  context.Context // harness processes' context: ends only after shutdown waited for them
 	stopping bool            // shutdown began: no harness process starts any more
+
+	// accessRetry is how long a stored message whose caller could not be
+	// checked (access files unavailable) waits before it is checked again.
+	accessRetry time.Duration
+
+	// endRetry and endAttempts bound how a turn's end is recorded again
+	// after a failed write (backoff doubling from endRetry).
+	endRetry    time.Duration
+	endAttempts int
+
+	// ifaceGrace is how long after its first start an interface's failure
+	// stays fatal; ifaceBackoff is the first delay before a later restart.
+	ifaceGrace, ifaceBackoff time.Duration
 }
 
 func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
@@ -130,7 +148,11 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 	if opt.GuardLogMax <= 0 {
 		opt.GuardLogMax = DefaultGuardLogMax
 	}
-	r := &Router{warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, opt.MaxParallel), log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
+	general, reserved := opt.MaxParallel, chan struct{}(nil)
+	if opt.MaxParallel > 1 {
+		general, reserved = opt.MaxParallel-1, make(chan struct{}, 1)
+	}
+	r := &Router{ifaceGrace: 30 * time.Second, ifaceBackoff: 2 * time.Second, endRetry: 250 * time.Millisecond, endAttempts: 5, accessRetry: time.Second, warm: harness.NewPool(opt.Harness), noticeRetry: time.Minute, noticeQueue: make(chan core.Inbound, 128), opt: opt, store: st, ifaces: map[string]Interface{}, sem: make(chan struct{}, general), reserved: reserved, log: opt.Log, convs: map[core.ConvKey]*conv{}, jobs: map[string]*turn{}, ready: make(chan struct{}), wakeOut: map[string]chan struct{}{}, runs: map[*harness.Run]struct{}{}}
 	if opt.Jobs != nil {
 		opt.Jobs.ResolveControl = r.schedulerCaller
 	}
@@ -187,10 +209,10 @@ func (r *Router) Run(parent context.Context) error {
 	r.pruneOutbox()
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { defer wg.Done(); r.callerNotices(ctx) }()
+	go func() { defer wg.Done(); r.keepRunning(ctx, "caller notices", func() { r.callerNotices(ctx) }) }()
 	for _, i := range r.ifaces {
 		wg.Add(1)
-		go func() { defer wg.Done(); r.deliver(ctx, i) }()
+		go func() { defer wg.Done(); r.keepRunning(ctx, "delivery for "+i.Name(), func() { r.deliver(ctx, i) }) }()
 	}
 	pending, err := r.store.Pending()
 	if err != nil {
@@ -211,9 +233,7 @@ func (r *Router) Run(parent context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := i.Run(ctx, r.accept); err != nil && ctx.Err() == nil {
-				errs <- fmt.Errorf("interface %s: %w", i.Name(), err)
-			}
+			r.runInterface(ctx, i, errs)
 		}()
 	}
 	select {
@@ -310,7 +330,19 @@ func waitExited(runs []*harness.Run, d time.Duration) int {
 
 // accept persists one verified message and hands it to its conversation.
 // Senders who cannot be identified are ignored without storing their text.
-func (r *Router) accept(ctx context.Context, in core.Inbound) error {
+func (r *Router) accept(ctx context.Context, in core.Inbound) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			// Acknowledged and dropped: re-offering it would fail the same
+			// way and hold up every later message of the interface.
+			r.log.Printf("recovered panic (%T) accepting a message in %s; message dropped", p, in.Conv)
+			err = nil
+		}
+	}()
+	return r.acceptMessage(ctx, in)
+}
+
+func (r *Router) acceptMessage(ctx context.Context, in core.Inbound) error {
 	if in.Origin == "" {
 		in.Origin = core.OriginLive
 	}
@@ -323,7 +355,13 @@ func (r *Router) accept(ctx context.Context, in core.Inbound) error {
 		r.release(in)
 		return errors.New("interface message claims a commitment review")
 	}
-	role, _, ok := r.opt.Access.Decide(in.From, in.Conv)
+	role, _, ok, err := r.opt.Access.Check(in.From, in.Conv)
+	if err != nil {
+		// Not acknowledged: the interface offers the message again later.
+		r.log.Printf("message from a %s caller in %s not accepted yet: %v", in.From.Platform, in.Conv, err)
+		r.release(in)
+		return fmt.Errorf("caller admission: %w", err)
+	}
 	if !ok {
 		r.log.Printf("ignored message from an unidentified %s caller in %s", in.From.Platform, in.Conv)
 		r.release(in)
@@ -375,7 +413,7 @@ func (r *Router) dispatch(row store.InboundRow) {
 	r.mu.Lock()
 	c := r.convs[row.Conv]
 	if c == nil {
-		c = &conv{r: r, key: row.Conv, signal: make(chan struct{}, 1), events: make(chan any), slot: make(chan struct{})}
+		c = &conv{r: r, key: row.Conv, signal: make(chan struct{}, 1), events: make(chan any), slot: make(chan chan struct{})}
 		r.convs[row.Conv] = c
 		go c.loop(r.ctx)
 	}
@@ -446,33 +484,44 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 			continue
 		}
 		row.Outbound.ID, row.Outbound.Attempt = row.ID, row.Attempts
-		err = i.Send(ctx, row.Outbound)
+		err = r.sendSafely(ctx, i, row.Outbound)
 		var perm PermanentError
+		var record func() error
 		switch {
 		case err == nil:
-			err = r.store.Sent(row.ID)
+			record = func() error { return r.store.Sent(row.ID) }
 			if row.File != nil {
 				os.Remove(row.File.Path)
 			}
 		case errors.As(err, &perm):
 			r.log.Printf("reply %d to %s failed permanently: %v", row.ID, row.Conv, err)
-			err = r.store.Failed(row.ID, err.Error())
+			msg := err.Error()
+			record = func() error { return r.store.Failed(row.ID, msg) }
 			if row.File != nil {
 				os.Remove(row.File.Path)
 			}
 		case row.Attempts+1 >= r.opt.MaxAttempts:
 			r.log.Printf("reply %d to %s failed after %d attempts: %v", row.ID, row.Conv, row.Attempts+1, err)
-			err = r.store.Failed(row.ID, fmt.Sprintf("gave up after %d attempts: %v", row.Attempts+1, err))
+			msg := fmt.Sprintf("gave up after %d attempts: %v", row.Attempts+1, err)
+			record = func() error { return r.store.Failed(row.ID, msg) }
 			if row.File != nil {
 				os.Remove(row.File.Path)
 			}
 		default:
 			backoff := min(time.Second<<min(row.Attempts, 9), 5*time.Minute)
 			r.log.Printf("reply %d to %s: retry in %s: %v", row.ID, row.Conv, backoff, err)
-			err = r.store.Retry(row.ID, time.Now().Add(backoff), err.Error())
+			at, msg := time.Now().Add(backoff), err.Error()
+			record = func() error { return r.store.Retry(row.ID, at, msg) }
 		}
-		if err != nil {
-			r.log.Printf("outbound %d: %v", row.ID, err)
+		// The outcome is recorded before the next reply: a row left as
+		// sending would block its chat until a restart, which resends it.
+		for attempt := 0; ctx.Err() == nil; attempt++ {
+			err := record()
+			if err == nil {
+				break
+			}
+			r.log.Printf("outbound %d: outcome not recorded, retrying: %v", row.ID, err)
+			sleep(ctx, min(100*time.Millisecond<<min(attempt, 6), 5*time.Second))
 		}
 	}
 }
@@ -512,13 +561,55 @@ type conv struct {
 	inbox  []store.InboundRow
 	signal chan struct{}
 	events chan any
-	slot   chan struct{}
+	slot   chan chan struct{} // a waiter hands over the semaphore it took a slot of
+	// slotSem is the semaphore whose slot this conversation holds, nil when
+	// none (loop-owned); releaseSlot gives it back exactly once.
+	slotSem chan struct{}
 
 	queue   []item
 	turn    *turn
 	waiting bool // a goroutine is waiting for the last process to exit, then for a parallelism slot
 	albums  map[string]*album
 	exited  <-chan struct{} // the last turn's harness process has exited
+
+	// held are stored messages whose caller could not be checked yet
+	// (access files unavailable), in arrival order; a retry is armed.
+	held      []store.InboundRow
+	heldArmed bool
+
+	routing int64 // the stored message being routed, failed if routing panics
+}
+
+// accessRetryEvent asks the loop to check its held messages again.
+type accessRetryEvent struct{}
+
+// holdForAccess keeps a stored message whose caller could not be checked
+// and checks it again after accessRetry: never rejected for a moment's
+// unreadable access files.
+func (c *conv) holdForAccess(row store.InboundRow) {
+	c.held = append(c.held, row)
+	if c.heldArmed {
+		return
+	}
+	c.heldArmed = true
+	ctx := c.r.ctx
+	time.AfterFunc(c.r.accessRetry, func() { c.send(ctx, accessRetryEvent{}) })
+}
+
+// take handles one row from the inbox: album announcements and parts are
+// held for their group, other rows routed now. While messages wait for
+// access, later ones wait behind them, in order.
+func (c *conv) take(ctx context.Context, row store.InboundRow) {
+	switch {
+	case row.Announce:
+		c.expect(ctx, row)
+	case len(c.held) > 0:
+		c.held = append(c.held, row)
+	case row.Group != "":
+		c.hold(ctx, row)
+	default:
+		c.handle(ctx, row)
+	}
 }
 
 // album is a caller's parts of one grouped message, held until none has
@@ -543,6 +634,10 @@ type turn struct {
 	nativeInvalid bool
 	startCtx      context.Context
 	startCancel   context.CancelFunc
+
+	abandoned     bool        // loop-owned: dropped after a recovered panic; its events are ignored
+	typingStopped bool        // loop-owned: typing was closed
+	doneSent      atomic.Bool // the runner handed over its end (sendDone)
 
 	interruption string // native process loss; separate from user stop/reset
 	detached     bool   // native continuation: no inbound batch or parallelism reservation
@@ -607,6 +702,7 @@ type doneEvent struct {
 	skipped  []string          // outbox files not taken, "name: reason"
 	refused  bool              // the caller's admission or role changed: refused before any harness
 	identity error             // a scheduled turn's creator check failed (scheduler.Admit): no harness ran
+	panicked bool              // the turn runner panicked: Heimdall's own failure
 }
 
 func (c *conv) push(row store.InboundRow) {
@@ -622,90 +718,172 @@ func (c *conv) push(row store.InboundRow) {
 
 func (c *conv) loop(ctx context.Context) {
 	for {
+		done := false
+		if c.r.safely("conversation "+c.key.String(), func() { done = c.step(ctx) }) {
+			c.afterPanic(ctx)
+		}
+		if done {
+			return
+		}
+		c.arm(ctx)
+	}
+}
+
+// step handles one inbox signal or event; it reports whether ctx ended.
+func (c *conv) step(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-c.signal:
+		c.mu.Lock()
+		rows := c.inbox
+		c.inbox = nil
+		c.mu.Unlock()
+		for _, row := range rows {
+			c.take(ctx, row)
+		}
+	case ev := <-c.events:
+		switch ev := ev.(type) {
+		case accessRetryEvent:
+			rows := c.held
+			c.held, c.heldArmed = nil, false
+			for _, row := range rows {
+				c.take(ctx, row)
+			}
+			if c.turn != nil {
+				c.steerNext(ctx, c.turn)
+			}
+		case continuationEvent:
+			c.continuation(ctx, ev)
+		case albumEvent:
+			if a := c.albums[ev.key]; a != nil && a.gen == ev.gen {
+				delete(c.albums, ev.key)
+				// A harness choice or !next in one part's caption is the
+				// album's: the parts stay one message.
+				var choice *command
+				for _, row := range a.rows {
+					if cmd := parseCommand(row.Text); cmd.Kind == cmdMessage && (cmd.Harness != "" || cmd.Next) {
+						choice = &cmd
+						break
+					}
+				}
+				for _, row := range a.rows {
+					c.route(row, choice)
+				}
+				if c.turn != nil {
+					c.steerNext(ctx, c.turn)
+				}
+			}
+		case readyEvent:
+			if ev.t.abandoned {
+				break
+			}
+			ev.t.harness, ev.t.ready = ev.harness, true
+			c.steerNext(ctx, ev.t)
+		case steerEvent:
+			if ev.t.abandoned {
+				break
+			}
+			c.steerDone(ctx, ev)
+		case doneEvent:
+			if ev.t.abandoned {
+				break
+			}
+			ev.t.done = &ev
+			if !ev.t.steering {
+				c.finish(ctx, ev.t)
+			}
+		}
+	case sem := <-c.slot:
+		c.waiting = false
+		c.slotSem = sem
+		c.start(ctx)
+	}
+	return false
+}
+
+// arm starts waiting for a turn slot when messages wait and no turn runs,
+// and updates busy.
+func (c *conv) arm(ctx context.Context) {
+	if c.turn == nil && len(c.queue) > 0 && !c.waiting {
+		c.waiting = true
+		// Reuse a warm transport immediately; wait for cleanup when a
+		// turn could not retain its transport.
+		head := c.queue[0]
+		var note *store.InboundRow
+		if head.row.Origin == core.OriginLive && head.row.Run == nil && head.row.Review == nil {
+			note = &head.row
+		}
+		go c.waitSlot(ctx, c.exited, ownerLive(head), note)
+	}
+	c.mu.Lock()
+	c.busy.Store(c.turn != nil || len(c.nativeTurns) > 0 || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0 || len(c.held) > 0)
+	c.mu.Unlock()
+}
+
+// queuedNotice tells a live caller, once per wait, that every turn slot
+// they may take is busy.
+const queuedNotice = "Queued — starting when a slot frees. — heimdall"
+
+// ownerLive reports whether it may take the owner's reserved slot: the
+// owner's own live message, never a scheduled run or a review.
+func ownerLive(it item) bool {
+	return it.role == core.RoleOwner && it.row.Origin == core.OriginLive && it.row.Run == nil && it.row.Review == nil
+}
+
+// waitSlot waits for the last turn's process to exit, then for a turn slot:
+// a general one, or for the owner's live turn the reserved one (first). If none is
+// free at once, note's sender is told once. The slot is handed to the loop.
+func (c *conv) waitSlot(ctx context.Context, exited <-chan struct{}, owner bool, note *store.InboundRow) {
+	if exited != nil {
 		select {
+		case <-exited:
 		case <-ctx.Done():
 			return
-		case <-c.signal:
-			c.mu.Lock()
-			rows := c.inbox
-			c.inbox = nil
-			c.mu.Unlock()
-			for _, row := range rows {
-				if row.Announce {
-					c.expect(ctx, row)
-					continue
-				}
-				if row.Group != "" {
-					c.hold(ctx, row)
-					continue
-				}
-				c.handle(ctx, row)
-			}
-		case ev := <-c.events:
-			switch ev := ev.(type) {
-			case continuationEvent:
-				c.continuation(ctx, ev)
-			case albumEvent:
-				if a := c.albums[ev.key]; a != nil && a.gen == ev.gen {
-					delete(c.albums, ev.key)
-					// A harness choice or !next in one part's caption is the
-					// album's: the parts stay one message.
-					var choice *command
-					for _, row := range a.rows {
-						if cmd := parseCommand(row.Text); cmd.Kind == cmdMessage && (cmd.Harness != "" || cmd.Next) {
-							choice = &cmd
-							break
-						}
-					}
-					for _, row := range a.rows {
-						c.route(row, choice)
-					}
-					if c.turn != nil {
-						c.steerNext(ctx, c.turn)
-					}
-				}
-			case readyEvent:
-				ev.t.harness, ev.t.ready = ev.harness, true
-				c.steerNext(ctx, ev.t)
-			case steerEvent:
-				c.steerDone(ctx, ev)
-			case doneEvent:
-				ev.t.done = &ev
-				if !ev.t.steering {
-					c.finish(ctx, ev.t)
-				}
-			}
-		case <-c.slot:
-			c.waiting = false
-			c.start(ctx)
 		}
-		if c.turn == nil && len(c.queue) > 0 && !c.waiting {
-			c.waiting = true
-			// Reuse a warm transport immediately; wait for cleanup when a
-			// turn could not retain its transport.
-			exited := c.exited
-			go func() {
-				if exited != nil {
-					select {
-					case <-exited:
-					case <-ctx.Done():
-						return
-					}
-				}
-				select {
-				case c.r.sem <- struct{}{}:
-					select {
-					case c.slot <- struct{}{}:
-					case <-ctx.Done():
-						<-c.r.sem
-					}
-				case <-ctx.Done():
-				}
-			}()
+	}
+	reserved := c.r.reserved
+	if !owner {
+		reserved = nil // a nil channel is never ready
+	}
+	// The owner takes the reserved slot first, leaving general ones to
+	// others; anyone else only ever takes a general one.
+	var sem chan struct{}
+	select {
+	case reserved <- struct{}{}:
+		sem = reserved
+	default:
+		select {
+		case c.r.sem <- struct{}{}:
+			sem = c.r.sem
+		default:
 		}
-		c.mu.Lock()
-		c.busy.Store(c.turn != nil || len(c.nativeTurns) > 0 || len(c.queue) > 0 || c.waiting || len(c.inbox) > 0 || len(c.albums) > 0)
-		c.mu.Unlock()
+	}
+	if sem == nil {
+		if note != nil {
+			c.reply(*note, queuedNotice)
+		}
+		select {
+		case c.r.sem <- struct{}{}:
+			sem = c.r.sem
+		case reserved <- struct{}{}:
+			sem = reserved
+		case <-ctx.Done():
+			return
+		}
+	}
+	select {
+	case c.slot <- sem:
+	case <-ctx.Done():
+		<-sem
+	}
+}
+
+// releaseSlot gives back the conversation's turn slot, if it holds one.
+func (c *conv) releaseSlot() {
+	if c.slotSem != nil {
+		<-c.slotSem
+		c.slotSem = nil
 	}
 }
 
@@ -788,10 +966,21 @@ func (c *conv) handle(ctx context.Context, row store.InboundRow) {
 // now, so a revoked principal (or, later, a scheduled job's creator) fails
 // closed.
 func (c *conv) route(row store.InboundRow, choice *command) bool {
+	c.routing = row.ID
+	steer := c.routeRow(row, choice)
+	c.routing = 0
+	return steer
+}
+
+func (c *conv) routeRow(row store.InboundRow, choice *command) bool {
 	if row.Review != nil {
 		// A commitment review: like a scheduled run, never a command or a
 		// steer; the creator is decided against the commitment's route.
-		role, _, _ := c.r.opt.Access.Decide(row.From, row.Review.Target)
+		role, _, _, err := c.r.opt.Access.Check(row.From, row.Review.Target)
+		if err != nil {
+			c.holdForAccess(row)
+			return false
+		}
 		c.queue = append(c.queue, item{row: row, role: role, next: true, text: row.Text})
 		return false
 	}
@@ -799,11 +988,20 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		// A scheduled run: never a command, never a steer, one turn of its
 		// own. The creator's admission is decided against the job's target
 		// as the turn starts (runTurn), which settles the run either way.
-		role, _, _ := c.r.opt.Access.Decide(row.From, row.Run.Target)
+		role, _, _, err := c.r.opt.Access.Check(row.From, row.Run.Target)
+		if err != nil {
+			c.holdForAccess(row)
+			return false
+		}
 		c.queue = append(c.queue, item{row: row, role: role, next: true, text: row.Text})
 		return false
 	}
-	role, _, ok := c.r.opt.Access.Decide(row.From, c.key)
+	role, _, ok, err := c.r.opt.Access.Check(row.From, c.key)
+	if err != nil {
+		c.r.log.Printf("message %d in %s held: %v; checked again shortly", row.ID, c.key, err)
+		c.holdForAccess(row)
+		return false
+	}
 	if !ok {
 		c.r.log.Printf("message %d from %s in %s rejected: caller no longer authorized", row.ID, row.From.Key(), c.key)
 		_ = c.r.store.SetInbound(row.ID, store.InRejected, "caller not authorized")
@@ -858,6 +1056,12 @@ func (c *conv) route(row store.InboundRow, choice *command) bool {
 		c.answer(row, store.CommandEnd{Detail: "which"}, c.which(role, row.From.Key()))
 		return false
 	case cmdUse:
+		if role != core.RoleOwner {
+			// The conversation's harness is the owner's setup: refused before
+			// any session, worker or binding changes.
+			c.answer(row, store.CommandEnd{Detail: "use refused"}, "Only the owner can change this conversation's harness.")
+			return false
+		}
 		if c.turn != nil {
 			c.turn.nativeInvalid = true
 		}
@@ -1158,7 +1362,13 @@ func (c *conv) which(role core.Role, who string) string {
 // parallelism slot.
 func (c *conv) start(ctx context.Context) {
 	if c.turn != nil || len(c.queue) == 0 {
-		<-c.r.sem
+		c.releaseSlot()
+		return
+	}
+	if c.slotSem != nil && c.slotSem == c.r.reserved && !ownerLive(c.queue[0]) {
+		// The owner's message this slot was taken for is gone: the reserved
+		// slot is not for anyone else. Wait again for a general one.
+		c.releaseSlot()
 		return
 	}
 	first := c.queue[0]
@@ -1175,7 +1385,7 @@ func (c *conv) start(ctx context.Context) {
 		if !ok {
 			c.queue = c.queue[1:]
 			c.r.release(first.row.Inbound)
-			<-c.r.sem
+			c.releaseSlot()
 			return
 		}
 		first.job = job.Name
@@ -1185,10 +1395,12 @@ func (c *conv) start(ctx context.Context) {
 	if review != nil && (first.role != core.RoleOwner || c.r.opt.Work == nil || !current(c.r.opt.Work, review)) {
 		// Revalidated as the turn actually starts: the creator is still an
 		// admitted owner on the route and the attempt still waits.
-		_ = c.r.store.SetInbound(first.row.ID, store.InCancelled, "held: review refused at launch: creator no longer an admitted owner on the route, or the commitment is paused, cancelled or no longer waits for this attempt's verdict")
+		if err := c.r.store.SetInbound(first.row.ID, store.InCancelled, "held: review refused at launch: creator no longer an admitted owner on the route, or the commitment is paused, cancelled or no longer waits for this attempt's verdict"); err != nil {
+			c.r.log.Printf("message %d: refused review not recorded: %v", first.row.ID, err)
+		}
 		c.queue = c.queue[1:]
 		c.r.release(first.row.Inbound)
-		<-c.r.sem
+		c.releaseSlot()
 		return
 	}
 	for job == nil && review == nil && n < len(c.queue) && !first.row.MCPControl && !c.queue[n].row.MCPControl && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
@@ -1210,7 +1422,7 @@ func (c *conv) start(ctx context.Context) {
 			run, readErr := c.r.store.Run(job.Run)
 			cancelled = readErr == nil && run.State == store.RunCancelled
 		}
-		<-c.r.sem
+		c.releaseSlot()
 		c.queue = c.queue[n:]
 		for _, it := range batch {
 			if !cancelled {
@@ -1334,7 +1546,9 @@ func (c *conv) startTyping(ctx context.Context, t *turn) {
 				return
 			default:
 			}
-			ty.Typing(ctx, c.key)
+			if c.r.safely("typing", func() { ty.Typing(ctx, c.key) }) {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1349,7 +1563,7 @@ func (c *conv) startTyping(ctx context.Context, t *turn) {
 // typedOnce shows the typing indicator once, without waiting for it.
 func (c *conv) typedOnce(ctx context.Context) {
 	if ty, ok := c.r.ifaces[c.key.Interface].(Typer); ok {
-		go ty.Typing(ctx, c.key)
+		go c.r.safely("typing", func() { ty.Typing(ctx, c.key) })
 	}
 }
 
@@ -1364,6 +1578,7 @@ func (c *conv) send(ctx context.Context, ev any) {
 // turn is ready did nothing, so the next one may take over; once a harness
 // is ready the turn is committed to it.
 func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
+	defer c.recoverTurn(ctx, t)
 	c.observe(ctx, t, "start", harness.Progress{})
 	var notes []string
 	// gated holds employee-gate skips. They only reach the reply when no
@@ -1403,7 +1618,23 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if ctx.Err() != nil || t.stopped.Load() || identity != nil {
 			break
 		}
-		current, caps, admitted := c.r.opt.Access.Decide(from, target)
+		current, caps, admitted, err := c.r.opt.Access.Check(from, target)
+		if err != nil {
+			// Unreadable access files are not a refusal: the turn waits
+			// for them, before any harness, unless it is stopped.
+			c.r.log.Printf("turn %d in %s waits: %v", t.id, c.key, err)
+			wait := t.startCtx
+			if wait == nil {
+				wait = ctx
+			}
+			for err != nil && wait.Err() == nil && !t.stopped.Load() {
+				sleep(wait, c.r.accessRetry)
+				current, caps, admitted, err = c.r.opt.Access.Check(from, target)
+			}
+			if err != nil {
+				break
+			}
+		}
 		if !admitted || current != t.role {
 			notes = append(notes, "caller admission or role changed; turn refused")
 			refused = true
@@ -1482,7 +1713,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		caller := harness.Caller{Capabilities: caps, Principal: from, Role: t.role, Conv: target, Private: t.private, OAuthActor: actor, OAuthInstallation: installation}
 		caller.SlackRead = harness.SlackReadAllowed(c.r.opt.OwnerSlack, batch[0].row.Inbound, t.role, h, c.r.opt.SlackTeam)
-		logf := func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) }
+		logf := guarded(c.r, "harness log", func(s string) { c.r.log.Printf("turn %d in %s: %s", t.id, c.key, s) })
 		var progress func(harness.Progress)
 		if _, ok := c.r.ifaces[c.key.Interface].(TurnObserver); ok && t.job == nil && t.review == nil {
 			progress = func(p harness.Progress) { c.observe(ctx, t, "progress", p) }
@@ -1574,6 +1805,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				}
 			}
 		}
+		progress, notify = guarded(c.r, "harness progress", progress), guarded(c.r, "harness notice", notify)
 		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive || t.job != nil && t.role == core.RoleOwner, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
 		if t.review != nil {
 			// One bounded turn; no scheduler or MCP control, no progress,
@@ -1588,15 +1820,21 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				} else if t.review.Run != "" {
 					tool = t3WaitTool
 				}
-				spec.NativeCalls = &harness.NativeCalls{Tools: []string{tool}, Done: func(n harness.NativeCall) {
+				spec.NativeCalls = &harness.NativeCalls{Tools: []string{tool}, Done: guarded(c.r, "harness native call", func(n harness.NativeCall) {
 					t.mu.Lock()
 					t.native = append(t.native, n)
 					t.mu.Unlock()
-				}}
+				})}
 			}
 		}
 		if t.job == nil && t.review == nil {
-			spec.Continuation = func(ev harness.Continuation) bool {
+			spec.Continuation = func(ev harness.Continuation) (ok bool) {
+				defer func() {
+					if p := recover(); p != nil {
+						c.r.log.Printf("recovered panic (%T) in harness continuation", p)
+						ok = false
+					}
+				}()
 				e := continuationEvent{source: t, harness: h, native: ev}
 				if ev.Phase == "start" {
 					e.accepted = make(chan bool, 1)
@@ -1631,7 +1869,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				}
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
-					c.send(ctx, doneEvent{t: t, harness: h, res: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}, notes: notes})
+					c.sendDone(ctx, doneEvent{t: t, harness: h, res: harness.Result{Cancelled: true, Cause: harness.CauseTimeout}, notes: notes})
 					return
 				}
 				spec.Timeout = min(spec.Timeout, remaining)
@@ -1687,7 +1925,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if res.Cancelled {
 			// Preserve a pre-ready limit result. It must not become a generic
 			// startup failure (or a scheduler startup retry).
-			c.send(ctx, doneEvent{t: t, harness: h, res: res, notes: notes})
+			c.sendDone(ctx, doneEvent{t: t, harness: h, res: res, notes: notes})
 			return
 		}
 		why := res.Failure
@@ -1697,7 +1935,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		notes = append(notes, h+" failed before starting: "+why)
 	}
 	notes = append(gated, notes...)
-	c.send(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes, refused: refused, identity: identity})
+	c.sendDone(ctx, doneEvent{t: t, res: harness.Result{Cancelled: ctx.Err() != nil || t.stopped.Load()}, notes: notes, refused: refused, identity: identity})
 }
 
 // commit ends the turn with harness h's outcome: h took the turn, so no
@@ -1721,7 +1959,7 @@ func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, 
 	if r := done.res; r.Failure == "" && r.NeedsHuman == "" && !r.Cancelled {
 		done.files, done.skipped = c.collect(t)
 	}
-	c.send(ctx, done)
+	c.sendDone(ctx, done)
 }
 
 // sessionPointer uses only existing bindings, before BindTurn overwrites them.
@@ -1781,9 +2019,17 @@ func (c *conv) steerNext(ctx context.Context, t *turn) {
 	run := t.run
 	t.mu.Unlock()
 	go func() {
+		var refs []string
+		defer func() {
+			if p := recover(); p != nil {
+				// Whether the harness got it is unknown: never replayed.
+				c.r.log.Printf("recovered panic (%T) in turn %d steer", p, t.id)
+				c.send(ctx, steerEvent{t: t, items: items, refs: refs, outcome: harness.SteerUnknown})
+			}
+		}()
 		var parts, contextParts []string
 		var images []harness.Image
-		refs := c.react(t, items)
+		refs = c.react(t, items)
 		for _, it := range items {
 			blocks, ims := c.files(t, it)
 			if t.harness == "codex" || t.harness == "claude" || t.harness == "pi" {
@@ -1878,9 +2124,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		// Shutdown: leave the turn recorded as running; the next start reports it.
 		return
 	}
-	if t.typing != nil {
-		close(t.typing)
-	}
+	c.stopTyping(t)
 	t.mu.Lock()
 	run := t.run
 	t.mu.Unlock()
@@ -1945,7 +2189,11 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 			answers = []string{res.Answer}
 		}
 		var clean []string
-		if clean, draft, jobChange, card = j.Prepare(scheduler.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}, answers, t.job == nil && !t.batch[0].row.MCPControl && t.batch[0].row.Origin == core.OriginLive); card != "" {
+		// Only a live request in the owner's private chat applies at once: in a
+		// shared chat other people's text reached the model, so a proposal
+		// there waits for the owner's confirmation card.
+		direct := t.private && t.job == nil && !t.batch[0].row.MCPControl && t.batch[0].row.Origin == core.OriginLive
+		if clean, draft, jobChange, card = j.Prepare(scheduler.Caller{Principal: t.from, Role: t.role, Conv: c.key, Private: t.private}, answers, direct); card != "" {
 			res.Answers, res.Answer = clean, strings.Join(slices.DeleteFunc(slices.Clone(clean), func(a string) bool { return a == "" }), "\n\n")
 		}
 	}
@@ -1983,6 +2231,9 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 	case res.Cancelled && res.Cause.Limited():
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, string(res.Cause)
 		text = "⏱ This turn hit its " + string(res.Cause) + " limit and was stopped. Work may be unfinished and was not re-run. Anything it already did may stand; check existing task IDs, results and sends before resending. Your next message starts a fresh session.\n— heimdall"
+	case d.panicked:
+		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "internal error"
+		text = "⚠ Something went wrong in Heimdall during this turn. It was stopped and not re-run; resend if still needed."
 	case d.harness == "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "no harness could start"
 		text = "⚠ No harness could take this turn."
@@ -2042,9 +2293,7 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 	if t.detached {
 		e.PreserveSession = true
 	} // never overwrite a newer running session binding
-	if _, err := c.r.store.EndTurn(t.id, c.key, t.who, e); err != nil {
-		c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
-	}
+	c.endTurn(ctx, t, e)
 	if t.startCancel != nil {
 		t.startCancel()
 	}
@@ -2079,8 +2328,53 @@ func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 	}
 	c.turn = nil
 	// A native result ends the running turn; idle/cleanup processes hold no slot.
-	<-c.r.sem
+	c.releaseSlot()
 	c.flushContinuations(ctx)
+}
+
+// endTurn records a turn's end with its reply. A failed write is retried
+// with backoff, each time only while the turn is still recorded as running,
+// so the reply is never queued twice. If it still cannot be recorded, the
+// reply text is sent once straight to its chat (best effort, outside the
+// outbox) and the turn is left running for restart recovery to report.
+func (c *conv) endTurn(ctx context.Context, t *turn, e store.TurnEnd) {
+	_, err := c.r.store.EndTurn(t.id, c.key, t.who, e)
+	for attempt := 0; err != nil && attempt < c.r.endAttempts && ctx.Err() == nil; attempt++ {
+		c.r.log.Printf("turn %d: end not recorded, retrying: %v", t.id, err)
+		sleep(ctx, c.r.endRetry<<attempt)
+		running, rerr := c.r.store.TurnIsRunning(t.id)
+		switch {
+		case rerr != nil:
+			err = rerr
+		case !running:
+			return // the earlier write was recorded after all
+		default:
+			_, err = c.r.store.EndTurn(t.id, c.key, t.who, e)
+		}
+	}
+	if err == nil {
+		return
+	}
+	c.r.log.Printf("turn %d: end not recorded: %v", t.id, err)
+	if ctx.Err() != nil || e.Reply == nil || strings.TrimSpace(e.Reply.Text) == "" {
+		return
+	}
+	if running, rerr := c.r.store.TurnIsRunning(t.id); rerr != nil || !running {
+		return // unknown, or recorded: the outbox has (or may have) the reply
+	}
+	i := c.r.ifaces[e.Reply.Conv.Interface]
+	if i == nil {
+		return
+	}
+	out := *e.Reply
+	out.ID, out.TurnID, out.File = 0, 0, nil
+	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := i.Send(sctx, out); err != nil {
+		c.r.log.Printf("turn %d: unrecorded reply not sent directly: %v", t.id, err)
+		return
+	}
+	c.r.log.Printf("turn %d: reply sent directly, end left for restart recovery", t.id)
 }
 
 // jobEnd is a scheduled turn's end as its job decides it: the reply and

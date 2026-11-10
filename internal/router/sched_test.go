@@ -507,7 +507,7 @@ func TestMCPControlProposalNeverAutoApplies(t *testing.T) {
 	}
 	tr := &turn{id: id, role: core.RoleOwner, from: tgOwner, who: tgOwner.Key(), private: true, started: time.Now(), batch: []item{{row: row}}}
 	tr.done = &doneEvent{harness: "pi", res: harness.Result{Answer: "```heimdall-job\n" + `{"name":"control","schedule":{"every":"1h"},"prompt":"p"}` + "\n```"}}
-	c := &conv{r: e.r, key: ownerDM, turn: tr}
+	c := &conv{r: e.r, key: ownerDM, turn: tr, slotSem: e.r.sem}
 	e.r.sem <- struct{}{}
 	c.finish(context.Background(), tr)
 	jobs, err := e.st.Jobs(store.JobFilter{})
@@ -537,7 +537,7 @@ func TestScheduledWakeUsesCurrentSourceConversationHarness(t *testing.T) {
 			// neither may replace the bound source's routing preference.
 			want(t, e.ask(group, "!use codex"), "now uses codex")
 			e.sendIn(core.Principal{Platform: "fake", ID: "employee"}, core.ConvKey{Interface: "telegram", Chat: "2"}, "!use codex")
-			want(t, e.reply(), "now uses codex")
+			want(t, e.reply(), "Only the owner can change this conversation's harness.")
 			// Old synthetic-conversation state must never supply a preference.
 			if err := e.st.AnswerCommand(0, core.ConvKey{Interface: "telegram", Chat: core.SchedChat(id)}, store.CommandEnd{SetHarness: true, Harness: "codex"}); err != nil {
 				t.Fatal(err)
