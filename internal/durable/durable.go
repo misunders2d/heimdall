@@ -156,6 +156,7 @@ type ReviewResult struct {
 	Reason  string `json:"reason,omitempty"`
 	Held    string `json:"held,omitempty"`
 	Failure string `json:"failure,omitempty"`
+	Class   string `json:"class,omitempty"` // a Wake* class when there is no verdict
 }
 
 // Assistant runs one wake of a commitment as a server-initiated turn of
@@ -190,11 +191,47 @@ type WorkResult struct {
 	Next    string        `json:"next,omitempty"`
 	Held    string        `json:"held,omitempty"`
 	Failure string        `json:"failure,omitempty"`
+	// Class is how a wake without a report or a valid WAIT ended, set by
+	// the router from the persisted turn outcome (never from error text).
+	Class string `json:"class,omitempty"`
 }
+
+// Wake classes (WorkResult.Class, ReviewResult.Class).
+const (
+	WakeNotStarted = "not_started" // no harness took the turn: nothing could have happened
+	WakeCutOff     = "cut_off"     // started and was cut off (time limit, provider error, restart, not current)
+	WakeMalformed  = "malformed"   // finished with neither REPORT nor a valid WAIT
+	WakeApproval   = "approval"    // asked for a native approval or input
+	WakeRefused    = "refused"     // the creator was refused
+	WakeStopped    = "stopped"     // the owner stopped it
+)
 
 // reviewRetries bounds automatic re-reviews after technical failures; the
 // commitment then holds.
 const reviewRetries = 3
+
+// Caps (owner, 2026-11-10: "3 tries, then ask"). At a cap the task stops
+// and the owner gets one line; !work retry resets the counters.
+const (
+	maxFailedWakes = 3   // wakes in a row that failed (not started, cut off, malformed)
+	maxMalformed   = 2   // malformed answers in a row
+	maxRejections  = 3   // rejections of automatic reports or by the supervisor, one stage
+	maxWaits       = 100 // WAIT wakes of one attempt
+)
+
+// patchWakeRules gates the bounded wake rules, continuation wakes and the
+// owner's one-line stop notice (docs/durable.md, upgrade policy). A
+// workflow started before them keeps the old path until an explicit
+// !work retry of a hold, where it takes the new one.
+const patchWakeRules = "wake-rules-v2"
+
+// wakeRetryPause is the first pause before a failed wake's next try; it
+// doubles to an hour (a variable for tests).
+var wakeRetryPause = 10 * time.Minute
+
+// forceOldPath makes new workflows take the pre-patch path (tests only: it
+// writes a real old-path history).
+var forceOldPath bool
 
 // Permanent marks an error that retrying cannot fix (a native denial, a
 // route conflict, an unreconcilable effect). The commitment holds visibly
@@ -392,6 +429,7 @@ type Event struct {
 	By       string `json:"by"`
 	Evidence string `json:"evidence,omitempty"`
 	Note     string `json:"note,omitempty"`
+	auto     bool   // built here (worker report, supervisor verdict), never a live owner's
 }
 
 // State is the commitment's published execution state.
@@ -439,6 +477,10 @@ type run struct {
 	floorOK  bool
 	floorRun string
 	feedback string // the last rejection, sent as bounded repair feedback
+	// v2: the wake rules patch (patchWakeRules) applies to this execution.
+	v2      bool
+	rejects int // automatic rejections in a row of this stage (v2)
+	stops   int // stops told to the owner (v2): the line's effect key
 }
 
 // closed carries the owner's close event out of any wait.
@@ -448,6 +490,15 @@ func (closed) Error() string { return "closed by owner" }
 
 func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {
 	w := &run{c: c, st: State{Attempt: 1}}
+	if !forceOldPath {
+		// Before the first step: an older workflow already recorded one
+		// here, so Patch is false for it and it keeps the old path.
+		v2, err := dbos.Patch(ctx, patchWakeRules)
+		if err != nil {
+			return w.st, err
+		}
+		w.v2 = v2
+	}
 	err := r.supervise(ctx, w)
 	var cl closed
 	if errors.As(err, &cl) {
@@ -488,7 +539,7 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 					w.st.Dispatched = res.Receipt.Run
 					break
 				}
-				if err := r.hold(ctx, w, "dispatch "+key+": "+res.Held); err != nil {
+				if err := r.stop(ctx, w, "dispatch "+key+": "+res.Held, "it could not hand the work to its worker"); err != nil {
 					return err
 				}
 			}
@@ -513,6 +564,9 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		}
 		if why != "" {
 			if err := r.reject(ctx, w, "evidence rejected: "+why, r.opt.Reviewer == nil); err != nil {
+				return err
+			}
+			if err := r.rejected(ctx, w, ev.auto); err != nil {
 				return err
 			}
 			continue
@@ -542,8 +596,12 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 			if err := r.reject(ctx, w, "rejected by "+v.By+": "+v.Note, r.opt.Reviewer == nil); err != nil {
 				return err
 			}
+			if err := r.rejected(ctx, w, v.auto); err != nil {
+				return err
+			}
 			continue
 		}
+		w.rejects = 0
 		w.st.Verdict = "accepted by " + v.By
 		if v.Note != "" {
 			w.st.Verdict += ": " + v.Note
@@ -774,7 +832,7 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 		if finished {
 			w.st.Runs = append(w.st.Runs, done)
 			return Event{Kind: "report", Attempt: w.st.Attempt, By: "observer:" + w.c.Worker,
-				Evidence: fmt.Sprintf("%s run %s %s: %s", w.c.Worker, done, status, or(reply, "(no reply text)"))}, nil
+				Evidence: fmt.Sprintf("%s run %s %s: %s", w.c.Worker, done, status, or(reply, "(no reply text)")), auto: true}, nil
 		}
 		if !noticed && r.opt.Silence > 0 && quiet >= r.opt.Silence {
 			noticed = true
@@ -807,7 +865,7 @@ func (r *Runtime) awaitRun(ctx dbos.Context, w *run, wt Waiter) (Event, error) {
 		})
 		var p Permanent
 		if errors.As(err, &p) {
-			if err := r.hold(ctx, w, "wait "+req.Key+": "+p.Error()); err != nil {
+			if err := r.stop(ctx, w, "wait "+req.Key+": "+p.Error(), "it could not check on its worker"); err != nil {
 				return Event{}, err
 			}
 			continue
@@ -823,7 +881,7 @@ func (r *Runtime) awaitRun(ctx dbos.Context, w *run, wt Waiter) (Event, error) {
 				rq.Key = effectKey(c.Issue, w.st.Attempt, fmt.Sprintf("read/%d", m))
 				body, err := step(r, ctx, w, "read", func(sctx context.Context) (string, error) { return wt.Read(sctx, rq, run) })
 				if errors.As(err, &p) {
-					if err := r.hold(ctx, w, "read "+rq.Key+": "+p.Error()); err != nil {
+					if err := r.stop(ctx, w, "read "+rq.Key+": "+p.Error(), "it could not read its worker's result"); err != nil {
 						return Event{}, err
 					}
 					continue
@@ -834,7 +892,7 @@ func (r *Runtime) awaitRun(ctx dbos.Context, w *run, wt Waiter) (Event, error) {
 				w.st.Runs = append(w.st.Runs, run)
 				w.st.Note = ""
 				return Event{Kind: "report", Attempt: w.st.Attempt, By: "waiter:" + c.Worker,
-					Evidence: fmt.Sprintf("%s run %s %s: %s", c.Worker, run, res.Status, body)}, nil
+					Evidence: fmt.Sprintf("%s run %s %s: %s", c.Worker, run, res.Status, body), auto: true}, nil
 			}
 		}
 		if note := fmt.Sprintf("waiting on %s run %s through the creator's native T3 tools (%s)", c.Worker, run, or(res.Status, "not finished")); note != w.st.Note {
@@ -865,16 +923,31 @@ func (r *Runtime) awaitRun(ctx dbos.Context, w *run, wt Waiter) (Event, error) {
 // (compute is queued, never dropped). A turn reports evidence, still
 // unaccepted, or names its next action and wake time: the owned next
 // action is persisted and DBOS waits durably, holding no capacity, taking
-// owner events; a restart resumes the wait. A wake that was held, failed
-// or ended without a valid REPORT or WAIT may already have acted, so it is
-// never replayed under a new key: the commitment holds with the key, turn
-// and reason until the owner reconciles and sends !work retry.
+// owner events; a restart resumes the wait.
+//
+// A wake that ended without a REPORT or a valid WAIT is never replayed
+// blindly. With the wake rules (v2), by its Class:
+//   - not started (no harness took it): nothing happened; the next wake
+//     runs under a new key after a pause (wakeRetryPause, doubling to 1 h);
+//   - cut off (time limit, provider error, restart) or malformed: it may
+//     already have acted, so the next wake, after the same pause, is a
+//     continuation whose prompt says so: check what was done, do not
+//     repeat it, then continue;
+//   - an approval request or a refused creator stops the task with one
+//     line to the owner; an owner stop stops it without one.
+//
+// maxFailedWakes failed wakes (or maxMalformed malformed answers) in a
+// row, or maxWaits WAIT wakes in one attempt, stop the task with one line.
+// !work retry wakes a stopped task again, as a continuation when the last
+// wake may have acted. On the old path every such wake held until
+// !work retry.
 func (r *Runtime) work(ctx dbos.Context, w *run) (Event, error) {
 	c := w.c
-	action := ""
+	action, resume := "", ""
+	failed, malformed, waits := 0, 0, 0
 	for n := 1; ; n++ {
 		req := WorkRequest{Key: effectKey(c.Issue, w.st.Attempt, fmt.Sprintf("work/%d", n)), Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route,
-			Private: c.Private, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Prompt: workPrompt(w, action)}
+			Private: c.Private, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Prompt: workPrompt(w, action, resume)}
 		h, err := dbos.RunWorkflow(ctx, r.workTurn, req, dbos.WithWorkflowID(req.Key), dbos.WithQueue(r.queues[c.Resource]), dbos.WithQueuePartitionKey(c.Issue))
 		if err != nil {
 			return Event{}, err
@@ -885,39 +958,132 @@ func (r *Runtime) work(ctx dbos.Context, w *run) (Event, error) {
 		}
 		if strings.TrimSpace(res.Report) != "" && res.Held == "" && res.Failure == "" {
 			w.st.Note = ""
-			return Event{Kind: "report", Attempt: w.st.Attempt, By: fmt.Sprintf("assistant (turn %d)", res.Turn), Evidence: res.Report}, nil
+			return Event{Kind: "report", Attempt: w.st.Attempt, By: fmt.Sprintf("assistant (turn %d)", res.Turn), Evidence: res.Report, auto: true}, nil
 		}
-		if res.Held != "" || res.Failure != "" || res.Next == "" || res.Wait <= 0 {
-			// The wake may already have acted (sent, bought, posted) before
-			// it failed, was denied or ended without a valid answer: never
-			// replayed under a new key. Held until the owner reconciles;
-			// !work retry is the only next wake.
-			why := or(res.Held, or(res.Failure, "no report and no valid WAIT"))
-			if err := r.hold(ctx, w, fmt.Sprintf("work %s (turn %d): %s; it may have acted: check its effects before !work retry", req.Key, res.Turn, clip(why, 300))); err != nil {
+		valid := res.Held == "" && res.Failure == "" && res.Next != "" && res.Wait > 0
+		why := clip(or(res.Held, or(res.Failure, "no report and no valid WAIT")), 300)
+		if !w.v2 && !valid {
+			// The old path: the wake may already have acted (sent, bought,
+			// posted) before it failed, was denied or ended without a valid
+			// answer: held until the owner reconciles; !work retry is the
+			// only next wake.
+			if err := r.hold(ctx, w, fmt.Sprintf("work %s (turn %d): %s; it may have acted: check its effects before !work retry", req.Key, res.Turn, why)); err != nil {
 				return Event{}, err
+			}
+			if w.v2 { // the retry moved it onto the wake rules
+				resume = continuation(req.Key, false)
+			}
+			continue
+		}
+		if !valid {
+			class := res.Class
+			if class == "" { // a result from before classes: never a blind retry
+				class = WakeCutOff
+				if res.Held != "" {
+					class = WakeRefused
+				}
+			}
+			turn := fmt.Sprintf("work %s (turn %d, %s): %s", req.Key, res.Turn, class, why)
+			reason := ""
+			switch class {
+			case WakeStopped:
+			case WakeApproval:
+				reason = "it asked for an approval"
+			case WakeRefused:
+				reason = "it could not run as you"
+			default:
+				failed++
+				if class == WakeMalformed {
+					malformed++
+				} else {
+					malformed = 0
+				}
+				if class != WakeNotStarted {
+					resume = continuation(req.Key, class == WakeMalformed)
+				}
+				switch {
+				case malformed >= maxMalformed:
+					reason = "it gave an unreadable answer twice"
+				case failed >= maxFailedWakes:
+					reason = fmt.Sprintf("it failed %d times", failed)
+				}
+				if reason == "" {
+					pause := min(wakeRetryPause<<(failed-1), time.Hour)
+					w.st.Note = fmt.Sprintf("wake %s did not finish (%s); next wake in %s", req.Key, class, pause)
+					if err := r.publish(ctx, w, PhaseWorking, "next wake in "+pause.String()+": "+or(action, "the goal")); err != nil {
+						return Event{}, err
+					}
+					if ev, err := r.pause(ctx, w, pause); err != nil || ev != nil {
+						return deref(ev), err
+					}
+					continue
+				}
+				turn = fmt.Sprintf("%d wakes in a row failed; last %s", failed, turn)
+			}
+			if err := r.stop(ctx, w, turn+"; it may have acted: check its effects before !work retry", reason); err != nil {
+				return Event{}, err
+			}
+			failed, malformed, waits = 0, 0, 0
+			if class != WakeNotStarted {
+				resume = continuation(req.Key, false)
 			}
 			continue
 		}
 		w.st.Note, action = "", clip(res.Next, 500)
+		if w.v2 {
+			failed, malformed, resume = 0, 0, ""
+			if waits++; waits >= maxWaits {
+				if err := r.stop(ctx, w, fmt.Sprintf("%d wakes of attempt %d ended in WAIT without a report", waits, w.st.Attempt), fmt.Sprintf("it checked back %d times without finishing", waits)); err != nil {
+					return Event{}, err
+				}
+				waits = 0
+				continue
+			}
+		}
 		wait := res.Wait
 		wake := fmt.Sprintf("next wake in %s: %s", wait, or(action, "the goal"))
 		if err := r.publish(ctx, w, PhaseWorking, wake); err != nil {
 			return Event{}, err
 		}
-		for waited := false; !waited; {
-			ev, ok, err := r.next(ctx, w, wait)
-			switch {
-			case err != nil:
-				return Event{}, err
-			case !ok:
-				waited = true
-			case ev.Kind == "close":
-				return ev, closed{ev}
-			case ev.Kind == "report" && ev.Attempt == w.st.Attempt:
-				return ev, nil
-			}
+		if ev, err := r.pause(ctx, w, wait); err != nil || ev != nil {
+			return deref(ev), err
 		}
 	}
+}
+
+// pause waits durably for d, taking owner events: a close (as a closed
+// error) or a report of the current attempt ends it early (ev non-nil).
+func (r *Runtime) pause(ctx dbos.Context, w *run, d time.Duration) (*Event, error) {
+	for {
+		ev, ok, err := r.next(ctx, w, d)
+		switch {
+		case err != nil:
+			return nil, err
+		case !ok:
+			return nil, nil
+		case ev.Kind == "close":
+			return &ev, closed{ev}
+		case ev.Kind == "report" && ev.Attempt == w.st.Attempt:
+			return &ev, nil
+		}
+	}
+}
+
+func deref(ev *Event) Event {
+	if ev == nil {
+		return Event{}
+	}
+	return *ev
+}
+
+// continuation warns the next wake after one that started and did not
+// finish cleanly: it may already have acted.
+func continuation(key string, malformed bool) string {
+	s := fmt.Sprintf("Your previous wake (%s) was cut off or did not finish cleanly, and it may already have acted. First check what it already did (messages sent, changes made, purchases, posts); do not repeat any of it. Then continue from where it stopped.", key)
+	if malformed {
+		s += " Its answer was in neither form below; answer exactly in one of them."
+	}
+	return s
 }
 
 // workTurn is the queued child workflow of one assistant wake.
@@ -927,7 +1093,7 @@ func (r *Runtime) workTurn(ctx dbos.Context, req WorkRequest) (WorkResult, error
 		res, err := attempt(ctx, "work", func(sctx context.Context) (WorkResult, error) { return r.opt.Assistant.Work(sctx, req) })
 		var p Permanent
 		if errors.As(err, &p) {
-			return WorkResult{Held: p.Error()}, nil
+			return WorkResult{Held: p.Error(), Class: WakeRefused}, nil
 		}
 		if err == nil || ctx.Err() != nil {
 			return res, err
@@ -943,7 +1109,7 @@ func (r *Runtime) workTurn(ctx dbos.Context, req WorkRequest) (WorkResult, error
 // workPrompt wakes the assistant with the commitment's persisted goal,
 // state, evidence and next action. Authority stays with the runtime and
 // the assistant's own native permissions.
-func workPrompt(w *run, action string) string {
+func workPrompt(w *run, action, resume string) string {
 	c, st := w.c, w.st
 	var b strings.Builder
 	fmt.Fprintf(&b, "Durable commitment %s %q, attempt %d (a wake from Heimdall's durable runtime, not a live message).\n", c.Issue, c.Title, st.Attempt)
@@ -953,6 +1119,9 @@ func workPrompt(w *run, action string) string {
 	fmt.Fprintf(&b, "Goal: %s\n", brief(w))
 	if action != "" {
 		fmt.Fprintf(&b, "Your persisted next action: %s\n", action)
+	}
+	if resume != "" {
+		fmt.Fprintf(&b, "%s\n", resume)
 	}
 	if st.Note != "" {
 		fmt.Fprintf(&b, "State note: %s\n", st.Note)
@@ -1008,7 +1177,7 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 			if strings.HasPrefix(w.st.Note, "supervisor review") {
 				w.st.Note = ""
 			}
-			return Event{Kind: res.Verdict, Attempt: w.st.Attempt, By: fmt.Sprintf("supervisor (turn %d)", res.Turn), Note: clip(res.Reason, 500)}, nil
+			return Event{Kind: res.Verdict, Attempt: w.st.Attempt, By: fmt.Sprintf("supervisor (turn %d)", res.Turn), Note: clip(res.Reason, 500), auto: true}, nil
 		}
 		if res.Held == "" {
 			if failed++; failed > reviewRetries {
@@ -1020,6 +1189,11 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 			w.st.Blocked = "review " + key + ": " + clip(res.Held, 300)
 			if err := r.publish(ctx, w, PhaseHeld, "reconcile "+w.st.Blocked+"; then !work retry, accept, reject or close"); err != nil {
 				return Event{}, err
+			}
+			if res.Class != WakeStopped {
+				if err := r.tell(ctx, w, "its result check could not finish"); err != nil {
+					return Event{}, err
+				}
 			}
 			wait = maxWait
 		} else {
@@ -1044,6 +1218,9 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 			}
 		}
 		if res.Held != "" {
+			if err := r.upgrade(ctx, w); err != nil {
+				return Event{}, err
+			}
 			w.st.Blocked = ""
 			if err := r.publish(ctx, w, PhaseReported, "supervisor review of the evidence"); err != nil {
 				return Event{}, err
@@ -1123,6 +1300,11 @@ func (r *Runtime) close(ctx dbos.Context, w *run, ev Event) (State, error) {
 // until an explicit !work retry (re-enqueued under a new key) or close. A
 // non-blocking delivery (notices) records the failure and moves on.
 func (r *Runtime) deliver(ctx dbos.Context, w *run, effect, text string, blocking bool) error {
+	return r.send(ctx, w, effect, text+"\n— heimdall", blocking)
+}
+
+// send is deliver with the final text, signature included.
+func (r *Runtime) send(ctx dbos.Context, w *run, effect, text string, blocking bool) error {
 	c := w.c
 	for n := 0; ; n++ {
 		key := c.Issue + "/" + effect
@@ -1130,7 +1312,7 @@ func (r *Runtime) deliver(ctx dbos.Context, w *run, effect, text string, blockin
 			key = fmt.Sprintf("%s#retry%d", key, n)
 		}
 		id, err := step(r, ctx, w, "deliver", func(context.Context) (int64, error) {
-			id, err := r.opt.Outbox.EnqueueEffect(key, core.Outbound{Conv: c.Route, ReplyTo: c.ReplyTo, Text: text + "\n— heimdall"})
+			id, err := r.opt.Outbox.EnqueueEffect(key, core.Outbound{Conv: c.Route, ReplyTo: c.ReplyTo, Text: text})
 			if errors.Is(err, store.ErrEffectConflict) {
 				err = Permanent{err}
 			}
@@ -1164,13 +1346,24 @@ func (r *Runtime) deliver(ctx dbos.Context, w *run, effect, text string, blockin
 	}
 }
 
-// hold publishes the held phase with why and waits durably for an
-// explicit retry (returns nil) or close; other events are kept for later.
-func (r *Runtime) hold(ctx dbos.Context, w *run, why string) error {
+// hold stops the commitment without telling the owner (a failed delivery,
+// or the old path).
+func (r *Runtime) hold(ctx dbos.Context, w *run, why string) error { return r.stop(ctx, w, why, "") }
+
+// stop publishes the held phase with why and waits durably for an explicit
+// retry (returns nil) or close; other events are kept for later. With the
+// wake rules (v2) and a reason, the owner gets one plain line first (tell).
+// After a retry, an older workflow takes the new path (upgrade).
+func (r *Runtime) stop(ctx dbos.Context, w *run, why, reason string) error {
 	phase, next := w.st.Phase, w.st.Next
 	w.st.Blocked = why
 	if err := r.publish(ctx, w, PhaseHeld, "reconcile "+why+"; then !work retry or !work close"); err != nil {
 		return err
+	}
+	if reason != "" {
+		if err := r.tell(ctx, w, reason); err != nil {
+			return err
+		}
 	}
 	for {
 		ev, err := dbos.Recv[Event](ctx, topic, maxWait)
@@ -1188,8 +1381,58 @@ func (r *Runtime) hold(ctx dbos.Context, w *run, why string) error {
 		}
 		w.buf = append(w.buf, ev)
 	}
+	if err := r.upgrade(ctx, w); err != nil {
+		return err
+	}
 	w.st.Blocked = ""
 	return r.publish(ctx, w, phase, next)
+}
+
+// upgrade, after an explicit retry of a hold, moves a workflow that started
+// before the wake rules onto them. It runs just before the publish an old
+// workflow recorded after its earlier retries (Patch false there), so only
+// a position not yet run takes the new path.
+func (r *Runtime) upgrade(ctx dbos.Context, w *run) error {
+	if w.v2 || forceOldPath {
+		return nil
+	}
+	p, err := dbos.Patch(ctx, patchWakeRules+"-retry")
+	w.v2 = p
+	return err
+}
+
+// tell sends the owner one plain line that the task needs them (v2 only),
+// under a fixed key per stop so it is never repeated. A failed send is a
+// note; it never stops the task again.
+func (r *Runtime) tell(ctx dbos.Context, w *run, reason string) error {
+	if !w.v2 {
+		return nil
+	}
+	w.stops++
+	title := clip(strings.Join(strings.Fields(w.c.Title), " "), 80)
+	text := fmt.Sprintf("Task \"%s\" (%s) needs you: %s. Reply \"!work retry %s\" or \"!work close %s\". — heimdall", title, w.c.Issue, reason, w.c.Issue, w.c.Issue)
+	note := w.st.Note
+	if err := r.send(ctx, w, fmt.Sprintf("needs-you/%d", w.stops), text, false); err != nil {
+		return err
+	}
+	if w.st.Note != note { // the line failed: visible, never another stop
+		return r.publish(ctx, w, w.st.Phase, w.st.Next)
+	}
+	return nil
+}
+
+// rejected counts an automatic rejection of the current stage (v2): at
+// maxRejections the task stops with one line; !work retry resets it.
+func (r *Runtime) rejected(ctx dbos.Context, w *run, auto bool) error {
+	if !w.v2 || !auto {
+		return nil
+	}
+	if w.rejects++; w.rejects < maxRejections {
+		return nil
+	}
+	n := w.rejects
+	w.rejects = 0
+	return r.stop(ctx, w, fmt.Sprintf("%d results in a row were rejected; last: %s", n, clip(w.st.Verdict, 300)), fmt.Sprintf("its result was rejected %d times", n))
 }
 
 // receipt waits durably until outbound id is sent or failed.
