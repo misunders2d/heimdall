@@ -862,9 +862,9 @@ func TestReplyAndForwardContext(t *testing.T) {
 	got := c.list()
 	for i, w := range []struct{ text, context string }{
 		{"what is it?", "[Telegram reply context | replied_msg 5 | from Bob Ray (tg_user_77) | date 2023-11-14T22:13:20.000Z]\nlook at this [Photo]"},
-		{"fyi", "[Telegram forward context | source Cy (tg_user_8) | date 2023-11-14T22:15:00.000Z]"},
-		{"news", "[Telegram forward context | source Daily | date 2023-11-14T22:16:40.000Z]"},
-		{"rumour", "[Telegram forward context | source Anon (hidden user) | date unknown]"},
+		{"", "[Telegram forward context | source Cy (tg_user_8) | date 2023-11-14T22:15:00.000Z]\n" + fwdBody("fyi")},
+		{"", "[Telegram forward context | source Daily | date 2023-11-14T22:16:40.000Z]\n" + fwdBody("news")},
+		{"", "[Telegram forward context | source Anon (hidden user) | date unknown]\n" + fwdBody("rumour")},
 		{"done", "[Telegram reply context | replied_msg 10 | from Heimdall (tg_user_999) | date 2023-11-14T22:13:20.000Z]\n[Private native MCP sign-in UI omitted]"},
 		{"in a topic", ""},
 	} {
@@ -873,6 +873,9 @@ func TestReplyAndForwardContext(t *testing.T) {
 		}
 	}
 }
+
+// fwdBody is a forward's own text as the router gets it: untrusted context.
+func fwdBody(text string) string { return router.Untrusted("Telegram forwarded message", text) }
 
 func TestAttachmentLabels(t *testing.T) {
 	for _, tc := range []struct {

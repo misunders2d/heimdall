@@ -390,7 +390,12 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		text = m.Caption
 	}
 	replied := repliedTo(m)
-	direct := private || router.UnmentionedCommand(text, t.command(text), t.botName, t.opt.UnmentionedCommands) || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
+	// A forward's body is someone else's words, never the sender's command.
+	commandText := text
+	if m.ForwardOrigin != nil {
+		commandText = ""
+	}
+	direct := private || router.UnmentionedCommand(commandText, t.command(commandText), t.botName, t.opt.UnmentionedCommands) || t.mentions(text) || replied != nil && replied.From != nil && replied.From.ID == t.botID || t.albumAddressed(m)
 	addressed := direct || !private && t.forwardAddressed(m)
 	if !addressed {
 		return t.ambient(u, m, text)
@@ -403,13 +408,24 @@ func (t *Interface) inbound(u update) (core.Inbound, *message, bool) {
 		// an inherited forward never extends it.
 		t.rememberAddressed(m)
 	}
-	text = t.command(text)
+	forwarded := ""
+	if m.ForwardOrigin != nil {
+		// Quoted third-party content: untrusted context only. The message
+		// has no text of its own, so it never runs as a command or answers
+		// a job's yes/no; a forward alone still runs as input.
+		forwarded, text = strings.TrimSpace(text), ""
+	} else {
+		text = t.command(text)
+	}
 	own := contentContext(m)
-	if strings.TrimSpace(text) == "" && own == "" && detect(replied) == nil {
+	if strings.TrimSpace(text) == "" && own == "" && forwarded == "" && detect(replied) == nil {
 		t.logf("update %d in chat %d ignored: no text, caption or attachment", u.UpdateID, m.Chat.ID)
 		return core.Inbound{}, nil, false
 	}
 	context := messageContext(m)
+	if forwarded != "" {
+		context = strings.TrimSpace(context + "\n" + router.Untrusted("Telegram forwarded message", forwarded))
+	}
 	if own != "" {
 		// The message's own attachment, by label; files follow as
 		// attachments, contacts, locations and venues are only this.
