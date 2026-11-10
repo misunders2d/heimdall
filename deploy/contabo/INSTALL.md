@@ -92,6 +92,60 @@ newer than this Heimdall"). In that case restore `heimdall.db` and
 replies stored after the backup are lost with it. Turns that a stop cut off
 are reported, never re-run.
 
+## Watch checkers (recurring checks without an AI turn)
+
+Owner rule, 2026-11-10: Heimdall handles all reminders and recurring tasks;
+recurring checks are Heimdall watch jobs, not systemd timers. A watch job
+names a checker; the checker is an executable in one root-owned directory,
+looked up at every run, so adding one needs no restart.
+
+Once (root): create the directory and name it in the config.
+
+```bash
+install -d -o root -g root -m 0755 /etc/heimdall/checkers
+# In /etc/heimdall/config.json, in "scheduler": "checkers_dir": "/etc/heimdall/checkers"
+/usr/local/bin/heimdall check-config -config /etc/heimdall/config.json
+```
+
+Setting the key is a config change, so it takes effect at the next restart
+(drain first, as in "Release, upgrade and rollback"). After that, adding or
+changing checkers never needs one.
+
+Add a checker (root): a regular executable file named `[a-z0-9-]`, owned by
+root (or the `run_as.owner` account), not group- or world-writable. A symlink
+is accepted only to a file directly in the same directory. Heimdall refuses
+anything else at job creation and fails the run with a fixed cause.
+
+```bash
+install -o root -g root -m 0755 ./competitor-deals /etc/heimdall/checkers/competitor-deals
+```
+
+Then, in the owner's private chat, ask for the job or send
+`!job add {"name":"Competitor deals","kind":"watch","check":{"checker":"competitor-deals"},"schedule":{"every":"15m"},"to":"slack:C…"}`.
+
+The contract: no arguments, no stdin, working directory `run_as.owner.dir`
+(default that account's home),
+environment only `HOME`, `USER`, `PATH`, `LANG`, `TZ`, the caller identity
+variables and `MEMENTO_PROCESSING=1` (never Heimdall's or Infisical's
+variables). Exit 0 and print nothing: nothing is sent. Exit 0 and print text:
+that text is sent to the job's target (first 3500 bytes). Any other exit, a
+timeout (60 s by default, the job's `timeout` from 10 s to 10 min), more than
+256 KiB of output or output that is not UTF-8 fails the run; the first stderr
+line appears only in the owner's private notices. Do not print secrets.
+
+A checker that needs arguments or secrets is a small wrapper in the
+directory. Keep secrets in a root-only file outside the checkers directory:
+
+```sh
+#!/bin/sh
+# /etc/heimdall/checkers/competitor-deals: arguments and secrets live here,
+# never in the job. Runs as run_as.owner.
+set -eu
+KEEPA_KEY=$(cat /etc/heimdall/checker-secrets/keepa) # root:root 0600
+export KEEPA_KEY
+exec /opt/checks/competitor-deals.py --threshold 15
+```
+
 ## Launch findings
 
 Source inspected: Pi pack `origin/hub`, revision
