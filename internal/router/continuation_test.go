@@ -30,11 +30,9 @@ func TestNativeBetweenTurnDelivery(t *testing.T) {
 			e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "BACKGROUND_SAME_WRITE")
 			first := e.reply()
 			want(t, first, "turn=1")
-			notice := e.reply()
-			want(t, notice, "background task completed")
 			late := e.reply()
 			want(t, late, "BACKGROUND_DELIVERED")
-			if first.Conv != conv || notice.Conv != conv || late.Conv != conv || late.ReplyTo != first.ReplyTo {
+			if first.Conv != conv || late.Conv != conv || late.ReplyTo != first.ReplyTo {
 				t.Fatalf("wrong destination: %+v %+v", first, late)
 			}
 			e.noReply(100 * time.Millisecond)
@@ -55,8 +53,6 @@ func TestNativeCompletionBeforeNewInputReplay(t *testing.T) {
 	first := e.reply()
 	want(t, first, "turn=1")
 	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "second person question")
-	notice := e.reply()
-	want(t, notice, "background task completed")
 	late := e.reply()
 	want(t, late, "BACKGROUND_DELIVERED")
 	answer := e.reply()
@@ -73,7 +69,6 @@ func TestNativeCompletionWhileNewUserTurnRuns(t *testing.T) {
 	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "BACKGROUND BG_SLOW")
 	first := e.reply()
 	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "HANG")
-	want(t, e.reply(), "background task completed")
 	late := e.reply()
 	want(t, late, "BACKGROUND_DELIVERED")
 	if late.ReplyTo != first.ReplyTo {
@@ -150,11 +145,10 @@ func TestNativeContinuationKeepsCallerAndConversation(t *testing.T) {
 	other.Thread = "other"
 	e.sendIn(boss, other, "other conversation")
 	want(t, e.reply(), "other conversation")
-	notice := e.reply()
 	late := e.reply()
 	want(t, late, "BACKGROUND_DELIVERED")
-	if notice.Conv != conv || late.Conv != conv || late.ReplyTo != first.ReplyTo {
-		t.Fatalf("crossed caller/conversation: %+v %+v", notice, late)
+	if late.Conv != conv || late.ReplyTo != first.ReplyTo {
+		t.Fatalf("crossed caller/conversation: %+v", late)
 	}
 	pids, _ := os.ReadFile(filepath.Join(e.state, "pids"))
 	if len(strings.Fields(string(pids))) != 3 {
@@ -171,7 +165,6 @@ func TestNativeContinuationFilesReactionsAndDuplicateResult(t *testing.T) {
 	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "BACKGROUND BG_FILE BG_REACT BG_DUPLICATE")
 	first := e.reply()
 	want(t, first, "turn=1")
-	want(t, e.reply(), "background task completed")
 	late := e.reply()
 	want(t, late, "BACKGROUND_DELIVERED")
 	if len(late.Reactions) != 1 || late.Reactions[0].MsgID != first.ReplyTo {
@@ -191,7 +184,6 @@ func TestNativeContinuationCannotProposeJobs(t *testing.T) {
 	e := continuationEnv(t, "telegram")
 	conv := core.ConvKey{Interface: "telegram", Chat: "42"}
 	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "BACKGROUND BG_JOB")
-	e.reply()
 	e.reply()
 	late := e.reply()
 	want(t, late, "BACKGROUND_DELIVERED")
@@ -213,9 +205,6 @@ func TestNativeBackgroundSurvivesRestartAsInterruption(t *testing.T) {
 			}
 			e.sendIn(who, conv, prompt)
 			want(t, e.reply(), "turn=1")
-			if stage == "notification-gap" {
-				want(t, e.reply(), "background task completed")
-			}
 			e.sendIn(who, conv, "!status")
 			want(t, e.reply(), "native background turn")
 			id, clean, err := e.st.Session(conv, who.Key(), "claude")
@@ -351,7 +340,6 @@ func TestNativeRetirementAfterBufferedAnswerNotifiesOnce(t *testing.T) {
 	conv := core.ConvKey{Interface: "telegram", Chat: "42"}
 	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, conv, "BACKGROUND BG_NORESULT")
 	e.reply()
-	e.reply()
 	want(t, e.reply(), "Pending background work was interrupted")
 	e.noReply(250 * time.Millisecond)
 	eventuallyTrue(t, "retired background settled", e.r.Idle)
@@ -448,7 +436,6 @@ func TestPendingBackgroundSurvivesIdle(t *testing.T) {
 	e.start()
 	e.sendIn(core.Principal{Platform: "fake", ID: "owner"}, core.ConvKey{Interface: "telegram", Chat: "42"}, "BACKGROUND BG_SLOW")
 	want(t, e.reply(), "turn=1")
-	want(t, e.reply(), "background task completed")
 	want(t, e.reply(), "BACKGROUND_DELIVERED")
 }
 

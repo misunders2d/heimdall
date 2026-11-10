@@ -14,6 +14,15 @@ are gated per user, so the core requirement is conveying the
 interface-verified caller identity to each harness process reliably, in the
 form those tools read, never only as prompt text.
 
+**Goal confirmed by the owner, 2026-11-10:** Heimdall is the gateway.
+Harnesses stay unconstrained except by their own tool guards and limits.
+Switching harness or provider must not affect jobs, reminders, tasks or
+memory. In his words: "heimdall is the gateway, but harnesses remain
+unconstrained, only by their own internal tool guards, limitations etc. I am
+free to switch to whatever harness/provider I want without having to worry
+about anytihng else - jobs, reminders, memories etc continue as if never
+happened."
+
 Its whole job, per message:
 
 1. receive it from an interface;
@@ -47,6 +56,17 @@ the `heimdall-live` unit.
   in private Telegram chats or live-verified same-workspace Slack 1:1 DMs,
   on Pi/Claude/Codex; never ambient or scheduled turns. Other turns have
   Slack disabled. See [setup runbook](docs/owner-slack-read.md).
+  Exception, durable tasks (owner, approved 2026-11-08/09): owner tasks are
+  durable commitments on embedded DBOS Transact Go with its SQLite system
+  database (`internal/durable`, `<data_dir>/durable.db`,
+  [docs/durable.md](docs/durable.md)). The hub orchestrates all owner tasks:
+  only Hub (root) is an orchestrator, and the orchestration stays on the
+  Heimdall swarm. Owner, 2026-11-10: follow the "Pi Durable" path, a
+  reliable, disruption- and restart-surviving system that continues
+  interrupted tasks. Off by default in code. Production runs it with
+  `supervisor_review` and `assistant_work` on and `t3_dispatch` off.
+  Wake rules, caps, the one owner line and T3 intake (`deploy/t3-intake`):
+  [docs/durable.md](docs/durable.md).
 - **Identity comes from the interface, never from text.** Callers never log
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack
@@ -57,7 +77,11 @@ the `heimdall-live` unit.
   (auth.test team ID). Slack Connect guests from other workspaces, and
   emails remembered from earlier lookups, never count. Display names,
   usernames and message text are never identity. A caller the interface
-  cannot identify is ignored and logged, fail closed. The verified identity is carried on
+  cannot identify is ignored and logged, fail closed. When the access files
+  cannot be read nobody is admitted, and messages wait instead of being
+  dropped (`core.ErrAccessUnavailable`): the router holds and retries every
+  1 s in order, Telegram keeps its offset (backoff), Slack leaves the event
+  pending within its retry window. The verified identity is carried on
   every message handed to a harness, and to the harness process in the
   hub's identity variables (`docs/hub-parity.md`), including scheduled jobs
   (later phase), which store their creator and run under that creator's
@@ -115,6 +139,9 @@ the `heimdall-live` unit.
   Employees, scheduled jobs and MCP controls receive no pointer.
 - **Conversations.** Key = interface + chat + thread. Same key: one turn at a
   time. Different keys run in parallel up to `max_parallel` running turns. Idle warm processes use no turn slot.
+  With `max_parallel` > 1 one of those slots is reserved for the owner's live
+  turns, which take it first (none at 1). A caller who must wait for a slot
+  is told once: "Queued — starting when a slot frees. — heimdall".
 - **Telegram** (as the hub's connector). A private chat is always handled.
   In a group, exact controls allowed by `commands.unmentioned` work without
   addressing. Other messages are handled only if they mention `@<bot username>`, replies to one of the bot's
@@ -122,7 +149,9 @@ the `heimdall-live` unit.
   group message from a person is never run or answered; it is kept only as
   bounded, untrusted context for that conversation's later turns (the newest
   1000 kept, 40 shown, 4000 chars each and 16000 in all, scrubbed; files
-  only by label). `/start` is `!help`. The text, else the caption. Files
+  only by label). `/start` is `!help`. The text, else the caption. A
+  forward's text is quoted untrusted context ("Telegram forwarded message"),
+  never a command or the sender's own words. Files
   (the message's and the replied-to message's, at most 20 MB) are downloaded
   into Heimdall's 0700 upload directory and, at turn start, copied into a
   per-turn directory owned by the turn's OS user; pictures also go natively
@@ -205,9 +234,16 @@ the `heimdall-live` unit.
   starts and the reply says so. Outbound delivery is at-least-once: a crash
   between a successful platform send and its local acknowledgement can repeat
   that one message. Say so; never claim exactly-once.
+  A failed turn-end write is retried 5 times (backoff from 250 ms); if it
+  never succeeds the answer text is sent once directly (no files) and the
+  turn is left for restart recovery; its "sent" record is retried until it
+  succeeds. A crash (panic) is contained to its chat: one notice, the turn
+  is not re-run. An interface failing within 30 s of its first start stops
+  Heimdall; a later failure restarts only that interface, backoff 2 s to
+  5 min (Telegram and Slack are restartable).
 - **Commands** use the `!` prefix on every interface (Slack forbids `/` in
   threads): `!help`, `!status`, `!which`, `!stop`, `!cancel`, `!reset`, `!chatid`,
-  `!use <harness>` (sticky per conversation: chat + thread), `!use default`,
+  `!use <harness>` (owner only; sticky per conversation: chat + thread), `!use default`,
   `!jobs`, `!job …` (scheduler),
   `!<harness> <msg>` (that message only), `!next <msg>`. The hub's control
   words work alone in a message without the `!`: `stop`, `cancel`
@@ -240,7 +276,8 @@ the `heimdall-live` unit.
     Other interrupted runs are never re-run, except `idempotent` jobs (once).
   - Models propose jobs only when asked, through the answer block. Direct owner
     person turns apply new jobs and edits with the reply in one transaction,
-    without a card. Non-owners, removals and any `rerun_on_timeout` job still
+    without a card, only in a private chat from a live owner message; in a
+    group the owner confirms it. Non-owners, removals and any `rerun_on_timeout` job still
     require a human confirmation in
     the same conversation within 24 h (`!job confirm`, or a bare yes/no that
     Heimdall matches itself, ignoring surrounding whitespace and trailing
@@ -316,6 +353,7 @@ thinking stream and live-session reply registration.
 | `internal/store` | SQLite: inbound/outbound queues, turns, sessions, chat settings, jobs and runs |
 | `internal/schedule` | cron, interval and one-off slots in a zone, the DST rule |
 | `internal/scheduler` | due loop, job rules, commands, drafts, outcomes, notices, `sched`/`drain` |
+| `internal/durable` | durable owner tasks on DBOS + SQLite (`durable.db`): admission, review, assistant work, dispatch |
 | `internal/harness` | ported native adapters, launch as an OS user |
 | `internal/router` | conversations, `!` commands, steer/follow-up, fallback, delivery |
 | `internal/iface/local` | local stdin/stdout interface for end-to-end tests |
@@ -341,6 +379,15 @@ thinking stream and live-session reply registration.
 - Keep it lean: standard library, pure-Go SQLite, pinned coder/websocket
   and owner-approved x/text for NFKC (static binary,
   `CGO_ENABLED=0`). Add a dependency only when a requirement needs it.
+  Direct dependencies today (`go.mod`): `modernc.org/sqlite`,
+  `coder/websocket`, `golang.org/x/text`, `golang.org/x/sys` (Linux peer
+  credentials), `adhocore/gronx` (cron) and DBOS Transact Go v1.8.0 (durable
+  tasks, owner-approved 2026-11-08/09; it brings its own indirect modules).
+- CI (`.github/workflows/ci.yml`) runs vet, race tests and the static build
+  on every push and pull request; the repository is public, so CI uses no
+  secrets. Owner, 2026-11-10: only the main branch may run in production; before
+  a release, run `deploy/contabo/engine-check.sh` against the real engines
+  (release steps: [INSTALL.md](deploy/contabo/INSTALL.md)).
 - Tests: `go vet ./...` and `go test -race ./...` (fake harnesses speak each
   real protocol). Live harness checks are manual: `heimdall local` (or
   `heimdall run` with a separate test bot's token, never the production
@@ -360,4 +407,4 @@ thinking stream and live-session reply registration.
 2. Slack interface. AgentNet stays separate and is never a Heimdall interface.
 3. Scheduler (jobs carry and run as their creator): 3a built (jobs,
    drafts, Pi tool switch); 3b watches next.
-4. Production cutover.
+4. Production cutover (done: production runs Heimdall).

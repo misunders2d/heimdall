@@ -86,6 +86,9 @@ func (r *Router) Work(ctx context.Context, q durable.WorkRequest) (durable.WorkR
 	default:
 		res.Failure = o.State + ": " + or(d, o.Detail)
 	}
+	if res.Report == "" && res.Next == "" {
+		res.Class = turnClass(o)
+	}
 	return res, nil
 }
 
@@ -616,7 +619,49 @@ func reviewOutcome(o store.InboundOutcome) (durable.ReviewResult, bool) {
 	default:
 		res.Failure = o.State + ": " + or(o.TurnDetail, o.Detail)
 	}
+	if res.Verdict == "" {
+		res.Class = turnClass(o)
+	}
 	return res, true
+}
+
+// Held details the router records itself (reviewEnd); turnClass maps them,
+// with the store's typed turn states, to the wake classes the durable
+// runtime acts on, so it never reads error text.
+const (
+	heldRefused  = reviewHeld + "creator admission or role changed; review refused"
+	heldStopped  = reviewHeld + "review stopped"
+	heldApproval = reviewHeld + "the harness asked for a native approval or input; nothing was approved"
+	heldStale    = reviewHeld + "the commitment was no longer current when the review ended (paused, cancelled or moved on); outcome not applied: "
+	noHarness    = "no harness could start: "
+)
+
+// turnClass classifies a commitment turn that gave no outcome. Only a turn
+// no harness took (no candidate passed its ready signal, nothing stopped or
+// refused it) is "not started"; anything unrecognised may have acted and is
+// "cut off", never a blind retry.
+func turnClass(o store.InboundOutcome) string {
+	d := o.TurnDetail
+	if o.TurnState == "" {
+		d = o.Detail
+	}
+	switch {
+	case o.State == store.InRejected:
+		return durable.WakeRefused
+	case strings.HasPrefix(d, heldStale):
+		return durable.WakeCutOff
+	case strings.HasPrefix(d, heldRefused):
+		return durable.WakeRefused
+	case strings.HasPrefix(d, heldStopped):
+		return durable.WakeStopped
+	case strings.HasPrefix(d, heldApproval), o.TurnState == store.TurnNeedsHuman:
+		return durable.WakeApproval
+	case o.TurnState == store.TurnDone:
+		return durable.WakeMalformed
+	case o.TurnState == store.TurnFailed && strings.HasPrefix(d, noHarness):
+		return durable.WakeNotStarted
+	}
+	return durable.WakeCutOff
 }
 
 // reviewEnd ends a review turn: no reply, no files, no notices. The
@@ -632,15 +677,15 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 	live := c.r.opt.Work != nil && current(c.r.opt.Work, t.review)
 	switch {
 	case d.refused:
-		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, reviewHeld+"creator admission or role changed; review refused"
+		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, heldRefused
 	case res.Cancelled && t.stopped.Load():
-		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, reviewHeld+"review stopped"
+		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, heldStopped
 	case res.NeedsHuman != "":
-		e.State, e.ItemState, e.Detail = store.TurnNeedsHuman, store.InNeedsHuman, reviewHeld+"the harness asked for a native approval or input; nothing was approved"
+		e.State, e.ItemState, e.Detail = store.TurnNeedsHuman, store.InNeedsHuman, heldApproval
 	case res.Cancelled:
 		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, "cancelled: "+or(string(res.Cause), "no cause")
 	case d.harness == "":
-		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "no harness could start: "+strings.Join(d.notes, "; ")
+		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, noHarness+strings.Join(d.notes, "; ")
 	case res.Failure != "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, failureReason(c.r.scrub(res.Failure))
 	default:
@@ -663,7 +708,7 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 		}
 	}
 	if !live && !strings.HasPrefix(e.Detail, reviewHeld) {
-		e.Detail = reviewHeld + "the commitment was no longer current when the review ended (paused, cancelled or moved on); outcome not applied: " + e.Detail
+		e.Detail = heldStale + e.Detail
 	}
 	return e
 }

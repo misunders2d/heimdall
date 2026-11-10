@@ -52,9 +52,19 @@ func TestAssistantWorksWithoutT3(t *testing.T) {
 		s := a.seen()
 		return slices.Contains(s, "MEL-70/1/work/2") && slices.Contains(s, "MEL-71/1/work/1")
 	})
-	st, _ := e.rt.State("MEL-71")
-	if st.Phase != PhaseWorking || st.Next != "next wake in 1h0m0s: recheck stock" {
-		t.Fatalf("%+v", st)
+	// The fake records the wake when it is called; the workflow persists
+	// its WAIT just after. Wait for that state, not only the call.
+	var st State
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, _ = e.rt.State("MEL-71")
+		if st.Phase == PhaseWorking && st.Next == "next wake in 1h0m0s: recheck stock" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%+v", st)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	e.close() // restart during MEL-70's second wait
 
@@ -94,7 +104,12 @@ func TestAssistantWorksWithoutT3(t *testing.T) {
 // have acted: it is held with its key, turn and reason, never replayed
 // under a new key while waiting or across a restart; only !work retry
 // wakes the assistant again.
+//
+// That is the old path (before patchWakeRules), kept for workflows that
+// started before it; TestWakeClassesAreBounded covers the new rules.
 func TestAssistantAmbiguousWakeHolds(t *testing.T) {
+	forceOldPath = true
+	defer func() { forceOldPath = false }()
 	dir := t.TempDir()
 	a := &fakeAssistant{prompts: map[string]string{}, plan: map[string]WorkResult{
 		"MEL-72/1/work/1": {Turn: 7, Failure: "failed: harness exited after sending the email"},

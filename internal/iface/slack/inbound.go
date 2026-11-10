@@ -128,7 +128,13 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		return finish()
 	}
 	if s.opt.Access != nil {
-		if _, _, admitted := s.opt.Access.Decide(principal, core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: m.ThreadTS}); !admitted {
+		_, _, admitted, err := s.opt.Access.Check(principal, core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: m.ThreadTS})
+		if err != nil {
+			// Not finished: the event stays pending and is retried with
+			// backoff, within the ingress retry window.
+			return err
+		}
+		if !admitted {
 			s.opt.Log.Print("slack: ignored caller not admitted by access policy")
 			return finish()
 		}

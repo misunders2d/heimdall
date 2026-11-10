@@ -1,7 +1,13 @@
 # Durable commitments (MEL-763, slice 1: partial)
 
-Status: opt-in and **disabled by default**. Laptop-tested only; not deployed
-or live-accepted. Slice 1 is **partial**:
+Status (2026-11-10): **off by default in code** (`durable.enabled`).
+Production runs it enabled, with `supervisor_review` and `assistant_work` on
+and `t3_dispatch` off. The owner approved durable tasks on DBOS + SQLite on
+2026-11-08/09, and on 2026-11-10 set the direction: the "Pi Durable" path, a
+reliable, disruption- and restart-surviving system that continues
+interrupted tasks. The hub (root) is the only orchestrator of owner tasks.
+This file records no live verification of the items under "Not qualified". Slice 1
+is **partial**:
 - worker results are observed without the owner (T3 observer);
 - with `supervisor_review`, the verdict comes from a server-initiated
   review turn of the creator's harness (see Verdict);
@@ -187,10 +193,46 @@ attempt are revalidated as the turn starts and ends.
 The answer is either `REPORT` then the evidence, which goes through the
 gates, the supervisor review or the owner verdict (never accepted by the
 wake), or `WAIT <1m..168h>` then the next action: DBOS waits durably,
-holding no compute, and a restart resumes the wait. A wake that was
-denied, failed, or ended with anything else may already have acted, so it
-is never replayed under a new key: the commitment holds with the key, turn
-and reason until the owner checks its effects and sends `!work retry`.
+holding no compute, and a restart resumes the wait.
+
+**Wake rules** (patch `wake-rules-v2`; tasks started before it keep the old
+path, holding until `!work retry`, which moves them onto these rules). A wake
+that did not finish is classified: not started, cut off, malformed,
+approval, refused or stopped.
+
+- *Not started*: retried after 10 min, doubling to 1 h.
+- *Cut off* or *malformed*: the next wake is a continuation, told to check
+  what was already done and not repeat it.
+- *Approval* or *refused*: the task stops with one owner line.
+- *Stopped* by the owner: the task stops with no line.
+
+Caps: 3 failed wakes in a row, 2 malformed answers in a row, 3 automatic
+rejections, 100 `WAIT` wakes per attempt. At a cap the task stops with one
+line; `!work retry` resets the counters. The one owner line is
+
+```
+Task "<title>" (<id>) needs you: <reason>. Reply "!work retry <id>" or "!work close <id>". — heimdall
+```
+
+sent once per stop under a fixed key; a failed send never stops the task
+again. A stopped wake may have acted: the owner checks its effects before
+`!work retry`.
+
+**T3 intake** (hooks in [deploy/t3-intake](../deploy/t3-intake/README.md)).
+A T3 session's hooks call the scheduler control actions `task_intake`
+(event `prompt_submit`) and `task_intake_done` (event `stop`) with the
+thread id only. They are accepted from the trusted T3 launcher only
+([external-origin.md](external-origin.md)), need no `manage`, and are not
+in discovery or the MCP tool enum. Each owner request in a T3 thread
+becomes a tracking-only task `T3-<n>` (table `heimdall_t3_intakes` in
+`durable.db`; `T3-` ids are reserved). Ownership is T3's per-message
+`createdBy=user` when present; on T3 v0.1.5, which marks only the thread,
+the thread's `createdBy=user` (weaker: an agent message in an owner thread
+counts as the owner's, and the task's brief says so). It closes quietly
+when the run completes, is cancelled or rolled back, or a newer request
+supersedes it; an interrupted or failed run makes it an active task under
+the wake rules. `mcp:launch:` and agent-created threads are never admitted.
+Requires `durable.t3_command`. Laptop-local T3 sessions are not covered.
 
 Admission without typing `!work add`: during a live owner request, the
 assistant can call the existing `heimdall_scheduler` control with
@@ -299,6 +341,8 @@ version.
   that position. Put patches before steps that old workflows have passed
   (see the test).
 - Run only one Heimdall process per data dir.
+- `wake-rules-v2` is such a patch: workflows started before it keep the old
+  hold-until-retry path until `!work retry` moves them onto the wake rules.
 
 ## Not qualified (what still blocks autonomous follow-through)
 

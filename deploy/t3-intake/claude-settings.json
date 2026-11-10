@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/ABS/PATH/heimdall-t3-intake.sh /ABS/PATH/heimdall /ABS/PATH/control.sock prompt",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/ABS/PATH/heimdall-t3-intake.sh /ABS/PATH/heimdall /ABS/PATH/control.sock stop",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

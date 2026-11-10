@@ -68,6 +68,10 @@ Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into rep
 // its message, so a retried request is one event.
 func (r *Runtime) Task(c Caller, action, issue, title, requestID string) (reply string, changed bool) {
 	switch action {
+	case "intake":
+		return r.intake(c, issue)
+	case "intake_done":
+		return r.intakeDone(c, issue)
 	case "list":
 		return r.Command(c, "list"), false
 	case "show":
@@ -84,7 +88,9 @@ func (r *Runtime) Task(c Caller, action, issue, title, requestID string) (reply 
 		return reply, reply == "Sent close to "+up+"." || strings.HasPrefix(reply, up+" paused by owner.") || reply == up+" resumed."
 	case "add":
 		f := strings.Fields(title)
-		if len(f) == 0 || strings.Contains(f[0], "=") || strings.Contains(title, "| next:") || strings.ContainsAny(issue, " \t\r\n") {
+		// Checked as Command re-splits it (whitespace collapsed to single
+		// spaces), so "|  next:" or "|\tnext:" cannot smuggle a next step.
+		if len(f) == 0 || strings.Contains(f[0], "=") || strings.Contains(strings.Join(f, " "), "| next:") || strings.ContainsAny(issue, " \t\r\n") {
 			return "A task needs a plain title: no worker, resource, gate or next step from a tool call.", false
 		}
 		reply = r.Command(c, "add "+issue+" "+title)
@@ -114,6 +120,9 @@ func (r *Runtime) Command(c Caller, text string) string {
 		return "Not a Linear issue identifier: " + f[1]
 	}
 	rest := strings.Join(f[2:], " ")
+	if sub == "add" && strings.HasPrefix(issue, "T3-") {
+		return "T3-<n> ids are reserved for T3 requests."
+	}
 	var err error
 	if sub != "add" {
 		cm, ok := r.input(issue)
@@ -325,6 +334,9 @@ func (r *Runtime) list(c Caller) string {
 	}
 	var vs []View
 	for _, v := range all {
+		if v.cm.Intake != nil && v.State.Phase == PhaseClosed {
+			continue // a finished T3 request: !work show still has it
+		}
 		if c.sees(v.cm) {
 			vs = append(vs, v)
 		}
@@ -347,7 +359,11 @@ func (r *Runtime) show(issue string) string {
 	for _, v := range vs {
 		if v.Issue == issue {
 			s := v.State
-			return fmt.Sprintf("%s %s\n%s\nLinear: %s\nworker: %s\nattempt: %d%s\ndispatched run: %s\nevidence: %s\nverdict: %s\nreceipts: %v", v.Issue, v.Title, v.line(), r.linearURL(v.Issue), or(v.Worker, "owner-dispatched"), s.Attempt, map[bool]string{true: " (authorized next step)"}[s.Stage == "next"], or(s.Dispatched, "none"), or(s.Evidence, "none"), or(s.Verdict, "none"), s.Receipts)
+			link := r.linearURL(v.Issue)
+			if v.cm.Intake != nil {
+				link = "none (T3 thread " + v.cm.Intake.Thread + ", run " + v.cm.Intake.Run + ")"
+			}
+			return fmt.Sprintf("%s %s\n%s\nLinear: %s\nworker: %s\nattempt: %d%s\ndispatched run: %s\nevidence: %s\nverdict: %s\nreceipts: %v", v.Issue, v.Title, v.line(), link, or(v.Worker, "owner-dispatched"), s.Attempt, map[bool]string{true: " (authorized next step)"}[s.Stage == "next"], or(s.Dispatched, "none"), or(s.Evidence, "none"), or(s.Verdict, "none"), s.Receipts)
 		}
 	}
 	return issue + " is not tracked."

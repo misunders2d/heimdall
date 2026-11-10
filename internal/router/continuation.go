@@ -40,7 +40,15 @@ func (c *conv) continuation(ctx context.Context, e continuationEvent) {
 		c.nativeTurns = map[continuationKey]*turn{}
 	}
 	t := c.nativeTurns[key]
-	role, _, admitted := c.r.opt.Access.Decide(source.from, c.key)
+	role, _, admitted, err := c.r.opt.Access.Check(source.from, c.key)
+	if err != nil && e.accepted == nil {
+		// A background result or notice is not dropped for a moment's
+		// unreadable access files: it is checked again shortly. A start
+		// waits for its answer, so it stays fail-closed (not accepted).
+		c.r.log.Printf("background %s in %s held: %v", e.native.Phase, c.key, err)
+		time.AfterFunc(c.r.accessRetry, func() { c.send(ctx, e) })
+		return
+	}
 	valid := source.generation == c.generation[source.who] && !source.reset && !source.stopped.Load() && admitted && role == source.role
 	if !valid {
 		// A start already accepted must still end durably and stop typing even
