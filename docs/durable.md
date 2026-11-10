@@ -1,7 +1,13 @@
 # Durable commitments (MEL-763, slice 1: partial)
 
-Status: opt-in and **disabled by default**. Laptop-tested only; not deployed
-or live-accepted. Slice 1 is **partial**:
+Status (2026-11-10): **off by default in code** (`durable.enabled`).
+Production runs it enabled, with `supervisor_review` and `assistant_work` on
+and `t3_dispatch` off. The owner approved durable tasks on DBOS + SQLite on
+2026-11-08/09, and on 2026-11-10 set the direction: the "Pi Durable" path, a
+reliable, disruption- and restart-surviving system that continues
+interrupted tasks. The hub (root) is the only orchestrator of owner tasks.
+The items under "Not qualified" below are still not verified live. Slice 1
+is **partial**:
 - worker results are observed without the owner (T3 observer);
 - with `supervisor_review`, the verdict comes from a server-initiated
   review turn of the creator's harness (see Verdict);

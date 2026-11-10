@@ -12,6 +12,9 @@ harnesses. Heimdall receives a message, attaches the caller identity its
 interface verified, picks a harness (OMP, Codex, Claude, Pi or AGY), runs
 the turn in that conversation's native session, steers the running turn
 with mid-turn messages, and delivers the reply back to the same chat.
+It also keeps owner tasks as durable commitments that survive restarts
+(DBOS + SQLite, [docs/durable.md](docs/durable.md)); the hub is the only
+orchestrator of owner tasks.
 
 ```
 Telegram ─┐                      ┌─ OMP
@@ -27,8 +30,13 @@ business connectors or tool restrictions (each harness's native configuration).
 **Status:** Telegram and Slack interfaces, durable queues, caller identity,
 native sessions, steering and file delivery are implemented. Slack is tested
 against fake Web API/Socket Mode servers and fake native harnesses; the live
-Slack window is arranged separately by the orchestrator. Scheduler is phase 3.
-Linux only.
+Slack window is arranged separately by the orchestrator. The scheduler
+(phase 3a) and durable tasks are built. Production runs Heimdall from the
+main branch, with durable tasks enabled (`supervisor_review` and
+`assistant_work` on, `t3_dispatch` off; all three are off by default in
+code). CI runs vet and race tests on every change; engine upgrades are
+checked by hand against real harnesses before a release
+([INSTALL.md](deploy/contabo/INSTALL.md)). Linux only.
 
 ## Build
 
