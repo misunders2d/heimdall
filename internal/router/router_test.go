@@ -321,6 +321,16 @@ func (e *env) noReply(d time.Duration) {
 	}
 }
 
+// wantFresh is want for a turn that had to start a fresh session: the
+// chat never gets an engine/session note about it.
+func wantFresh(t *testing.T, out core.Outbound, parts ...string) {
+	t.Helper()
+	want(t, out, parts...)
+	if strings.Contains(out.Text, "did not finish cleanly") || strings.Contains(out.Text, " session:") {
+		t.Fatalf("session note in chat: %q", out.Text)
+	}
+}
+
 func want(t *testing.T, out core.Outbound, parts ...string) {
 	t.Helper()
 	for _, p := range parts {
@@ -671,7 +681,7 @@ func TestStopCancelsTurn(t *testing.T) {
 	want(t, e.reply(), "Stopping current run")
 	// The stopped session did not finish cleanly: next turn starts fresh.
 	e.send(owner, "c1", "after")
-	want(t, e.reply(), "omp#1 resumed=false", "new omp session")
+	wantFresh(t, e.reply(), "omp#1 resumed=false")
 }
 
 func TestHelpStatusAndUnknownCommand(t *testing.T) {
@@ -700,7 +710,7 @@ func TestRestartReportsInterruptedTurnAndNeverReruns(t *testing.T) {
 	want(t, out, "Heimdall restarted while omp was working", "not re-run")
 	e.noReply(500 * time.Millisecond)
 	e.send(owner, "c1", "next")
-	want(t, e.reply(), "omp#1 resumed=false", "new omp session")
+	wantFresh(t, e.reply(), "omp#1 resumed=false")
 }
 
 func TestPendingMessagesRunAfterRestart(t *testing.T) {
@@ -896,7 +906,7 @@ func TestRestartBeforeReadyNeverResumesSession(t *testing.T) {
 	e.start()
 	want(t, e.reply(), "Heimdall restarted while omp was working")
 	e.send(owner, "c1", "next")
-	want(t, e.reply(), "omp#1 resumed=false", "new omp session")
+	wantFresh(t, e.reply(), "omp#1 resumed=false")
 }
 
 func TestFailureBeforeReadyKeepsSessionResumable(t *testing.T) {
@@ -1112,8 +1122,8 @@ func TestCancelClearsOnlyTheCallersQueue(t *testing.T) {
 	e.noReply(500 * time.Millisecond)
 }
 
-// reset makes the caller's next message start a fresh session, without the
-// "did not finish cleanly" note, stops the caller's own running turn and
+// reset makes the caller's next message start a fresh session, with no
+// session note, stops the caller's own running turn and
 // leaves other callers' sessions alone.
 func TestResetStartsAFreshSession(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp", "codex"}, "omp", "codex")
@@ -1732,7 +1742,7 @@ func TestStopDuringClaudeDrain(t *testing.T) {
 	e.send(owner, "c1", "!stop")
 	want(t, e.reply(), "Stopping current run")
 	e.send(owner, "c1", "after")
-	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
+	wantFresh(t, e.reply(), "claude#1 resumed=false")
 }
 
 // A late Claude turn that fails keeps the first answer with a note, and the
@@ -1746,7 +1756,7 @@ func TestClaudeLateTurnFailureKeepsTheAnswer(t *testing.T) {
 	want(t, out, "claude#1 resumed=false", "\n\n(a later message was not answered: Claude reported an error: fake late failure)")
 	unsigned(t, out)
 	e.send(owner, "c1", "after")
-	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
+	wantFresh(t, e.reply(), "claude#1 resumed=false")
 }
 
 // The reply keeps each answer Claude and Codex gave in one turn: Claude's
@@ -1950,7 +1960,7 @@ func TestClaudeLateTurnExitWithoutResult(t *testing.T) {
 	want(t, out, "claude#1 resumed=false", "\n\n(a later message was not answered: Claude exited without answering it)")
 	unsigned(t, out)
 	e.send(owner, "c1", "after")
-	want(t, e.reply(), "claude#1 resumed=false", "new claude session")
+	wantFresh(t, e.reply(), "claude#1 resumed=false")
 }
 
 func TestIngressControlReceiptReplies(t *testing.T) {

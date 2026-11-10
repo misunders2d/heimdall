@@ -517,3 +517,47 @@ func TestNativeLossKeepsDifferentCallersSeparate(t *testing.T) {
 	eventuallyTrue(t, "both callers settled", e.r.Idle)
 	assertNoRunningNative(t, e)
 }
+
+// A native task that settles cleanly leaves the session clean: the next
+// message resumes the same native session on the same live process, with
+// no new-session note.
+func TestNativeTaskSettledKeepsSessionClean(t *testing.T) {
+	e := continuationEnv(t, "telegram")
+	who := core.Principal{Platform: "fake", ID: "owner"}
+	conv := core.ConvKey{Interface: "telegram", Chat: "42"}
+	e.sendIn(who, conv, "BACKGROUND BG_TERMINAL_ONLY")
+	want(t, e.reply(), "turn=1")
+	eventuallyTrue(t, "native task settled", e.r.Idle)
+	e.noReply(100 * time.Millisecond)
+	db, err := sql.Open("sqlite", "file:"+e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM turns WHERE state='done' AND detail='native task completed'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("native task turns n=%d err=%v", n, err)
+	}
+	var id string
+	var clean bool
+	if err := db.QueryRow(`SELECT native_id,clean FROM sessions WHERE harness='claude'`).Scan(&id, &clean); err != nil {
+		t.Fatal(err)
+	}
+	e.sendIn(who, conv, "next question")
+	a := e.reply()
+	want(t, a, "turn=2")
+	if strings.Contains(a.Text, "session") {
+		t.Fatalf("session note in chat: %q", a.Text)
+	}
+	pids, _ := os.ReadFile(filepath.Join(e.state, "pids"))
+	if len(strings.Fields(string(pids))) != 1 {
+		t.Fatalf("worker replaced: %s", pids)
+	}
+	var after string
+	if err := db.QueryRow(`SELECT native_id FROM sessions WHERE harness='claude'`).Scan(&after); err != nil || after != id {
+		t.Fatalf("session %q, was %q: %v", after, id, err)
+	}
+	if !clean {
+		t.Fatal("settled native task left the session not clean")
+	}
+}
