@@ -16,6 +16,10 @@ It also keeps owner tasks as durable commitments that survive restarts
 (DBOS + SQLite, [docs/durable.md](docs/durable.md)); the hub is the only
 orchestrator of owner tasks.
 
+Goal (owner, 2026-11-10): Heimdall is the gateway. Harnesses stay
+unconstrained except by their own tool guards and limits. Switching harness
+or provider must not affect jobs, reminders, tasks or memory.
+
 ```
 Telegram ─┐                      ┌─ OMP
 Slack    ─┼─► Heimdall ──────────┼─ Codex

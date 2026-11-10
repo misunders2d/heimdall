@@ -14,6 +14,15 @@ are gated per user, so the core requirement is conveying the
 interface-verified caller identity to each harness process reliably, in the
 form those tools read, never only as prompt text.
 
+**Goal confirmed by the owner, 2026-11-10:** Heimdall is the gateway.
+Harnesses stay unconstrained except by their own tool guards and limits.
+Switching harness or provider must not affect jobs, reminders, tasks or
+memory. In his words: "heimdall is the gateway, but harnesses remain
+unconstrained, only by their own internal tool guards, limitations etc. I am
+free to switch to whatever harness/provider I want without having to worry
+about anytihng else - jobs, reminders, memories etc continue as if never
+happened."
+
 Its whole job, per message:
 
 1. receive it from an interface;
