@@ -64,7 +64,7 @@ existing native run/lifetime limits. Pending person starts have their own
 cancellation scope: stop/reset and router shutdown cancel that request before
 releasing the native gate. They cannot launch or send stopped input after the
 background process exits. A failed warm reuse always starts a new session, even
-if retirement already consumed its background flags; the reply says so. Native result UUIDs are
+if retirement already consumed its background flags; the service log says so, never the chat. Native result UUIDs are
 deduplicated within a bounded recent window. Session, replay and subagent checks
 remain enforced by the existing adapters.
 

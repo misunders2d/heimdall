@@ -148,7 +148,7 @@ func (c *conv) continuation(ctx context.Context, e continuationEvent) {
 		if e.native.Notice == "killed" {
 			state = store.TurnCancelled
 		}
-		c.settle(ctx, t, store.TurnEnd{State: state, Harness: e.harness, Session: e.native.Result.SessionID, Detail: "native task " + e.native.Notice})
+		c.settle(ctx, t, store.TurnEnd{State: state, Harness: e.harness, Session: e.native.Result.SessionID, Clean: state == store.TurnDone, Detail: "native task " + e.native.Notice})
 		return
 	}
 	d := doneEvent{t: t, harness: e.harness, res: e.native.Result}

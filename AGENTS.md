@@ -230,8 +230,9 @@ the `heimdall-live` unit.
   an interface acknowledges a message upstream. A turn interrupted by a
   restart is reported to its chat and never re-run; messages that never
   started run after the restart. A native session is resumed only when its
-  last turn finished cleanly (AgentNet's rule); otherwise a fresh session
-  starts and the reply says so. Outbound delivery is at-least-once: a crash
+  last turn finished cleanly (AgentNet's rule), native tasks that settled
+  done included; otherwise a fresh session starts, noted in the service log
+  only (owner, 2026-11-10: no engine/session notes in chat). Outbound delivery is at-least-once: a crash
   between a successful platform send and its local acknowledgement can repeat
   that one message. Say so; never claim exactly-once.
   A failed turn-end write is retried 5 times (backoff from 250 ms); if it
