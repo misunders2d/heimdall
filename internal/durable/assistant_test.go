@@ -52,9 +52,19 @@ func TestAssistantWorksWithoutT3(t *testing.T) {
 		s := a.seen()
 		return slices.Contains(s, "MEL-70/1/work/2") && slices.Contains(s, "MEL-71/1/work/1")
 	})
-	st, _ := e.rt.State("MEL-71")
-	if st.Phase != PhaseWorking || st.Next != "next wake in 1h0m0s: recheck stock" {
-		t.Fatalf("%+v", st)
+	// The fake records the wake when it is called; the workflow persists
+	// its WAIT just after. Wait for that state, not only the call.
+	var st State
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, _ = e.rt.State("MEL-71")
+		if st.Phase == PhaseWorking && st.Next == "next wake in 1h0m0s: recheck stock" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%+v", st)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	e.close() // restart during MEL-70's second wait
 
