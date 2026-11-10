@@ -537,7 +537,7 @@ func TestScheduledWakeUsesCurrentSourceConversationHarness(t *testing.T) {
 			// neither may replace the bound source's routing preference.
 			want(t, e.ask(group, "!use codex"), "now uses codex")
 			e.sendIn(core.Principal{Platform: "fake", ID: "employee"}, core.ConvKey{Interface: "telegram", Chat: "2"}, "!use codex")
-			want(t, e.reply(), "now uses codex")
+			want(t, e.reply(), "Only the owner can change this conversation's harness.")
 			// Old synthetic-conversation state must never supply a preference.
 			if err := e.st.AnswerCommand(0, core.ConvKey{Interface: "telegram", Chat: core.SchedChat(id)}, store.CommandEnd{SetHarness: true, Harness: "codex"}); err != nil {
 				t.Fatal(err)
