@@ -49,6 +49,8 @@ const usage = `usage:
       offline validation; missing employee account is a warning
   heimdall sched list|show ID|health|export -config FILE
       scheduled jobs: list, one job, health JSON (exit 1 on any issue), definitions as JSON
+  heimdall sched tasks -config FILE -json
+      the running service's durable task queue as JSON (root admin, read-only)
   heimdall sched control -socket PATH
       one owner-authenticated JSON operation from stdin; no direct store access
   heimdall sched mcp -socket PATH
@@ -205,6 +207,7 @@ func run(args []string) error {
 			jobs.Tasks = func(who scheduler.Caller, action, issue, title, requestID string) (string, bool) {
 				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered}, action, issue, title, requestID)
 			}
+			jobs.TaskExport = func() ([]byte, error) { return work.Export(time.Now()) }
 			// Owner turns admit accepted work themselves only when the
 			// control is configured and wakes work it (no owner babysitting).
 			jobs.TaskIntake = cfg.Scheduler.On() && cfg.Scheduler.Control != nil && cfg.Durable.Assistant
@@ -389,7 +392,8 @@ func schedulerConfig(cfg *config.Config, interfaces []string) scheduler.Config {
 	}
 	return scheduler.Config{DefaultTZ: c.DefaultTZ, MaxConcurrent: c.MaxConcurrent, PerCreator: c.PerCreator,
 		GraceRecurring: time.Duration(c.GraceRecurringSeconds) * time.Second, GraceOneOff: time.Duration(c.GraceOneOffSeconds) * time.Second,
-		PauseAfter: c.PauseAfter, EmployeeHarnesses: cfg.EmployeeHarnesses, Interfaces: interfaces}
+		PauseAfter: c.PauseAfter, EmployeeHarnesses: cfg.EmployeeHarnesses, Interfaces: interfaces,
+		Checkers: harness.Checkers{Dir: c.CheckersDir, Accounts: harness.Accounts{RunAs: cfg.RunAs}}}
 }
 
 // sched is the operator's view of scheduled jobs. It works whether the
@@ -397,6 +401,9 @@ func schedulerConfig(cfg *config.Config, interfaces []string) scheduler.Config {
 func sched(args []string) error {
 	if len(args) > 0 && (args[0] == "control" || args[0] == "mcp") {
 		return schedControl(args)
+	}
+	if len(args) > 0 && args[0] == "tasks" {
+		return schedTasks(args[1:], os.Stdout)
 	}
 	if len(args) == 0 {
 		return errors.New("usage: heimdall sched list|show ID|health|export -config FILE")

@@ -709,8 +709,9 @@ func minTime(a, b time.Time) time.Time {
 }
 
 func freshAfterWorkerLoss(s *Spec) {
-	if s.Session.Resume {
-		s.freshWarning = "The native worker ended or changed; this input started a fresh session. Existing work was not re-run."
+	if s.Session.Resume && s.Log != nil {
+		// Engine internals: the service log only, never the chat.
+		s.Log("new " + s.Harness + " session: the native worker ended or changed")
 	}
 	s.Session = Session{ID: NewSessionID(s.Harness)}
 }

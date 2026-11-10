@@ -256,6 +256,9 @@ func (s *Scheduler) material(c Caller, a, b Def) string {
 	if a.RerunOnTimeout != b.RerunOnTimeout {
 		rows = append(rows, fmt.Sprintf("Repeat-safe timeout rerun: %t → %t", a.RerunOnTimeout, b.RerunOnTimeout))
 	}
+	if checker(a) != checker(b) {
+		add("Checker", or(checker(a), "none"), or(checker(b), "none"))
+	}
 	// Retain material option visibility without dumping execution internals or JSON.
 	aa, bb := a, b
 	aa.Name, bb.Name, aa.Summary, bb.Summary, aa.Prompt, bb.Prompt, aa.Text, bb.Text, aa.To, bb.To, aa.TZ, bb.TZ = "", "", "", "", "", "", "", "", "", "", "", ""
@@ -263,10 +266,19 @@ func (s *Scheduler) material(c Caller, a, b Def) string {
 	aa.RerunOnTimeout, bb.RerunOnTimeout = false, false
 	aa.Until, bb.Until, aa.Timeout, bb.Timeout = "", "", "", ""
 	aa.Quiet, bb.Quiet = false, false
+	aa.Check, bb.Check = nil, nil
 	if mustJSON(aa) != mustJSON(bb) {
 		rows = append(rows, "Execution or delivery settings: changed (see Details).")
 	}
 	return strings.Join(rows, "\n")
+}
+
+// checker is a watch job's checker name, or "".
+func checker(d Def) string {
+	if d.Check == nil {
+		return ""
+	}
+	return d.Check.Checker
 }
 
 // Human receipts use one local time. Operator Details retain UTC as well.

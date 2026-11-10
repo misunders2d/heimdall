@@ -33,7 +33,7 @@ Principles:
 |---|---|---|
 | `agent` | a harness turn with the job's prompt | the answer, plus files in `out/` |
 | `notify` | nothing; fixed text | the text |
-| `watch` (3b) | a checker script or an inbound-event rule | on a match: a fixed notice, or an agent turn |
+| `watch` (3b) | an owner-installed checker script, no AI turn (built, §6.0); planned: an inbound-event rule | the script's output when it prints any; nothing otherwise |
 
 ### 2.2 Definition
 
@@ -68,7 +68,7 @@ One JSON object, used by `!job add`, `!job edit` and model drafts (§5). The sam
 | `harness` | Empty: the creator-bound source conversation's current `!use` selection at turn start, or the default order when unset; fallback only before the ready signal. A name: that harness only, no fallback (AGENTS.md "Harness choice"). |
 | `quiet` | If the answer is exactly `NO_UPDATE`, nothing is sent and the run is `quiet`. |
 | `grace` | How late a slot may start. Defaults: 2 h recurring, 24 h one-off. |
-| `until` | Expiry date or duration. Optional for jobs, required for watches. |
+| `until` | Expiry date or duration. Optional. (Planned as required for watches; checker watch jobs as built do not require it, §6.0.) |
 | `expect` | Deterministic result checks (§3.8). |
 | `overlap` | `skip` (default) or `queue_one` (§3.4). |
 | `session` | `fresh` (default): a new native session each run. `job`: resume the job's stored native transcript, only if its last run ended cleanly. No process stays resident either way. |
@@ -272,6 +272,18 @@ People ask in plain language ("remind me every Monday at 9 to …"). The harness
 This replaces Pi's model-called `schedule_*` tools. With those tools, a prompt-injected model could schedule directly (`extensions/scheduler.ts:1128-1170`).
 
 ## 6. Watches (phase 3b)
+
+### 6.0 Checker watch jobs, as built (2026-11-10)
+
+Owner, 2026-11-10: "no compromises, heimdall is supposed to handle all the reminders, recurring tasks etc. make sure we're not overcomplicating things. or would you rather suggest thousands of systemd timers that pile up?" Recurring checks are Heimdall jobs, not system timers. This build is the checker part of 3b, simplified; where it differs from §6.1–6.3 below, this section describes the code. Event watches, cursors, `params`, the stdin/stdout JSON contract, debounce, rate caps and prompt mode (output handed to an AI turn) are not built.
+
+- **Job.** `{"name":"Competitor deals","kind":"watch","check":{"checker":"competitor-deals"},"schedule":{"every":"15m"},"to":"slack:C…","overlap":"skip","summary":"…"}`. The job carries only the checker's name, never arguments or a path. Owner jobs only (an employee is refused, at creation and at every fire). Refused on a watch job: `prompt`, `text`, an `agentnet:` target, `checkpoint`, `harness`, `quiet`, `expect`, `idempotent`, `rerun_on_timeout`, `session: job`, an unknown or unusable checker. `timeout` is allowed: 10 s to 10 min, default 60 s. No `until` is required. A model's proposal from a direct owner turn in a private chat applies at once; in a group the confirmation card applies (§5).
+- **Checkers.** One config key, `scheduler.checkers_dir` (a clean absolute path; unset: watch jobs are refused with that reason). A checker's name is a file name in it matching `^[a-z0-9][a-z0-9-]{0,62}$`, resolved at every run, so a new checker needs no restart. The directory must be a real directory owned by root and not group- or world-writable; the file a regular executable owned by root or the `run_as.owner` account, not group- or world-writable; a symlink only to a file directly in the directory. Anything else fails the run with a fixed cause (and refuses creation or an edit). A checker needing arguments or secrets is a small wrapper script in the directory (deploy/contabo/INSTALL.md).
+- **Run.** As `run_as.owner`, with no arguments and no stdin, in that account's working directory, with an environment rebuilt from the account: `HOME`, `USER`, `PATH`, `LANG` and `TZ` (when Heimdall has them), the identity variables of the creator for the target conversation (`docs/hub-parity.md`) and `MEMENTO_PROCESSING=1`; never `HEIMDALL_*`, `INFISICAL_*` or anything else of Heimdall's. Own process group with `Pdeathsig`; at the time limit the whole group is killed (descendants that left it too); output pipes are waited for at most 5 s after exit or kill, so a child holding stdout cannot hang the run. Stdout is read up to 256 KiB.
+- **Result.** Exit 0 and empty output (after trimming): run `quiet`, nothing sent. Exit 0 and text: the text is delivered to the target as plain text, like a notify job; over 3500 bytes, the first 3500 bytes cut at a UTF-8 boundary plus a last line `… (cut: output too long)`, and the run is `ok`. A non-zero exit, a signal, a timeout, output over 256 KiB, output that is not UTF-8, a process left holding the output, or an unusable checker: run `failed` with a fixed cause; the first stderr line, scrubbed, appears only in private notices and private `!job history`. Single failures send no notice; the `pause_after`-th failure in a row pauses the job with one notice (to the target and the notice chat, §2.3). A creator refusal (§4) keeps its identity notice.
+- **Concurrency.** Each check runs in its own goroutine, never inside the due loop and never through the router. Checks have their own cap of 2, outside `max_concurrent` and `per_creator`: an agent turn never blocks a check, and a slow check never delays another job. `overlap` and one run per job still apply.
+- **Kept rules.** Outside the `delivery_window` the run is `skipped` and the checker does not run. A drain's hold is checked in the transaction that starts the check; `heimdall drain` waits for running checks. A one-off ends `done`. Output is dropped (run `cancelled`) when the job was edited, paused or removed during the check. `!job stop` and `!job rm` kill the running check: by the scheduler's stop, or at the due loop's next look when the command's transaction cancelled its row. At shutdown checks are killed and nothing is written; at the next start `Recover` marks the run `interrupted`, with a notice, and never re-runs it. `pause`, `resume`, `run`, `history` and `show` work as for other jobs.
+- **Store.** No schema step: `kind` is text and a watch run has no inbound message (`inbound_id` NULL). No new dependency.
 
 There is exactly one Slack Socket Mode consumer and one Telegram poller: Heimdall's. A second consumer would steal events. Slack may send any event to any of up to 10 connections, and on Telegram a higher getUpdates offset confirms and forgets earlier updates.
 
@@ -480,7 +492,7 @@ Defaults:
 - grace 2 h recurring / 24 h one-off;
 - 3 retries before the ready signal;
 - `pause_after` 3;
-- watch `until` 7 days (maximum 90);
+- watch `until` 7 days (maximum 90) (planned for event watches; checker watch jobs as built require no `until`, §6.0);
 - quiet token `NO_UPDATE`;
 - `rm` stops a running run.
 
@@ -517,6 +529,8 @@ Defaults:
 3. Event rules over stored inbound and ambient messages.
 4. Actions, debounce, rate cap, expiry warning, renew, `max_events`, stale-watch health.
 5. One example checker documented (inputs, outputs). Real checkers live outside the repo.
+
+Built 2026-11-10 (§6.0): item 1 without the JSON contract (plain output, checkers resolved from `scheduler.checkers_dir`), and item 5 as the wrapper example in deploy/contabo/INSTALL.md. Items 2–4 are not built.
 
 ### Size estimate
 
@@ -677,6 +691,8 @@ For 3b, add:
 
 ## 16. Rules for AGENTS.md (add in 3a)
 
+(The watch rule below was the 3a plan; AGENTS.md now records the checker watch jobs of §6.0 and the owner's rule that recurring checks are Heimdall jobs, not system timers.)
+
 - Jobs run as their creator; role and admission are evaluated at every fire. Slack creators are re-verified live. Never another identity.
 - One run per job and slot: `UNIQUE(job_id, slot)` in the same transaction that creates the run. Delivery is at-least-once.
 - Scheduled turns:
@@ -713,7 +729,7 @@ Built on `main` 4f3f7e8, rebased onto `main` fe58149 (employee Google sign-in, `
 - A harness that asks for interactive input in a scheduled run (Pi's pack `ask_user_question` tool reaches native UI because RPC mode has a UI; an approval; a sign-in, since scheduled turns relay none) ends the turn at once with nothing answered. The run is `failed` with the cause `needs_human: …` in `!job history` and the failure notice; it counts towards `pause_after` and is not retried.
 - A scheduled run's own notes (the quiet instruction, the AgentNet delivery instruction) follow its prompt in the native message on every harness. As turn context, live Pi ignored the quiet instruction.
 - Heimdall's own notice follows the answer; an answer that was only the block is replaced by the immediate status line or, where confirmation is required, the draft card.
-- `scheduler.checkers` is not accepted until 3b.
+- `scheduler.checkers` (the planned map) is never accepted; 3b as built uses `scheduler.checkers_dir` (§6.0).
 - Size (before the review fixes below): about 2,800 non-comment Go lines (3,300 with comments) against the ~1,520 estimate; the operator CLI, the DST evaluation and the role checks of every command are the difference. No dependency beyond gronx.
 
 **Review fixes (independent review, 2026-11-03)**

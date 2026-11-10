@@ -216,5 +216,8 @@ func TestSlackRestartDoesNotReplayStartedTurn(t *testing.T) {
 	// The fake recognizes WAIT_STEER even inside live history. Finish its
 	// second synthetic run explicitly; real harnesses receive it as untrusted.
 	f.push(f.event("D1", "im", "Uowner", "FINISH", work.TS))
-	waitFor(t, "fresh after restart", func() bool { return f.hasText("previous turn there did not finish cleanly") })
+	waitFor(t, "fresh after restart", func() bool { return f.hasText("resumed=false") })
+	if f.hasText("did not finish cleanly") {
+		t.Fatal("session note in chat")
+	}
 }

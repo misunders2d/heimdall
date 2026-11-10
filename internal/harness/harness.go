@@ -130,8 +130,6 @@ type Spec struct {
 	ScheduledJob string
 	ScheduledRun int64
 
-	freshWarning string
-
 	// Continuation receives native work emitted without a new person input.
 	// The callback stays bound to this exact caller, conversation and outbox.
 	// A start returns true only after durable acceptance; false stops its process.
@@ -226,8 +224,6 @@ type Run struct {
 	scheduledJob     string // trusted scheduled origin; see Spec.ScheduledJob
 	scheduledRun     int64
 	controlProcess   *os.File // spawn-time pidfd, control authority only
-
-	startWarning string
 
 	continuation func(Continuation) bool
 	progress     func(Progress)
@@ -440,7 +436,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	cmd.Dir, cmd.Env = spec.Launch.Dir, env
 	setProcAttr(cmd, spec.Launch.Cred)
 	cmd.WaitDelay = 5 * time.Second
-	r := &Run{schedulerControl: spec.SchedulerControl, scheduledJob: spec.ScheduledJob, scheduledRun: spec.ScheduledRun, startWarning: spec.freshWarning, contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
+	r := &Run{schedulerControl: spec.SchedulerControl, scheduledJob: spec.ScheduledJob, scheduledRun: spec.ScheduledRun, contextDir: contextDir, caller: spec.Caller, harness: spec.Harness, cmd: cmd, ctx: runCtx, cancel: cancel, done: make(chan struct{}), exited: make(chan struct{}), grace: ExitGrace, term: TermGrace, log: spec.Log}
 	r.stderr.max = 4 << 10
 	cmd.Stderr = &r.stderr
 	expected := ""
@@ -657,9 +653,6 @@ func (r *Run) logf(format string, args ...any) {
 }
 
 func (r *Run) finalize(res Result) {
-	if r.startWarning != "" {
-		res.Warning = joinWarnings(res.Warning, r.startWarning)
-	}
 	r.settle.Do(func() {
 		switch {
 		case res.Answer == "":

@@ -235,8 +235,9 @@ the `heimdall-live` unit.
   an interface acknowledges a message upstream. A turn interrupted by a
   restart is reported to its chat and never re-run; messages that never
   started run after the restart. A native session is resumed only when its
-  last turn finished cleanly (AgentNet's rule); otherwise a fresh session
-  starts and the reply says so. Outbound delivery is at-least-once: a crash
+  last turn finished cleanly (AgentNet's rule), native tasks that settled
+  done included; otherwise a fresh session starts, noted in the service log
+  only (owner, 2026-11-10: no engine/session notes in chat). Outbound delivery is at-least-once: a crash
   between a successful platform send and its local acknowledgement can repeat
   that one message. Say so; never claim exactly-once.
   A failed turn-end write is retried 5 times (backoff from 250 ms); if it
@@ -298,8 +299,17 @@ the `heimdall-live` unit.
     shared channels.
   - AgentNet: owner jobs may name an address; the agent delivers; Heimdall
     never talks to AgentNet.
-  - Watches (3b): deterministic checkers from config only, running as the
-    creator, with an expiry. One Slack consumer and one Telegram poller.
+  - Recurring checks belong in Heimdall jobs, not system timers (owner,
+    2026-11-10: Heimdall handles all reminders and recurring tasks).
+  - Watch jobs (3b, checker part): an owner job names a checker, a file in
+    `scheduler.checkers_dir` resolved at every run (root-owned directory,
+    not group/world-writable; no arguments or paths in the job). It runs as
+    `run_as.owner` with a minimal rebuilt environment, no AI turn, its own
+    cap of 2 outside `max_concurrent`/`per_creator`; empty output is quiet,
+    text is delivered plain (cut at 3500 bytes), failures speak only at
+    `pause_after`, stderr only privately. No `until` required. Event watches,
+    cursors and prompt mode are not built. One Slack consumer and one
+    Telegram poller.
   - `PI_SCHEDULER_TOOLS=0` on Pi and OMP turns while the scheduler is
     enabled. Production restarts run `heimdall drain` first; its hold
     applies where a run's turn starts.
@@ -411,5 +421,6 @@ thinking stream and live-session reply registration.
    interface (end to end on the development machine).
 2. Slack interface. AgentNet stays separate and is never a Heimdall interface.
 3. Scheduler (jobs carry and run as their creator): 3a built (jobs,
-   drafts, Pi tool switch); 3b watches next.
+   drafts, Pi tool switch); 3b checker watch jobs built; event watches,
+   cursors and prompt mode not built.
 4. Production cutover (done: production runs Heimdall).

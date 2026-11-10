@@ -307,6 +307,21 @@ from a live private-chat message applies at once; in a group the owner confirms
 it too). Removal follows `!job rm`
 authority and running-run behavior; discard leaves the job untouched.
 
+**Watch jobs** run a script with no AI turn and speak only when it has
+something to say. Recurring checks belong here, not in system timers. An
+owner installs an executable in `scheduler.checkers_dir` (a root-owned
+directory; see [deploy/contabo/INSTALL.md](deploy/contabo/INSTALL.md)) and
+names it: `{"name":"Competitor deals","kind":"watch","check":{"checker":"competitor-deals"},"schedule":{"every":"15m"},"to":"slack:C…"}`.
+The checker is looked up at every run, so a new one needs no restart. It runs
+as `run_as.owner` with no arguments, no stdin and a minimal environment
+(`HOME`, `USER`, `PATH`, `LANG`, `TZ`, the identity variables,
+`MEMENTO_PROCESSING=1`), for at most `timeout` (default 60 s, 10 s to 10 min).
+Exit 0 with no output: nothing is sent. Exit 0 with text: the text goes to the
+target as plain text (first 3500 bytes, then a "cut" line). Anything else is a
+failed run; after `pause_after` failures in a row the job pauses with one
+notice, and the script's stderr appears only in private notices. A checker
+that needs arguments or secrets is a small wrapper script in that directory.
+
 Runs deliver to their target with no typing or progress, never capture
 memory, and send failures as fixed notices. Operators:
 `heimdall sched list|show <id>|health|export -config FILE`, and

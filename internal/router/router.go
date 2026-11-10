@@ -552,7 +552,11 @@ type conv struct {
 	continuations []continuationEvent
 	nativeTurns   map[continuationKey]*turn
 	losses        map[lossKey]bool
-	delivered     map[string]deliveredState // c.mu; exact native process scoped cursors
+	// caller + harness: their last person turn ended done and resumable,
+	// so a native task that settles cleanly behind it may leave the
+	// session clean too.
+	personClean map[string]bool
+	delivered   map[string]deliveredState // c.mu; exact native process scoped cursors
 
 	r      *Router
 	key    core.ConvKey
@@ -1700,7 +1704,8 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		default:
 			sess.ID = harness.NewSessionID(h)
 			if prev != "" {
-				notes = append(notes, "new "+h+" session: the previous turn there did not finish cleanly")
+				// Engine internals: the service log only, never the chat.
+				c.r.log.Printf("turn %d in %s: new %s session: the previous turn there did not finish cleanly", t.id, c.key, h)
 			}
 		}
 		sessionNote := c.sessionPointer(t, h, sess, launch, batch[0].row.MCPControl)
@@ -2291,9 +2296,22 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 // frees its slot.
 func (c *conv) settle(ctx context.Context, t *turn, e store.TurnEnd) {
 	e.Files = c.r.splitCaptions(e.Files)
-	if t.detached {
+	if e.Harness != "" {
+		key := t.who + "\x00" + e.Harness
+		if t.detached {
+			// Never overwrite a newer running session binding, and never
+			// clean a session behind a person turn that did not end clean.
+			e.PreserveSession = true
+			e.Clean = e.Clean && c.personClean[key]
+		} else {
+			if c.personClean == nil {
+				c.personClean = map[string]bool{}
+			}
+			c.personClean[key] = e.State == store.TurnDone && e.Clean && !e.Forget
+		}
+	} else if t.detached {
 		e.PreserveSession = true
-	} // never overwrite a newer running session binding
+	}
 	c.endTurn(ctx, t, e)
 	if t.startCancel != nil {
 		t.startCancel()

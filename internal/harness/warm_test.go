@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -536,9 +537,15 @@ func TestFailedGenericWaitWithoutLeaseAlwaysStartsFresh(t *testing.T) {
 			s.Prompt = "AFTER_WAIT_LIMIT"
 			s.Timeout = 200 * time.Millisecond
 			s.LiveWorkerOnly = nil
+			var logged []string
+			var mu sync.Mutex
+			s.Log = func(line string) { mu.Lock(); logged = append(logged, line); mu.Unlock() }
 			next := pooledTurn(t, p, ctx, s)
-			if !strings.Contains(next.Result().Warning, "fresh session") {
-				t.Fatal("fresh session was not reported")
+			mu.Lock()
+			reported := strings.Contains(strings.Join(logged, "\n"), "new "+name+" session: the native worker ended or changed")
+			mu.Unlock()
+			if !reported || strings.Contains(next.Result().Warning, "session") {
+				t.Fatalf("fresh session logged %t, chat warning %q", reported, next.Result().Warning)
 			}
 			if next.Result().SessionID == previous {
 				t.Fatal("failed no-lease reuse cold-resumed interrupted session")
