@@ -84,7 +84,9 @@ func (r *Runtime) Task(c Caller, action, issue, title, requestID string) (reply 
 		return reply, reply == "Sent close to "+up+"." || strings.HasPrefix(reply, up+" paused by owner.") || reply == up+" resumed."
 	case "add":
 		f := strings.Fields(title)
-		if len(f) == 0 || strings.Contains(f[0], "=") || strings.Contains(title, "| next:") || strings.ContainsAny(issue, " \t\r\n") {
+		// Checked as Command re-splits it (whitespace collapsed to single
+		// spaces), so "|  next:" or "|\tnext:" cannot smuggle a next step.
+		if len(f) == 0 || strings.Contains(f[0], "=") || strings.Contains(strings.Join(f, " "), "| next:") || strings.ContainsAny(issue, " \t\r\n") {
 			return "A task needs a plain title: no worker, resource, gate or next step from a tool call.", false
 		}
 		reply = r.Command(c, "add "+issue+" "+title)
