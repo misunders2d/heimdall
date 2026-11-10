@@ -2,6 +2,7 @@ package durable
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -157,6 +158,11 @@ func TestWakeClassesAreBounded(t *testing.T) {
 // automatic rejections stop the task; each stop is one line.
 func TestWaitsAndRejectionsAreCapped(t *testing.T) {
 	fastWakes(t)
+	if maxWaits != 100 {
+		t.Fatalf("production wait cap %d, want 100", maxWaits)
+	}
+	maxWaits = 5 // the same rule, without 100 real wakes
+	t.Cleanup(func() { maxWaits = 100 })
 	repo, _ := gitRepo(t)
 	a := &planAssistant{def: func(key string) WorkResult {
 		if strings.HasPrefix(key, "MEL-95/") {
@@ -166,23 +172,23 @@ func TestWaitsAndRejectionsAreCapped(t *testing.T) {
 	}}
 	e := open(t, t.TempDir(), Options{Assistant: a, Silence: -1})
 	defer e.close()
-	for _, q := range e.rt.queues { // 100 queued wakes: poll faster than DBOS's 1 s
+	for _, q := range e.rt.queues { // queued wakes: poll faster than DBOS's 1 s
 		if err := q.SetPollingInterval(e.rt.ctx, 10*time.Millisecond); err != nil {
 			t.Fatal(err)
 		}
 	}
 	e.cmd("add MEL-95 Wait forever")
 	e.cmd("add MEL-96 gate=git:" + repo + " Bad evidence")
-	waitFor(t, 120*time.Second, "100 waits", func() bool {
+	waitFor(t, 30*time.Second, "capped waits", func() bool {
 		st, _ := e.rt.State("MEL-95")
 		return st.Phase == PhaseHeld
 	})
-	e.held("MEL-95", "100 wakes of attempt 1 ended in WAIT")
+	e.held("MEL-95", fmt.Sprintf("%d wakes of attempt 1 ended in WAIT", maxWaits))
 	if n := len(a.seen("MEL-95/")); n != maxWaits {
 		t.Fatalf("wakes %d", n)
 	}
 	waitFor(t, 10*time.Second, "wait line", func() bool {
-		return len(outbound(t, e.dir, `(MEL-95) needs you: it checked back 100 times without finishing.`)) == 1
+		return len(outbound(t, e.dir, fmt.Sprintf(`(MEL-95) needs you: it checked back %d times without finishing.`, maxWaits))) == 1
 	})
 	st := e.held("MEL-96", "3 results in a row were rejected")
 	if st.Attempt != 4 {

@@ -213,11 +213,13 @@ const reviewRetries = 3
 // Caps (owner, 2026-11-10: "3 tries, then ask"). At a cap the task stops
 // and the owner gets one line; !work retry resets the counters.
 const (
-	maxFailedWakes = 3   // wakes in a row that failed (not started, cut off, malformed)
-	maxMalformed   = 2   // malformed answers in a row
-	maxRejections  = 3   // rejections of automatic reports or by the supervisor, one stage
-	maxWaits       = 100 // WAIT wakes of one attempt
+	maxFailedWakes = 3 // wakes in a row that failed (not started, cut off, malformed)
+	maxMalformed   = 2 // malformed answers in a row
+	maxRejections  = 3 // rejections of automatic reports or by the supervisor, one stage
 )
+
+// maxWaits caps the WAIT wakes of one attempt (a variable for tests).
+var maxWaits = 100
 
 // patchWakeRules gates the bounded wake rules, continuation wakes and the
 // owner's one-line stop notice (docs/durable.md, upgrade policy). A
