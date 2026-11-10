@@ -205,12 +205,28 @@ func TestNativeBackgroundSurvivesRestartAsInterruption(t *testing.T) {
 			}
 			e.sendIn(who, conv, prompt)
 			want(t, e.reply(), "turn=1")
+			if stage == "notification-gap" {
+				// Restart only inside the gap: the router has taken the
+				// task's notification, which starts the follow-through as
+				// a new running continuation turn (person turn, task
+				// start, notification), and no result comes.
+				eventuallyTrue(t, "notification taken", func() bool {
+					return countTurns(t, e, `chat='42'`) == 3 && countTurns(t, e, `chat='42' AND state='running'`) == 1
+				})
+			}
 			e.sendIn(who, conv, "!status")
 			want(t, e.reply(), "native background turn")
 			id, clean, err := e.st.Session(conv, who.Key(), "claude")
 			if err != nil || id == "" || clean {
 				t.Fatalf("background binding was clean: %q %v %v", id, clean, err)
 			}
+			// Stop only after the status reply is recorded as sent, as a
+			// production restart drains first: a stop between its send and
+			// that record resends it after the restart (at-least-once).
+			eventuallyTrue(t, "replies recorded", func() bool {
+				n, err := e.st.Undelivered()
+				return err == nil && n == 0
+			})
 			e.stop()
 			stopOnce.Delete(e.st)
 			e.start()
@@ -275,6 +291,21 @@ func TestWarmPendingApprovalNeverFallsBack(t *testing.T) {
 		t.Fatalf("approval fell back: %s", e.logs.String())
 	}
 	e.noReply(100 * time.Millisecond)
+}
+
+// countTurns counts the turns rows matching where.
+func countTurns(t *testing.T, e *env, where string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err = db.QueryRow(`SELECT count(*) FROM turns WHERE ` + where).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func assertNoRunningNative(t *testing.T, e *env) {
