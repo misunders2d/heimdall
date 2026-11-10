@@ -88,10 +88,11 @@ func (f *fakeT3) delay(s string) {
 // check, read through the configured CLI after the hook has its answer.
 // One prompt gives one tracking task (T3-<n>), a repeat gives none, an
 // agent's prompt gives none. T3 v0.1.5 marks only the thread: an
-// owner-created thread's latest message gives one tracking-only task that
-// closes quietly however its run ends; an agent-created or unmarked
-// thread gives none and one log line; message marks still win over the
-// thread's. An untrusted caller is
+// owner-created thread's latest message gives one tracking task that
+// closes quietly when its run completes and, when its run is interrupted,
+// becomes an active task whose brief says the attribution is the
+// thread's only; an agent-created or unmarked thread gives none and one
+// log line; message marks still win over the thread's. An untrusted caller is
 // refused, the stop hook closes it quietly, a newer prompt supersedes an
 // older one, and a run that ends interrupted becomes an active task that
 // the owner's assistant continues. Nothing reaches the owner's chat
@@ -219,8 +220,8 @@ func TestT3IntakeEndToEnd(t *testing.T) {
 		t.Fatal("agent prompt admitted")
 	}
 	// T3 v0.1.5: messages carry no createdBy, only the thread does. An
-	// owner-created thread's latest user message gives exactly one T3-<n>,
-	// tracking only: even an interrupted run closes it quietly, no wake.
+	// owner-created thread's latest user message gives exactly one T3-<n>;
+	// a completed run closes it quietly, no wake.
 	weak := msg{Role: "user", RunID: "run-5", Text: "Order more sheets"}
 	cli.set("running", "run-5", "run-5", msg{Role: "user", RunID: "run-0", Text: "older"}, weak)
 	call(prompt)
@@ -230,10 +231,29 @@ func TestT3IntakeEndToEnd(t *testing.T) {
 	if _, err := work.State("T3-5"); err == nil {
 		t.Fatal("repeat of a thread-marked request admitted a second task")
 	}
-	cli.set("interrupted", "run-5", "", weak)
+	cli.set("completed", "run-5", "", weak)
 	call(stop)
-	if st := phase("T3-4", durable.PhaseClosed); !strings.Contains(st.Verdict, "ended interrupted") || !strings.Contains(st.Verdict, "tracking only") {
+	if st := phase("T3-4", durable.PhaseClosed); !strings.Contains(st.Verdict, "finished in T3 (completed)") {
 		t.Fatalf("%+v", st)
+	}
+	// An interrupted run of a thread-marked request becomes an active task
+	// like a marked one; its brief says who wrote it is the thread's mark.
+	weak2 := msg{Role: "user", RunID: "run-5b", Text: "Reorder the towels"}
+	cli.set("running", "run-5b", "run-5b", weak, weak2)
+	call(prompt)
+	phase("T3-5", durable.PhaseTracking)
+	cli.set("interrupted", "run-5b", "", weak, weak2)
+	call(stop)
+	phase("T3-5", durable.PhaseReported)
+	q = a.nth(t, 1, 2)
+	for _, want := range []string{"T3-5", "Reorder the towels", "T3 thread thread-A", "ended interrupted", "do not repeat what was done",
+		"T3 does not mark who wrote this message; it is the latest request in a thread the owner created. Read the thread first and confirm what was asked before acting."} {
+		if !strings.Contains(q.Prompt, want) {
+			t.Fatalf("wake prompt lacks %q: %s", want, q.Prompt)
+		}
+	}
+	if q.Owner.Key() != boss.Key() || q.Route != bossDM {
+		t.Fatalf("%+v", q)
 	}
 	// An agent-created thread, then a thread with no createdBy anywhere:
 	// none, and one metadata-only log line each.
@@ -258,7 +278,7 @@ func TestT3IntakeEndToEnd(t *testing.T) {
 	if strings.Contains(logs.String(), "SECRET-") {
 		t.Fatalf("logs %q", logs.String())
 	}
-	if _, err := work.State("T3-5"); err == nil {
+	if _, err := work.State("T3-6"); err == nil {
 		t.Fatal("agent-created or unmarked thread admitted")
 	}
 
@@ -275,7 +295,7 @@ func TestT3IntakeEndToEnd(t *testing.T) {
 		t.Fatalf("control answer took %s", d)
 	}
 	cli.delay("")
-	phase("T3-5", durable.PhaseTracking)
+	phase("T3-6", durable.PhaseTracking)
 
 	// A delegated thread is skipped; untrusted callers are refused.
 	if got := call(ControlRequest{Action: "task_intake", ID: "mcp:launch:abc", RequestID: "prompt_submit"}); !strings.Contains(got.Reply, "skipped") {
@@ -298,15 +318,15 @@ func TestT3IntakeEndToEnd(t *testing.T) {
 	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_intake", ID: "thread-A", RequestID: "Email the PO"}, who, valid); !strings.Contains(got.Error, "prompt_submit") || strings.Contains(logs.String(), "Email the PO") {
 		t.Fatal("free-text event", got)
 	}
-	// Owner chat: only the active task's unaccepted report (the owner must
-	// verify it); intake tracking, closes and supersedes sent nothing.
+	// Owner chat: only the active tasks' unaccepted reports (the owner must
+	// verify them); intake tracking, closes and supersedes sent nothing.
 	time.Sleep(300 * time.Millisecond)
 	chat = append(chat, r.sent()...)
 	var texts []string
 	for _, o := range chat {
 		texts = append(texts, o.Text)
 	}
-	if len(texts) != 1 || !strings.Contains(texts[0], "T3-3 attempt 1: UNACCEPTED worker report") {
+	if len(texts) != 2 || !strings.Contains(texts[0], "T3-3 attempt 1: UNACCEPTED worker report") || !strings.Contains(texts[1], "T3-5 attempt 1: UNACCEPTED worker report") {
 		t.Fatalf("owner chat %q", texts)
 	}
 }
@@ -324,14 +344,17 @@ func (a *planWake) Work(_ context.Context, q durable.WorkRequest) (durable.WorkR
 	return durable.WorkResult{Turn: 1, Report: "sent to Bob once; checked the thread first"}, nil
 }
 
-func (a *planWake) first(t *testing.T) durable.WorkRequest {
+func (a *planWake) first(t *testing.T) durable.WorkRequest { t.Helper(); return a.nth(t, 0, 1) }
+
+// nth returns wake i when exactly n wakes were recorded.
+func (a *planWake) nth(t *testing.T, i, n int) durable.WorkRequest {
 	t.Helper()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.reqs) != 1 {
-		t.Fatalf("wakes %d", len(a.reqs))
+	if len(a.reqs) != n {
+		t.Fatalf("wakes %d, want %d", len(a.reqs), n)
 	}
-	return a.reqs[0]
+	return a.reqs[i]
 }
 
 // The hook script prints nothing, always exits 0, gives up after 3 s, and
