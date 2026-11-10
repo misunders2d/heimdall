@@ -12,7 +12,7 @@ import (
 )
 
 // The admin export is fixed fields only: an 80-character whitespace-
-// collapsed title, origin, phase, since, attempt, needs_owner (held) and
+// collapsed title, origin, phase, since, attempt, needs_owner and
 // next_wake; no brief, note, evidence, verdict, blocked reason, next step,
 // worker or route. Closed tasks older than 7 days are hidden, open ones
 // all listed, newest since first, at most 200 rows, never null.
@@ -148,5 +148,51 @@ func TestExportRuntime(t *testing.T) {
 	r := out.Tasks[0]
 	if _, err := time.Parse(time.RFC3339, r.Since); err != nil || r.ID != "MEL-70" || r.Title != "Ship the export" || r.Origin != "chat" || r.Phase == "" || r.NeedsOwner {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// A cancelled task ages out like a closed one and, over the cap, goes
+// before open ones; a failed task needs the owner, a paused one does not.
+func TestExportCancelledAndFailed(t *testing.T) {
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	row := func(issue, status, pausedBy string, since time.Time) View {
+		return View{Issue: issue, Title: issue, Status: status, PausedBy: pausedBy, State: State{Phase: PhaseWorking, Since: since}}
+	}
+	cancelled, failed := string(dbos.WorkflowStatusCancelled), string(dbos.WorkflowStatusError)
+	var out struct {
+		Tasks []TaskRow `json:"tasks"`
+	}
+	_ = json.Unmarshal(exportJSON([]View{
+		row("MEL-1", cancelled, "", now.Add(-8*24*time.Hour)),
+		row("MEL-2", cancelled, "", now.Add(-6*24*time.Hour)),
+		row("MEL-3", failed, "", now.Add(-30*24*time.Hour)),
+		row("MEL-4", cancelled, "owner", now.Add(-30*24*time.Hour)),
+	}, now), &out)
+	got := map[string]TaskRow{}
+	for _, r := range out.Tasks {
+		got[r.ID] = r
+	}
+	if _, ok := got["MEL-1"]; ok {
+		t.Fatal("cancelled more than 7 days ago listed")
+	}
+	if r, ok := got["MEL-2"]; !ok || r.Phase != "cancelled" || r.NeedsOwner {
+		t.Fatalf("recent cancelled %+v", r)
+	}
+	if r := got["MEL-3"]; r.Phase != "failed" || !r.NeedsOwner {
+		t.Fatalf("failed %+v", r)
+	}
+	if r := got["MEL-4"]; r.Phase != "paused" || r.NeedsOwner {
+		t.Fatalf("paused %+v", r)
+	}
+
+	// Over the cap, recently cancelled rows never push out an old open task.
+	var many []View
+	for i := range 250 {
+		many = append(many, row(fmt.Sprintf("T3-%d", i+1), cancelled, "", now.Add(-time.Duration(i)*time.Minute)))
+	}
+	many = append(many, row("MEL-50", string(dbos.WorkflowStatusPending), "", now.Add(-20*24*time.Hour)))
+	_ = json.Unmarshal(exportJSON(many, now), &out)
+	if n := len(out.Tasks); n != 200 || out.Tasks[199].ID != "MEL-50" {
+		t.Fatalf("%d rows, last %+v", n, out.Tasks[n-1])
 	}
 }

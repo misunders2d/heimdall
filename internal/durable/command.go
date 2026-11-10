@@ -330,7 +330,7 @@ type TaskRow struct {
 	Phase      string `json:"phase"`  // the published phase, or paused, queued, cancelled, failed
 	Since      string `json:"since"`  // RFC3339
 	Attempt    int    `json:"attempt"`
-	NeedsOwner bool   `json:"needs_owner"` // held: stopped waiting for the owner
+	NeedsOwner bool   `json:"needs_owner"` // held or failed: stopped until the owner looks
 	NextWake   string `json:"next_wake"`   // RFC3339 or empty; no wake time is published yet
 }
 
@@ -341,8 +341,8 @@ const (
 )
 
 // Export is the task queue for a local admin reader (the scheduler
-// control's task_export): every open task and those closed in the last
-// 7 days, newest since first, at most 200. It only reads.
+// control's task_export): every open task and those closed or cancelled
+// in the last 7 days, newest since first, at most 200. It only reads.
 func (r *Runtime) Export(now time.Time) ([]byte, error) {
 	vs, err := r.Views()
 	if err != nil {
@@ -351,6 +351,9 @@ func (r *Runtime) Export(now time.Time) ([]byte, error) {
 	return exportJSON(vs, now), nil
 }
 
+// ended is an export phase that will not move again: closed or cancelled.
+func ended(phase string) bool { return phase == PhaseClosed || phase == "cancelled" }
+
 func exportJSON(vs []View, now time.Time) []byte {
 	rows := []TaskRow{}
 	at := map[string]time.Time{}
@@ -358,9 +361,6 @@ func exportJSON(vs []View, now time.Time) []byte {
 		since := v.State.Since
 		if since.IsZero() {
 			since = v.Created
-		}
-		if v.State.Phase == PhaseClosed && now.Sub(since) > exportClosed {
-			continue
 		}
 		origin := "chat"
 		if v.cm.Intake != nil || v.cm.Origin == OriginTrustedT3 {
@@ -383,12 +383,15 @@ func exportJSON(vs []View, now time.Time) []byte {
 		case phase == "":
 			phase = "queued" // not started yet: no state published
 		}
+		if ended(phase) && now.Sub(since) > exportClosed {
+			continue
+		}
 		title := strings.Join(strings.FieldsFunc(v.Title, func(c rune) bool { return unicode.IsSpace(c) || unicode.IsControl(c) }), " ")
 		if t := []rune(title); len(t) > exportTitle {
 			title = strings.TrimSpace(string(t[:exportTitle]))
 		}
 		at[v.Issue] = since
-		rows = append(rows, TaskRow{ID: v.Issue, Title: title, Origin: origin, Phase: phase, Since: since.UTC().Format(time.RFC3339), Attempt: v.State.Attempt, NeedsOwner: phase == PhaseHeld})
+		rows = append(rows, TaskRow{ID: v.Issue, Title: title, Origin: origin, Phase: phase, Since: since.UTC().Format(time.RFC3339), Attempt: v.State.Attempt, NeedsOwner: phase == PhaseHeld || phase == "failed"})
 	}
 	newest := func(rows []TaskRow) {
 		slices.SortStableFunc(rows, func(a, b TaskRow) int {
@@ -400,11 +403,11 @@ func exportJSON(vs []View, now time.Time) []byte {
 	}
 	newest(rows)
 	if len(rows) > exportRows {
-		// Over the cap, closed rows go first: an open or held task is
-		// never pushed out by recently closed ones.
+		// Over the cap, closed and cancelled rows go first: an open or
+		// held task is never pushed out by recently ended ones.
 		var open, closed []TaskRow
 		for _, r := range rows {
-			if r.Phase == PhaseClosed {
+			if ended(r.Phase) {
 				closed = append(closed, r)
 			} else {
 				open = append(open, r)
