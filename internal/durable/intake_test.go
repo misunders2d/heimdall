@@ -149,31 +149,35 @@ J
 }
 
 // A large T3 thread takes about 20 s to read (measured on the hub,
-// 2026-11-10): the read limit leaves room for it. Scaled 1:100 here: a
-// 250 ms read (25 s) is admitted under a 900 ms limit (90 s), and a read
-// past the limit is still refused with one metadata-only line.
+// 2026-11-10): the read limit leaves room for it. Scaled 1:30 here: a
+// 0.85 s read (25 s) is admitted under a 3 s limit (90 s), and a read
+// past the limit is still refused with one metadata-only line. The hook
+// answers the "hang" thread within 2 s, before its read is killed at the
+// 3 s limit: a hook held by the read could answer only after that, so the
+// check does not depend on how fast the scheduler starts the probe.
 func TestIntakeToleratesSlowCLI(t *testing.T) {
 	if intakeTimeout < 90*time.Second {
 		t.Fatalf("intake read limit %s is below a large thread's read", intakeTimeout)
 	}
 	defer func(d time.Duration) { intakeTimeout = d }(intakeTimeout)
-	intakeTimeout = 900 * time.Millisecond
+	intakeTimeout = 3 * time.Second
 	defer SetIntakePause(10 * time.Millisecond)()
 	logs := &lockedLog{}
-	opt := Options{Observer: T3{Command: []string{slowT3(t, "0.25")}}, Observe: time.Hour, Silence: -1, Log: log.New(logs, "", 0)}
+	opt := Options{Observer: T3{Command: []string{slowT3(t, "0.85")}}, Observe: time.Hour, Silence: -1, Log: log.New(logs, "", 0)}
 	e := open(t, t.TempDir(), opt)
 	defer e.close()
 	t3 := Caller{Principal: owner.Principal, Role: core.RoleOwner, Conv: owner.Conv, Live: true, Private: true, Origin: OriginTrustedT3}
-	start := time.Now()
-	if reply, _ := e.rt.Task(t3, "intake", "slow", "", "prompt_submit"); reply != "T3 request noted." || time.Since(start) > 200*time.Millisecond {
-		t.Fatal("hook held by the read:", reply, time.Since(start))
-	}
-	e.phase("T3-1", PhaseTracking, 0)
-	if reply, _ := e.rt.Task(t3, "intake", "hang", "", "prompt_submit"); reply != "T3 request noted." {
+	if reply, _ := e.rt.Task(t3, "intake", "slow", "", "prompt_submit"); reply != "T3 request noted." {
 		t.Fatal(reply)
 	}
+	e.phase("T3-1", PhaseTracking, 0)
 	const line = "durable: T3 intake refused (cli), thread hang\n"
-	waitFor(t, 5*time.Second, "refusal line", func() bool { return strings.Contains(logs.String(), line) })
+	start := time.Now()
+	reply, _ := e.rt.Task(t3, "intake", "hang", "", "prompt_submit")
+	if took := time.Since(start); reply != "T3 request noted." || took > 2*time.Second || strings.Contains(logs.String(), line) {
+		t.Fatal("hook held by the read:", reply, took)
+	}
+	waitFor(t, 10*time.Second, "refusal line", func() bool { return strings.Contains(logs.String(), line) })
 	if got := logs.String(); strings.Count(got, "T3 intake refused") != 1 || strings.Contains(got, "Email the PO") {
 		t.Fatalf("log %q", got)
 	}
