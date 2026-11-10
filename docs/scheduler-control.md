@@ -53,6 +53,7 @@ ECONNREFUSED and a second Lstat verifies the same inode. A live listener, timeou
 or other error never permits removal. Control errors are logged as unavailable;
 the otherwise-functional router continues.
 Keep parent data/config directories protected too; no employee traversal rights.
+Task export (2026-11-10): `heimdall sched tasks -config FILE -json` asks this socket for `task_export`, read-only: `{"tasks":[{id,title,origin,phase,since,attempt,needs_owner,next_wake}]}`, no free text, `needs_owner` true for held and failed tasks, open tasks plus those closed or cancelled within 7 days (dropped first over the cap), newest first, at most 200; refused unless the peer and its whole ancestry run as Heimdall's own user (root), outside Heimdall's process tree (turns, workers, checkers), bound to no turn or session, and not descended from the trusted T3 launcher (lineage) or an external launcher (its socket; launcher down: refused) that runs as Heimdall's user; service down exits 1 with one line.
 
 Legacy `scheduler.control.source` remains parseable but is no longer used to
 route or authorize control requests. There is no latest-conversation fallback.

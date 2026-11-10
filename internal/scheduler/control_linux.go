@@ -182,6 +182,10 @@ func (c *Control) serve(ctx context.Context, conn *net.UnixConn) {
 		scan.Buffer(make([]byte, 4096), ControlMaxBytes)
 		if !scan.Scan() || strictJSON(scan.Bytes(), &req) != nil {
 			result.Error = "invalid control request"
+		} else if req.Action == taskExport {
+			// Read-only and never bound to a caller: outside executePeer
+			// and its lock.
+			result = c.export(cred.Uid, int(cred.Pid), req, originErr == nil, alive)
 		} else {
 			if originErr != nil {
 				result.Error = "trusted active request origin unavailable: " + originErr.Error()
@@ -672,6 +676,79 @@ func (c *Control) intake(uid uint32, req ControlRequest, who Caller, valid []fun
 	reply, changed := c.s.Tasks(who, strings.TrimPrefix(req.Action, "task_"), req.ID, "", req.RequestID)
 	c.s.log.Printf("scheduler control: operator uid %d, action %s, event %s", uid, req.Action, req.RequestID)
 	return ControlResult{Reply: reply, Changed: changed}
+}
+
+const taskExport = "task_export"
+
+// export answers task_export: the durable task queue as fixed-field JSON
+// (no free text) for a local admin process such as the dashboard's feed
+// exporter. It only reads. The peer must run, with its whole process
+// ancestry, as Heimdall's own user (root on the hub), outside Heimdall's
+// process tree (every turn, worker and checker), with no turn, launcher
+// or session bound to it, and ask with no arguments. A launcher running
+// as Heimdall's user too must show the peer is not its descendant: the
+// trusted T3 launcher by lineage, an external launcher by its own socket
+// (down: refused). Nothing a turn, T3 or harness caller may do changes.
+func (c *Control) export(uid uint32, pid int, req ControlRequest, bound bool, alive func() bool) ControlResult {
+	refuse := func(why string) ControlResult { return ControlResult{Error: "task_export refused: " + why} }
+	self := uint32(os.Geteuid())
+	switch {
+	case bound:
+		return refuse("the peer is bound to a Heimdall turn or registered session; only a local admin process may export")
+	case req.ID != "" || req.Title != "" || req.RequestID != "" || req.Key != "" || req.Revision != "" || req.Outbound != 0 || len(req.Definition) > 0:
+		return refuse("task_export takes no arguments")
+	case uid != self:
+		return refuse("the peer does not run as Heimdall's own user")
+	}
+	chain, err := processChain(pid)
+	if err != nil || len(chain) == 0 {
+		return refuse("process ancestry unreadable")
+	}
+	for _, e := range chain {
+		if e.pid == os.Getpid() {
+			return refuse("a process Heimdall started is not an admin process")
+		}
+		uids, err := procUIDs(e.pid)
+		if err != nil || len(uids) == 0 {
+			return refuse("process ancestry unreadable")
+		}
+		for _, u := range uids {
+			if u != self {
+				return refuse("a process in the peer's ancestry runs as another user")
+			}
+		}
+		if ppid, start, err := procStat(e.pid); err != nil || ppid != e.ppid || start != e.start {
+			return refuse("the peer's ancestry changed during verification")
+		}
+	}
+	if t := c.s.TrustedT3; t != nil && t.UID == self {
+		exe, err := trustedExecutable(t)
+		if err != nil {
+			return refuse("trusted T3 launcher lineage unverifiable")
+		}
+		if _, _, err := t3Lineage(t, exe, pid); !errors.Is(err, errNoT3Launcher) {
+			return refuse("the peer descends from the trusted T3 launcher or its lineage is unverifiable")
+		}
+	}
+	for _, o := range c.s.External {
+		if o.UID != self {
+			continue // its sessions have an ancestor of another user
+		}
+		if _, err := askLauncher(o, pid); !errors.Is(err, errNotLaunched) {
+			return refuse("the peer descends from external launcher " + o.Name + " or that launcher is unavailable")
+		}
+	}
+	if c.s.TaskExport == nil {
+		return ControlResult{Error: "durable tasks are not enabled here"}
+	}
+	if !alive() {
+		return refuse("the peer is no longer active")
+	}
+	data, err := c.s.TaskExport()
+	if err != nil {
+		return ControlResult{Error: "task export unavailable: " + err.Error()}
+	}
+	return ControlResult{Reply: string(data)}
 }
 
 // CallControl is shared by the CLI and stdio adapter. It never opens the store.

@@ -71,6 +71,9 @@ type Scheduler struct {
 	// caller; nil: durable tasks are off. changed reports a new commitment or
 	// an applied change; requestID is the control's stable request id.
 	Tasks func(who Caller, action, issue, title, requestID string) (reply string, changed bool)
+	// TaskExport is the durable task queue as fixed-field JSON for a local
+	// admin reader (task_export; docs/scheduler-control.md); nil: off.
+	TaskExport func() ([]byte, error)
 	// TaskIntake: Tasks is reachable through the control and admitted tasks
 	// are worked by assistant wakes, so a live owner turn is told to admit
 	// accepted follow-through work itself (TaskNote).

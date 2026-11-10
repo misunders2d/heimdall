@@ -350,6 +350,18 @@ func unsigned(t *testing.T, out core.Outbound) {
 
 // waitReady waits until the owner's turn in chat is running on omp, as
 // !status reports it once the harness is ready.
+// waitRecorded waits until every reply is recorded as delivered or failed,
+// as a production restart drains first. A stop between a reply's send and
+// that record leaves the row sending, and the restart resends it
+// (at-least-once), ahead of anything the restart itself reports.
+func (e *env) waitRecorded() {
+	e.t.Helper()
+	eventuallyTrue(e.t, "replies recorded", func() bool {
+		n, err := e.st.Undelivered()
+		return err == nil && n == 0
+	})
+}
+
 func (e *env) waitReady(chat string) { e.t.Helper(); e.waitReadyOn(chat, "omp") }
 
 func (e *env) waitReadyOn(chat, h string) {
@@ -702,6 +714,7 @@ func TestRestartReportsInterruptedTurnAndNeverReruns(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	e.send(owner, "c1", "SLEEP")
 	e.waitReady("c1")
+	e.waitRecorded()
 	e.stop()
 	stopOnce.Delete(e.st)
 
@@ -852,6 +865,7 @@ func TestPrivateChatReachesHarness(t *testing.T) {
 	e.send(owner, "group", "hi")
 	want(t, e.reply(), "PI_EXTERNAL_MCP_PRIVATE=0 ")
 	// Stored before a restart, run after it.
+	e.waitRecorded()
 	e.stop()
 	stopOnce.Delete(e.st)
 	st, err := store.Open(e.dbPath)
