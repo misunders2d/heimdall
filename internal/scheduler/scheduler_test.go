@@ -80,8 +80,8 @@ func (r *rig) apply(change *store.JobChange) {
 	if err := r.st.AnswerCommand(0, core.ConvKey{}, store.CommandEnd{Detail: "job", Job: change}); err != nil {
 		r.t.Fatal(err)
 	}
-	if change != nil && change.StopJob != "" {
-		r.s.stopRun(change.StopJob)
+	for _, id := range change.StopJobs() {
+		r.s.stopRun(id)
 	}
 }
 
@@ -564,14 +564,11 @@ func TestDrafts(t *testing.T) {
 	if _, handled := r.answer(inGroup, "yes."); handled {
 		t.Fatal("punctuated reply confirmed elsewhere")
 	}
-	// Two drafts: a bare yes asks which.
+	// Two drafts: details lists both (bulk yes/no: TestBulkAnswer).
 	_, second, _ := r.s.Draft(asBoss, []string{block})
 	r.apply(&store.JobChange{Add: second})
-	if out, _ := r.answer(asBoss, " YES! "); !strings.Contains(out, "Several requests") {
+	if out, _ := r.answer(asBoss, " details "); !strings.Contains(out, "2 requests wait") || strings.Contains(out, second.ID) {
 		t.Fatalf("two drafts: %s", out)
-	}
-	if out, _ := r.answer(asBoss, "ні…"); !strings.Contains(out, "Several") {
-		t.Fatal(out)
 	}
 	r.cmd(asBoss, "job discard "+second.ID)
 	if out, ok := r.answer(asBoss, "так"); !ok || !strings.Contains(out, "*🟢 Active*.\n*Next scheduled check:*") || r.job(draft.ID).State != store.JobActive {

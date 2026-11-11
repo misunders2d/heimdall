@@ -120,7 +120,9 @@ anything else at job creation and fails the run with a fixed cause.
 install -o root -g root -m 0755 ./competitor-deals /etc/heimdall/checkers/competitor-deals
 ```
 
-Then, in the owner's private chat, ask for the job or send
+Then ask for the job in any channel the owner uses (it applies at once in the
+owner's private chat; a group shows a card to confirm with a plain yes), ask a
+trusted T3 session (with `trusted_t3.manage`; it applies at once), or send
 `!job add {"name":"Competitor deals","kind":"watch","check":{"checker":"competitor-deals"},"schedule":{"every":"15m"},"to":"slack:C…"}`.
 
 The contract: no arguments, no stdin, working directory `run_as.owner.dir`

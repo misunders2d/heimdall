@@ -287,14 +287,20 @@ the `heimdall-live` unit.
     require a human confirmation in
     the same conversation within 24 h (`!job confirm`, or a bare yes/no that
     Heimdall matches itself, ignoring surrounding whitespace and trailing
-    punctuation, whole replies only). Exactly one waiting draft, the same
-    caller and conversation are required for word replies. Cards use native
+    punctuation, whole replies only). The same caller and conversation are
+    required for word replies; with several of that caller's drafts waiting
+    there, one yes/no answers all of them, one line each, and Details lists
+    them (owner, 2026-11-11: no typing ids). Cards use native
     Slack/Telegram Markdown, a short purpose, exact human-readable schedule,
     destination, truthful state/effects and Yes/No actions. Raw IDs, cron,
     harness fields and prompts stay in opt-in Details/operator views; private
     prompt visibility remains caller-scoped. Paused cards never imply an active
     next run. Shared-chat privacy stays unchanged. Blocks from
-    scheduled turns are ignored; MCP controls never auto-apply.
+    scheduled turns are ignored; MCP controls from Heimdall turns never
+    auto-apply. Trusted T3 with `trusted_t3.manage` (owner, 2026-11-11: "T3
+    is a trusted source of scheduling") creates and edits the bound owner's
+    jobs at once, like an external owner origin; removal, checkpoint and
+    acknowledge stay refused, `rerun_on_timeout` still asks.
   - Notices are fixed templates ending `— heimdall`; no model text in
     shared channels.
   - AgentNet: owner jobs may name an address; the agent delivers; Heimdall

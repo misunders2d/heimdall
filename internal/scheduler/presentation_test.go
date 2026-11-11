@@ -197,11 +197,11 @@ func TestConciseEditRemovalSharedAndAmbiguity(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.apply(&store.JobChange{Add: &removal})
-	for _, w := range []string{"Yes", "No", "Details"} {
-		text, change, ok := r.s.Answer(asBoss, w)
-		if !ok || change != nil || !strings.Contains(text, "Several requests") || strings.Contains(text, id) {
-			t.Fatal(w, text)
-		}
+	// Details with several waiting: what each does, no ids, nothing changed.
+	text, change, ok := r.s.Answer(asBoss, "Details")
+	if !ok || change != nil || !Formatted(text) || !strings.Contains(text, "2 requests wait") || !strings.Contains(text, "📝 Update *Private name* — Private purpose") ||
+		!strings.Contains(text, "🗑️ Remove *Private name*") || strings.Contains(text, id) || strings.Contains(text, j.ID) || strings.Contains(text, removal.ID) {
+		t.Fatal(text)
 	}
 	r.cmd(asBoss, "job discard "+j.ID)
 	card = r.s.card(asBoss, removal)

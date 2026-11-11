@@ -424,10 +424,10 @@ func TestTrustedT3PathProtection(t *testing.T) {
 }
 
 // Management (owner opt-in "manage"): off, trusted T3 stays task-only; on,
-// the same bound deployment owner lists, reads, runs, pauses, resumes and
-// stops only their own existing jobs and pauses, resumes and closes only
-// their own tasks, with request_id replay; never create, edit, remove,
-// checkpoint, acknowledge or confirm.
+// the same bound deployment owner creates, edits (applied at once, no card),
+// lists, reads, runs, pauses, resumes and stops only their own jobs and
+// pauses, resumes and closes only their own tasks, with request_id replay;
+// never remove, checkpoint, acknowledge or confirm.
 func TestTrustedT3Management(t *testing.T) {
 	r, c, f, _ := t3Rig(t)
 	ctx := context.Background()
@@ -478,6 +478,7 @@ func TestTrustedT3Management(t *testing.T) {
 	manage := []ControlRequest{
 		{Action: "list"}, {Action: "show", ID: mine}, {Action: "history", ID: mine},
 		{Action: "pause", ID: mine, RequestID: "off-p"}, {Action: "run", ID: mine, RequestID: "off-r"},
+		daily, {Action: "edit", ID: mine, RequestID: "off-e", Definition: json.RawMessage(`{"prompt":"changed"}`)},
 		{Action: "task_pause", ID: "MEL-755", RequestID: "off-tp"}, {Action: "task_close", ID: "MEL-755", RequestID: "off-tc"},
 	}
 	for _, req := range manage {
@@ -516,20 +517,53 @@ func TestTrustedT3Management(t *testing.T) {
 		t.Fatal("other owner's job changed")
 	}
 	refused(ControlRequest{Action: "pause", ID: mine}, "stable request_id")
-	// Never create, edit, remove, checkpoint, acknowledge, confirm or discover.
+	// Create applies at once (owner, 2026-11-11: "T3 is a trusted source of
+	// scheduling"), in the owner's private chat, and is listed; its replay
+	// is the recorded answer.
+	r.sent()
+	created := ok(daily)
+	if created.JobID == "" || created.DraftID != "" || !created.Changed || !strings.Contains(created.Reply, "Scheduled task created") {
+		t.Fatal("create", created)
+	}
+	if j := r.job(created.JobID); j.State != store.JobActive || j.Creator.Key() != boss.Key() || j.CreatedIn != bossDM {
+		t.Fatal("created job", j)
+	}
+	if out := r.sent(); len(out) != 1 || out[0].Conv != bossDM || !strings.Contains(out[0].Text, "Scheduled task created") {
+		t.Fatal("create notice", out)
+	}
+	if again := do(daily); again != created {
+		t.Fatal("create replay", again)
+	}
+	if got := ok(ControlRequest{Action: "list"}); !strings.Contains(got.Reply, "daily check") {
+		t.Fatal("created job not listed", got)
+	}
+	// Edit applies at once to the owner's own job only.
+	edited := ok(ControlRequest{Action: "edit", ID: mine, RequestID: "e1", Definition: json.RawMessage(`{"prompt":"changed"}`)})
+	if d, _, _ := parse(r.job(mine)); !edited.Changed || d.Prompt != "changed" || r.job(mine).Version != 2 {
+		t.Fatal("edit", edited, d)
+	}
+	refused(ControlRequest{Action: "edit", ID: theirs, RequestID: "e2", Definition: json.RawMessage(`{"prompt":"changed"}`)}, "no job of the bound creator")
+	// Validation stays: a schedule without a future run is refused.
+	refused(ControlRequest{Action: "create", RequestID: "past", Definition: json.RawMessage(`{"name":"past","schedule":{"at":"2020-01-01T09:00"},"prompt":"p"}`)}, "no future run")
+	// rerun_on_timeout keeps its human confirmation: a draft and a card in
+	// the owner's private chat, where a plain yes confirms it.
+	rerun := ok(ControlRequest{Action: "create", RequestID: "rr", Definition: json.RawMessage(`{"name":"repeat-safe","schedule":{"every":"1h"},"prompt":"p","idempotent":true,"rerun_on_timeout":true,"timeout":"1m"}`)})
+	if rerun.DraftID == "" || r.job(rerun.DraftID).State != store.JobDraft {
+		t.Fatal("rerun_on_timeout applied without confirmation", rerun)
+	}
+	r.cmd(asBoss, "job discard "+rerun.DraftID)
+	// Never remove, checkpoint, acknowledge, confirm or discover.
 	for _, req := range []ControlRequest{
-		daily,
-		{Action: "edit", ID: mine, RequestID: "e1", Definition: json.RawMessage(`{"prompt":"changed"}`)},
 		{Action: "remove", ID: mine, RequestID: "x1"},
 		{Action: "checkpoint", ID: mine},
 		{Action: "acknowledge", ID: mine, RequestID: "a1", Key: "k", Revision: "v", Outbound: 1},
 		{Action: "confirm", ID: mine, RequestID: "c1"},
 		{Action: "discover"},
 	} {
-		refused(req, "may only task_add, task_list and task_show; with manage")
+		refused(req, "may only task_add, task_list and task_show; with manage: list, show, history, create, edit, run, pause, resume, stop of the owner's jobs and task_pause, task_resume, task_close (never remove, checkpoint or acknowledge)")
 	}
-	if jobs, _ := r.st.Jobs(store.JobFilter{}); len(jobs) != 2 {
-		t.Fatal("management created or removed a job", jobs)
+	if jobs, _ := r.st.Jobs(store.JobFilter{States: []string{store.JobActive}}); len(jobs) != 3 || r.job(mine).State != store.JobActive {
+		t.Fatal("management removed a job", jobs)
 	}
 
 	// Tasks: the creator's own pause, resume and close; close is one event
@@ -617,6 +651,20 @@ func TestTrustedT3Management(t *testing.T) {
 	}
 	if got := c.executePeer(ctx, op, ControlRequest{Action: "pause", ID: mine, RequestID: "sched-p"}, sched, valid); got.Error == "" {
 		t.Fatal("scheduled origin managed a job", got)
+	}
+	// Employee and scheduled origins never create or edit.
+	for _, bad := range []Caller{emp, sched, unknown} {
+		for _, req := range []ControlRequest{
+			{Action: "create", RequestID: "bad-c", Definition: daily.Definition},
+			{Action: "edit", ID: mine, RequestID: "bad-e", Definition: json.RawMessage(`{"prompt":"bad"}`)},
+		} {
+			if got := c.executePeer(ctx, op, req, bad, valid); got.Error == "" || got.Changed {
+				t.Fatal("non-owner origin changed a job", bad, req.Action, got)
+			}
+		}
+	}
+	if d, _, _ := parse(r.job(mine)); d.Prompt != "changed" {
+		t.Fatal("refused edit changed the job", d)
 	}
 	f.set(func() { f.stat[t3Server] = procEntry{t3Server, t3Launcher, 21} }) // reused pid
 	if got := do(ControlRequest{Action: "pause", ID: mine, RequestID: "stale"}); got.Error == "" || r.job(mine).State != store.JobActive {
