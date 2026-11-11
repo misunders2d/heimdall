@@ -91,11 +91,11 @@ func TestAssistantWorksWithoutT3(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 	waitFor(t, 5*time.Second, "unaccepted report", func() bool {
-		return len(outbound(t, dir, "MEL-70 attempt 1: UNACCEPTED worker report. Evidence: PO 551")) == 1
+		return len(outbound(t, dir, "MEL-70 attempt 1: UNACCEPTED worker report: PO 551")) == 1
 	})
 	e.cmdAs("v1", "accept MEL-70 checked the email")
 	e.phase("MEL-70", PhaseClosed, 1)
-	if len(outbound(t, dir, "MEL-70 accepted (attempt 1")) != 1 {
+	if len(outbound(t, dir, "MEL-70 done: PO 551 confirmed by supplier email 2026-11-08.\n")) != 1 {
 		t.Fatal("acceptance not delivered")
 	}
 }

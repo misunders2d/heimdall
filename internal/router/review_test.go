@@ -113,7 +113,9 @@ func TestCommitmentReviewAccepts(t *testing.T) {
 	e.replyIn("c1", "MEL-40")
 	phase(t, rt, "MEL-40", durable.PhaseWorking)
 	e.send(owner, "c1", "!work report MEL-40 pushed abc "+say("**ACCEPT**\nchecked abc on main"))
-	e.replyIn("c1", "MEL-40 accepted", "supervisor (turn", "checked abc on main")
+	if out := e.replyIn("c1", "MEL-40 done: pushed abc"); strings.Contains(out.Text, "supervisor (turn") || strings.Contains(out.Text, "checked abc on main") {
+		t.Fatalf("verdict reached the chat: %q", out.Text)
+	}
 	st := phase(t, rt, "MEL-40", durable.PhaseClosed)
 	if !strings.HasPrefix(st.Verdict, "accepted by supervisor (turn ") {
 		t.Fatalf("verdict %q", st.Verdict)
@@ -159,7 +161,7 @@ func TestCommitmentReviewMalformedHolds(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	e.send(owner, "c2", "!work accept MEL-41")
-	e.replyIn("c2", "MEL-41 accepted", "fake:owner")
+	e.replyIn("c2", "MEL-41 done: done")
 	phase(t, rt, "MEL-41", durable.PhaseClosed)
 }
 

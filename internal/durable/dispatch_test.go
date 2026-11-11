@@ -241,7 +241,7 @@ func TestDispatchRepairThenNextStep(t *testing.T) {
 			t.Fatalf("internal state %q reached the chat: %q", needle, got)
 		}
 	}
-	if got := outbound(t, e.dir, "accepted"); len(got) != 2 {
+	if got := outbound(t, e.dir, "MEL-65 done: "); len(got) != 2 {
 		t.Fatalf("accepted deliveries %q", got)
 	}
 }
