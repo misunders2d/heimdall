@@ -134,7 +134,8 @@ func (s *Scheduler) draftAction(j store.Job) (string, Def) {
 }
 
 // answerAll confirms or discards every draft of the caller here, each
-// checked as its own confirm or discard would be. One that fails adds no
+// checked as its own confirm or discard would be (expired drafts are not
+// listed: drafts() leaves them out and the store sweeps them). One that fails adds no
 // change and never blocks the others; the changes are stored together
 // with the reply. Removals go last, so an edit never lands on a job
 // removed by the same reply, and the employee cap counts creates approved
@@ -188,8 +189,6 @@ func (s *Scheduler) answerAll(c Caller, drafts []store.Job, confirm bool) (strin
 		case ch == nil:
 			reason, _, _ := strings.Cut(msg, "\n")
 			done = "not approved: " + literal(strings.TrimPrefix(reason, "Request not approved: "))
-		case ch.Confirm == nil && ch.Update == "" && ch.Drop != "" && confirm:
-			done = "expired; nothing changed"
 		case j.EditOf == "" && removalID(j) == "" && confirm:
 			created++
 		}
