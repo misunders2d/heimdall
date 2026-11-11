@@ -210,7 +210,8 @@ func TestDispatchRepairThenNextStep(t *testing.T) {
 	d.onSend = func(q DispatchRequest) {
 		n++
 		run := "run-" + q.Key
-		o.set(Observation{Status: "completed", LatestRun: run, RunCount: n, Reply: "did " + q.Key, Replies: map[string]string{run: "did " + q.Key}}, nil)
+		reply := "\n\ndid " + q.Key + "\n\nproof: a long tail the owner never sees"
+		o.set(Observation{Status: "completed", LatestRun: run, RunCount: n, Reply: reply, Replies: map[string]string{run: reply}}, nil)
 	}
 	review := reviewerFunc(func(_ context.Context, q ReviewRequest) (ReviewResult, error) {
 		if q.Attempt == 1 {
@@ -241,8 +242,15 @@ func TestDispatchRepairThenNextStep(t *testing.T) {
 			t.Fatalf("internal state %q reached the chat: %q", needle, got)
 		}
 	}
-	if got := outbound(t, e.dir, "MEL-65 done: "); len(got) != 2 {
+	got := outbound(t, e.dir, "MEL-65 done: ")
+	if len(got) != 2 {
 		t.Fatalf("accepted deliveries %q", got)
+	}
+	for i, m := range got { // the worker's first reply line, never its blank lead or proof
+		key := fmt.Sprintf("MEL-65/%d/dispatch", i+2)
+		if !strings.HasPrefix(m, "sent: MEL-65 done: t3:thread-R run run-"+key+" ") || !strings.HasSuffix(m, ": did "+key+"\n— heimdall") {
+			t.Fatalf("accepted delivery %q", m)
+		}
 	}
 }
 

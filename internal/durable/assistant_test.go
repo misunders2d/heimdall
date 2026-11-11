@@ -83,7 +83,7 @@ func TestAssistantWorksWithoutT3(t *testing.T) {
 	a.mu.Lock()
 	p := a.prompts["MEL-70/1/work/3"]
 	a.mu.Unlock()
-	if !strings.Contains(p, "Goal: MEL-70: Confirm the supplier PO") || !strings.Contains(p, "Your persisted next action: send the PO summary") {
+	if !strings.Contains(p, "Goal: MEL-70: Confirm the supplier PO") || !strings.Contains(p, "Your persisted next action: send the PO summary") || !strings.Contains(p, "The owner sees only the evidence's first line: make it one plain caveman-terse sentence") {
 		t.Fatalf("prompt %q", p)
 	}
 	st, _ = e.rt.State("MEL-70")
