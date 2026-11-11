@@ -78,7 +78,7 @@ type Scheduler struct {
 	External []ExternalOrigin
 	// TrustedT3: the owner-trusted T3 launcher whose descendants may
 	// register durable tasks (task_add/list/show) for the deployment owner
-	// and, with Manage, manage that owner's existing jobs and tasks; tried
+	// and, with Manage, create, edit and manage that owner's jobs and tasks; tried
 	// last, only when no Heimdall turn or launcher owns the peer.
 	TrustedT3 *TrustedLauncher
 	// Tasks admits (action "add"), reads ("list", "show") or, for its

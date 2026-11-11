@@ -17,14 +17,16 @@ import (
 // "just make T3 auto accepted"). A control peer that descends from the
 // running process of exactly this executable may register durable tasks
 // for the deployment owner and, only with Manage (opt-in), manage that
-// owner's existing jobs (list/show/history/run/pause/resume/stop) and tasks
-// (pause/resume/close); never create, edit, remove, confirm or reroute. It
+// owner's jobs (list/show/history/create/edit/run/pause/resume/stop; create
+// and edit apply at once, owner 2026-11-11: "T3 is a trusted source of
+// scheduling") and tasks (pause/resume/close); never remove, confirm or
+// reroute. It
 // is a source the owner trusts, not an attestation that a human typed the
 // request.
 type TrustedLauncher struct {
 	Path   string // configured launcher path (a stable symlink is fine); resolved per request
 	UID    uint32 // the OS user the launcher process runs as
-	Manage bool   // owner opt-in: existing-job and task management as above
+	Manage bool   // owner opt-in: job and task management as above
 	root   string // tests only: where path protection checks start ("/" when empty)
 }
 
@@ -68,7 +70,8 @@ var pathLstat = os.Lstat
 
 // resolveTrustedT3 binds a peer that no Heimdall turn or configured launcher
 // owns, and that descends from the trusted T3 launcher process, to the
-// deployment owner's registered private conversation, task-only. Principal
+// deployment owner's registered private conversation: tasks, and with Manage
+// the owner's jobs (Control.manages). Principal
 // and route come from configuration and verified ingress, never the request.
 func (c *Control) resolveTrustedT3(pid int, alive func() bool) (Caller, func() bool, error) {
 	t := c.s.TrustedT3
@@ -110,7 +113,7 @@ func (c *Control) resolveTrustedT3(pid int, alive func() bool) (Caller, func() b
 		return true
 	}
 	// caller() re-verifies Slack live (OAuth actor from that check only) and
-	// re-decides the role per call; executeLocked keeps it task-only.
+	// re-decides the role per call; executeLocked limits it (Control.manages).
 	return Caller{Principal: p, Role: role, Conv: k, Private: true, External: trustedT3, Registered: trustedT3}, valid, nil
 }
 

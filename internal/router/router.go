@@ -951,8 +951,8 @@ func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
 	c.r.release(row.Inbound)
 	c.r.wake(c.key.Interface)
 	if e.Job != nil {
-		if e.Job.StopJob != "" {
-			c.r.stopJob(e.Job.StopJob)
+		for _, id := range e.Job.StopJobs() {
+			c.r.stopJob(id)
 		}
 		c.r.opt.Jobs.Wake()
 	}
@@ -1019,7 +1019,7 @@ func (c *conv) routeRow(row store.InboundRow, choice *command) bool {
 		return false
 	}
 	if j := c.r.opt.Jobs; j != nil && row.Origin == core.OriginLive {
-		// A bare yes or no answers the caller's one draft here.
+		// A bare yes or no answers the caller's drafts here (all of them).
 		if text, change, ok := j.Answer(c.caller(row, role), row.Text); ok {
 			c.answer(row, store.CommandEnd{Detail: "job answer", Job: change}, text)
 			return false

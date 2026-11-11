@@ -171,12 +171,17 @@ attestation. Wakes say "Registered through trusted T3". A Heimdall process
 tree, a stale turn or a launcher that refused never falls through to this.
 
 `"manage":true` in `trusted_t3` (owner opt-in, default off) also lets that
-same bound owner `list`, `show`, `history`, `run`, `pause`, `resume` and
-`stop` their own existing jobs (exact creator) and `task_pause`,
-`task_resume`, `task_close` their own tasks, with the same binding, lineage
-recheck and `request_id` record. It never creates, edits, removes,
-checkpoints, acknowledges, confirms or reroutes, and is still a trusted
-agent source, not human attestation.
+same bound owner `create` jobs and `edit`, `list`, `show`, `history`, `run`,
+`pause`, `resume` and `stop` their own jobs (exact creator) and
+`task_pause`, `task_resume`, `task_close` their own tasks, with the same
+binding, lineage recheck and `request_id` record. Owner, 2026-11-11: "T3 is
+a trusted source of scheduling". Create and edit apply at once, as for an
+external owner origin (no chat to confirm in), through the same validation
+and activation checks; the conversation and `"to":"here"` are the owner's
+registered private chat, and an explicit target such as `slack:C…` works as
+for chat-created jobs. A `rerun_on_timeout` job still waits as a draft with a
+card in that chat. It never removes, checkpoints, acknowledges, confirms or
+reroutes, and is still a trusted agent source, not human attestation.
 
 The same trusted T3 caller may also send the intake hooks' `task_intake`
 (`request_id` `prompt_submit`) and `task_intake_done` (`stop`), with only a

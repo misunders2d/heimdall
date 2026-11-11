@@ -97,7 +97,12 @@ does not invent platform human ingress. Logs contain metadata, never prompts.
 Create/edit/remove prepare ordinary 24-hour drafts and queue the normal private
 confirmation card atomically. Only the same real person in the same platform
 conversation can confirm. The adapter cannot confirm, synthesize a yes, or assert
-a repeat-safe rerun. Pause/resume/run/stop use existing canonical command changes;
+a repeat-safe rerun. Exception: a verified external owner origin, and trusted T3
+with `trusted_t3.manage`, have no chat to confirm in, so their create/edit apply
+at once through the same activation checks as a direct owner request; the
+notice goes to the owner's registered private chat (also `"to":"here"`).
+Their removals and `rerun_on_timeout` jobs keep the draft and card; trusted T3
+never removes, checkpoints or acknowledges. Pause/resume/run/stop use existing canonical command changes;
 stop callbacks run once after the original commit; a cached reply never stops a newer run. No direct SQLite control from tools or CLI.
 Normal chat owner creation/edit behavior is preserved.
 

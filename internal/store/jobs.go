@@ -113,9 +113,39 @@ type JobChange struct {
 	CancelRetries        string // timeout retry fence, stored with command answer
 	CancelPendingRetries string // pause/edit: pending replay only
 	StopJob              string // router callback after command commit, not persisted
+	// More: further changes stored in the same transaction, in order (a bare
+	// yes or no answering several drafts at once).
+	More []*JobChange
+}
+
+// StopJobs are the jobs whose running runs stop after commit, More included.
+func (ch *JobChange) StopJobs() []string {
+	if ch == nil {
+		return nil
+	}
+	var out []string
+	if ch.StopJob != "" {
+		out = append(out, ch.StopJob)
+	}
+	for _, m := range ch.More {
+		out = append(out, m.StopJobs()...)
+	}
+	return out
 }
 
 func (ch *JobChange) apply(tx *sql.Tx) error {
+	if err := ch.applyOne(tx); err != nil || ch == nil {
+		return err
+	}
+	for _, m := range ch.More {
+		if err := m.apply(tx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ch *JobChange) applyOne(tx *sql.Tx) error {
 	if ch != nil && ch.CancelRetries != "" {
 		// Fence running attempts too: a concurrent EndTurn must not resurrect
 		// a pending rerun after stop/pause/delete has committed.

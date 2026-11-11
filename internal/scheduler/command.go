@@ -56,8 +56,9 @@ func cutBlocks(text string) (string, []string) {
 // Only a person request may propose scheduler changes.
 func WithoutProposals(text string) string { clean, _ := cutBlocks(text); return clean }
 
-// yes and no are whole replies that confirm or discard the caller's one
-// draft in this conversation (whole reply, any case, trailing punctuation ignored).
+// yes and no are whole replies that confirm or discard the caller's drafts
+// in this conversation, all of them when several wait (whole reply, any
+// case, trailing punctuation ignored).
 var (
 	yes = []string{"yes", "ok", "confirm", "да", "так"}
 	no  = []string{"no", "cancel", "нет", "ні"}
@@ -65,7 +66,9 @@ var (
 
 // Answer handles a bare yes or no while the caller has drafts waiting in
 // this conversation; handled false otherwise (the text is then an ordinary
-// message, or cancel's usual command). The change is stored with the reply.
+// message, or cancel's usual command). With several drafts it answers every
+// one (owner, 2026-11-11: a plain yes confirms; no typing ids). The change
+// is stored with the reply.
 func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.JobChange, handled bool) {
 	// A question is not consent to confirm or discard a draft.
 	if strings.HasSuffix(strings.TrimSpace(text), "?") {
@@ -83,8 +86,10 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 	switch {
 	case len(drafts) == 0:
 		return "", nil, false
+	case len(drafts) > 1 && details:
+		return s.waiting(c, drafts), nil, true
 	case len(drafts) > 1:
-		return "Several requests wait here. Open !jobs details to choose one; no request was changed.", nil, true
+		reply, change = s.answerAll(c, drafts, confirm)
 	case details:
 		j := drafts[0]
 		if id := removalID(j); id != "" {
@@ -97,6 +102,106 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 		reply, change = s.discard(c, drafts[0].ID)
 	}
 	return reply, change, true
+}
+
+// waiting lists the caller's drafts here: what each would do, no ids.
+func (s *Scheduler) waiting(c Caller, drafts []store.Job) string {
+	lines := []string{s.heading(c, fmt.Sprintf("📋 %d requests wait", len(drafts)))}
+	for _, j := range drafts {
+		action, d := s.draftAction(j)
+		line := "• " + action + " " + bold(c.Conv, s.name(c, d))
+		if c.Private && d.Summary != "" && !strings.EqualFold(d.Summary, d.Name) {
+			line += " — " + literal(d.Summary)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n") + "\n\n👉 Reply " + bold(c.Conv, "Yes") + " to apply all or " + bold(c.Conv, "No") + " to cancel all."
+}
+
+// draftAction is what a draft would do, and the definition it shows: a
+// removal shows its job's.
+func (s *Scheduler) draftAction(j store.Job) (string, Def) {
+	if id := removalID(j); id != "" {
+		orig, _, _ := s.st.Job(id)
+		d, _, _ := parse(orig)
+		return "🗑️ Remove", d
+	}
+	d, _, _ := parse(j)
+	if j.EditOf != "" {
+		return "📝 Update", d
+	}
+	return "📅 Schedule", d
+}
+
+// answerAll confirms or discards every draft of the caller here, each
+// checked as its own confirm or discard would be. One that fails adds no
+// change and never blocks the others; the changes are stored together
+// with the reply. Removals go last, so an edit never lands on a job
+// removed by the same reply, and the employee cap counts creates approved
+// above.
+func (s *Scheduler) answerAll(c Caller, drafts []store.Job, confirm bool) (string, *store.JobChange) {
+	slices.SortStableFunc(drafts, func(a, b store.Job) int {
+		ra, rb := removalID(a) != "", removalID(b) != ""
+		switch {
+		case ra == rb:
+			return 0
+		case ra:
+			return 1
+		}
+		return -1
+	})
+	title := "📋 Requests cancelled"
+	if confirm {
+		title = "📋 Requests answered"
+	}
+	lines := []string{s.heading(c, title)}
+	all := &store.JobChange{}
+	created := 0
+	for _, j := range drafts {
+		_, d := s.draftAction(j)
+		var msg, done string
+		var ch *store.JobChange
+		switch {
+		case !confirm:
+			msg, ch = s.discard(c, j.ID)
+			done = "cancelled"
+		case removalID(j) != "":
+			msg, ch = s.confirm(c, j.ID)
+			done = "removed"
+		case j.EditOf == "":
+			if c.Role != core.RoleOwner && created > 0 {
+				if jobs, _ := s.st.Jobs(store.JobFilter{Creator: c.Principal.Key(), States: []string{store.JobActive, store.JobPaused}}); len(jobs)+created >= 10 {
+					msg = "Task not created: at most 10 scheduled tasks per employee. Remove one first."
+					break
+				}
+			}
+			msg, ch = s.confirm(c, j.ID)
+			done = "created"
+			if pd, _, _ := parse(j); pd.Paused {
+				done = "created, paused"
+			}
+		default:
+			msg, ch = s.confirm(c, j.ID)
+			done = "updated"
+		}
+		switch {
+		case ch == nil:
+			reason, _, _ := strings.Cut(msg, "\n")
+			done = "not approved: " + literal(strings.TrimPrefix(reason, "Request not approved: "))
+		case ch.Confirm == nil && ch.Update == "" && ch.Drop != "" && confirm:
+			done = "expired; nothing changed"
+		case j.EditOf == "" && removalID(j) == "" && confirm:
+			created++
+		}
+		if ch != nil {
+			all.More = append(all.More, ch)
+		}
+		lines = append(lines, "• "+bold(c.Conv, s.name(c, d))+" — "+done)
+	}
+	if len(all.More) == 0 {
+		return strings.Join(lines, "\n"), nil
+	}
+	return strings.Join(lines, "\n"), all
 }
 
 func (s *Scheduler) drafts(c Caller) []store.Job {
