@@ -205,7 +205,8 @@ func run(args []string) error {
 			// person turn or a verified external human owner reaches here
 			// (scheduled runs are refused there).
 			jobs.Tasks = func(who scheduler.Caller, action, issue, title, requestID string) (string, bool) {
-				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered}, action, issue, title, requestID)
+				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered,
+					Same: func(p core.Principal) bool { return access.SamePerson(p, who.Principal) }}, action, issue, title, requestID)
 			}
 			jobs.TaskExport = func() ([]byte, error) { return work.Export(time.Now()) }
 			// Owner turns admit accepted work themselves only when the

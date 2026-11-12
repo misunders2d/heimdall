@@ -66,9 +66,10 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
   only a real human reply there confirms (unchanged removal rule).
 - Reads, `run`, `pause`, `resume`, `stop`, `acknowledge`: as for a live owner
   turn.
-- `task_add`, `task_list`, `task_show`, and the creator's own `task_pause`,
-  `task_resume`, `task_close` (id and `request_id` only; a close is one event
-  per `request_id`): as for a live owner turn. The task's
+- `task_add`, `task_list`, `task_show`, `task_wake`, and the creator's own
+  `task_pause`, `task_resume`, `task_close` (id and `request_id` only; a
+  close is one event per `request_id`): as for a live owner turn
+  (`task_wake`: [durable.md](durable.md), "Wake now"). The task's
   creator, route and privacy are the mapped principal's registered private
   conversation. A Slack owner's native OAuth actor and installation come only
   from the live Slack verification of that same principal and team; without
@@ -161,8 +162,9 @@ person's owner role or keys in AgentNet takes effect on the next call.
 `"trusted_t3":{"launcher":"/ABSOLUTE/PATH/TO/t3","user":"T3_OS_USER"}` (absent = off)
 lets a peer that no Heimdall turn or configured launcher owns, and that
 descends from the running process of the executable `launcher` resolves to
-(resolved per request, so no version pin), run `task_add`, `task_list` and
-`task_show` only, as `owner` in its registered private conversation. Every
+(resolved per request, so no version pin), run `task_add`, `task_list`,
+`task_show` and `task_wake` only, as `owner` in its registered private
+conversation. Every
 path component must be owned by root or `user` and not group/other writable;
 below such a directory that others cannot search, another owner is allowed.
 The process must run as `user`, and the ancestry must be unchanged at commit.

@@ -32,6 +32,9 @@ type Caller struct {
 	// Origin names a registration source that is not a live chat message
 	// (the owner-trusted T3 launcher); empty for messages and person turns.
 	Origin string
+	// Same reports whether a creator is this caller's own person (identity
+	// aliases); only task_wake uses it. Nil: exact creator only.
+	Same func(core.Principal) bool
 }
 
 // sees reports whether c may see cm. As for !job: in the creator's private
@@ -87,6 +90,12 @@ func (r *Runtime) Task(c Caller, action, issue, title, requestID string) (reply 
 		reply = r.Command(c, action+" "+issue)
 		up := strings.ToUpper(issue)
 		return reply, reply == "Sent close to "+up+"." || strings.HasPrefix(reply, up+" paused by owner.") || reply == up+" resumed."
+	case "wake":
+		if strings.ContainsAny(issue, " \t\r\n") || requestID == "" {
+			return "Unsupported task action.", false
+		}
+		reply = r.Wake(c, strings.ToUpper(issue))
+		return reply, reply == "Sent wake to "+strings.ToUpper(issue)+"."
 	case "add":
 		f := strings.Fields(title)
 		// Checked as Command re-splits it (whitespace collapsed to single
@@ -240,6 +249,53 @@ func (r *Runtime) Signal(issue string, ev Event, key string) error {
 		}
 	}
 	return dbos.Send(r.ctx, issue, ev, topic, dbos.WithIdempotencyKey(key))
+}
+
+// Wake ends an assistant task's wait now, so its next wake runs at once
+// (task_wake). It carries no text. The caller is the creator or, while an
+// owner, the same person under another identity (a Slack-bound T3 caller
+// for a Telegram-made task). Only a running task in the working phase
+// takes it. The key is the attempt's latest wake: every signal until the
+// next wake starts is one event, so exactly one more wake follows.
+func (r *Runtime) Wake(c Caller, issue string) string {
+	if !c.Live || c.Role != core.RoleOwner {
+		return "!work is for the owner's live messages only."
+	}
+	ws, err := dbos.ListWorkflows(r.ctx, dbos.WithFilterWorkflowIDs(issue), dbos.WithFilterName(workflowName), dbos.WithFilterLoadInput(true))
+	var cm Commitment
+	ok := err == nil && len(ws) == 1
+	if ok {
+		cm, ok = decodeInput(ws[0].Input)
+	}
+	mine := ok && (cm.Creator == c.Principal.Key() || c.Same != nil && c.Same(cm.Owner))
+	if !mine || !c.Private && cm.Route != c.Conv {
+		return issue + " is not tracked here."
+	}
+	if cm.Worker != "" || cm.Intake != nil || r.opt.Assistant == nil {
+		return issue + ": not woken by your assistant; task_wake wakes only those tasks."
+	}
+	st, _ := r.State(issue)
+	switch p, _ := ws[0].Attributes["paused_by"].(string); {
+	case p != "":
+		return issue + ": paused: resume first."
+	case ws[0].Status == dbos.WorkflowStatusSuccess || ws[0].Status == dbos.WorkflowStatusCancelled || st.Phase == PhaseClosed:
+		return issue + ": closed."
+	case ws[0].Status != dbos.WorkflowStatusPending && ws[0].Status != dbos.WorkflowStatusEnqueued: // enqueued: recovering after a restart
+		return issue + ": not waiting."
+	case st.Phase == PhaseHeld:
+		return issue + ": held: !work retry " + issue + "."
+	case st.Phase != PhaseWorking:
+		return issue + ": not waiting."
+	}
+	wakes, err := dbos.ListWorkflows(r.ctx, dbos.WithFilterWorkflowIDPrefix(fmt.Sprintf("%s/%d/work/", issue, st.Attempt)))
+	if err != nil {
+		return issue + ": " + err.Error()
+	}
+	ev := Event{Attempt: st.Attempt, By: c.Principal.Key(), Wake: true}
+	if err := dbos.Send(r.ctx, issue, ev, topic, dbos.WithIdempotencyKey(fmt.Sprintf("wake/%d/%d", st.Attempt, len(wakes)))); err != nil {
+		return issue + ": " + err.Error()
+	}
+	return "Sent wake to " + issue + "."
 }
 
 // Pause is the explicit owner pause: the workflow is cancelled with a

@@ -1,7 +1,9 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -129,5 +131,112 @@ func TestControlTaskAdmission(t *testing.T) {
 	}
 	if _, err := work.State("MEL-205"); err == nil {
 		t.Fatal("cargo task admitted")
+	}
+}
+
+// wakeAssistant waits an hour after wake 1 and reports at wake 2.
+type wakeAssistant struct {
+	mu   sync.Mutex
+	keys []string
+}
+
+func (a *wakeAssistant) Work(_ context.Context, q durable.WorkRequest) (durable.WorkResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.keys = append(a.keys, q.Key)
+	if strings.HasSuffix(q.Key, "/work/1") {
+		return durable.WorkResult{Turn: 1, Wait: time.Hour, Next: "wait for the worker"}, nil
+	}
+	return durable.WorkResult{Turn: 2, Report: "worker finished"}, nil
+}
+
+func (a *wakeAssistant) count(issue string) (n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, k := range a.keys {
+		if strings.HasPrefix(k, issue+"/") {
+			n++
+		}
+	}
+	return n
+}
+
+// task_wake through the control: the owner's live turn and the trusted
+// T3 launcher (no manage) wake their task now; a repeated request_id is
+// answered from the record (one signal); it takes no title; scheduled and
+// employee callers and a finished task are refused, and each refusal is
+// logged without the caller's identity.
+func TestControlTaskWake(t *testing.T) {
+	r, c := controlRig(t)
+	var logs bytes.Buffer
+	r.s.log = log.New(&logs, "", 0)
+	ctx := context.Background()
+	a := &wakeAssistant{}
+	work, err := durable.Open(durable.Options{Path: filepath.Join(t.TempDir(), "durable.db"), Outbox: r.st, Assistant: a, Silence: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := work.Launch(); err != nil {
+		t.Fatal(err)
+	}
+	defer work.Close()
+	r.s.Tasks = func(who Caller, action, issue, title, requestID string) (string, bool) {
+		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, Origin: who.Registered}, action, issue, title, requestID)
+	}
+	live := Caller{Principal: boss, Role: core.RoleOwner, Conv: bossDM, Private: true}
+	t3 := Caller{Principal: boss, Role: core.RoleOwner, Conv: bossDM, Private: true, External: trustedT3, Registered: trustedT3}
+	waiting := func(issue string) {
+		t.Helper()
+		for end := time.Now().Add(20 * time.Second); a.count(issue) != 1; time.Sleep(20 * time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatalf("%s never waited", issue)
+			}
+		}
+	}
+	reported := func(issue string) {
+		t.Helper()
+		for end := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			if st, err := work.State(issue); err == nil && st.Phase == durable.PhaseReported {
+				return
+			}
+			if time.Now().After(end) {
+				t.Fatalf("%s not woken", issue)
+			}
+		}
+	}
+	for i, who := range []Caller{live, t3} {
+		issue := []string{"MEL-400", "MEL-401"}[i]
+		if got := c.execute(ctx, 1234, ControlRequest{Action: "task_add", ID: issue, Title: "Wait for the worker", RequestID: "add-" + issue}, who); !got.Changed {
+			t.Fatalf("%+v", got)
+		}
+		waiting(issue)
+		wake := ControlRequest{Action: "task_wake", ID: issue, RequestID: "wake-" + issue}
+		got := c.execute(ctx, 1234, wake, who)
+		if got.Error != "" || !got.Changed || got.Reply != "Sent wake to "+issue+"." {
+			t.Fatalf("%s: %+v", issue, got)
+		}
+		reported(issue)
+		if again := c.execute(ctx, 1234, wake, who); again != got || a.count(issue) != 2 {
+			t.Fatalf("repeated request %+v, wakes %d", again, a.count(issue))
+		}
+	}
+	logs.Reset()
+	for name, tc := range map[string]struct {
+		req  ControlRequest
+		who  Caller
+		want string
+	}{
+		"scheduled": {ControlRequest{Action: "task_wake", ID: "MEL-400", RequestID: "s1"}, Caller{Principal: boss, Role: core.RoleOwner, Conv: team, Job: "j1", Run: 1}, "scheduled origin"},
+		"employee":  {ControlRequest{Action: "task_wake", ID: "MEL-400", RequestID: "e1"}, Caller{Principal: boss, Role: core.RoleEmployee, Conv: bossDM, Private: true}, "trusted active request origin required"},
+		"text":      {ControlRequest{Action: "task_wake", ID: "MEL-400", Title: "done, see PR", RequestID: "x1"}, live, "takes only an issue id"},
+		"no-id":     {ControlRequest{Action: "task_wake", ID: "MEL-400"}, live, "stable request_id"},
+		"finished":  {ControlRequest{Action: "task_wake", ID: "MEL-400", RequestID: "f1"}, live, "MEL-400: not waiting."},
+	} {
+		if res := c.execute(ctx, 1234, tc.req, tc.who); !strings.Contains(res.Error+res.Reply, tc.want) || res.Changed {
+			t.Fatalf("%s: want %q, got %+v", name, tc.want, res)
+		}
+	}
+	if n := strings.Count(logs.String(), "action task_wake refused"); n != 5 || strings.Contains(logs.String(), boss.Key()) {
+		t.Fatalf("refusal log %q", logs.String())
 	}
 }
