@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/store"
 )
 
 // planAssistant answers each wake by its key, else by def.
@@ -368,4 +371,226 @@ func TestOldPathTaskRecoversThenUpgradesOnRetry(t *testing.T) {
 	defer e.close()
 	e.cmdAs("a97", "accept MEL-97")
 	e.phase("MEL-97", PhaseClosed, 1)
+}
+
+// gateAssistant holds each key in hold until its channel closes, then
+// answers by plan.
+type gateAssistant struct {
+	*planAssistant
+	started sync.Map
+	hold    map[string]chan struct{}
+}
+
+func (g *gateAssistant) Work(ctx context.Context, q WorkRequest) (WorkResult, error) {
+	g.started.Store(q.Key, true)
+	if ch := g.hold[q.Key]; ch != nil {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return WorkResult{}, ctx.Err()
+		}
+	}
+	return g.planAssistant.Work(ctx, q)
+}
+
+func (g *gateAssistant) running(t *testing.T, key string) {
+	t.Helper()
+	waitFor(t, 10*time.Second, key+" running", func() bool { _, ok := g.started.Load(key); return ok })
+}
+
+func (e *env) wake(c Caller, issue, id string) string {
+	reply, _ := e.rt.Task(c, "wake", issue, "", id)
+	return reply
+}
+
+// task_wake ends a WAIT at once: a signal in a 1h pause wakes within
+// seconds; signals during a running wake (twice) give exactly one more
+// wake; with no signal the timer wakes as before. Paused, worker,
+// finished and other people's tasks are refused; the same person under
+// another identity is not.
+func TestTaskWakeEndsWaitEarly(t *testing.T) {
+	fastWakes(t)
+	rel := make(chan struct{})
+	a := &gateAssistant{planAssistant: &planAssistant{plan: map[string]WorkResult{
+		"MEL-300/1/work/1": {Turn: 1, Wait: time.Hour, Next: "wait for the worker"},
+		"MEL-300/1/work/2": {Turn: 2, Wait: time.Hour, Next: "wait again"},
+		"MEL-300/1/work/3": {Turn: 3, Report: "worker done"},
+		"MEL-301/1/work/1": {Turn: 4, Wait: 50 * time.Millisecond, Next: "check"},
+		"MEL-301/1/work/2": {Turn: 5, Report: "timer woke it"},
+		"MEL-302/1/work/1": {Turn: 6, Wait: time.Hour, Next: "wait"},
+		"MEL-302/1/work/2": {Turn: 7, Report: "woken by the same person"},
+		"MEL-303/1/work/1": {Turn: 8, Wait: time.Hour, Next: "wait"},
+	}}, hold: map[string]chan struct{}{"MEL-300/1/work/1": rel}}
+	e := open(t, t.TempDir(), Options{Assistant: a, Silence: -1})
+	defer e.close()
+	for _, c := range []string{"add MEL-300 Wait for a worker", "add MEL-301 Timer only", "add MEL-302 Alias", "add MEL-303 Paused", "add MEL-304 worker=t3:thread-W Worker task"} {
+		e.cmd(c)
+	}
+	e.phase("MEL-301", PhaseReported, 1) // no signal: the timer, as before
+
+	a.running(t, "MEL-300/1/work/1")
+	for _, id := range []string{"w1", "w2"} {
+		if got := e.wake(owner, "MEL-300", id); got != "Sent wake to MEL-300." {
+			t.Fatal(got)
+		}
+	}
+	close(rel)
+	waitFor(t, 5*time.Second, "one more wake", func() bool { return len(a.seen("MEL-300/")) == 2 })
+	time.Sleep(500 * time.Millisecond)
+	if got := a.seen("MEL-300/"); len(got) != 2 {
+		t.Fatalf("signals during a wake gave %q", got)
+	}
+	start := time.Now()
+	if got := e.wake(owner, "MEL-300", "w3"); got != "Sent wake to MEL-300." {
+		t.Fatal(got)
+	}
+	e.phase("MEL-300", PhaseReported, 1)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("woke after %s", d)
+	}
+	if got := e.wake(owner, "MEL-300", "w4"); got != "MEL-300: not waiting." {
+		t.Fatal(got)
+	}
+
+	e.phase("MEL-302", PhaseWorking, 1)
+	a.running(t, "MEL-303/1/work/1")
+	stranger := Caller{Principal: core.Principal{Platform: "test2", ID: "owner"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "test2", Chat: "dm"}, Live: true, Private: true}
+	if got := e.wake(stranger, "MEL-302", "x1"); got != "MEL-302 is not tracked here." {
+		t.Fatal(got)
+	}
+	alias := stranger
+	alias.Same = func(p core.Principal) bool { return p.Key() == owner.Principal.Key() }
+	waitFor(t, 10*time.Second, "MEL-302 waiting", func() bool { return len(a.seen("MEL-302/")) == 1 })
+	if got := e.wake(alias, "MEL-302", "x2"); got != "Sent wake to MEL-302." {
+		t.Fatal(got)
+	}
+	e.phase("MEL-302", PhaseReported, 1)
+
+	waitFor(t, 10*time.Second, "MEL-303 waiting", func() bool { return len(a.seen("MEL-303/")) == 1 })
+	e.cmd("pause MEL-303")
+	notLive := owner
+	notLive.Live = false
+	for _, tc := range []struct {
+		c         Caller
+		issue, id string
+		want      string
+	}{
+		{owner, "MEL-303", "p1", "MEL-303: paused: resume first."},
+		{owner, "MEL-304", "p2", "MEL-304: not woken by your assistant; task_wake wakes only those tasks."},
+		{owner, "MEL-399", "p3", "MEL-399 is not tracked here."},
+		{owner, "MEL-303", "", "Unsupported task action."},
+		{notLive, "MEL-303", "p4", "!work is for the owner's live messages only."},
+	} {
+		if got := e.wake(tc.c, tc.issue, tc.id); got != tc.want {
+			t.Fatalf("%s: %q, want %q", tc.issue, got, tc.want)
+		}
+	}
+	if got := a.seen("MEL-303/"); len(got) != 1 {
+		t.Fatalf("paused task woke: %q", got)
+	}
+}
+
+// A signal stored while wake 1 ran is stale once that wake reports: the
+// owner's accept queued behind it still wins over the supervisor's
+// reject.
+func TestTaskWakeStaleSignalLosesToOwnerVerdict(t *testing.T) {
+	relWork, relReview, reviewing := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)
+	a := &gateAssistant{planAssistant: &planAssistant{plan: map[string]WorkResult{"MEL-310/1/work/1": {Turn: 1, Report: "done"}}},
+		hold: map[string]chan struct{}{"MEL-310/1/work/1": relWork}}
+	rv := reviewerFunc(func(context.Context, ReviewRequest) (ReviewResult, error) {
+		reviewing <- struct{}{}
+		<-relReview
+		return ReviewResult{Turn: 2, Verdict: "reject", Reason: "looks wrong"}, nil
+	})
+	e := open(t, t.TempDir(), Options{Assistant: a, Reviewer: rv, Silence: -1})
+	defer e.close()
+	e.cmd("add MEL-310 Verdict race")
+	a.running(t, "MEL-310/1/work/1")
+	if got := e.wake(owner, "MEL-310", "s1"); got != "Sent wake to MEL-310." {
+		t.Fatal(got)
+	}
+	close(relWork)
+	select {
+	case <-reviewing:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no review")
+	}
+	if got := e.cmdAs("acc", "accept MEL-310"); got != "Sent accept to MEL-310." {
+		t.Fatal(got)
+	}
+	close(relReview)
+	e.phase("MEL-310", PhaseClosed, 1)
+	if st, _ := e.rt.State("MEL-310"); !strings.HasPrefix(st.Verdict, "accepted by "+owner.Principal.Key()) {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// The signal is in durable.db when task_wake answers: stored while no
+// workflow runs (the runtime is not launched), it still wakes the task
+// after the restart, long before its 1h timer. A signal sent while the
+// restarted runtime is still recovering also wakes.
+func TestTaskWakeStoredBeforeAckSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	a := &planAssistant{plan: map[string]WorkResult{
+		"MEL-320/1/work/1": {Turn: 1, Wait: time.Hour, Next: "wait"},
+		"MEL-320/1/work/2": {Turn: 2, Report: "woken after restart"},
+		"MEL-321/1/work/1": {Turn: 3, Wait: time.Hour, Next: "wait"},
+		"MEL-321/1/work/2": {Turn: 4, Report: "woken while recovering"},
+	}}
+	e := open(t, dir, Options{Assistant: a, Silence: -1})
+	for _, issue := range []string{"MEL-320", "MEL-321"} {
+		e.cmd("add " + issue + " Survive a restart")
+		waitFor(t, 10*time.Second, "pause", func() bool { st, _ := e.rt.State(issue); return strings.HasPrefix(st.Next, "next wake in 1h") })
+	}
+	e.close()
+
+	st, err := store.Open(filepath.Join(dir, "heimdall.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := Open(Options{Path: filepath.Join(dir, "durable.db"), Outbox: st, Assistant: a, Silence: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := rt.Task(owner, "wake", "MEL-320", "", "r1"); got != "Sent wake to MEL-320." {
+		t.Fatal(got)
+	}
+	rt.Close()
+	st.Close()
+
+	e = open(t, dir, Options{Assistant: a, Silence: -1})
+	defer e.close()
+	// Right after a restart DBOS shows a recovering workflow as enqueued:
+	// a signal then still counts.
+	if got := e.wake(owner, "MEL-321", "r2"); got != "Sent wake to MEL-321." {
+		t.Fatal(got)
+	}
+	e.phase("MEL-321", PhaseReported, 1)
+	e.phase("MEL-320", PhaseReported, 1)
+	if got := a.seen("MEL-320/"); !slices.Equal(got, []string{"MEL-320/1/work/1", "MEL-320/1/work/2"}) {
+		t.Fatalf("wakes %q", got)
+	}
+}
+
+// Without a supervisor, a signal stored while wake 1 ran is stale in the
+// owner-verdict wait: it is not silence, so no notice goes out, and the
+// owner's accept still closes the task.
+func TestTaskWakeStaleSignalIsNotSilence(t *testing.T) {
+	rel := make(chan struct{})
+	a := &gateAssistant{planAssistant: &planAssistant{plan: map[string]WorkResult{"MEL-330/1/work/1": {Turn: 1, Report: "done"}}},
+		hold: map[string]chan struct{}{"MEL-330/1/work/1": rel}}
+	e := open(t, t.TempDir(), Options{Assistant: a}) // silence notices on (1h)
+	defer e.close()
+	e.cmd("add MEL-330 Manual verdict")
+	a.running(t, "MEL-330/1/work/1")
+	if got := e.wake(owner, "MEL-330", "s1"); got != "Sent wake to MEL-330." {
+		t.Fatal(got)
+	}
+	close(rel)
+	waitFor(t, 10*time.Second, "report", func() bool { return len(outbound(t, e.dir, "MEL-330 attempt 1: UNACCEPTED")) == 1 })
+	e.cmdAs("acc", "accept MEL-330") // queued behind the stale signal
+	e.phase("MEL-330", PhaseClosed, 1)
+	if got := outbound(t, e.dir, "no signal for"); len(got) != 0 {
+		t.Fatalf("stale signal sent a notice: %q", got)
+	}
 }

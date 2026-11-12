@@ -438,7 +438,11 @@ type Event struct {
 	By       string `json:"by"`
 	Evidence string `json:"evidence,omitempty"`
 	Note     string `json:"note,omitempty"`
-	auto     bool   // built here (worker report, supervisor verdict), never a live owner's
+	// Wake marks a task_wake signal. Its Kind is "" so that every binary,
+	// b99e44d included, reads it as a timeout: it ends a wake pause early
+	// and nothing else. Newer code skips it in every other wait.
+	Wake bool `json:"wake,omitempty"`
+	auto bool // built here (worker report, supervisor verdict), never a live owner's
 }
 
 // State is the commitment's published execution state.
@@ -697,6 +701,9 @@ func (r *Runtime) await(ctx dbos.Context, w *run, kinds ...string) (Event, error
 			return Event{}, err
 		}
 		if !ok {
+			if ev.Wake {
+				continue // a stale wake signal is not silence: no notice
+			}
 			if !noticed {
 				noticed = true
 				text := fmt.Sprintf("%s attempt %d: no signal for %s (%s). Still open; next: %s. No further notice until it changes.", w.c.Issue, w.st.Attempt, wait, w.st.Phase, w.st.Next)
@@ -1072,7 +1079,8 @@ func (r *Runtime) work(ctx dbos.Context, w *run) (Event, error) {
 }
 
 // pause waits durably for d, taking owner events: a close (as a closed
-// error) or a report of the current attempt ends it early (ev non-nil).
+// error) or a report of the current attempt ends it early (ev non-nil). A
+// task_wake signal ends it early too (as a timeout: the next wake runs).
 func (r *Runtime) pause(ctx dbos.Context, w *run, d time.Duration) (*Event, error) {
 	for {
 		ev, ok, err := r.next(ctx, w, d)
@@ -1183,6 +1191,9 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 			if err != nil {
 				return Event{}, err
 			}
+			if !ok && ev.Wake {
+				continue // a stale wake signal: an owner verdict behind it still wins
+			}
 			if !ok {
 				break
 			}
@@ -1227,6 +1238,7 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 			switch {
 			case err != nil:
 				return Event{}, err
+			case !ok && ev.Wake: // a stale wake signal: not the end of the backoff
 			case !ok:
 				again = res.Held == ""
 			case ev.Kind == "close":

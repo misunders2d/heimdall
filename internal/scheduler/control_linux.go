@@ -189,6 +189,9 @@ func (c *Control) serve(ctx context.Context, conn *net.UnixConn) {
 		} else {
 			if originErr != nil {
 				result.Error = "trusted active request origin unavailable: " + originErr.Error()
+				if req.Action == "task_wake" {
+					c.s.log.Printf("scheduler control: operator uid %d, action task_wake refused: origin unbound", cred.Uid)
+				}
 			} else {
 				result = c.executePeer(ctx, cred, req, who, valid)
 			}
@@ -363,8 +366,15 @@ func (c *Control) execute(ctx context.Context, uid uint32, req ControlRequest, o
 	return c.executeLocked(ctx, uid, req, origin)
 }
 
-func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequest, origin []Caller, valid ...func() bool) ControlResult {
+func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequest, origin []Caller, valid ...func() bool) (res ControlResult) {
 	fail := func(err error) ControlResult { return ControlResult{Error: err.Error()} }
+	if req.Action == "task_wake" {
+		defer func() {
+			if res.Error != "" || !res.Changed { // metadata only: never the caller's identity or the reason
+				c.s.log.Printf("scheduler control: operator uid %d, action task_wake refused", uid)
+			}
+		}()
+	}
 	if uid != 0 && uid != c.uid {
 		return fail(errors.New("operator not authorized"))
 	}
@@ -415,7 +425,7 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		return fail(errors.New("receipt fields require acknowledge"))
 	}
 	if req.Action == "discover" {
-		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show, task_pause, task_resume, task_close for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there (an external or trusted T3 owner origin's create/edit apply at once; removal and rerun_on_timeout still ask). Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
+		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show, task_wake, task_pause, task_resume, task_close for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step; task_wake: id + request_id, wakes it now). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there (an external or trusted T3 owner origin's create/edit apply at once; removal and rerun_on_timeout still ask). Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
 	}
 	var job store.Job
 	if req.ID != "" {
@@ -602,6 +612,12 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 		if req.ID == "" || bad(req.ID, 64) || strings.ContainsAny(req.ID, " \t") || strings.TrimSpace(req.Title) == "" || bad(req.Title, 500) {
 			return fail("task_add needs an issue id and a one-line title (up to 500 bytes)")
 		}
+	case "task_wake":
+		// Ends an assistant task's wait now; no text. Trusted T3 needs no
+		// manage: a worker it launched signals that it is done.
+		if req.ID == "" || bad(req.ID, 64) || strings.ContainsAny(req.ID, " \t") || req.Title != "" {
+			return fail("task_wake takes only an issue id and request_id")
+		}
 	case "task_pause", "task_resume", "task_close":
 		if who.Registered != "" && !c.manages(who, req.Action) {
 			return fail(who.Registered + " may only task_add, task_list and task_show" + c.managed())
@@ -610,7 +626,7 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 			return fail(req.Action + " takes only an issue id and request_id")
 		}
 	default:
-		return fail("unsupported task action (task_add, task_list, task_show, task_pause, task_resume, task_close)")
+		return fail("unsupported task action (task_add, task_list, task_show, task_wake, task_pause, task_resume, task_close)")
 	}
 	if req.RequestID == "" || bad(req.RequestID, 128) {
 		return fail("mutation requires a stable request_id (1-128 bytes); reuse only for the same request")

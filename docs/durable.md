@@ -218,6 +218,42 @@ sent once per stop under a fixed key; a failed send never stops the task
 again. A stopped wake may have acted: the owner checks its effects before
 `!work retry`.
 
+**Wake now (`task_wake`, MEL-785).** A `WAIT` no longer has to run out
+when the work it waits for is done: the scheduler control action
+`task_wake` (issue id and stable `request_id`, nothing else; it carries no
+text) ends the wait, and the next wake runs at once with its usual prompt.
+The timer stays as the backup and the caps are unchanged: a woken wake
+that answers `WAIT` counts toward the 100, a failed one as failed, and a
+signal during a failed-wake backoff shortens it.
+- *Who:* the owner's live turn, a verified external `author: human` run
+  and the trusted T3 launcher (no `manage` needed: a worker it launched
+  signals back). The creator, or while an owner the same person under
+  another identity (a Slack-bound T3 caller waking a Telegram-made task).
+  Scheduled, employee, review and wake turns stay refused. Each refusal is
+  one metadata-only log line (`action task_wake refused`).
+- *Which tasks:* only those worked by assistant wakes (no `worker=`, not a
+  `T3-<n>` intake) that are running in the working phase. Otherwise the
+  fixed answers: "paused: resume first", "held: !work retry", "closed",
+  "not waiting", "not tracked here".
+- *Durability:* the signal is committed to `durable.db` before the answer;
+  a restart before the wake still wakes it. The DBOS key is the attempt's
+  latest wake (`wake/<attempt>/<N>`), so every signal until the next wake
+  starts is one event: two signals give one wake, a signal during a
+  running wake gives exactly one more. The same `request_id` is answered
+  from the control record. A crash between storing the signal and that
+  record, then a retry after the next wake started, can give one extra
+  wake.
+- *Encoding:* an event with an empty kind and a `wake` marker. Every
+  binary, b99e44d included, reads it as a timeout, so a database moves
+  both ways between them (checked by replaying a history with a consumed
+  signal in b99e44d's wake pause). A signal still queued when the task has
+  moved on is skipped by this binary's other waits: no silence notice and
+  an owner verdict behind it still wins (both tested); the skip in a
+  review backoff covers a narrow race and is untested. Rollback limit
+  (checked against b99e44d): after such a skip, an older binary replays
+  that task differently and DBOS marks it failed (`UnexpectedStep`);
+  coming back to this binary does not repair it.
+
 **T3 intake** (hooks in [deploy/t3-intake](../deploy/t3-intake/README.md)).
 A T3 session's hooks call the scheduler control actions `task_intake`
 (event `prompt_submit`) and `task_intake_done` (event `stop`) with the
@@ -241,7 +277,8 @@ assistant can call the existing `heimdall_scheduler` control with
 `task_add` (Linear issue id, one-line title, stable `request_id`),
 `task_list` or `task_show`, and change its own task with `task_pause`,
 `task_resume` or `task_close` (issue id and stable `request_id`; a close is
-keyed by that `request_id`, as a chat close is by its message). The control binds the caller as for jobs
+keyed by that `request_id`, as a chat close is by its message), or wake it
+now with `task_wake` (see "Wake now"). The control binds the caller as for jobs
 (kernel peer, the active turn's generation, matching stored live ingress,
 owner now, Slack re-verified): creator, conversation, privacy and OAuth
 actor are that turn's, never arguments. The same `request_id` is answered
