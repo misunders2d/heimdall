@@ -66,7 +66,7 @@ func TestReviewIsInternalUntilAccepted(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 	all := outbound(t, dir, "MEL-50")
-	if len(all) != 1 || !strings.Contains(all[0], "MEL-50 accepted") {
+	if len(all) != 1 || !strings.Contains(all[0], "MEL-50 done: second") {
 		t.Fatalf("outbound %q", all)
 	}
 	if q := f.reqs[0]; q.Issue != "MEL-50" || q.Attempt != 1 || q.Route != c.Conv || q.Owner != c.Principal || q.Key != "MEL-50/1/review" {

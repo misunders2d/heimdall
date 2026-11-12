@@ -210,7 +210,7 @@ func TestAcceptBeforeDeliverAndRetire(t *testing.T) {
 		t.Fatalf("state %+v", st)
 	}
 	got := outbound(t, e.dir, "MEL-1")
-	if len(got) != 2 || !strings.Contains(got[0], "sent: MEL-1 attempt 1: UNACCEPTED worker report") || !strings.Contains(got[1], "sent: MEL-1 accepted") {
+	if len(got) != 2 || !strings.Contains(got[0], "sent: MEL-1 attempt 1: UNACCEPTED worker report") || !strings.Contains(got[1], "sent: MEL-1 done: done, see PR") {
 		t.Fatalf("deliveries %q", got)
 	}
 }
@@ -854,7 +854,7 @@ func TestCrashAtEverySeam(t *testing.T) {
 			if len(d) != 1 || !strings.HasPrefix(d[0], "MEL-9/1/dispatch\tt3:thread-A\t") {
 				t.Fatalf("dispatch effects %q", d)
 			}
-			acc := outbound(t, dir, "MEL-9 accepted")
+			acc := outbound(t, dir, "MEL-9 done: ")
 			if len(acc) != 1 || !strings.HasPrefix(acc[0], "sent:") {
 				t.Fatalf("accepted deliveries %q", acc)
 			}

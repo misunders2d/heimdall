@@ -608,7 +608,7 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 			if err := r.publish(ctx, w, PhaseReported, "verify the evidence: !work accept or !work reject"); err != nil {
 				return err
 			}
-			if err := r.deliver(ctx, w, fmt.Sprintf("report/%d", w.st.Attempt), fmt.Sprintf("%s attempt %d: UNACCEPTED worker report. Evidence: %s\nNot done until verified: !work accept %s or !work reject %s <reason>", c.Issue, w.st.Attempt, ev.Evidence, c.Issue, c.Issue), true); err != nil {
+			if err := r.deliver(ctx, w, fmt.Sprintf("report/%d", w.st.Attempt), fmt.Sprintf("%s attempt %d: UNACCEPTED worker report: %s\nNot done until verified: !work accept %s or !work reject %s <reason>", c.Issue, w.st.Attempt, summary(ev.Evidence), c.Issue, c.Issue), true); err != nil {
 				return err
 			}
 			v, err = r.await(ctx, w, "accept", "reject")
@@ -637,7 +637,7 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		if err := r.publish(ctx, w, PhaseAccepted, next); err != nil {
 			return err
 		}
-		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), fmt.Sprintf("%s accepted (attempt %d, %s). Evidence: %s", c.Issue, w.st.Attempt, w.st.Verdict, w.st.Evidence), true); err != nil {
+		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), fmt.Sprintf("%s done: %s", c.Issue, summary(w.st.Evidence)), true); err != nil {
 			return err
 		}
 		if c.Next == "" || w.st.Stage == "next" {
@@ -859,7 +859,7 @@ func (r *Runtime) awaitReport(ctx dbos.Context, w *run) (Event, error) {
 		if finished {
 			w.st.Runs = append(w.st.Runs, done)
 			return Event{Kind: "report", Attempt: w.st.Attempt, By: "observer:" + w.c.Worker,
-				Evidence: fmt.Sprintf("%s run %s %s: %s", w.c.Worker, done, status, or(reply, "(no reply text)")), auto: true}, nil
+				Evidence: fmt.Sprintf("%s run %s %s: %s", w.c.Worker, done, status, or(strings.TrimSpace(reply), "(no reply text)")), auto: true}, nil
 		}
 		if !noticed && r.opt.Silence > 0 && quiet >= r.opt.Silence {
 			noticed = true
@@ -919,7 +919,7 @@ func (r *Runtime) awaitRun(ctx dbos.Context, w *run, wt Waiter) (Event, error) {
 				w.st.Runs = append(w.st.Runs, run)
 				w.st.Note = ""
 				return Event{Kind: "report", Attempt: w.st.Attempt, By: "waiter:" + c.Worker,
-					Evidence: fmt.Sprintf("%s run %s %s: %s", c.Worker, run, res.Status, body), auto: true}, nil
+					Evidence: fmt.Sprintf("%s run %s %s: %s", c.Worker, run, res.Status, strings.TrimSpace(body)), auto: true}, nil
 			}
 		}
 		if note := fmt.Sprintf("waiting on %s run %s through the creator's native T3 tools (%s)", c.Worker, run, or(res.Status, "not finished")); note != w.st.Note {
@@ -1155,7 +1155,7 @@ func workPrompt(w *run, action, resume string) string {
 		fmt.Fprintf(&b, "State note: %s\n", st.Note)
 	}
 	b.WriteString("Do the next step now with your normal tools, within your own permissions. Then answer in one of two forms only:\n")
-	b.WriteString("REPORT on the first line, then the evidence that the goal is done (it will be verified; it is not accepted by you), or\n")
+	b.WriteString("REPORT on the first line, then the evidence that the goal is done (it will be verified; it is not accepted by you). The owner sees only the evidence's first line: make it one plain caveman-terse sentence with the result and anything the owner must do; put the proof below it. Or\n")
 	b.WriteString("WAIT <duration> on the first line (e.g. WAIT 30m, between 1m and 168h), then the next action you will take when woken.")
 	return b.String()
 }
@@ -1275,6 +1275,33 @@ func brief(w *run) string {
 		b += fmt.Sprintf("\n\nRepair, attempt %d: the previous attempt's result was not accepted: %s\nFix only that, within the work above; do not widen its scope.", w.st.Attempt, w.feedback)
 	}
 	return b
+}
+
+// summaryCap bounds the owner-facing summary, in runes.
+const summaryCap = 300
+
+// summary is the owner-facing line of a report: the evidence's first
+// non-empty line, cut at a word to summaryCap runes. The full evidence and
+// verdict stay in state (!work show); chat gets only this line.
+func summary(evidence string) string {
+	var line string
+	for l := range strings.Lines(evidence) {
+		if line = strings.TrimSpace(l); line != "" {
+			break
+		}
+	}
+	if line == "" {
+		return "(no summary line)"
+	}
+	r := []rune(line)
+	if len(r) <= summaryCap {
+		return line
+	}
+	cut := string(r[:summaryCap])
+	if i := strings.LastIndexAny(cut, " \t"); i > 0 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " \t,;:") + "…"
 }
 
 // reviewPrompt is the supervisor's brief. Authority stays with the
