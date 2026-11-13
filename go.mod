@@ -1,6 +1,6 @@
 module github.com/misunders2d/heimdall
 
-go 1.26.0
+go 1.26.11
 
 require (
 	github.com/adhocore/gronx v1.20.5
