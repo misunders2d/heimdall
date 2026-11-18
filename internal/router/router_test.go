@@ -520,6 +520,20 @@ func TestWhichOMPConfig(t *testing.T) {
 	want(t, e.reply(), "now uses omp")
 	e.send(owner, "c1", "!which")
 	want(t, e.reply(), "omp (set with !use", "Model: google-antigravity/gemini-3.8-flash\nThinking: high", "— heimdall")
+
+	// A reply on another model (switch or fallback) wins over the config.
+	e.send(owner, "c1", "plain")
+	want(t, e.reply(), "omp#1")
+	sessions, _ := filepath.Glob(filepath.Join(os.Getenv("HOME"), ".local", "state", "heimdall", "sessions", "omp", "*"))
+	if len(sessions) != 1 {
+		t.Fatalf("omp session dirs = %v", sessions)
+	}
+	line := `{"type":"message","message":{"role":"assistant","provider":"openai-codex","model":"gpt-6.1-sol"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(sessions[0], "t.jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.send(owner, "c1", "!which")
+	want(t, e.reply(), "Model: openai-codex/gpt-6.1-sol (last reply)\nThinking: high")
 }
 
 func TestMidTurnMessageSteers(t *testing.T) {
