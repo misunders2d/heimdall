@@ -50,6 +50,7 @@ type piRPCBridge struct {
 	buf                  []byte
 	active, done, failed bool
 	omp, ended           bool
+	detached             bool // owned by a passive continuation, with no prompt request
 	published            bool
 	failure, human       string
 	session              string // the session directory name
@@ -434,7 +435,7 @@ func (b *piRPCBridge) event(raw []byte) {
 			b.humanLocked("A native " + b.nativeName() + " extension needs interactive input; no approval or response was invented")
 		}
 	case "prompt_result":
-		if !b.omp || e.ID != initialID {
+		if !b.omp || b.detached || e.ID != initialID {
 			return
 		}
 		if e.Status != "completed" {
@@ -446,6 +447,12 @@ func (b *piRPCBridge) event(raw []byte) {
 			return
 		}
 		b.publishLocked()
+	case "session_settled":
+		// This OMP event has no request ID. Only a detached run can end
+		// here; a prompt always waits for its own prompt_result.
+		if b.omp && b.detached {
+			b.publishLocked()
+		}
 	case "agent_settled":
 		if b.omp {
 			return
@@ -461,7 +468,7 @@ func (b *piRPCBridge) event(raw []byte) {
 func (b *piRPCBridge) publishLocked() {
 	b.answers = keepAnswer(b.answers, b.answer)
 	b.answer = joinAnswers(b.answers)
-	if strings.TrimSpace(b.answer) == "" {
+	if strings.TrimSpace(b.answer) == "" && !(b.omp && b.detached) {
 		b.failLocked(b.nativeName() + " finished without an answer")
 		return
 	}
