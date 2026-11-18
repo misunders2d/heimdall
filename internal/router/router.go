@@ -1332,9 +1332,11 @@ func (c *conv) which(role core.Role, who string) string {
 		model, level := "", ""
 		if launch, err := c.r.opt.Accounts.Prepare(role, false, harness.Binary(selected)); err == nil {
 			model, level = harness.Model(selected, launch), harness.Thinking(selected, launch)
-			if model == "" && (selected == "claude" || selected == "omp") {
-				// The harness picks its own default; show what this
-				// conversation's last reply from it actually used.
+			if model == "" && selected == "claude" || selected == "omp" {
+				// Show what this conversation's last reply actually used:
+				// Claude picks its own default; OMP may switch or fall back
+				// away from its configured default. Config stays the answer
+				// until a reply is observed.
 				if id, _, err := c.r.store.Session(c.key, who, selected); err == nil {
 					m := harness.ClaudeSessionModel(launch, id)
 					if selected == "omp" {
