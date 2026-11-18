@@ -1332,11 +1332,15 @@ func (c *conv) which(role core.Role, who string) string {
 		model, level := "", ""
 		if launch, err := c.r.opt.Accounts.Prepare(role, false, harness.Binary(selected)); err == nil {
 			model, level = harness.Model(selected, launch), harness.Thinking(selected, launch)
-			if model == "" && selected == "claude" {
-				// Claude Code picks its own default; show what this
-				// conversation's last Claude reply actually used.
-				if id, _, err := c.r.store.Session(c.key, who, "claude"); err == nil {
-					if m := harness.ClaudeSessionModel(launch, id); m != "" {
+			if model == "" && (selected == "claude" || selected == "omp") {
+				// The harness picks its own default; show what this
+				// conversation's last reply from it actually used.
+				if id, _, err := c.r.store.Session(c.key, who, selected); err == nil {
+					m := harness.ClaudeSessionModel(launch, id)
+					if selected == "omp" {
+						m = harness.OMPSessionModel(launch, id)
+					}
+					if m != "" {
 						model = m + " (last reply)"
 					}
 				}

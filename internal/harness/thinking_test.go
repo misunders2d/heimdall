@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestThinking(t *testing.T) {
@@ -231,6 +232,41 @@ func TestClaudeSessionModel(t *testing.T) {
 	}
 	for _, bad := range []string{"", "*", "../x", "0f1e2d3c-aaaa-bbbb-cccc-000000000000"} {
 		if got := ClaudeSessionModel(l, bad); got != "" {
+			t.Fatalf("id %q gave %q", bad, got)
+		}
+	}
+}
+
+func TestOMPSessionModel(t *testing.T) {
+	home := t.TempDir()
+	id := "0f1e2d3c-aaaa-bbbb-cccc-123456789abc"
+	dir := filepath.Join(home, ".local", "state", "heimdall", "sessions", "omp", id)
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string, age time.Duration) {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mod := time.Now().Add(-age)
+		if err := os.Chtimes(p, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("old.jsonl", `{"type":"message","message":{"role":"assistant","provider":"openai-codex","model":"gpt-6.1-sol"}}`+"\n", time.Hour)
+	write("new.jsonl", `{"type":"model_change","model":"x/y"}
+{"type":"message","message":{"role":"assistant","provider":"openai-codex","model":"gpt-6.2-sol"}}
+{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5-5"}}
+{"type":"message","message":{"role":"user"}}
+`, 0)
+	write(filepath.Join("sub", "__advisor.jsonl"), `{"type":"message","message":{"role":"assistant","provider":"z","model":"advisor"}}`+"\n", -time.Hour)
+	l := Launch{Home: home}
+	if got := OMPSessionModel(l, id); got != "anthropic/claude-opus-5-5" {
+		t.Fatalf("got %q", got)
+	}
+	for _, bad := range []string{"", "*", "../x", "0f1e2d3c-aaaa-bbbb-cccc-000000000000"} {
+		if got := OMPSessionModel(l, bad); got != "" {
 			t.Fatalf("id %q gave %q", bad, got)
 		}
 	}

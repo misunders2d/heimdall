@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Thinking is the thinking level a harness is configured with under the
@@ -57,6 +58,60 @@ func Model(name string, l Launch) string {
 	}
 	if len(model) > 64 || strings.TrimLeft(model, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/[]") != "" {
 		return "" // shown in chat as is: one plain token only
+	}
+	return model
+}
+
+// OMPSessionModel is "<provider>/<model>" of the last assistant message in
+// the newest OMP transcript of Heimdall session id, or "". Only the tail of
+// the newest top-level transcript is read; subagent transcripts in
+// subdirectories (advisor and the like) are ignored.
+func OMPSessionModel(l Launch, id string) string {
+	dir := SessionPath("omp", l, id)
+	if dir == "" {
+		return ""
+	}
+	paths, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	var newest string
+	var newestMod time.Time
+	for _, p := range paths {
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.ModTime().After(newestMod) {
+			newest, newestMod = p, st.ModTime()
+		}
+	}
+	if newest == "" {
+		return ""
+	}
+	f, err := os.Open(newest)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	const tail = 256 << 10
+	if st, err := f.Stat(); err == nil && st.Size() > tail {
+		_, _ = f.Seek(st.Size()-tail, 0)
+	}
+	data, _ := io.ReadAll(io.LimitReader(f, tail))
+	model := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role     string `json:"role"`
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &entry) != nil || entry.Type != "message" || entry.Message.Role != "assistant" || entry.Message.Model == "" {
+			continue
+		}
+		model = entry.Message.Model
+		if entry.Message.Provider != "" {
+			model = entry.Message.Provider + "/" + model
+		}
+	}
+	if len(model) > 64 || strings.TrimLeft(model, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/[]") != "" {
+		return ""
 	}
 	return model
 }
