@@ -193,7 +193,7 @@ func (r *Router) Run(parent context.Context) error {
 		r.log.Printf("turn %d in %s interrupted by restart (harness %q); reported, not re-run", t.Turn, t.Conv, t.Harness)
 	}
 	for _, m := range rec.Unconfirmed {
-		r.log.Printf("message %d in %s was being steered into turn %d at the restart; reported, not replayed", m.ID, m.Conv, m.TurnID)
+		r.log.Printf("message %d in %s handoff to turn %d interrupted by restart; delivery unconfirmed, available as recovery context", m.ID, m.Conv, m.TurnID)
 	}
 	r.mu.Lock()
 	r.ctx = ctx
@@ -2216,7 +2216,7 @@ func (c *conv) requeue(items ...item) {
 func (c *conv) finish(ctx context.Context, t *turn) {
 	d := t.done
 	if ctx.Err() != nil {
-		// Shutdown: leave the turn recorded as running; the next start reports it.
+		// A terminal event during shutdown leaves the turn running for recovery.
 		return
 	}
 	c.stopTyping(t)
@@ -2591,7 +2591,7 @@ func clipAll(in []string, n int) []string {
 }
 
 func unconfirmedNotice(m store.InboundRow) core.Outbound {
-	return core.Outbound{Conv: m.Conv, ReplyTo: m.MsgID, Text: "⚠ Heimdall restarted while handing this message to the running turn, so it may or may not have reached it. It will not be re-sent automatically; resend it if still needed.\n— heimdall"}
+	return core.Outbound{Conv: m.Conv, ReplyTo: m.MsgID, Text: "⚠ Heimdall restarted during handoff, so the running turn may or may not have received this message. If the turn resumes, Heimdall includes this message as context. Resend it if still needed.\n— heimdall"}
 }
 
 func interruptedNotice(t store.Interrupted) core.Outbound {

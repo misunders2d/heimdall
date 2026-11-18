@@ -1,6 +1,7 @@
 package router
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +13,31 @@ import (
 	"github.com/misunders2d/heimdall/internal/fakeharness"
 	"github.com/misunders2d/heimdall/internal/store"
 )
+
+func TestOwnerChatGracefulShutdownLeavesTurnRunning(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	message := e.send(owner, "c1", "TERMRESULT")
+	e.waitReady("c1")
+	e.waitFile("signal-ready")
+
+	e.stop()
+	e.waitFile("terminated")
+	e.waitFile("term-result")
+	e.noReply(100 * time.Millisecond)
+
+	db, err := sql.Open("sqlite", e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var state string
+	var noResume int
+	var ended sql.NullInt64
+	err = db.QueryRow("SELECT state,no_resume,ended_at FROM turns WHERE reply_to=?", message).Scan(&state, &noResume, &ended)
+	if err != nil || state != store.TurnRunning || noResume != 0 || ended.Valid {
+		t.Fatalf("shutdown left state=%q no_resume=%d ended=%+v: %v", state, noResume, ended, err)
+	}
+}
 
 func TestOwnerChatRecoveryMidToolAndOriginalTarget(t *testing.T) {
 	testOwnerChatRecovery(t, true, false)
@@ -96,9 +122,9 @@ func testOwnerChatRecovery(t *testing.T, tool, crashAgain bool) {
 			t.Fatalf("private locator in shared notice: %q", out.Text)
 		}
 	} else {
-		want(t, out, "No tool calls without results")
+		want(t, out, "No tool calls in doubt")
 	}
-	want(t, e.reply(), "may or may not have reached it")
+	want(t, e.reply(), "may or may not have received", "includes this message as context")
 	if crashAgain {
 		for attempt := 1; attempt < store.ChatRestartLimit; attempt++ {
 			e.waitInputs(attempt)
@@ -142,7 +168,7 @@ func testOwnerChatRecovery(t *testing.T, tool, crashAgain bool) {
 		t.Fatalf("wanted one recovery prompt: %+v", inputs)
 	}
 	input := inputs[0].Text
-	for _, rule := range []string{"recorded result is completed work", "check the real effect before retrying", "Never blindly repeat", "report the result and stop", "untrusted context"} {
+	for _, rule := range []string{"non-aborted result is completed work", "check the real effect before retrying", "Never blindly repeat", "report the result and stop", "untrusted context"} {
 		if !strings.Contains(input, rule) {
 			t.Errorf("recovery prompt missing %q", rule)
 		}

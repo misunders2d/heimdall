@@ -28,7 +28,7 @@ const (
 	InNeedsHuman  = "needs_human" // its turn ended on a native approval/input request
 	InCancelled   = "cancelled"   // its turn was stopped
 	InInterrupted = "interrupted" // its turn was cut off by a restart; never re-run
-	InUnconfirmed = "unconfirmed" // steer acceptance unknown; never replayed
+	InUnconfirmed = "unconfirmed" // steer delivery unknown; context if the chat turn resumes
 	InCommand     = "command"     // a ! command, answered by Heimdall itself
 	InRejected    = "rejected"    // sender no longer authorized when handled
 )
@@ -960,7 +960,7 @@ func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice 
 	for i := range held {
 		held[i].State = InUnconfirmed
 		r := held[i]
-		if _, err := tx.Exec(`UPDATE inbound SET state=?,detail=? WHERE id=?`, InUnconfirmed, "steer interrupted by restart; not replayed", r.ID); err != nil {
+		if _, err := tx.Exec(`UPDATE inbound SET state=?,detail=? WHERE id=?`, InUnconfirmed, "steer handoff interrupted by restart; delivery unconfirmed", r.ID); err != nil {
 			return rec, err
 		}
 		if _, err := enqueue(tx, steerNotice(r)); err != nil {

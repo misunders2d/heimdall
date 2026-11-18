@@ -109,8 +109,8 @@ commit counts even if the engine never starts. The third cutoff ends recovery
 and sends a notice. Stop and reset fence the turn against recovery.
 
 The recovery input asks the engine to verify before continuing and lists tool
-calls without recorded results. It includes messages caught mid-steer as
-unconfirmed context. The original input appears as quoted context. Heimdall
+calls with missing or interrupted results. It includes messages caught
+mid-steer as unconfirmed context. The original input appears as quoted context. Heimdall
 does not replay tools.
 It reads the native transcript and uses synchronous Claude tool hooks to cover
 transcript write lag. The hooks record call IDs, names, selected argument

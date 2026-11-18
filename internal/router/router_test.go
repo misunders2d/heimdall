@@ -906,7 +906,7 @@ func TestRestartDuringSteerHandoverNeverReplays(t *testing.T) {
 	stopOnce.Delete(e.st)
 	e.start()
 	want(t, e.reply(), "Heimdall restarted while omp was working")
-	want(t, e.reply(), "may or may not have reached it", "will not be re-sent")
+	want(t, e.reply(), "may or may not have received", "If the turn resumes", "includes this message as context")
 	e.noReply(time.Second)
 }
 

@@ -9,6 +9,7 @@
 //	FAILPRE=NAME   exit with an error before the turn is ready
 //	FAILPOST=NAME  exit with an error after the turn is ready
 //	HANGTERM       wait before ready, recording SIGTERM (NOTERM ignores it)
+//	TERMRESULT     (omp) start a tool and emit an aborted result on SIGTERM
 //	HANGPRE=NAME   create STATE/hang-pre and hang before the turn is ready
 //	BADLINE=NAME   before the turn is ready, send an unreadable protocol
 //	               line, then stay 1 s with STATE/lingering present and
@@ -609,6 +610,13 @@ func (f *fake) piRPC() {
 		f.emit(map[string]any{"type": "extension_ui_request", "id": "x1", "method": "setStatus"})
 		f.emit(map[string]any{"type": "response", "id": id, "command": "prompt", "success": true})
 		f.emit(map[string]any{"type": "agent_start"})
+		if omp && f.has("TERMRESULT") {
+			f.emit(map[string]any{"type": "tool_execution_start", "toolName": "bash", "toolCallId": "call1"})
+			f.waitForTerm(30 * time.Second)
+			f.emit(map[string]any{"type": "prompt_result", "id": id, "status": "aborted", "sessionSettled": true})
+			_ = os.WriteFile(filepath.Join(f.state, "term-result"), nil, 0o600)
+			return
+		}
 		if f.has("PROGRESS") {
 			for _, event := range []map[string]any{{"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_start", "contentIndex": 0}}, {"type": "message_update", "assistantMessageEvent": map[string]any{"type": "thinking_delta", "contentIndex": 0, "delta": "Checking public sources"}}, {"type": "tool_execution_start", "toolName": "web_search"}} {
 				f.emit(event)

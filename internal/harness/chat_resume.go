@@ -17,6 +17,7 @@ import (
 type toolRecord struct {
 	ID, Name, Args string
 	Done           bool
+	Aborted        bool `json:",omitempty"`
 	At             time.Time
 }
 
@@ -28,10 +29,11 @@ func claudeToolPath(l Launch, id string) string {
 // Claude can run the tool. Store metadata only; never return tool decisions.
 func ClaudeToolRecord(in io.Reader, path string) error {
 	var e struct {
-		Event string          `json:"hook_event_name"`
-		ID    string          `json:"tool_use_id"`
-		Input json.RawMessage `json:"tool_input"`
-		Name  string          `json:"tool_name"`
+		Event     string          `json:"hook_event_name"`
+		ID        string          `json:"tool_use_id"`
+		Input     json.RawMessage `json:"tool_input"`
+		Name      string          `json:"tool_name"`
+		Interrupt bool            `json:"is_interrupt"`
 	}
 	if err := json.NewDecoder(in).Decode(&e); err != nil {
 		return err
@@ -47,7 +49,10 @@ func ClaudeToolRecord(in io.Reader, path string) error {
 		return err
 	}
 	defer f.Close()
-	if err := json.NewEncoder(f).Encode(toolRecord{e.ID, e.Name, toolArgs(e.Input), e.Event != "PreToolUse", time.Now()}); err != nil {
+	record := toolRecord{ID: e.ID, Name: e.Name, Args: toolArgs(e.Input), At: time.Now()}
+	record.Aborted = e.Event == "PostToolUseFailure" && e.Interrupt
+	record.Done = !record.Aborted && (e.Event == "PostToolUse" || e.Event == "PostToolUseFailure")
+	if err := json.NewEncoder(f).Encode(record); err != nil {
 		return err
 	}
 	return f.Sync()
@@ -91,8 +96,60 @@ func toolName(name string) bool {
 	return name != "" && len(name) <= 128 && strings.Trim(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:-") == ""
 }
 
-// ChatResumeRecord finds the original session and reads tool calls lacking
-// results. A transcript with only headers is insufficient to resume Claude.
+type nativeToolStatus struct {
+	Aborted, Canceled, Cancelled bool
+	Status                       string
+}
+
+func (s nativeToolStatus) interrupted() bool {
+	switch s.Status {
+	case "aborted", "canceled", "cancelled", "interrupted":
+		return true
+	}
+	return s.Aborted || s.Canceled || s.Cancelled
+}
+
+// Some engines record a synthetic text result so the provider accepts the
+// history. Match their interruption markers, not arbitrary failure output.
+func abortResultText(raw json.RawMessage, match func(string) bool) bool {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return match(strings.TrimSpace(text))
+	}
+	var blocks []struct{ Type, Text string }
+	if json.Unmarshal(raw, &blocks) == nil {
+		for _, b := range blocks {
+			if (b.Type == "text" || b.Type == "input_text") && match(strings.TrimSpace(b.Text)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func codexToolAbort(text string) bool {
+	// Codex tools/parallel.rs emits these abort results. History repair
+	// also uses the plain "aborted" placeholder for an unmatched call.
+	if first, rest, ok := strings.Cut(text, "\n"); ok && strings.HasPrefix(first, "Wall time: ") {
+		return rest == "aborted by user"
+	}
+	return text == "aborted" || text == "aborted before dispatch" ||
+		text == "aborted by user" || strings.HasPrefix(text, "aborted by user after ")
+}
+
+func ompToolAbort(text string) bool {
+	return text == "Tool execution was aborted" || text == "Command aborted" ||
+		text == "[Command cancelled]" || strings.HasPrefix(text, "[Command cancelled]\n") ||
+		text == "[Command aborted]" || strings.HasSuffix(text, "\n[Command aborted]")
+}
+
+func claudeToolAbort(text string) bool {
+	return text == "[Request interrupted by user]" || text == "[Request interrupted by user for tool use]" ||
+		strings.HasPrefix(text, "[Tool call interrupted:")
+}
+
+// ChatResumeRecord finds the original session and reads tool calls with
+// missing or interrupted results. Claude needs more than transcript headers.
 func ChatResumeRecord(name string, l Launch, id string, since time.Time) (record string, actions []string) {
 	path := SessionPath(name, l, id)
 	if name == "omp" && path != "" {
@@ -102,22 +159,27 @@ func ChatResumeRecord(name string, l Launch, id string, since time.Time) (record
 		}
 		path = paths[0]
 	}
-	pending := map[string]string{}
-	done := map[string]bool{}
+	calls := map[string]string{}
+	results := map[string]bool{} // an explicit interruption dominates a generic result for the same call
 	apply := func(t toolRecord) {
 		if t.ID == "" {
 			return
 		}
-		if t.Done {
-			done[t.ID] = true
-			delete(pending, t.ID)
-		} else if toolName(t.Name) && !done[t.ID] && !t.At.Before(since) {
+		if t.Aborted {
+			results[t.ID] = false
+		} else if _, recorded := results[t.ID]; t.Done && !recorded {
+			results[t.ID] = true
+		}
+		if toolName(t.Name) && !t.At.Before(since) && (t.Args != "" || calls[t.ID] == "") {
 			label := t.Name
 			if t.Args != "" {
 				label += " (" + t.Args + ")"
 			}
-			pending[t.ID] = label
+			calls[t.ID] = label
 		}
+	}
+	result := func(id string, aborted bool) {
+		apply(toolRecord{ID: id, Aborted: aborted, Done: !aborted})
 	}
 	hasHistory := false
 	if name == "claude" {
@@ -133,13 +195,18 @@ func ChatResumeRecord(name string, l Launch, id string, since time.Time) (record
 			Type      string
 			Timestamp time.Time
 			Message   struct {
+				nativeToolStatus
 				Role       string
 				ToolCallID string
 				Content    json.RawMessage
+				Details    json.RawMessage
+				IsError    bool
 			}
 			Payload struct {
+				nativeToolStatus
 				Type, Name string
 				Arguments  json.RawMessage
+				Output     json.RawMessage
 				CallID     string `json:"call_id"`
 			}
 		}
@@ -150,21 +217,28 @@ func ChatResumeRecord(name string, l Launch, id string, since time.Time) (record
 			hasHistory = true
 			switch e.Payload.Type {
 			case "function_call", "custom_tool_call":
-				apply(toolRecord{e.Payload.CallID, e.Payload.Name, toolArgs(e.Payload.Arguments), false, e.Timestamp})
+				apply(toolRecord{ID: e.Payload.CallID, Name: e.Payload.Name, Args: toolArgs(e.Payload.Arguments), At: e.Timestamp})
 			case "function_call_output", "custom_tool_call_output":
-				apply(toolRecord{ID: e.Payload.CallID, Done: true})
+				p := e.Payload
+				result(p.CallID, p.interrupted() || abortResultText(p.Output, codexToolAbort))
 			}
 		}
 		if e.Message.Role == "user" || e.Message.Role == "assistant" {
 			hasHistory = true
 		}
 		if e.Message.Role == "toolResult" {
-			apply(toolRecord{ID: e.Message.ToolCallID, Done: true})
+			m := e.Message
+			var details nativeToolStatus
+			_ = json.Unmarshal(m.Details, &details)
+			result(m.ToolCallID, m.interrupted() || details.interrupted() || m.IsError && abortResultText(m.Content, ompToolAbort))
 		}
 		var blocks []struct {
+			nativeToolStatus
 			Type, ID, Name   string
 			Input, Arguments json.RawMessage
+			Content          json.RawMessage
 			ToolUseID        string `json:"tool_use_id"`
+			IsError          bool   `json:"is_error"`
 		}
 		_ = json.Unmarshal(e.Message.Content, &blocks)
 		for _, b := range blocks {
@@ -174,15 +248,16 @@ func ChatResumeRecord(name string, l Launch, id string, since time.Time) (record
 				if len(input) == 0 {
 					input = b.Input
 				}
-				apply(toolRecord{b.ID, b.Name, toolArgs(input), false, e.Timestamp})
+				apply(toolRecord{ID: b.ID, Name: b.Name, Args: toolArgs(input), At: e.Timestamp})
 			case "tool_result":
-				apply(toolRecord{ID: b.ToolUseID, Done: true})
+				result(b.ToolUseID, b.interrupted() || b.IsError && abortResultText(b.Content, claudeToolAbort))
 			}
 		}
 	}) && hasHistory {
 		record = path
 	}
-	actions = slices.Sorted(maps.Values(pending))
+	maps.DeleteFunc(calls, func(id, _ string) bool { return results[id] })
+	actions = slices.Sorted(maps.Values(calls))
 	return record, actions
 }
 
