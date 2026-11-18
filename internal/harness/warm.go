@@ -332,8 +332,9 @@ func launchFingerprint(s Spec) [32]byte {
 		Slack          *OwnerSlack
 		Session        string
 		Telemetry      bool
+		RecordTools    bool
 		NativeSettings string
-	}{s.Harness, s.Instructions, s.Context != "" || s.Instructions != "" || s.WarmContext != nil, s.Launch, s.Caller, s.OwnerSlack, "", s.Progress != nil, nativeSettings(s)})
+	}{s.Harness, s.Instructions, s.Context != "" || s.Instructions != "" || s.WarmContext != nil, s.Launch, s.Caller, s.OwnerSlack, "", s.Progress != nil, s.RecordClaudeTools, nativeSettings(s)})
 	return sha256.Sum256(b)
 }
 func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {

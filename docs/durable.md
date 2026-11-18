@@ -17,6 +17,11 @@ is **partial**:
 
 This is not complete MEL-763. See "Not qualified" below.
 
+Owner live chat turns have a separate Heimdall startup recovery path
+([MEL-801](between-turn-delivery.md#owner-chat-recovery-after-restart-mel-801)).
+DBOS remains responsible for commitment wakes, including interrupted
+`!work` turns. A wake never enters chat recovery.
+
 ## What it is
 
 Heimdall embeds [DBOS Transact Go](https://github.com/dbos-inc/dbos-transact-golang)

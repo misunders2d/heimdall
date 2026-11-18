@@ -75,7 +75,8 @@ as interrupted and never re-runs them. The exact live retained worker can still
 accept another person input while its background record is outstanding. That
 exact worker requirement travels with the launch request and is rechecked when
 the pool claims it; eviction or exit between lookup and claim always starts a
-new native session. An unclean session without that worker always starts fresh. Native results use the existing answer,
+new native session. Outside startup recovery below, an unclean session without
+that worker starts fresh. Native results use the existing answer,
 reaction, checked-outbox, redaction, lifecycle and outbound delivery flows.
 They retain the originating verified principal, role, conversation, reply
 reference and outbox. Admission/role and reset/harness-selection generations
@@ -98,6 +99,28 @@ with one acknowledgement and no cancelled native final. Reset, harness changes
 and revoked admission settle accepted continuation rows and stop their typing.
 Shutdown leaves unsettled native work for the existing recovery flow.
 Outbound delivery retains its existing at-least-once semantics.
+
+## Owner chat recovery after restart (MEL-801)
+
+On startup Heimdall can continue an interrupted live owner chat turn in its
+original OMP, Codex or Claude session. SQLite records the cutoff count and
+the notice against the same turn before any engine call. A crash after that
+commit counts even if the engine never starts. The third cutoff ends recovery
+and sends a notice. Stop and reset fence the turn against recovery.
+
+The recovery input asks the engine to verify before continuing and lists tool
+calls with missing or interrupted results. It includes messages caught
+mid-steer as unconfirmed context. The original input appears as quoted context. Heimdall
+does not replay tools.
+It reads the native transcript and uses synchronous Claude tool hooks to cover
+transcript write lag. The hooks record call IDs, names, selected argument
+summaries and start or completion. Shared chat notices show tool names.
+The notice and result go to the original reply target.
+
+When the native session is unavailable, including a first turn cut off before
+OMP or Claude persists one, the notice is the only recovery output. The next
+owner message starts fresh. Native background continuations, scheduled turns,
+commitment wakes and employee turns follow their existing recovery rules.
 
 ## Verification and limits
 

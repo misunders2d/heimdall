@@ -70,6 +70,10 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "hook":
+		if len(os.Args) == 4 && os.Args[2] == "chat-tool" {
+			err = harness.ClaudeToolRecord(os.Stdin, os.Args[3])
+			break
+		}
 		if len(os.Args) != 3 || os.Args[2] != "slack-guard" && os.Args[2] != "employee-guard" && os.Args[2] != "input-context" {
 			err = errors.New("unknown hook")
 		} else if os.Args[2] == "input-context" {
