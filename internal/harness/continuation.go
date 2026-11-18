@@ -119,7 +119,7 @@ func (w *worker) passiveLocked(source *Run) *passiveTurn {
 	case "claude":
 		p.bridge = &claudeStreamBridge{warm: true, ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), closed: make(chan struct{}), session: session, pending: map[string]*pendingSteer{}, seen: map[string]string{}}
 	case "pi", "omp":
-		p.bridge = &piRPCBridge{warm: true, ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), closed: make(chan struct{}), session: session, omp: source.harness == "omp", pending: map[string]*pendingSteer{}, seen: map[string]string{}}
+		p.bridge = &piRPCBridge{warm: true, ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), closed: make(chan struct{}), session: session, omp: source.harness == "omp", detached: true, pending: map[string]*pendingSteer{}, seen: map[string]string{}}
 	case "codex":
 		p.bridge = &codexBridge{warm: true, ctx: ctx, input: input, ready: make(chan struct{}), answered: make(chan struct{}), thread: session, steering: map[string]chan SteerOutcome{}, contextRequests: map[string]map[string]any{}}
 	}

@@ -177,6 +177,16 @@ func (f *fake) warm() {
 			f.emit(map[string]any{"type": "message_end", "messageId": id, "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": answer}}}})
 			f.emit(map[string]any{"type": "agent_end"})
 			if f.name == "omp" {
+				if strings.Contains(text, "OMP_LATE_SETTLE") {
+					f.emit(map[string]any{"type": "session_settled"})
+					_ = os.WriteFile(filepath.Join(f.state, "omp-late-settle-sent"), nil, 0600)
+					for {
+						if _, err := os.Stat(filepath.Join(f.state, "release-prompt-result")); err == nil {
+							break
+						}
+						time.Sleep(time.Millisecond)
+					}
+				}
 				f.emit(map[string]any{"type": "prompt_result", "id": m["id"], "status": "completed", "sessionSettled": true})
 			} else {
 				f.emit(map[string]any{"type": "agent_settled"})
@@ -188,11 +198,11 @@ func (f *fake) warm() {
 			f.emit(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": session, "turn": map[string]any{"id": id, "status": "completed"}}})
 		}
 
-		if strings.Contains(text, "AUTONOMOUS") && (f.name == "pi" || f.name == "codex") {
+		if strings.Contains(text, "AUTONOMOUS") && (f.name == "pi" || f.name == "omp" || f.name == "codex") {
 			go func() {
 				time.Sleep(20 * time.Millisecond)
 				nativeID := "autonomous-turn"
-				if f.name == "pi" {
+				if f.name != "codex" {
 					f.emit(map[string]any{"type": "agent_start"})
 				} else {
 					f.emit(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": session, "turn": map[string]any{"id": nativeID}}})
@@ -203,11 +213,19 @@ func (f *fake) warm() {
 					}
 					time.Sleep(time.Millisecond)
 				}
-				if f.name == "pi" {
-					f.emit(map[string]any{"type": "message_start", "messageId": nativeID, "message": map[string]any{"role": "assistant"}})
-					f.emit(map[string]any{"type": "message_end", "messageId": nativeID, "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": "AUTONOMOUS_ANSWER"}}}})
+				if f.name != "codex" {
+					if f.name != "omp" || !strings.Contains(text, "AUTONOMOUS_SILENT") {
+						f.emit(map[string]any{"type": "message_start", "messageId": nativeID, "message": map[string]any{"role": "assistant"}})
+						f.emit(map[string]any{"type": "message_end", "messageId": nativeID, "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": "AUTONOMOUS_ANSWER"}}}})
+					}
 					f.emit(map[string]any{"type": "agent_end"})
-					f.emit(map[string]any{"type": "agent_settled"})
+					if f.name == "omp" {
+						settle := map[string]any{"type": "session_settled"}
+						f.emit(settle)
+						f.emit(settle) // immediate replay of the same settle
+					} else {
+						f.emit(map[string]any{"type": "agent_settled"})
+					}
 				} else {
 					f.emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": session, "turnId": nativeID, "item": map[string]any{"type": "agentMessage", "phase": "final_answer", "text": "AUTONOMOUS_ANSWER"}}})
 					f.emit(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": session, "turn": map[string]any{"id": nativeID, "status": "completed"}}})
