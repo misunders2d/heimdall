@@ -598,8 +598,8 @@ func (f *fake) piRPC() {
 		id, _ := m["id"].(string)
 		f.failPre()
 		dir := arg("--session-dir")
-		if dir == "" || !hasArg("--continue") {
-			fmt.Fprintln(os.Stderr, "fake: expected --session-dir DIR --continue")
+		if dir == "" || (!hasArg("--continue") && arg("--resume") == "") {
+			fmt.Fprintln(os.Stderr, "fake: expected --session-dir DIR with --continue or --resume")
 			os.Exit(6)
 		}
 		if err := f.session(filepath.Join(dir, "fake-session"), false); err != nil {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -335,23 +336,24 @@ func TestAmbient(t *testing.T) {
 
 func TestFirstMessage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "h.db")
-	s, err := Open(path)
+	// Populate the actual schema from before the callers migration.
+	if err := CreateAtSchema(path, 8); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	old := core.Principal{Platform: "x", ID: "old"}
 	in := msg("1")
 	in.From = old
-	if _, _, err := s.AddInbound(in); err != nil {
+	_, _, err = addInbound(db, in, time.Now(), "")
+	db.Close()
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Reopen as a database from before the callers step: whoever wrote
-	// before it is not new.
-	if _, err := s.db.Exec(`DROP TABLE job_checkpoints; DROP TABLE job_alerts; DROP TABLE scheduler_controls; DROP TABLE caller_notices; DROP TABLE interface_progress; DROP TABLE interface_events; DROP TABLE callers; DROP TABLE job_runs; DROP TABLE jobs; DROP TABLE sched_meta; ALTER TABLE turns DROP COLUMN ready; PRAGMA user_version=8`); err != nil {
-		t.Fatal(err)
-	}
-	s.Close()
-	if s, err = Open(path); err != nil {
+	s, err := Open(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()

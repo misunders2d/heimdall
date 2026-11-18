@@ -172,8 +172,8 @@ func New(opt Options, st *store.Store, ifaces ...Interface) *Router {
 
 // Run recovers interrupted work, then routes until ctx ends or an
 // interface fails, which stops everything else and is returned. Turns still
-// running at shutdown stay recorded as running, so the next start reports
-// them exactly like a crash. Before it returns, every harness process still
+// running at shutdown stay recorded as running for startup recovery,
+// just as they would after a crash. Before it returns, every harness process still
 // running is stopped and waited for (stopRuns).
 func (r *Router) Run(parent context.Context) error {
 	ctx, cancel := context.WithCancel(parent)
@@ -185,7 +185,7 @@ func (r *Router) Run(parent context.Context) error {
 	r.runsMu.Lock()
 	r.procCtx = procCtx
 	r.runsMu.Unlock()
-	rec, err := r.store.Recover(interruptedNotice, unconfirmedNotice)
+	rec, err := r.store.Recover(interruptedNotice, unconfirmedNotice, r.prepareChatResume)
 	if err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
@@ -207,6 +207,17 @@ func (r *Router) Run(parent context.Context) error {
 		}
 	}
 	r.pruneOutbox()
+	for i := range rec.Chat {
+		resume := &rec.Chat[i]
+		for _, row := range rec.Unconfirmed {
+			if row.TurnID == resume.Turn && row.Conv == resume.Conv && row.From.Key() == resume.Principal && row.Origin == core.OriginLive && !row.MCPControl {
+				resume.Inputs = append(resume.Inputs, row)
+			}
+		}
+		r.log.Printf("turn %d in %s: claimed %s chat recovery after cutoff %d", resume.Turn, resume.Conv, resume.Harness, resume.Cutoffs)
+		c := r.conversation(resume.Conv)
+		c.push(item{row: resume.Inputs[0], role: core.RoleOwner, harness: resume.Harness, resume: resume})
+	}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); r.keepRunning(ctx, "caller notices", func() { r.callerNotices(ctx) }) }()
@@ -410,15 +421,19 @@ func (r *Router) acceptMessage(ctx context.Context, in core.Inbound) error {
 }
 
 func (r *Router) dispatch(row store.InboundRow) {
+	r.conversation(row.Conv).push(item{row: row})
+}
+
+func (r *Router) conversation(key core.ConvKey) *conv {
 	r.mu.Lock()
-	c := r.convs[row.Conv]
+	defer r.mu.Unlock()
+	c := r.convs[key]
 	if c == nil {
-		c = &conv{r: r, key: row.Conv, signal: make(chan struct{}, 1), events: make(chan any), slot: make(chan chan struct{})}
-		r.convs[row.Conv] = c
+		c = &conv{r: r, key: key, signal: make(chan struct{}, 1), events: make(chan any), slot: make(chan chan struct{})}
+		r.convs[key] = c
 		go c.loop(r.ctx)
 	}
-	r.mu.Unlock()
-	c.push(row)
+	return c
 }
 
 // Idle reports whether nothing is queued, running or waiting for delivery,
@@ -537,6 +552,7 @@ func sleep(ctx context.Context, d time.Duration) {
 
 // item is one message waiting for, or steering, a turn.
 type item struct {
+	resume  *store.ChatResume
 	row     store.InboundRow
 	role    core.Role
 	job     string // a scheduled run's job name
@@ -564,7 +580,7 @@ type conv struct {
 	key    core.ConvKey
 	busy   atomic.Bool
 	mu     sync.Mutex
-	inbox  []store.InboundRow
+	inbox  []item
 	signal chan struct{}
 	events chan any
 	slot   chan chan struct{} // a waiter hands over the semaphore it took a slot of
@@ -636,6 +652,7 @@ type albumEvent struct {
 }
 
 type turn struct {
+	resume        *store.ChatResume
 	generation    uint64
 	nativeInvalid bool
 	startCtx      context.Context
@@ -711,9 +728,9 @@ type doneEvent struct {
 	panicked bool              // the turn runner panicked: Heimdall's own failure
 }
 
-func (c *conv) push(row store.InboundRow) {
+func (c *conv) push(it item) {
 	c.mu.Lock()
-	c.inbox = append(c.inbox, row)
+	c.inbox = append(c.inbox, it)
 	c.busy.Store(true)
 	c.mu.Unlock()
 	select {
@@ -745,8 +762,12 @@ func (c *conv) step(ctx context.Context) bool {
 		rows := c.inbox
 		c.inbox = nil
 		c.mu.Unlock()
-		for _, row := range rows {
-			c.take(ctx, row)
+		for _, it := range rows {
+			if it.resume != nil {
+				c.queue = append(c.queue, it)
+			} else {
+				c.take(ctx, it.row)
+			}
 		}
 	case ev := <-c.events:
 		switch ev := ev.(type) {
@@ -817,7 +838,7 @@ func (c *conv) arm(ctx context.Context) {
 		// turn could not retain its transport.
 		head := c.queue[0]
 		var note *store.InboundRow
-		if head.row.Origin == core.OriginLive && head.row.Run == nil && head.row.Review == nil {
+		if head.row.Origin == core.OriginLive && head.row.Run == nil && head.row.Review == nil && head.resume == nil {
 			note = &head.row
 		}
 		go c.waitSlot(ctx, c.exited, ownerLive(head), note)
@@ -1166,6 +1187,11 @@ func (c *conv) cancelTurn(t *turn) {
 	if !t.stopped.CompareAndSwap(false, true) {
 		return
 	}
+	if len(t.batch) > 0 && liveOwnerChat(t, t.batch[0].row) {
+		if err := c.r.store.FenceChatResume(t.id); err != nil {
+			c.r.log.Printf("turn %d: could not record stop for recovery: %v", t.id, err)
+		}
+	}
 	if t.startCancel != nil {
 		t.startCancel()
 	}
@@ -1187,7 +1213,13 @@ func (c *conv) cancelQueued(role core.Role, who, why string) int {
 		var out []item
 		for _, it := range items {
 			if role == core.RoleOwner || it.row.From.Key() == who {
-				if err := c.r.store.SetInbound(it.row.ID, store.InCancelled, why); err != nil {
+				var err error
+				if it.resume != nil {
+					_, err = c.r.store.EndTurn(it.resume.Turn, c.key, it.resume.Principal, store.TurnEnd{State: store.TurnCancelled, ItemState: store.InCancelled, Detail: why})
+				} else {
+					err = c.r.store.SetInbound(it.row.ID, store.InCancelled, why)
+				}
+				if err != nil {
 					c.r.log.Printf("message %d: cancel not recorded: %v", it.row.ID, err)
 					out = append(out, it)
 					continue
@@ -1415,7 +1447,7 @@ func (c *conv) start(ctx context.Context) {
 		c.releaseSlot()
 		return
 	}
-	for job == nil && review == nil && n < len(c.queue) && !first.row.MCPControl && !c.queue[n].row.MCPControl && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
+	for first.resume == nil && job == nil && review == nil && n < len(c.queue) && c.queue[n].resume == nil && !first.row.MCPControl && !c.queue[n].row.MCPControl && c.queue[n].row.From.Key() == first.row.From.Key() && c.queue[n].harness == first.harness {
 		n++
 	}
 	batch := append([]item(nil), c.queue[:n]...)
@@ -1424,7 +1456,13 @@ func (c *conv) start(ctx context.Context) {
 		ids[i] = it.row.ID
 	}
 	who := first.row.From.Key()
-	id, err := c.r.store.StartTurn(c.key, first.role, who, first.row.MsgID, ids)
+	var id int64
+	var err error
+	if first.resume != nil {
+		id = first.resume.Turn
+	} else {
+		id, err = c.r.store.StartTurn(c.key, first.role, who, first.row.MsgID, ids)
+	}
 	if err != nil {
 		c.r.log.Printf("turn in %s not started: %v", c.key, err)
 		// A committed job stop can cancel the inbound between Begin and
@@ -1453,7 +1491,7 @@ func (c *conv) start(ctx context.Context) {
 	}
 	c.generation[who] = c.generation[who]
 	startCtx, startCancel := context.WithCancel(ctx)
-	t := &turn{startCtx: startCtx, startCancel: startCancel, generation: c.generation[who], id: id, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, job: job, review: review}
+	t := &turn{startCtx: startCtx, startCancel: startCancel, generation: c.generation[who], id: id, resume: first.resume, role: first.role, from: first.row.From, who: who, private: first.row.Private, replyTo: first.row.MsgID, started: time.Now(), batch: batch, job: job, review: review}
 	// Scheduled sessions stay in sched:<job>, while their routing preference
 	// comes from the creator-bound source conversation at actual turn start.
 	route := c.key
@@ -1607,6 +1645,21 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		actor, installation = batch[0].row.OAuthActor, batch[0].row.OAuthInstallation
 	}
 	var identity error
+	if t.resume != nil && from.Platform == core.PlatformSlack {
+		verifier, ok := c.r.ifaces[c.key.Interface].(interface {
+			Reverify(context.Context, core.Principal) (scheduler.Verified, bool, error)
+		})
+		if !ok {
+			identity = errors.New("Slack recovery requires a live caller check")
+		} else {
+			v, live, err := verifier.Reverify(t.startCtx, from)
+			if err != nil || !live || v.Principal.Key() != t.who || v.OAuthActor != actor || v.OAuthInstallation != installation {
+				identity = errors.New("Slack recovery caller could not be reverified")
+			} else {
+				from = v.Principal
+			}
+		}
+	}
 	if t.job != nil {
 		target, memory = t.job.Target.Conv, false
 		// The creator is checked now, as the turn starts: never only when
@@ -1677,7 +1730,18 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			t.mu.Lock()
 			t.launch = launch
 			t.mu.Unlock()
-			prompt, images = c.prompt(t, batch)
+			if t.resume != nil {
+				prompt = recoveryInput(t)
+				if p, ok := c.r.ifaces[c.key.Interface].(Prompter); ok {
+					t.instructions = strings.TrimSpace(p.PromptNote())
+				}
+				t.nativeText, t.nativeContext = prompt, c.outboxNote(t)
+				if t.nativeContext != "" {
+					prompt += "\n\n" + t.nativeContext
+				}
+			} else {
+				prompt, images = c.prompt(t, batch)
+			}
 		}
 		if t.role == core.RoleEmployee {
 			dir, e := c.turnDir(t)
@@ -1705,6 +1769,11 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		case err != nil:
 			notes = append(notes, h+": session lookup failed: "+err.Error())
 			continue
+		case t.resume != nil:
+			if t.resume.Session != prev {
+				continue
+			}
+			sess = harness.Session{ID: prev, Resume: true, RecoveryPath: t.resume.Record}
 		case t.job != nil && t.job.Def.Session != "job", t.review != nil:
 			sess.ID = harness.NewSessionID(h)
 		case prev != "" && (clean || liveID == prev):
@@ -1716,10 +1785,12 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				c.r.log.Printf("turn %d in %s: new %s session: the previous turn there did not finish cleanly", t.id, c.key, h)
 			}
 		}
-		sessionNote := c.sessionPointer(t, h, sess, launch, batch[0].row.MCPControl)
-		ownerInputs := c.ownerRequestContext(t, h, sess, prev, clean, batch[0].row.Inbound)
-		// Recorded before the harness gets any input: a crash from here on
-		// leaves this session not resumable.
+		var sessionNote, ownerInputs string
+		if t.resume == nil {
+			sessionNote = c.sessionPointer(t, h, sess, launch, batch[0].row.MCPControl)
+			ownerInputs = c.ownerRequestContext(t, h, sess, prev, clean, batch[0].row.Inbound)
+		}
+		// Mark the native binding in progress before handing it input.
 		if err := c.r.store.BindTurn(t.id, c.key, t.who, h, sess.ID); err != nil {
 			notes = append(notes, "turn not recordable, so it did not run: "+err.Error())
 			break
@@ -1820,6 +1891,18 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		progress, notify = guarded(c.r, "harness progress", progress), guarded(c.r, "harness notice", notify)
 		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive || t.job != nil && t.role == core.RoleOwner, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
+		spec.RecordClaudeTools = h == "claude" && ownerLive(batch[0])
+		if liveOwnerChat(t, batch[0].row) && (h == "codex" || h == "omp" || h == "claude") {
+			spec.SessionOpened = func(id string) error {
+				if id == sess.ID {
+					return nil
+				}
+				if t.resume != nil {
+					return errors.New("recovery cannot switch native sessions")
+				}
+				return c.r.store.BindTurn(t.id, c.key, t.who, h, id)
+			}
+		}
 		if t.review != nil {
 			// One bounded turn; no scheduler or MCP control, no progress,
 			// notifications or continuations (spec fields left off).
@@ -1890,7 +1973,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		run, err := c.startCandidate(ctx, t, spec)
 		if err != nil {
-			c.unbind(t, h, prev, clean)
+			if t.resume == nil {
+				c.unbind(t, h, prev, clean)
+			}
 			if t.stopped.Load() || t.startCtx != nil && t.startCtx.Err() != nil {
 				break
 			}
@@ -1914,8 +1999,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		default:
 		}
 		if ctx.Err() != nil {
-			// Shutdown: the binding stays, as after a crash, so the next
-			// start reports the turn and never resumes the session.
+			// Shutdown leaves the binding and turn for startup recovery.
 			break
 		}
 		// An answer commits before ready too; only a failed candidate must exit
@@ -1929,7 +2013,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			return
 		}
 		<-run.Exited()
-		if !res.Cause.Limited() {
+		if !res.Cause.Limited() && t.resume == nil {
 			c.unbind(t, h, prev, clean)
 		}
 		if res.Cancelled && !res.Cause.Limited() {
@@ -1962,9 +2046,7 @@ func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, 
 	}
 	c.observe(ctx, t, "progress", harness.Progress{Phase: "running"})
 	if err := c.r.store.BindTurn(t.id, c.key, t.who, h, run.SessionID()); err != nil {
-		// The session is already recorded as in progress; only a new
-		// session's native ID is missing, so a crash now means the next
-		// turn starts a fresh one.
+		// The session is already recorded as in progress.
 		c.r.log.Printf("turn %d: native session ID not recorded: %v", t.id, err)
 	}
 	c.send(ctx, readyEvent{t: t, harness: h})
@@ -2171,6 +2253,10 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 			}
 			res.Answers = answers
 		}
+	}
+	if t.resume != nil && d.harness == "" && !t.stopped.Load() && !d.panicked {
+		c.settle(ctx, t, store.TurnEnd{State: store.TurnInterrupted, ItemState: store.InInterrupted, Detail: "native recovery could not start"})
+		return
 	}
 	if t.review != nil {
 		c.settle(ctx, t, c.reviewEnd(t, d, res))
@@ -2509,6 +2595,9 @@ func unconfirmedNotice(m store.InboundRow) core.Outbound {
 }
 
 func interruptedNotice(t store.Interrupted) core.Outbound {
+	if t.Cutoffs >= store.ChatRestartLimit {
+		return core.Outbound{Conv: t.Conv, ReplyTo: t.ReplyTo, Text: fmt.Sprintf("⚠ Heimdall stopped recovery after %d interruptions. Check what already took effect before continuing.\n— heimdall", t.Cutoffs)}
+	}
 	if t.Conv.IsSched() {
 		return core.Outbound{} // the scheduler tells the job's creator (Jobs.Recover)
 	}

@@ -118,13 +118,16 @@ func NewSessionID(name string) string {
 
 // Session is the native session a turn runs in.
 type Session struct {
-	ID     string // native session ID; pi/omp: session directory name
-	Resume bool   // continue ID; otherwise create a new session
+	RecoveryPath string // exact OMP transcript selected at crash recovery
+	ID           string // native session ID; pi/omp: session directory name
+	Resume       bool   // continue ID; otherwise create a new session
 }
 
 // Spec is one turn.
 type Spec struct {
-	SchedulerControl bool // trusted live person input, or a router-started owner scheduled run; never MCP work
+	RecordClaudeTools bool               // synchronous metadata hooks on owner chat sessions
+	SessionOpened     func(string) error // persist a new native ID before its first input
+	SchedulerControl  bool               // trusted live person input, or a router-started owner scheduled run; never MCP work
 	// ScheduledJob/ScheduledRun name the scheduled run this turn executes. Only
 	// the router sets them, from the scheduler's own run handover; never input.
 	ScheduledJob string
@@ -287,7 +290,11 @@ func sessionArgs(name string, s Session, home string) ([]string, error) {
 			return nil, fmt.Errorf("invalid %s session directory name %q", name, s.ID)
 		}
 		// An empty directory starts a new session; the same directory resumes.
-		return []string{"--session-dir", filepath.Join(home, ".local", "state", "heimdall", "sessions", name, s.ID), "--continue"}, nil
+		dir := filepath.Join(home, ".local", "state", "heimdall", "sessions", name, s.ID)
+		if name == "omp" && s.RecoveryPath != "" {
+			return []string{"--session-dir", dir, "--resume", s.RecoveryPath}, nil
+		}
+		return []string{"--session-dir", dir, "--continue"}, nil
 	case sessionID:
 		if s.ID == "" {
 			return nil, errors.New("claude session needs an ID")
@@ -411,6 +418,11 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 			}()
 		}
 	}
+	if spec.SessionOpened != nil && spec.Harness != "codex" {
+		if err := spec.SessionOpened(spec.Session.ID); err != nil {
+			return nil, fmt.Errorf("%s session binding: %w", spec.Harness, err)
+		}
+	}
 	contextDir, contextArgs, err := prepareContext(spec, extra)
 	if err != nil {
 		return nil, err
@@ -464,6 +476,9 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		r.bridge, err = newClaudeStreamBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session.ID)
 	case sessionThread:
 		r.bridge, err = newCodexBridge(bridgeCtx, cmd, spec.Prompt, spec.Images, spec.Session, spec.Instructions, spec.Context)
+		if err == nil {
+			r.bridge.(*codexBridge).sessionOpened = spec.SessionOpened
+		}
 	case sessionConversation:
 		r.bridge = newAgyBridge(runCtx, cmd, spec.Prompt, expected)
 	}
@@ -548,6 +563,11 @@ func (r *Run) finishExit(runErr error) {
 		res.Cause, res.Unclean = r.cause, true
 		res.Warning = joinWarnings(res.Warning, "Turn limit reached; published answers kept, session discarded. Work was not re-run; check existing effects before resending.")
 	case r.cancelled.Load() || r.ctx.Err() != nil && !settled:
+		if r.cause == CauseStop && !settled {
+			// An explicit stop can end the process before a native result.
+			// The bridge's missing-result fallback is not a native failure.
+			res.Failure = ""
+		}
 		res = Result{Cancelled: true, Cause: r.cause, Failure: res.Failure, NeedsHuman: res.NeedsHuman, Ready: res.Ready, SessionID: res.SessionID}
 	case settled && res.Failure == "" && o.atExit && runErr != nil:
 		// The answers stand; the work after them ended in a failed exit.

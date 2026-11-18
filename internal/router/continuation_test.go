@@ -373,6 +373,12 @@ func TestNativeRetirementAfterBufferedAnswerNotifiesOnce(t *testing.T) {
 
 func TestNativeContinuationTransactionRefusalStopsWorker(t *testing.T) {
 	e := continuationEnv(t, "telegram")
+	// Finish startup recovery before a second connection changes the schema.
+	select {
+	case <-e.r.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("router did not finish startup")
+	}
 	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)

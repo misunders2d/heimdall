@@ -27,10 +27,11 @@ import (
 const clientVersion = "0.1.0"
 
 type codexBridge struct {
-	employee  bool
-	warm      bool
-	progress  func(Progress)
-	telemetry progressTracker
+	sessionOpened func(string) error
+	employee      bool
+	warm          bool
+	progress      func(Progress)
+	telemetry     progressTracker
 
 	ctx                       context.Context
 	input                     io.WriteCloser
@@ -281,6 +282,10 @@ func (b *codexBridge) event(raw []byte) {
 			}
 			if json.Unmarshal(m.Result, &r) != nil || r.Thread.ID == "" || b.resume != "" && r.Thread.ID != b.resume {
 				b.failLocked("Codex returned no usable session")
+				return
+			}
+			if b.sessionOpened != nil && b.sessionOpened(r.Thread.ID) != nil {
+				b.failLocked("Codex session could not be recorded")
 				return
 			}
 			b.thread = r.Thread.ID

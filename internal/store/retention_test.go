@@ -258,8 +258,7 @@ func TestPruneTextRemovesOldTextKeepsEverythingElse(t *testing.T) {
 	}
 }
 
-// The production schema at this release's base opens unchanged and prunes:
-// retention adds no schema step.
+// Retention works after startup upgrades an existing database.
 func TestPruneTextOnBaseSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "h.db")
 	if err := CreateAtSchema(path, AdminMinSchema); err != nil {
@@ -271,8 +270,8 @@ func TestPruneTextOnBaseSchema(t *testing.T) {
 	}
 	defer s.Close()
 	var v int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != AdminMinSchema || Schema() != AdminMinSchema {
-		t.Fatalf("schema %d (build %d), want %d: %v", v, Schema(), AdminMinSchema, err)
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != Schema() {
+		t.Fatalf("schema %d, want %d: %v", v, Schema(), err)
 	}
 	f := newRetentionFixture(t, s)
 	before := f.lookups(t)

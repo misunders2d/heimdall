@@ -16,7 +16,7 @@ func SessionPath(name string, l Launch, id string) string {
 	var pattern string
 	switch name {
 	case "claude":
-		pattern = filepath.Join(l.Home, ".claude", "projects", "*", id+".jsonl")
+		pattern = filepath.Join(configDir(l, "CLAUDE_CONFIG_DIR", ".claude"), "projects", "*", id+".jsonl")
 	case "codex":
 		pattern = filepath.Join(configDir(l, "CODEX_HOME", ".codex"), "sessions", "*", "*", "*", "*"+id+"*.jsonl")
 	case "pi", "omp":

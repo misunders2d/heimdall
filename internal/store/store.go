@@ -163,6 +163,8 @@ ALTER TABLE job_alerts RENAME TO job_alerts_old;
 CREATE TABLE job_alerts(job_id TEXT NOT NULL,creator TEXT NOT NULL,key TEXT NOT NULL,revision TEXT NOT NULL,outbound_id INTEGER NOT NULL,retired INTEGER NOT NULL DEFAULT 0,acknowledged_at INTEGER NOT NULL DEFAULT 0,failure_notice INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(job_id,creator,key,revision));
 INSERT INTO job_alerts(job_id,creator,key,revision,outbound_id) SELECT job_id,creator,key,revision,outbound_id FROM job_alerts_old;
 DROP TABLE job_alerts_old;`,
+	`ALTER TABLE turns ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE turns ADD COLUMN no_resume INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -317,19 +319,25 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(iface,chat,msg_id) DO NOTHIN
 	return InboundRow{ID: id, Inbound: in, State: InPending}, false, nil
 }
 
+const inboundColumns = "id,iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,private,extra,state,COALESCE(turn_id,0)"
+
 // Pending lists messages never started, oldest first.
 func (s *Store) Pending() ([]InboundRow, error) {
-	rows, err := s.db.Query(`SELECT id,iface,chat,thread,msg_id,platform,user_id,user_name,user_email,user_team,user_key_id,origin,text,received_at,private,extra FROM inbound WHERE state=? ORDER BY id`, InPending)
+	rows, err := s.db.Query("SELECT "+inboundColumns+" FROM inbound WHERE state=? ORDER BY id", InPending)
 	if err != nil {
 		return nil, err
 	}
+	return readInbounds(rows)
+}
+
+func readInbounds(rows *sql.Rows) ([]InboundRow, error) {
 	defer rows.Close()
 	var out []InboundRow
 	for rows.Next() {
 		var r InboundRow
 		var at int64
 		var extra string
-		if err := rows.Scan(&r.ID, &r.Conv.Interface, &r.Conv.Chat, &r.Conv.Thread, &r.MsgID, &r.From.Platform, &r.From.ID, &r.From.Name, &r.From.Email, &r.From.Team, &r.From.KeyID, &r.Origin, &r.Text, &at, &r.Private, &extra); err != nil {
+		if err := rows.Scan(&r.ID, &r.Conv.Interface, &r.Conv.Chat, &r.Conv.Thread, &r.MsgID, &r.From.Platform, &r.From.ID, &r.From.Name, &r.From.Email, &r.From.Team, &r.From.KeyID, &r.Origin, &r.Text, &at, &r.Private, &extra, &r.State, &r.TurnID); err != nil {
 			return nil, err
 		}
 		if extra != "" {
@@ -339,7 +347,7 @@ func (s *Store) Pending() ([]InboundRow, error) {
 			}
 			x.apply(&r.Inbound)
 		}
-		r.At, r.State = time.UnixMilli(at), InPending
+		r.At = time.UnixMilli(at)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -382,8 +390,8 @@ func (s *Store) StartTurn(conv core.ConvKey, role core.Role, who, replyTo string
 
 // BindTurn records the harness taking a turn and marks its native session
 // in progress (not clean) until the turn ends. It runs before the harness
-// gets any input, so a crash from then on never resumes that session, and
-// again once the turn is ready, when a new session's native ID is known.
+// gets any input, when a cold launch acquires its native ID, and again
+// once the turn is ready.
 func (s *Store) BindTurn(turn int64, conv core.ConvKey, who, harness, session string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -858,28 +866,30 @@ type Interrupted struct {
 	Harness   string
 	ReplyTo   string
 	Messages  int
+	Cutoffs   int
 }
 
 // Recovered is what a restart cut off.
 type Recovered struct {
 	Turns       []Interrupted
 	Unconfirmed []InboundRow // messages whose hand-over to a running turn was never recorded
+	Chat        []ChatResume
 }
 
 // Recover runs once at startup, before any interface: every turn still
-// running was cut off by the restart. It is marked interrupted with its
-// messages, its session is not resumed, and turnNotice builds the chat
-// notice. A message caught mid-hand-over to a running turn is marked
+// running was cut off by the restart. Eligible owner chat turns may be
+// claimed for native continuation by prepareChat; the rest are interrupted.
+// A message caught mid-hand-over to a running turn is marked
 // unconfirmed and steerNotice tells its sender. All in one transaction;
 // nothing is re-run. Replies caught mid-send go back to the queue.
-func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice func(InboundRow) core.Outbound) (Recovered, error) {
+func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice func(InboundRow) core.Outbound, prepareChat ...func(*ChatResume) (core.Outbound, bool)) (Recovered, error) {
 	var rec Recovered
 	tx, err := s.db.Begin()
 	if err != nil {
 		return rec, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT t.id,t.iface,t.chat,t.thread,t.role,t.principal,t.harness,t.reply_to,(SELECT count(*) FROM inbound i WHERE i.turn_id=t.id AND i.state IN (?,?)) FROM turns t WHERE t.state=? ORDER BY t.id`, InRunning, InSteered, TurnRunning)
+	rows, err := tx.Query(`SELECT t.id,t.iface,t.chat,t.thread,t.role,t.principal,t.harness,t.reply_to,(SELECT count(*) FROM inbound i WHERE i.turn_id=t.id AND i.state IN (?,?)),t.restart_count FROM turns t WHERE t.state=? ORDER BY t.id`, InRunning, InSteered, TurnRunning)
 	if err != nil {
 		return rec, err
 	}
@@ -887,7 +897,7 @@ func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice 
 	for rows.Next() {
 		var t Interrupted
 		var role string
-		if err := rows.Scan(&t.Turn, &t.Conv.Interface, &t.Conv.Chat, &t.Conv.Thread, &role, &t.Principal, &t.Harness, &t.ReplyTo, &t.Messages); err != nil {
+		if err := rows.Scan(&t.Turn, &t.Conv.Interface, &t.Conv.Chat, &t.Conv.Thread, &role, &t.Principal, &t.Harness, &t.ReplyTo, &t.Messages, &t.Cutoffs); err != nil {
 			rows.Close()
 			return rec, err
 		}
@@ -899,6 +909,25 @@ func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice 
 		return rec, err
 	}
 	for _, t := range cut {
+		var notice core.Outbound
+		if len(prepareChat) != 0 {
+			resume, err := claimChat(tx, &t)
+			if err != nil {
+				return rec, err
+			}
+			if resume != nil {
+				var ready bool
+				notice, ready = prepareChat[0](resume)
+				if ready {
+					if _, err := enqueue(tx, notice); err != nil {
+						return rec, err
+					}
+					rec.Chat = append(rec.Chat, *resume)
+					continue
+				}
+			}
+		}
+		rec.Turns = append(rec.Turns, t)
 		if _, err := tx.Exec(`UPDATE turns SET state=?,detail=?,ended_at=? WHERE id=?`, TurnInterrupted, "Heimdall restarted during this turn; not re-run", now(), t.Turn); err != nil {
 			return rec, err
 		}
@@ -911,32 +940,26 @@ func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice 
 			}
 		}
 		// A scheduled run's notice is the scheduler's (no notice here).
-		if out := turnNotice(t); out.Conv.Interface != "" {
-			if _, err := enqueue(tx, out); err != nil {
+		if notice.Conv.Interface == "" {
+			notice = turnNotice(t)
+		}
+		if notice.Conv.Interface != "" {
+			if _, err := enqueue(tx, notice); err != nil {
 				return rec, err
 			}
 		}
 	}
-	rows, err = tx.Query(`SELECT id,iface,chat,thread,msg_id,platform,user_id,turn_id FROM inbound WHERE state=? ORDER BY id`, InSteering)
+	rows, err = tx.Query("SELECT "+inboundColumns+" FROM inbound WHERE state=? ORDER BY id", InSteering)
 	if err != nil {
 		return rec, err
 	}
-	var held []InboundRow
-	for rows.Next() {
-		var r InboundRow
-		var turn sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.Conv.Interface, &r.Conv.Chat, &r.Conv.Thread, &r.MsgID, &r.From.Platform, &r.From.ID, &turn); err != nil {
-			rows.Close()
-			return rec, err
-		}
-		r.State, r.TurnID = InUnconfirmed, turn.Int64
-		held = append(held, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	held, err := readInbounds(rows)
+	if err != nil {
 		return rec, err
 	}
-	for _, r := range held {
+	for i := range held {
+		held[i].State = InUnconfirmed
+		r := held[i]
 		if _, err := tx.Exec(`UPDATE inbound SET state=?,detail=? WHERE id=?`, InUnconfirmed, "steer interrupted by restart; not replayed", r.ID); err != nil {
 			return rec, err
 		}
@@ -947,7 +970,7 @@ func (s *Store) Recover(turnNotice func(Interrupted) core.Outbound, steerNotice 
 	if _, err := tx.Exec(`UPDATE outbound SET state=? WHERE state=?`, OutPending, OutSending); err != nil {
 		return rec, err
 	}
-	rec.Turns, rec.Unconfirmed = cut, held
+	rec.Unconfirmed = held
 	return rec, tx.Commit()
 }
 

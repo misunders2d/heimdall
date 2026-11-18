@@ -108,7 +108,7 @@ func prepareContext(s Spec, args []string) (string, []string, error) {
 	if s.Harness != "pi" && s.Harness != "claude" {
 		return "", args, nil
 	}
-	if s.Context == "" && s.Instructions == "" && s.WarmContext == nil {
+	if s.Context == "" && s.Instructions == "" && s.WarmContext == nil && !s.RecordClaudeTools {
 		return "", args, nil
 	}
 	parent := ""
@@ -178,6 +178,14 @@ func prepareContext(s Spec, args []string) (string, []string, error) {
 		}
 		old, _ := hooks["UserPromptSubmit"].([]any)
 		hooks["UserPromptSubmit"] = append(old, map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command, "onFailure": "block"}}})
+		if s.RecordClaudeTools {
+			path := claudeToolPath(s.Launch, s.Session.ID)
+			recorder := "'" + strings.ReplaceAll(exe, "'", "'\\''") + "' hook chat-tool '" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+			for _, event := range []string{"PreToolUse", "PostToolUse", "PostToolUseFailure"} {
+				old, _ := hooks[event].([]any)
+				hooks[event] = append(old, map[string]any{"hooks": []any{map[string]any{"type": "command", "command": recorder}}})
+			}
+		}
 		settings["hooks"] = hooks
 		data, _ := json.Marshal(settings)
 		args = append(filtered, "--settings", string(data))
