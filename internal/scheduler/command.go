@@ -83,24 +83,10 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 		return "", nil, false
 	}
 	drafts := s.drafts(c)
-	if external(drafts) && ((w != "yes" && w != "no" && !details) || !s.cardIsLatest(drafts)) {
-		// A launcher proposal arrives unasked and waits in the chat where the
-		// owner talks to his assistant: only the exact word Yes, No or Details
-		// answers it, and only while its card is still the latest thing
-		// there. Otherwise the word never reaches it: it answers the owner's
-		// own drafts as usual, or is an ordinary message (a steer, an answer
-		// to the assistant, the cancel control); !jobs lists the proposal
-		// with its !job confirm|discard <id>.
-		drafts = slices.DeleteFunc(drafts, func(j store.Job) bool { return j.Origin != "" })
-	}
 	switch {
 	case len(drafts) == 0:
 		return "", nil, false
 	case len(drafts) > 1 && details:
-		return s.waiting(c, drafts), nil, true
-	case len(drafts) > 1 && external(drafts):
-		// A request from outside Heimdall can arrive while the owner answers
-		// another one: a plain word answers none of them then (H1).
 		return s.waiting(c, drafts), nil, true
 	case len(drafts) > 1:
 		reply, change = s.answerAll(c, drafts, confirm)
@@ -120,9 +106,6 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 
 // waiting lists the caller's drafts here: what each would do, no ids.
 func (s *Scheduler) waiting(c Caller, drafts []store.Job) string {
-	if external(drafts) {
-		return s.heading(c, fmt.Sprintf("📋 %d requests are waiting", len(drafts))) + ", so a plain Yes is not enough. Copy the line you want:\n" + s.answerLines(drafts)
-	}
 	lines := []string{s.heading(c, fmt.Sprintf("📋 %d requests wait", len(drafts)))}
 	for _, j := range drafts {
 		action, d := s.draftAction(j)
@@ -135,50 +118,9 @@ func (s *Scheduler) waiting(c Caller, drafts []store.Job) string {
 	return strings.Join(lines, "\n") + "\n\n👉 Reply " + bold(c.Conv, "Yes") + " to apply all or " + bold(c.Conv, "No") + " to cancel all."
 }
 
-// answerLines are one copyable line per draft: what it does (untrusted
-// titles quoted, never bold) and its confirm and discard commands.
-func (s *Scheduler) answerLines(drafts []store.Job) string {
-	var lines []string
-	for _, j := range drafts {
-		action, d := s.draftAction(j)
-		what := quoted(d.Name, 80)
-		if _, title, ok := taskOf(j); ok {
-			what = quoted(title, maxTitle)
-		}
-		lines = append(lines, "• "+action+" "+what+": `!job confirm "+j.ID+"` · skip: `!job discard "+j.ID+"`")
-	}
-	return strings.Join(lines, "\n")
-}
-
-// pending heads !jobs while a launcher proposal waits in this chat: its
-// card may no longer be the latest word here, so a plain Yes would not
-// reach it.
-func (s *Scheduler) pending(c Caller) string {
-	drafts := s.drafts(c)
-	if !external(drafts) {
-		return ""
-	}
-	n := "1 request is"
-	if len(drafts) > 1 {
-		n = fmt.Sprintf("%d requests are", len(drafts))
-	}
-	return s.heading(c, "📋 "+n+" waiting for your answer") + ". Copy the line you want:\n" + s.answerLines(drafts)
-}
-
-// external reports whether any draft came from a trusted local launcher.
-func external(drafts []store.Job) bool {
-	return slices.ContainsFunc(drafts, func(j store.Job) bool { return j.Origin != "" })
-}
-
 // draftAction is what a draft would do, and the definition it shows: a
 // removal shows its job's.
 func (s *Scheduler) draftAction(j store.Job) (string, Def) {
-	if _, title, ok := taskOf(j); ok {
-		if v := vouchOf(j); v != nil && v.Author == "human" {
-			return "🧑 Start", Def{Name: title}
-		}
-		return "🤖 Start", Def{Name: title}
-	}
 	if id := removalID(j); id != "" {
 		orig, _, _ := s.st.Job(id)
 		d, _, _ := parse(orig)
@@ -413,16 +355,6 @@ func (s *Scheduler) creator(j store.Job, asking Caller) Caller {
 
 // card uses fixed templates; full operator settings stay behind Details.
 func (s *Scheduler) card(c Caller, j store.Job) string {
-	if _, _, ok := taskOf(j); ok {
-		return s.taskCard(c.Conv, j)
-	}
-	if c.Vouch != nil {
-		card := s.request(c, j)
-		if c.Conv.Interface == core.PlatformSlack && c.Conv.Thread != "" {
-			card = strings.Replace(card, " to apply or ", " in this thread to apply or ", 1)
-		}
-		return asks(c.Conv, c.Vouch, false) + "\n\n" + card + "\nIf other messages come first, send !jobs to answer it.\n— heimdall"
-	}
 	return s.request(c, j) + "\n— heimdall"
 }
 
@@ -541,13 +473,7 @@ func (s *Scheduler) Command(c Caller, text string) (reply string, change *store.
 			}
 			return strings.TrimSpace(b.String()), nil
 		}
-		list := s.list(c, strings.EqualFold(rest, "all"))
-		if p := s.pending(c); p != "" {
-			// A launcher proposal whose card is no longer the latest word in
-			// this chat is answered from here (Answer).
-			list = p + "\n\n" + list
-		}
-		return list, nil
+		return s.list(c, strings.EqualFold(rest, "all")), nil
 	}
 	sub, rest := cut(rest)
 	id, arg := cut(rest)
@@ -674,12 +600,6 @@ func (s *Scheduler) confirm(c Caller, id string) (string, *store.JobChange) {
 	if !j.DraftExpires.After(now) {
 		return "Request expired; nothing was changed.", &store.JobChange{Drop: j.ID}
 	}
-	if why := s.revoked(j); why != "" {
-		return revokedLine(j, why), &store.JobChange{Drop: j.ID}
-	}
-	if _, _, ok := taskOf(j); ok {
-		return s.confirmTask(c, j)
-	}
 	if id := removalID(j); id != "" {
 		// Recheck current authority and reuse every rm side effect and retry fence.
 		reply, change := s.manage(c, "rm", id, "")
@@ -735,9 +655,6 @@ func (s *Scheduler) discard(c Caller, id string) (string, *store.JobChange) {
 	j, ok, err := s.st.Job(id)
 	if err != nil || !ok || j.State != store.JobDraft || j.Creator.Key() != c.Principal.Key() || j.CreatedIn != c.Conv {
 		return fmt.Sprintf("No draft %q of yours in this conversation.", id), nil
-	}
-	if j.Origin != "" {
-		return discarded(j), &store.JobChange{Drop: id}
 	}
 	return "Request cancelled; nothing was changed.", &store.JobChange{Drop: id}
 }
@@ -885,9 +802,6 @@ func (s *Scheduler) show(c Caller, id string) string {
 			return err.Error()
 		}
 		j = drafts[i]
-		if _, _, ok := taskOf(j); ok {
-			return s.showTask(j)
-		}
 		if target := removalID(j); target != "" {
 			return "Removal request (only genuine human confirmation applies):\n" + s.show(c, target)
 		}
@@ -899,9 +813,6 @@ func (s *Scheduler) show(c Caller, id string) string {
 		fmt.Fprintf(&b, " (%s)", j.Reason)
 	}
 	fmt.Fprintf(&b, ", by %s, version %d\n", j.Creator.Key(), j.Version)
-	if v := vouchOf(j); v != nil && j.State == store.JobDraft {
-		fmt.Fprintf(&b, "From: %s, author %s, person %s, run %s\n", v.Launcher, v.Author, v.Person, v.Run)
-	}
 	s.describe(&b, c, j, d, sched, false)
 	// The options are the definition without what describe showed.
 	var opts map[string]json.RawMessage

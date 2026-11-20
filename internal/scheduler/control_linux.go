@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
-	"github.com/misunders2d/heimdall/internal/durable"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
@@ -42,7 +41,7 @@ type ControlRequest struct {
 type ControlResult struct {
 	Reply   string `json:"reply,omitempty"`
 	DraftID string `json:"draft_id,omitempty"`
-	JobID   string `json:"job_id,omitempty"` // a job applied at once (trusted T3 owner origin)
+	JobID   string `json:"job_id,omitempty"` // a job applied at once (external owner origin)
 	Changed bool   `json:"changed"`
 	Error   string `json:"error,omitempty"`
 }
@@ -249,7 +248,7 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 	if !ok || r != core.RoleOwner {
 		return Caller{}, errors.New("bound caller is not a current owner")
 	}
-	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: actor, OAuthInstallation: installation, External: who.External, Vouch: who.Vouch, Registered: who.Registered}, nil
+	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: actor, OAuthInstallation: installation, External: who.External, Registered: who.Registered}, nil
 }
 
 // scheduledCaller binds a router-started scheduled run. The router already
@@ -353,6 +352,9 @@ func (c *Control) resolvePeer(pid int, alive func() bool) (Caller, func() bool, 
 // Capture an eligible native input before waiting; never upgrade a queued idle
 // request to a later turn. Recheck that same generation after live verification.
 func (c *Control) executePeer(ctx context.Context, cred *syscall.Ucred, req ControlRequest, who Caller, valid func() bool) ControlResult {
+	if who.externalAgent && req.Action != "task_add" {
+		return ControlResult{Error: "external owner agents may only add tasks"}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if valid == nil || !valid() {
@@ -385,15 +387,6 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	}
 	if len(valid) > 0 && !valid[0]() {
 		return fail(errors.New("request origin expired during verification"))
-	}
-	if v := who.Vouch; v != nil && v.Author != "human" {
-		// The launcher's opt-in let an agent author through (externalOrigin):
-		// it may only propose a task, which the owner approves, or wake one.
-		switch req.Action {
-		case "task_add", "task_wake", "discover":
-		default:
-			return fail(errors.New(v.Launcher + " agent requests may only propose a task (task_add) or wake one (task_wake); the owner approves each proposal in their private chat"))
-		}
 	}
 	if strings.HasPrefix(req.Action, "task_") {
 		return c.task(uid, req, who, valid)
@@ -435,7 +428,7 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		return fail(errors.New("receipt fields require acknowledge"))
 	}
 	if req.Action == "discover" {
-		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show, task_wake, task_pause, task_resume, task_close for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step; task_wake: id + request_id, wakes it now). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there (a trusted T3 owner origin's create/edit apply at once, removal and rerun_on_timeout still ask; an external launcher's create, edit, removal and task_add are cards the owner approves in their private chat, and an agent-authored external request may only task_add and task_wake). Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
+		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show, task_wake, task_pause, task_resume, task_close for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step; task_wake: id + request_id, wakes it now). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there (an external or trusted T3 owner origin's create/edit apply at once; removal and rerun_on_timeout still ask). Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
 	}
 	var job store.Job
 	if req.ID != "" {
@@ -469,8 +462,7 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	}{req, who.Conv})
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
-	requestKey := controlKey(who, req.RequestID)
-	if saved, ok, err := c.s.st.ControlResponse(who.Principal.Key(), requestKey, digest); err != nil {
+	if saved, ok, err := c.s.st.ControlResponse(who.Principal.Key(), req.RequestID, digest); err != nil {
 		return fail(err)
 	} else if ok {
 		var result ControlResult
@@ -518,23 +510,9 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		}
 		result = ControlResult{Reply: c.s.card(who, j), DraftID: j.ID, Changed: true}
 		change = &store.JobChange{Add: &j}
-		if who.Vouch != nil {
-			// Owner, 2026-11-20: every create, edit or removal from a
-			// launcher-vouched run is a card in the owner's private chat;
-			// nothing changes until the owner's own Yes there. The card goes
-			// to that chat; the run gets a plain receipt.
-			if msg := c.s.proposalCap(who); msg != "" {
-				return fail(errors.New(msg))
-			}
-			j.Origin = mustJSON(who.Vouch)
-			card := c.s.card(who, j)
-			result = ControlResult{Reply: "Sent to the owner's private chat for approval; nothing changes until they reply Yes there. — heimdall", DraftID: j.ID, Changed: true}
-			outs = []core.Outbound{{Conv: who.Conv, Text: card, Formatted: true}}
-			break
-		}
-		// The trusted T3 registration origin has no Heimdall chat to confirm
-		// in: like a direct owner chat request, create/edit apply at once.
-		// Removal and rerun_on_timeout keep the draft and its confirmation.
+		// An external owner origin has no Heimdall chat to confirm in: like a
+		// direct owner chat request, create/edit apply at once. Removal and
+		// rerun_on_timeout keep the draft and its human confirmation.
 		if d, _, _ := parse(j); who.External != "" && req.Action != "remove" && !d.RerunOnTimeout {
 			msg, applied := c.s.confirmJob(who, j)
 			if applied == nil {
@@ -564,7 +542,7 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	if len(valid) > 0 && !valid[0]() {
 		return fail(errors.New("request origin expired before commit"))
 	}
-	if err := c.s.st.ControlCommit(who.Principal.Key(), requestKey, digest, req.Action, req.ID, string(response), uid, change, outs); err != nil {
+	if err := c.s.st.ControlCommit(who.Principal.Key(), req.RequestID, digest, req.Action, req.ID, string(response), uid, change, outs); err != nil {
 		return fail(err)
 	}
 	if change != nil && change.StopJob != "" {
@@ -659,17 +637,13 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 	if who.External != "" && who.Principal.Platform == core.PlatformSlack && (who.OAuthActor == "" || who.OAuthInstallation == "") {
 		return fail("live Slack verification gave no native OAuth actor; the task was not admitted or changed")
 	}
-	if req.Action == "task_add" && who.Vouch != nil {
-		return c.propose(uid, req, who, valid)
-	}
 	raw, _ := json.Marshal(struct {
 		Request ControlRequest
 		Source  core.ConvKey
 	}{req, who.Conv})
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
-	requestKey := controlKey(who, req.RequestID)
-	if saved, ok, err := c.s.st.ControlResponse(who.Principal.Key(), requestKey, digest); err != nil {
+	if saved, ok, err := c.s.st.ControlResponse(who.Principal.Key(), req.RequestID, digest); err != nil {
 		return fail(err.Error())
 	} else if ok {
 		var result ControlResult
@@ -686,85 +660,10 @@ func (c *Control) task(uid uint32, req ControlRequest, who Caller, valid []func(
 	reply, changed := c.s.Tasks(who, strings.TrimPrefix(req.Action, "task_"), req.ID, req.Title, req.RequestID)
 	result := ControlResult{Reply: reply, Changed: changed}
 	response, _ := json.Marshal(result)
-	if err := c.s.st.ControlCommit(who.Principal.Key(), requestKey, digest, req.Action, req.ID, string(response), uid, nil, nil); err != nil {
+	if err := c.s.st.ControlCommit(who.Principal.Key(), req.RequestID, digest, req.Action, req.ID, string(response), uid, nil, nil); err != nil {
 		return fail(err.Error())
 	}
 	c.s.log.Printf("scheduler control: operator uid %d, action %s, changed %t", uid, req.Action, changed)
-	return result
-}
-
-// controlKey is the stored request key: a launcher-vouched origin's
-// request ids live in their own namespace, so they never meet a live
-// turn's ids for the same person.
-func controlKey(who Caller, id string) string {
-	if who.Vouch != nil {
-		return "ext:" + who.Vouch.Launcher + ":" + id
-	}
-	return id
-}
-
-// propose turns a launcher-vouched task_add into a card in the owner's
-// private chat (owner, 2026-11-20): a draft row holding the issue, the
-// title and the verified answer, the card and the request record, in one
-// transaction. Nothing is admitted until the owner's own Yes there
-// (Scheduler.confirmTask), which reads only this stored draft: the run has
-// usually ended by then and the launcher is never asked again. One run
-// proposes an issue once (its key outlives the draft, so a No is final for
-// that run); an issue waiting for an answer is not proposed twice.
-func (c *Control) propose(uid uint32, req ControlRequest, who Caller, valid []func() bool) ControlResult {
-	fail := func(msg string) ControlResult { return ControlResult{Error: msg} }
-	issue := strings.ToUpper(req.ID)
-	// The card shows the whole title and the Yes admits exactly it.
-	title, err := proposalTitle(req.Title)
-	if err != nil {
-		return fail("task_add not sent: " + err.Error())
-	}
-	switch f := strings.Fields(title); {
-	case !durable.IssuePattern.MatchString(issue):
-		return fail("task_add needs a Linear issue identifier such as ABC-123")
-	case strings.HasPrefix(issue, "T3-"):
-		return fail("T3-<n> ids are reserved for T3 requests")
-	case len(f) == 0 || strings.Contains(f[0], "=") || strings.Contains(title, "| next:"):
-		return fail("a task needs a plain title: no worker, resource, gate or next step from a tool call")
-	}
-	raw, _ := json.Marshal(struct {
-		Issue, Title string
-		Source       core.ConvKey
-	}{issue, title, who.Conv})
-	sum := sha256.Sum256(raw)
-	digest := hex.EncodeToString(sum[:])
-	key := "ext:" + who.Vouch.Launcher + ":" + who.Vouch.Run + ":task_add:" + issue
-	if saved, ok, err := c.s.st.ControlResponse(who.Principal.Key(), key, digest); err != nil {
-		return fail("this run already proposed " + issue + " differently (" + err.Error() + ")")
-	} else if ok {
-		var result ControlResult
-		_ = json.Unmarshal([]byte(saved), &result)
-		if result.DraftID != "" && !c.s.stillWaiting(result.DraftID) {
-			// The owner answered it (Yes or No) or it expired: whether the
-			// task is tracked is the owner's to say, not this run's to ask.
-			return ControlResult{Reply: "This proposal is no longer waiting: the owner answered it or it expired. This run cannot send " + issue + " again. — heimdall", DraftID: result.DraftID}
-		}
-		return result
-	}
-	if c.s.waitingTask(who.Principal, issue) {
-		return ControlResult{Reply: issue + " already waits for the owner's answer in their private chat; nothing new was sent."}
-	}
-	if msg := c.s.proposalCap(who); msg != "" {
-		return fail(msg)
-	}
-	j := c.s.taskDraft(who, issue, title)
-	card := c.s.taskCard(who.Conv, j)
-	result := ControlResult{Reply: "Sent to the owner's private chat for approval; nothing is tracked until they reply Yes there. — heimdall", DraftID: j.ID, Changed: true}
-	response, _ := json.Marshal(result)
-	if len(valid) > 0 && !valid[0]() {
-		return fail("request origin expired before the proposal")
-	}
-	outs := []core.Outbound{{Conv: who.Conv, Text: card, Formatted: true}}
-	if err := c.s.st.ControlCommit(who.Principal.Key(), key, digest, req.Action, issue, string(response), uid, &store.JobChange{Add: &j}, outs); err != nil {
-		return fail(err.Error())
-	}
-	c.s.notify(outs...)
-	c.s.log.Printf("scheduler control: operator uid %d, action task_add proposed, author %s", uid, who.Vouch.Author)
 	return result
 }
 

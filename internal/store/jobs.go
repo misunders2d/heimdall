@@ -39,19 +39,14 @@ const (
 // Job is a job or a draft of one. Def is its normalized definition
 // (scheduler.Def, JSON).
 type Job struct {
-	ID, Name, Kind string
-	Creator        core.Principal
-	CreatedIn      core.ConvKey
-	CreatedPrivate bool
-	Def            string
-	State, Reason  string
-	EditOf         string // a draft that changes this job
-	DraftExpires   time.Time
-	// Origin: provenance JSON of a draft proposed through a trusted local
-	// launcher (docs/external-origin.md); such a draft is never swept
-	// silently: its expiry posts one line (ExpireOriginDrafts). Empty for
-	// drafts from Heimdall chats.
-	Origin           string
+	ID, Name, Kind   string
+	Creator          core.Principal
+	CreatedIn        core.ConvKey
+	CreatedPrivate   bool
+	Def              string
+	State, Reason    string
+	EditOf           string // a draft that changes this job
+	DraftExpires     time.Time
 	NextSlot         string
 	NextDue          time.Time // zero: no further slot
 	Version          int
@@ -59,13 +54,13 @@ type Job struct {
 	Created, Updated time.Time
 }
 
-const jobCols = `id,name,kind,principal,created_iface,created_chat,created_thread,created_private,def,state,reason,edit_of,draft_expires_at,next_slot,next_due,version,fails,skips,created_at,updated_at,origin`
+const jobCols = `id,name,kind,principal,created_iface,created_chat,created_thread,created_private,def,state,reason,edit_of,draft_expires_at,next_slot,next_due,version,fails,skips,created_at,updated_at`
 
 func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	var j Job
 	var principal string
 	var expires, due, created, updated int64
-	err := row.Scan(&j.ID, &j.Name, &j.Kind, &principal, &j.CreatedIn.Interface, &j.CreatedIn.Chat, &j.CreatedIn.Thread, &j.CreatedPrivate, &j.Def, &j.State, &j.Reason, &j.EditOf, &expires, &j.NextSlot, &due, &j.Version, &j.Fails, &j.Skips, &created, &updated, &j.Origin)
+	err := row.Scan(&j.ID, &j.Name, &j.Kind, &principal, &j.CreatedIn.Interface, &j.CreatedIn.Chat, &j.CreatedIn.Thread, &j.CreatedPrivate, &j.Def, &j.State, &j.Reason, &j.EditOf, &expires, &j.NextSlot, &due, &j.Version, &j.Fails, &j.Skips, &created, &updated)
 	if err != nil {
 		return j, err
 	}
@@ -99,8 +94,8 @@ func insertJob(tx *sql.Tx, j Job) error {
 	if created == 0 {
 		created = now()
 	}
-	_, err = tx.Exec(`INSERT INTO jobs(id,name,kind,creator,principal,created_iface,created_chat,created_thread,created_private,def,state,reason,edit_of,draft_expires_at,next_slot,next_due,version,created_at,updated_at,origin)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`, j.ID, j.Name, j.Kind, j.Creator.Key(), string(principal), j.CreatedIn.Interface, j.CreatedIn.Chat, j.CreatedIn.Thread, j.CreatedPrivate, j.Def, j.State, j.Reason, j.EditOf, unix(j.DraftExpires), j.NextSlot, unix(j.NextDue), created, now(), j.Origin)
+	_, err = tx.Exec(`INSERT INTO jobs(id,name,kind,creator,principal,created_iface,created_chat,created_thread,created_private,def,state,reason,edit_of,draft_expires_at,next_slot,next_due,version,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, j.ID, j.Name, j.Kind, j.Creator.Key(), string(principal), j.CreatedIn.Interface, j.CreatedIn.Chat, j.CreatedIn.Thread, j.CreatedPrivate, j.Def, j.State, j.Reason, j.EditOf, unix(j.DraftExpires), j.NextSlot, unix(j.NextDue), created, now())
 	return err
 }
 
@@ -741,8 +736,7 @@ func (s *Store) PrivateChat(p core.Principal) (core.ConvKey, bool, error) {
 }
 
 // Prune drops ended runs older than runAge (keeping each job's newest 100),
-// deleted jobs older than jobAge, and expired drafts (not those with an
-// origin: ExpireOriginDrafts drops them with their one line).
+// deleted jobs older than jobAge, and expired drafts.
 func (s *Store) Prune(at time.Time, runAge, jobAge time.Duration) error {
 	return s.tx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM job_runs WHERE ended_at>0 AND ended_at<? AND id NOT IN (
@@ -755,46 +749,9 @@ func (s *Store) Prune(at time.Time, runAge, jobAge time.Duration) error {
 		if _, err := tx.Exec(`DELETE FROM jobs WHERE state=? AND updated_at<?`, JobDeleted, at.Add(-jobAge).UnixMilli()); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`DELETE FROM jobs WHERE state=? AND draft_expires_at<? AND origin=''`, JobDraft, at.UnixMilli())
+		_, err := tx.Exec(`DELETE FROM jobs WHERE state=? AND draft_expires_at<?`, JobDraft, at.UnixMilli())
 		return err
 	})
-}
-
-// ExpireOriginDrafts drops each draft with an origin for which drop
-// returns true (it expired, or its launcher lost its rights), and stores
-// drop's one line with the delete, in one transaction per draft. A draft a
-// confirm or discard already dropped posts nothing, so a draft ends with
-// exactly one answer or one expiry line.
-func (s *Store) ExpireOriginDrafts(drop func(Job) ([]core.Outbound, bool)) (int, error) {
-	drafts, err := s.Jobs(JobFilter{States: []string{JobDraft}})
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, j := range drafts {
-		if j.Origin == "" {
-			continue
-		}
-		outs, ok := drop(j)
-		if !ok {
-			continue
-		}
-		err := s.tx(func(tx *sql.Tx) error {
-			res, err := tx.Exec(`DELETE FROM jobs WHERE id=? AND state=?`, j.ID, JobDraft)
-			if err != nil {
-				return err
-			}
-			if k, _ := res.RowsAffected(); k != 1 {
-				return nil
-			}
-			n++
-			return enqueueAll(tx, outs)
-		})
-		if err != nil {
-			return n, err
-		}
-	}
-	return n, nil
 }
 
 // Busy counts running turns, scheduled runs handed to the router (started
