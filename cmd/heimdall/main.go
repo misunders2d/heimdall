@@ -206,16 +206,10 @@ func run(args []string) error {
 		defer work.Close()
 		if jobs != nil {
 			// The scheduler control's task actions: only a bound live owner
-			// person turn, a verified external owner origin (task_wake, reads)
-			// or the owner's own Yes to an external proposal reaches here
-			// (scheduled runs are refused there). A proposal the owner said Yes to keeps its
-			// provenance in the task's Origin.
+			// person turn or a verified external human owner reaches here
+			// (scheduled runs are refused there).
 			jobs.Tasks = func(who scheduler.Caller, action, issue, title, requestID string) (string, bool) {
-				origin := who.Registered
-				if origin == "" {
-					origin = who.Proposed
-				}
-				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: origin,
+				return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Registered,
 					Same: func(p core.Principal) bool { return access.SamePerson(p, who.Principal) }}, action, issue, title, requestID)
 			}
 			jobs.TaskExport = func() ([]byte, error) { return work.Export(time.Now()) }
@@ -235,9 +229,7 @@ func run(args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			jobs.Launchers = map[string]bool{}
 			for _, o := range cfg.Scheduler.Control.External {
-				jobs.Launchers[o.Name] = o.AgentProposals
 				lu, err := user.Lookup(o.User)
 				var luid uint64
 				if err == nil {
@@ -251,7 +243,7 @@ func run(args []string) error {
 				for person, m := range o.People {
 					people[person] = scheduler.ExternalPerson{Principal: m.Principal, Source: m.Source}
 				}
-				jobs.External = append(jobs.External, scheduler.ExternalOrigin{Name: o.Name, Label: o.Label, Socket: o.Socket, UID: uint32(luid), People: people, Agents: o.AgentProposals})
+				jobs.External = append(jobs.External, scheduler.ExternalOrigin{Name: o.Name, Socket: o.Socket, UID: uint32(luid), People: people})
 			}
 			if t := cfg.Scheduler.Control.TrustedT3; t != nil {
 				lu, err := user.Lookup(t.User)

@@ -306,10 +306,8 @@ Heimdall shows a card and only the person confirms (an owner's new job or edit
 from a live private-chat message applies at once; in a group the owner confirms
 it too). With several cards waiting, a plain yes or no answers all of them,
 one line each, and `Details` lists them; no ids to type. A trusted T3 session
-with `trusted_t3.manage` also creates and edits the owner's jobs at once. A
-run vouched by an external launcher (AgentNet) only proposes: its jobs and
-tasks wait as a card in the owner's private chat until the owner says yes
-there ([external origins](docs/external-origin.md)). Removal follows `!job rm`
+with `trusted_t3.manage` also creates and edits the owner's jobs at once
+([external origins](docs/external-origin.md)). Removal follows `!job rm`
 authority and running-run behavior; discard leaves the job untouched.
 
 **Watch jobs** run a script with no AI turn and speak only when it has

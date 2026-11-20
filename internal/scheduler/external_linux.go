@@ -22,13 +22,9 @@ import (
 // the launcher; this is the whole contract.
 type ExternalOrigin struct {
 	Name   string                    // label used in errors and the run binding
-	Label  string                    // name on approval cards; "" = Name
 	Socket string                    // the launcher's own Unix socket
 	UID    uint32                    // the OS user the launcher runs as
 	People map[string]ExternalPerson // launcher person -> Heimdall identity
-	// Agents (owner opt-in, 2026-11-20, default off): an "agent" answer for
-	// a mapped current owner may propose a task and wake one.
-	Agents bool
 }
 
 // ExternalPerson maps a launcher person to an existing Heimdall principal.
@@ -140,21 +136,7 @@ func (c *Control) externalOrigin(o ExternalOrigin, pid int, alive func() bool) (
 	if !ok {
 		return Caller{}, nil, fmt.Errorf("%s person %q has no Heimdall identity mapping", o.Name, ans.Person)
 	}
-	// Owner, 2026-11-20: "my agents can assign, other people's agents
-	// can't". With the launcher's opt-in, an agent-authored run may propose
-	// a task (always a card the owner approves) and wake one; nothing else
-	// (executeLocked). The v1 answer has no request chain: AgentNet's
-	// person is the verified roster person of the exact key that signed
-	// the request, re-checked on every ask. So a mapped current owner here
-	// proves the owner's own key (his device or one of his agents) signed
-	// it, which is the own-person rule until AgentNet's v2 chain field. It
-	// does not prove who started the chain: an own agent may relay text it
-	// got from someone else, which is why the proposal's title is shown
-	// as quoted untrusted text and only the owner's Yes admits it. Another
-	// person's key never maps to the owner (unmapped or not an owner:
-	// refused above or below); a launcher whose person is not bound to the
-	// signing key must not set the opt-in.
-	if ans.Author != "human" && !o.Agents {
+	if ans.Author != "human" {
 		return Caller{}, nil, fmt.Errorf("%s run %s was not requested by the person themself (author %s)", o.Name, ans.Run, ans.Author)
 	}
 	// The mapped identity's real registered private conversation, as for
@@ -175,12 +157,7 @@ func (c *Control) externalOrigin(o ExternalOrigin, pid int, alive func() bool) (
 		return err == nil && alive() && again == ans
 	}
 	// caller() re-verifies Slack live and re-decides the role per call.
-	label := o.Label
-	if label == "" {
-		label = o.Name
-	}
-	vouch := &Vouch{Launcher: o.Name, Label: label, Run: ans.Run, Person: ans.Person, Author: ans.Author}
-	return Caller{Principal: p, Role: role, Conv: k, Private: true, External: o.Name + " " + ans.Run, Vouch: vouch}, valid, nil
+	return Caller{Principal: p, Role: role, Conv: k, Private: true, External: o.Name + " " + ans.Run}, valid, nil
 }
 
 // askLauncher finds the launcher's direct child in pid's ancestry and asks

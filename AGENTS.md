@@ -92,28 +92,13 @@ the `heimdall-live` unit.
   [docs/external-origin.md](docs/external-origin.md): Heimdall connects to the
   launcher's own socket, checks its kernel credentials and that the peer
   descends from its direct child, and asks live (again before commit). Only
-  runs of people explicitly mapped to an existing principal that is a
-  current owner count; environment variables are never identity; no
-  AgentNet code or import. Owner, 2026-11-20: "my agents can assign, other
-  people's agents can't"; "card is good option, yes"; "just make sure it's
-  clear what I'm being asked of. clearly, concisely and without tons of
-  technical babble." Every create, edit, removal and `task_add` from such a
-  run is a card in the owner's private Heimdall chat (who asks, the job as
-  quoted untrusted text, where the report goes, Yes/No; ids only in
-  Details); nothing changes until the owner's own Yes there, which admits
-  from the stored draft without asking the launcher again. A bare word
-  answers such a card only if exactly Yes/No/Details while the card is
-  still the chat's latest (no turn or unprompted delivery since); else it
-  is an ordinary message and `!jobs` lists the request. The title must be
-  one visible line the card shows whole; a revoked launcher's cards are
-  withdrawn. A verified
-  external human owner may also list, show, wake, pause, resume and close
-  their tasks (a Slack owner only with the live-verified OAuth actor). With
-  the launcher's `agent_proposals` opt-in (off by default), an `author:
-  agent` run of the mapped owner may only propose a task and `task_wake`;
-  other people's agents, employee, scheduled and unknown origins stay
-  refused. Reports go to the owner's private chat until the launcher's
-  contract names the channel the work started in.
+  `author: human` runs of people explicitly mapped to an existing principal
+  that is a current owner count; environment variables are never identity;
+  no AgentNet code or import. Create/edit apply at once; removal and
+  `rerun_on_timeout` keep human confirmation. A verified external human
+  owner may add, list and show durable tasks (a Slack owner only with the
+  live-verified OAuth actor); employee, agent, scheduled and unknown
+  origins stay refused.
 - **Roles.**
   - *Owner (root)*: `ADMIN_USER_IDS` authority only. File admins are admitted employees.
     Config owners are only an explicit non-hub fallback.
