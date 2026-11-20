@@ -139,6 +139,15 @@ type ExternalOrigin struct {
 	Socket string                    `json:"socket"` // absolute path of the launcher's own socket
 	User   string                    `json:"user"`   // OS user the launcher runs as
 	People map[string]ExternalPerson `json:"people"`
+	// Label names the launcher on approval cards ("AgentNet"); default: Name.
+	Label string `json:"label,omitempty"`
+	// AgentProposals (owner opt-in, default off; owner, 2026-11-20): an
+	// answer with author "agent" for a mapped current owner may propose a
+	// task (task_add, always a card the owner approves) and wake one
+	// (task_wake); nothing else. Set it only for a launcher whose person is
+	// the verified person of the key that signed the request
+	// (docs/external-origin.md).
+	AgentProposals bool `json:"agent_proposals,omitempty"`
 }
 
 var externalName = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
@@ -408,6 +417,9 @@ func (c *Config) fill(staged bool) error {
 				}
 				if len(o.People) == 0 {
 					return fmt.Errorf("%s.people must map at least one person", at)
+				}
+				if len(o.Label) > 40 || strings.ContainsFunc(o.Label, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+					return fmt.Errorf("%s.label must be one short line (up to 40 bytes)", at)
 				}
 				for person, m := range o.People {
 					q, err := core.ParsePrincipalKey(m.Principal)

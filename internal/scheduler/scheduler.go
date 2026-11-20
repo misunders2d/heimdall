@@ -210,6 +210,17 @@ func (s *Scheduler) tick(ctx context.Context) time.Time {
 	if !s.held(now) {
 		soonest(s.start(ctx, now))
 	}
+	// An unanswered launcher proposal leaves one line when it expires; the
+	// minute of grace lets a Yes sent just before expiry finish first.
+	var expired []core.Outbound
+	if _, err := s.st.ExpireOriginDrafts(now.Add(-time.Minute), func(j store.Job) []core.Outbound {
+		outs := s.expiredLine(j)
+		expired = append(expired, outs...)
+		return outs
+	}); err != nil {
+		s.log.Printf("scheduler: expire proposals: %v", err)
+	}
+	s.notify(expired...)
 	if now.Sub(s.pruned) > time.Hour {
 		s.pruned = now
 		if err := s.st.Prune(now, 90*24*time.Hour, 30*24*time.Hour); err != nil {

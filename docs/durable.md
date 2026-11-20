@@ -230,7 +230,9 @@ text) ends the wait, and the next wake runs at once with its usual prompt.
 The timer stays as the backup and the caps are unchanged: a woken wake
 that answers `WAIT` counts toward the 100, a failed one as failed, and a
 signal during a failed-wake backoff shortens it.
-- *Who:* the owner's live turn, a verified external `author: human` run
+- *Who:* the owner's live turn, a verified external `author: human` run,
+  with the launcher's `agent_proposals` opt-in the mapped owner's own
+  `author: agent` run (owner, 2026-11-20; [external-origin.md](external-origin.md)),
   and the trusted T3 launcher (no `manage` needed: a worker it launched
   signals back). The creator, or while an owner the same person under
   another identity (a Slack-bound T3 caller waking a Telegram-made task).
@@ -292,6 +294,17 @@ arbitrary effects); a changed request under it is refused. A title cannot
 carry a worker, resource, gate or next step, and verdicts, retries,
 pauses and closes stay owner `!work` commands. Scheduled, employee,
 review and wake turns cannot admit (wakes have no scheduler control).
+
+From an external launcher's run (AgentNet; owner, 2026-11-20: "my agents
+can assign, other people's agents can't"), `task_add` admits nothing by
+itself: it sends a card to the owner's private Heimdall chat ("Your agent
+on AgentNet wants to start a job for you", the title quoted, "When done,
+I'll tell you in: this private chat", Yes/No). The owner's own Yes there
+admits the task from the stored draft, under that live message's identity
+(route and report: that private chat), even after the AgentNet run has
+ended; No or 24 hours without an answer leave one line and nothing else.
+The mapped owner's own agents may propose only with the launcher's
+`agent_proposals` opt-in ([external-origin.md](external-origin.md)).
 
 Automatic intake: with `assistant_work` on and the scheduler control
 configured (and listening), every live owner request turn carries

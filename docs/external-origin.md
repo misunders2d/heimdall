@@ -48,8 +48,9 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
    execs below C do not matter.
 5. Heimdall sends `{"v":1,"pid":C,"start":<C's start time>}` and reads one
    strict JSON answer (unknown fields refused, 4 KiB, 2 s deadline).
-6. The answer must name a run, a person and `author: "human"`. The person
-   must be in this launcher's `people` map; the mapped principal must have a
+6. The answer must name a run, a person and `author: "human"` (or, with
+   the launcher's `agent_proposals` opt-in, `"agent"`; see below). The
+   person must be in this launcher's `people` map; the mapped principal must have a
    real registered private conversation with Heimdall (the same verified
    ingress binding used today), is re-verified live on Slack, and must be a
    current owner (`access`, evaluated now). Role is never configured.
@@ -60,13 +61,58 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
 
 ### What the origin may do
 
-- `create` and `edit`: applied at once (as direct owner chat requests are since
-  f967daa). A job with `rerun_on_timeout` still becomes a draft that asks.
-- `remove`: a draft; the card goes to the owner's private Heimdall chat and
-  only a real human reply there confirms (unchanged removal rule).
+Owner, 2026-11-20: "my agents can assign, other people's agents can't";
+the report goes to the "same channel where it was started of a direct DM
+in telegram/slack"; "card is good option, yes"; "just make sure it's clear
+what I'm being asked of. clearly, concisely and without tons of technical
+babble."
+
+- `create`, `edit`, `remove` and `task_add`: **a card** in the mapped
+  principal's registered private Heimdall chat. Nothing is created or
+  changed until that owner's own Yes there (a bare `yes`, or
+  `!job confirm <id>`); `No`, `!job discard <id>` or 24 hours without an
+  answer drop it. The draft row (the existing scheduler drafts table, with
+  the launcher's verified answer in its `origin` column) holds everything
+  the Yes needs, so the Yes admits from it and **never asks the launcher
+  again**: the run has usually ended by then. The control reply to the run
+  is a plain receipt ("sent to the owner's private chat for approval").
+  - A draft ends with exactly one line: the answer to Yes or No, or one
+    fixed expiry line in the same private chat (stored with the delete in
+    one transaction; a restart neither resends the card nor loses the
+    draft).
+  - With several drafts waiting in that chat and one of them from a
+    launcher, a bare yes or no answers none; Heimdall lists each with its
+    `!job confirm` / `!job discard` command, so a request that arrives
+    while the owner answers another is never swept up.
+  - A run proposes an issue once (its record outlives the draft, so a No
+    is final for that run); an issue already waiting is not sent twice;
+    at most 5 launcher proposals wait per person. Launcher request ids
+    have their own namespace (`ext:<launcher>:`), separate from live
+    turns'.
+  - **Card face** (Telegram/Slack Markdown, fixed template): who asks
+    (`📱 You asked on <label> …` for `author: human`, `🤖 Your agent on
+    <label> wants to start a job for you` for `author: agent`; `label` is
+    launcher config, never request text), the job in one line (the
+    request's title, quoted, trimmed and escaped as untrusted text), where
+    the report goes, and Yes/No. The Linear issue, run, person and draft
+    ids are only in `Details`. A job card shows the usual scheduler card
+    below the same "who asks" line.
+  - **Report destination:** the channel where the work started; when that
+    is not reachable, the owner's private Heimdall chat. The v1 answer
+    names no channel, so today every report goes to that private chat and
+    the card says so ("this private chat"). The channel needs the
+    launcher's v2 contract.
+  - The Yes runs under the tapping message's own identity: a live owner
+    message in that private chat (Slack: its verified OAuth actor, which
+    the task keeps; without it nothing starts). The task's wakes say
+    "Registered through the owner's Yes to an <label> agent proposal".
+    Yes from a group, or from anyone but the mapped principal, answers
+    nothing.
+- `rerun_on_timeout` and removal keep their confirmation as before (now
+  the same card).
 - Reads, `run`, `pause`, `resume`, `stop`, `acknowledge`: as for a live owner
-  turn.
-- `task_add`, `task_list`, `task_show`, `task_wake`, and the creator's own
+  turn (`author: human` only).
+- `task_list`, `task_show`, `task_wake`, and the creator's own
   `task_pause`, `task_resume`, `task_close` (id and `request_id` only; a
   close is one event per `request_id`): as for a live owner turn
   (`task_wake`: [durable.md](durable.md), "Wake now"). The task's
@@ -74,18 +120,34 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
   conversation. A Slack owner's native OAuth actor and installation come only
   from the live Slack verification of that same principal and team; without
   them the task is refused. A Telegram owner's task carries no actor, as live
-  Telegram turns do. No chat notice is posted; the control reply is the
-  stored receipt. Employee, agent, scheduled and unknown origins stay
-  refused.
+  Telegram turns do.
+- **Agent authors** (`"agent_proposals": true` on the launcher, owner
+  opt-in, default off): an `author: agent` run of a mapped current owner
+  may only `task_add` (always a card) and `task_wake` (no text). Every
+  other action is refused. Without the opt-in, an agent answer is refused
+  as before. Employee, scheduled and unknown origins, and other people's
+  agents (their person is unmapped or not a current owner), stay refused.
+
+  **What "own person" means until the v2 contract.** AgentNet's v1
+  `person` is the verified roster person of the exact key that signed the
+  request, re-checked on every ask. A mapped current owner therefore proves
+  the owner's own key signed it: his device or one of his own agents. It
+  does not prove who started the chain: an own agent may relay text it got
+  from someone else. That is why the title is shown as quoted untrusted
+  text and only the owner's Yes admits it. Set `agent_proposals` only for a
+  launcher whose `person` is bound to the signing key like this; a launcher
+  that cannot bind it must leave it off (Heimdall cannot tell, so it trusts
+  this configuration). AgentNet's planned v2 chain field (`chain: own`)
+  will let Heimdall check the chain itself.
 
   Producer gap (current AgentNet `--run-origin`): only a new question or task
   from the person's verified human device is `author: human`; that person's
-  later replies in the same conversation are `agent` and are refused here.
-  Heimdall does not relax the author check to compensate.
+  later replies in the same conversation are `agent`. Without the opt-in
+  they are refused here; with it they may only propose and wake.
 - The job's creator is the mapped principal; it is created in, and `here`
   delivers to, that principal's private Heimdall conversation, where the
-  create/edit notice is also posted as the audit trail. A definition may
-  still say `"to":"agentnet:<address>"` to have the job's agent deliver there.
+  card is also the audit trail. A definition may still say
+  `"to":"agentnet:<address>"` to have the job's agent deliver there.
 
 Refusals name what is missing, for example: no Heimdall turn and no
 configured launcher started this process; the launcher does not vouch for this
@@ -126,7 +188,9 @@ authored by the person themself; the mapped identity is not a current owner.
 8. **`author`.** `human` only when the request was authored directly by that
    person on one of their own verified human devices. A request from an agent
    (including the person's own agents), a relay, a guest, a continuation,
-   a scheduled or automatic run is `agent`. Heimdall acts only on `human`.
+   a scheduled or automatic run is `agent`. Heimdall acts on `human`, and
+   on `agent` only with the launcher's `agent_proposals` opt-in, for
+   proposals the owner approves and `task_wake`.
    This is AgentNet's existing distinction between a person's own request
    from their verified human device (`OwnHumanRequest`, roster human check)
    and everything else; no new concept is needed.
@@ -145,6 +209,8 @@ authored by the person themself; the mapped identity is not a current owner.
     "name":"agentnet",
     "socket":"/root/.config/agentnet/run-origin.sock",
     "user":"root",
+    "label":"AgentNet",
+    "agent_proposals":false,
     "people":{"<AgentNet person id>":{"principal":"slack:OWNER_EMAIL"}}
   }]
 }}}
@@ -154,7 +220,10 @@ authored by the person themself; the mapped identity is not a current owner.
 optional `source` (`{"interface","chat","thread"}`) selects which of that
 principal's registered private conversations jobs are created in; without it
 the most recent one is used. Unmapped people are refused. Config is read at
-startup: removing an entry revokes it when Heimdall restarts. Revoking the
+startup: removing an entry revokes it when Heimdall restarts. `label`
+(optional, up to 40 bytes; default `name`) is the launcher's name on cards.
+`agent_proposals` (default false) admits the mapped owner's own agents to
+propose tasks and wake them, as above. Revoking the
 person's owner role or keys in AgentNet takes effect on the next call.
 
 ### Trusted T3 task registration (owner, 2026-11-09)
@@ -177,8 +246,9 @@ same bound owner `create` jobs and `edit`, `list`, `show`, `history`, `run`,
 `pause`, `resume` and `stop` their own jobs (exact creator) and
 `task_pause`, `task_resume`, `task_close` their own tasks, with the same
 binding, lineage recheck and `request_id` record. Owner, 2026-11-11: "T3 is
-a trusted source of scheduling". Create and edit apply at once, as for an
-external owner origin (no chat to confirm in), through the same validation
+a trusted source of scheduling". Create and edit apply at once (unchanged
+by the 2026-11-20 card rule, which covers launcher-vouched runs only),
+through the same validation
 and activation checks; the conversation and `"to":"here"` are the owner's
 registered private chat, and an explicit target such as `slack:C…` works as
 for chat-created jobs. A `rerun_on_timeout` job still waits as a draft with a
@@ -209,8 +279,13 @@ itself to find the owner's request ([durable.md](durable.md), T3 intake).
   the launcher's "still running for that request" rule; re-asked before
   commit.
 - **Other person's run.** The launcher names the requester; another person is
-  unmapped or not a current owner and is refused. A run of an agent's request
-  (`author: agent`) is refused even for the owner.
+  unmapped or not a current owner and is refused, agent or not. A run of the
+  owner's own agent (`author: agent`) is refused unless the launcher opts in,
+  and then may only propose (a card) or wake.
+- **An agent posing as the owner.** Before 2026-11-20 a create from an
+  `author: human` answer applied at once, so an agent that made its request
+  look human-authored could create jobs. Every create, edit and `task_add`
+  is now a card the owner answers in chat, whatever the author.
 - **Revoked identity.** Mapping is explicit config; owner role is evaluated
   live; Slack identity is re-verified live; the launcher vouches only against
   current keys.

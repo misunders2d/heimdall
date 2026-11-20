@@ -88,6 +88,10 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 		return "", nil, false
 	case len(drafts) > 1 && details:
 		return s.waiting(c, drafts), nil, true
+	case len(drafts) > 1 && external(drafts):
+		// A request from outside Heimdall can arrive while the owner answers
+		// another one: a plain word answers none of them then (H1).
+		return s.waiting(c, drafts), nil, true
 	case len(drafts) > 1:
 		reply, change = s.answerAll(c, drafts, confirm)
 	case details:
@@ -115,12 +119,28 @@ func (s *Scheduler) waiting(c Caller, drafts []store.Job) string {
 		}
 		lines = append(lines, line)
 	}
+	if external(drafts) {
+		lines = append(lines, "", "One or more came from outside Heimdall, so a plain Yes or No answers none of them. Answer each one:")
+		for _, j := range drafts {
+			_, d := s.draftAction(j)
+			lines = append(lines, "• "+literal(clip(d.Name, 60))+": !job confirm "+j.ID+" or !job discard "+j.ID)
+		}
+		return strings.Join(lines, "\n")
+	}
 	return strings.Join(lines, "\n") + "\n\n👉 Reply " + bold(c.Conv, "Yes") + " to apply all or " + bold(c.Conv, "No") + " to cancel all."
+}
+
+// external reports whether any draft came from a trusted local launcher.
+func external(drafts []store.Job) bool {
+	return slices.ContainsFunc(drafts, func(j store.Job) bool { return j.Origin != "" })
 }
 
 // draftAction is what a draft would do, and the definition it shows: a
 // removal shows its job's.
 func (s *Scheduler) draftAction(j store.Job) (string, Def) {
+	if _, title, ok := taskOf(j); ok {
+		return "🤖 Start job", Def{Name: clip(title, 80)}
+	}
 	if id := removalID(j); id != "" {
 		orig, _, _ := s.st.Job(id)
 		d, _, _ := parse(orig)
@@ -355,6 +375,12 @@ func (s *Scheduler) creator(j store.Job, asking Caller) Caller {
 
 // card uses fixed templates; full operator settings stay behind Details.
 func (s *Scheduler) card(c Caller, j store.Job) string {
+	if _, _, ok := taskOf(j); ok {
+		return s.taskCard(c.Conv, j)
+	}
+	if c.Vouch != nil {
+		return asks(c.Conv, c.Vouch, "make this change") + "\n\n" + s.request(c, j) + "\n— heimdall"
+	}
 	return s.request(c, j) + "\n— heimdall"
 }
 
@@ -600,6 +626,9 @@ func (s *Scheduler) confirm(c Caller, id string) (string, *store.JobChange) {
 	if !j.DraftExpires.After(now) {
 		return "Request expired; nothing was changed.", &store.JobChange{Drop: j.ID}
 	}
+	if _, _, ok := taskOf(j); ok {
+		return s.confirmTask(c, j)
+	}
 	if id := removalID(j); id != "" {
 		// Recheck current authority and reuse every rm side effect and retry fence.
 		reply, change := s.manage(c, "rm", id, "")
@@ -802,6 +831,9 @@ func (s *Scheduler) show(c Caller, id string) string {
 			return err.Error()
 		}
 		j = drafts[i]
+		if _, _, ok := taskOf(j); ok {
+			return s.showTask(j)
+		}
 		if target := removalID(j); target != "" {
 			return "Removal request (only genuine human confirmation applies):\n" + s.show(c, target)
 		}
@@ -813,6 +845,9 @@ func (s *Scheduler) show(c Caller, id string) string {
 		fmt.Fprintf(&b, " (%s)", j.Reason)
 	}
 	fmt.Fprintf(&b, ", by %s, version %d\n", j.Creator.Key(), j.Version)
+	if v := vouchOf(j); v != nil && j.State == store.JobDraft {
+		fmt.Fprintf(&b, "From: %s, author %s, person %s, run %s\n", v.Launcher, v.Author, v.Person, v.Run)
+	}
 	s.describe(&b, c, j, d, sched, false)
 	// The options are the definition without what describe showed.
 	var opts map[string]json.RawMessage

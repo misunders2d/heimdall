@@ -99,12 +99,32 @@ type Caller struct {
 	// vouched for this peer's run (docs/external-origin.md). Set only by the
 	// control resolver, never from a request; empty otherwise.
 	External string
+	// Vouch: what a configured launcher's live answer said about this
+	// peer's run (set only by the control resolver, never from a request;
+	// nil otherwise, trusted T3 included). Create and edit from it become
+	// cards in the owner's private chat; an agent author may only propose a
+	// task or wake one (docs/external-origin.md).
+	Vouch *Vouch
+	// Proposed: provenance of a task the owner admitted by answering Yes to
+	// an external proposal's card; carried into the task's Origin. Set only
+	// by the scheduler's confirm, never from a request.
+	Proposed string
 	// Registered: a registration origin ("trusted T3"): the peer descends
 	// from the configured trusted T3 launcher. It may only task_add/list/show
 	// and, with TrustedLauncher.Manage, create, edit and manage jobs and
 	// tasks of its creator (Control.manages); set only by the control
 	// resolver.
 	Registered string
+}
+
+// Vouch is a launcher's verified answer for one run: its configured name
+// and card label, and the run, person and author it answered.
+type Vouch struct {
+	Launcher string `json:"launcher"`
+	Label    string `json:"label"`
+	Run      string `json:"run"`
+	Person   string `json:"person"`
+	Author   string `json:"author"` // "human" or "agent"
 }
 
 // Target is where a job delivers.

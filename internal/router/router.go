@@ -2677,5 +2677,7 @@ func (r *Router) stopJob(job string) bool {
 
 // caller is a message's sender as the scheduler sees them.
 func (c *conv) caller(row store.InboundRow, role core.Role) scheduler.Caller {
-	return scheduler.Caller{Principal: row.From, Role: role, Conv: c.key, Private: row.Private}
+	// The stored message's interface-verified OAuth actor: a Yes that admits
+	// an external task proposal carries it into the task, as !work does.
+	return scheduler.Caller{Principal: row.From, Role: role, Conv: c.key, Private: row.Private, OAuthActor: row.OAuthActor, OAuthInstallation: row.OAuthInstallation}
 }
