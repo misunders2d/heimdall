@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/store"
@@ -105,10 +106,24 @@ func asks(k core.ConvKey, v *Vouch, what string) string {
 	return bold(k, "🤖 Your agent on "+label+" wants to "+what+" for you")
 }
 
-// quoted is untrusted proposal text on a card: one line, trimmed, escaped,
-// in quotes.
-func quoted(text string, n int) string {
-	return "“" + literal(clip(strings.Join(strings.Fields(text), " "), n)) + "”"
+// quoted is untrusted proposal text on a card (Markdown): one line,
+// trimmed, escaped, in quotes.
+func quoted(text string, n int) string { return "“" + literal(plainLine(text, n)) + "”" }
+
+// plainQuoted is the same for a plain-text line (sent unformatted, so not
+// escaped: escapes would show).
+func plainQuoted(text string, n int) string { return "“" + plainLine(text, n) + "”" }
+
+// plainLine is text as one trimmed line without control or format
+// characters.
+func plainLine(text string, n int) string {
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
+			return ' '
+		}
+		return r
+	}, text)
+	return clip(strings.Join(strings.Fields(text), " "), n)
 }
 
 // taskCard is the plain card face (owner, 2026-11-20: "clearly, concisely
@@ -132,7 +147,7 @@ func (s *Scheduler) showTask(j store.Job) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Task proposal %s — waiting for your answer (nothing is tracked yet)\n", j.ID)
-	fmt.Fprintf(&b, "Issue: %s\nTitle (untrusted, as sent): %s\n", issue, clip(title, 500))
+	fmt.Fprintf(&b, "Issue: %s\nTitle (untrusted, as sent): %s\n", issue, plainLine(title, 500))
 	fmt.Fprintf(&b, "From: %s, author %s, person %s, run %s\n", v.Launcher, v.Author, v.Person, v.Run)
 	fmt.Fprintf(&b, "Report: this private chat\nExpires: %s\n", j.DraftExpires.UTC().Format("2006-01-02 15:04 UTC"))
 	fmt.Fprintf(&b, "Answer: !job confirm %s · !job discard %s", j.ID, j.ID)
@@ -169,22 +184,23 @@ func (s *Scheduler) confirmTask(c Caller, j store.Job) (string, *store.JobChange
 	drop := &store.JobChange{Drop: j.ID}
 	switch {
 	case changed:
-		return "✅ Started: " + quoted(title, 160) + ". I'll tell you here when it's done.", drop
+		return "✅ Started: " + plainQuoted(title, 160) + ". I'll tell you here when it's done.", drop
 	case strings.Contains(reply, "already tracked elsewhere"):
 		return "That job is already being worked on elsewhere; nothing new was started.", drop
 	case strings.Contains(reply, "already tracked"):
 		return "✅ That job is already being worked on; I'll tell you here when it's done.", drop
 	}
-	return "Not started: " + literal(clip(reply, 200)) + " The request still waits; reply Yes to try again or No to cancel.", nil
+	return "Not started: " + plainLine(reply, 200) + " The request still waits; reply Yes to try again or No to cancel.", nil
 }
 
 // expiredLine is the one line an unanswered proposal leaves when it
 // expires, in the private chat it was sent to.
 func (s *Scheduler) expiredLine(j store.Job) []core.Outbound {
+	// Sent unformatted (plain text): nothing is escaped.
 	what := "Nothing was changed."
-	name := literal(clip(j.Name, 80))
+	name := plainQuoted(j.Name, 80)
 	if _, title, ok := taskOf(j); ok {
-		what, name = "Nothing was started.", quoted(title, 120)
+		what, name = "Nothing was started.", plainQuoted(title, 120)
 	}
 	return []core.Outbound{{Conv: j.CreatedIn, Text: "⌛ A request waited 24 hours without an answer and expired: " + name + ". " + what + "\n— heimdall"}}
 }

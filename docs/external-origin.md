@@ -107,7 +107,10 @@ babble."
     the task keeps; without it nothing starts). The task's wakes say
     "Registered through the owner's Yes to an <label> agent proposal".
     Yes from a group, or from anyone but the mapped principal, answers
-    nothing.
+    nothing. The card is sent to the exact registered conversation (for a
+    Slack owner, its DM thread); a Yes elsewhere, even in the same DM
+    outside that thread, does not match it. The answer and expiry lines
+    are plain text; only the card uses Markdown.
 - `rerun_on_timeout` and removal keep their confirmation as before (now
   the same card).
 - Reads, `run`, `pause`, `resume`, `stop`, `acknowledge`: as for a live owner

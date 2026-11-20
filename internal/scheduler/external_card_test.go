@@ -150,7 +150,7 @@ func TestExternalProposalCardFace(t *testing.T) {
 		t.Fatal("card shows a raw id", card)
 	}
 	details, ok := r.answer(asBoss, "details")
-	if !ok || !strings.Contains(details, "MEL-900") || !strings.Contains(details, "req-1") || !strings.Contains(details, "person:sergey") || !strings.Contains(details, "author agent") {
+	if !ok || Formatted(details) || !strings.Contains(details, "Fix *the* Windows save bug <!here> [link](http://x)") || !strings.Contains(details, "MEL-900") || !strings.Contains(details, "req-1") || !strings.Contains(details, "person:sergey") || !strings.Contains(details, "author agent") {
 		t.Fatal("details lack the request's provenance", details)
 	}
 }
@@ -198,12 +198,14 @@ func TestExternalProposalAnswers(t *testing.T) {
 	t.Run("expiry", func(t *testing.T) {
 		r, c, _, who, valid := agentRig(t)
 		tc := fakeTasks(r)
-		c.executePeer(context.Background(), op, fixWin, who, valid)
+		req := fixWin
+		req.Title = "Fix save_bug *now* [x](http://y)"
+		c.executePeer(context.Background(), op, req, who, valid)
 		r.sent()
 		r.now = r.now.Add(24*time.Hour + 2*time.Minute)
 		r.tick()
 		outs := r.sent()
-		if len(outs) != 1 || outs[0].Conv != bossDM || !strings.Contains(outs[0].Text, "expired") || !strings.Contains(outs[0].Text, "Nothing was started") || strings.Contains(outs[0].Text, "MEL-900") {
+		if len(outs) != 1 || outs[0].Conv != bossDM || outs[0].Formatted || !strings.Contains(outs[0].Text, "expired") || !strings.Contains(outs[0].Text, "“Fix save_bug *now* [x](http://y)”") || !strings.Contains(outs[0].Text, "Nothing was started") || strings.Contains(outs[0].Text, "MEL-900") {
 			t.Fatal("one plain expiry line", outs)
 		}
 		r.tick()
@@ -242,7 +244,7 @@ func TestExternalProposalAnswers(t *testing.T) {
 			t.Fatal("restart resent the card or lost the draft", outs)
 		}
 		asked := len(f.asked)
-		if out, ok := r.answer(asBoss, "yes"); !ok || !strings.Contains(out, "Started") || len(tc.calls) != 1 {
+		if out, ok := r.answer(asBoss, "yes"); !ok || !strings.Contains(out, "Started: “Fix the Windows save bug in AgentNet”") || Formatted(out) || strings.Contains(out, "\\") || len(tc.calls) != 1 {
 			t.Fatal("Yes after restart", out)
 		}
 		if len(f.asked) != asked {
