@@ -136,9 +136,6 @@ func (c *Control) externalOrigin(o ExternalOrigin, pid int, alive func() bool) (
 	if !ok {
 		return Caller{}, nil, fmt.Errorf("%s person %q has no Heimdall identity mapping", o.Name, ans.Person)
 	}
-	if ans.Author != "human" {
-		return Caller{}, nil, fmt.Errorf("%s run %s was not requested by the person themself (author %s)", o.Name, ans.Run, ans.Author)
-	}
 	// The mapped identity's real registered private conversation, as for
 	// the deployment binding: Slack email/team come from verified ingress.
 	p, k, err := c.s.st.ControlBinding(person.Principal, person.Source)
@@ -157,7 +154,7 @@ func (c *Control) externalOrigin(o ExternalOrigin, pid int, alive func() bool) (
 		return err == nil && alive() && again == ans
 	}
 	// caller() re-verifies Slack live and re-decides the role per call.
-	return Caller{Principal: p, Role: role, Conv: k, Private: true, External: o.Name + " " + ans.Run}, valid, nil
+	return Caller{Principal: p, Role: role, Conv: k, Private: true, External: o.Name + " " + ans.Run, externalAgent: ans.Author == "agent"}, valid, nil
 }
 
 // askLauncher finds the launcher's direct child in pid's ancestry and asks

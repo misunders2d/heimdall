@@ -352,6 +352,9 @@ func (c *Control) resolvePeer(pid int, alive func() bool) (Caller, func() bool, 
 // Capture an eligible native input before waiting; never upgrade a queued idle
 // request to a later turn. Recheck that same generation after live verification.
 func (c *Control) executePeer(ctx context.Context, cred *syscall.Ucred, req ControlRequest, who Caller, valid func() bool) ControlResult {
+	if who.externalAgent && req.Action != "task_add" {
+		return ControlResult{Error: "external owner agents may only add tasks"}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if valid == nil || !valid() {

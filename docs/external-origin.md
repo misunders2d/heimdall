@@ -48,7 +48,7 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
    execs below C do not matter.
 5. Heimdall sends `{"v":1,"pid":C,"start":<C's start time>}` and reads one
    strict JSON answer (unknown fields refused, 4 KiB, 2 s deadline).
-6. The answer must name a run, a person and `author: "human"`. The person
+6. The answer must name a run, a person and an author of `human` or `agent`. The person
    must be in this launcher's `people` map; the mapped principal must have a
    real registered private conversation with Heimdall (the same verified
    ingress binding used today), is re-verified live on Slack, and must be a
@@ -59,6 +59,9 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
    new connection; run, person and author must be identical and P alive.
 
 ### What the origin may do
+
+An `agent` origin may only submit `task_add` under the verified owner.
+The following controls apply to `human` origins.
 
 - `create` and `edit`: applied at once (as direct owner chat requests are since
   f967daa). A job with `rerun_on_timeout` still becomes a draft that asks.
@@ -75,13 +78,8 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
   from the live Slack verification of that same principal and team; without
   them the task is refused. A Telegram owner's task carries no actor, as live
   Telegram turns do. No chat notice is posted; the control reply is the
-  stored receipt. Employee, agent, scheduled and unknown origins stay
-  refused.
-
-  Producer gap (current AgentNet `--run-origin`): only a new question or task
-  from the person's verified human device is `author: human`; that person's
-  later replies in the same conversation are `agent` and are refused here.
-  Heimdall does not relax the author check to compensate.
+  stored receipt. The same admission checks apply to `task_add` from the
+  owner's agents.
 - The job's creator is the mapped principal; it is created in, and `here`
   delivers to, that principal's private Heimdall conversation, where the
   create/edit notice is also posted as the audit trail. A definition may
@@ -89,8 +87,8 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
 
 Refusals name what is missing, for example: no Heimdall turn and no
 configured launcher started this process; the launcher does not vouch for this
-process; person `X` has no Heimdall identity mapping; the request was not
-authored by the person themself; the mapped identity is not a current owner.
+process; person `X` has no Heimdall identity mapping; the mapped identity is
+not a current owner; external owner agents may only add tasks.
 
 ## Contract a launcher must provide (AgentNet side)
 
@@ -126,7 +124,8 @@ authored by the person themself; the mapped identity is not a current owner.
 8. **`author`.** `human` only when the request was authored directly by that
    person on one of their own verified human devices. A request from an agent
    (including the person's own agents), a relay, a guest, a continuation,
-   a scheduled or automatic run is `agent`. Heimdall acts only on `human`.
+   a scheduled or automatic run is `agent`. The `person` field still identifies
+   the verified requester for either author value.
    This is AgentNet's existing distinction between a person's own request
    from their verified human device (`OwnHumanRequest`, roster human check)
    and everything else; no new concept is needed.
@@ -209,8 +208,8 @@ itself to find the owner's request ([durable.md](durable.md), T3 intake).
   the launcher's "still running for that request" rule; re-asked before
   commit.
 - **Other person's run.** The launcher names the requester; another person is
-  unmapped or not a current owner and is refused. A run of an agent's request
-  (`author: agent`) is refused even for the owner.
+  unmapped or not a current owner and is refused. An `agent` origin from a
+  verified owner is limited to creating tasks.
 - **Revoked identity.** Mapping is explicit config; owner role is evaluated
   live; Slack identity is re-verified live; the launcher vouches only against
   current keys.

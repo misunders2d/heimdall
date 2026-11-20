@@ -99,6 +99,8 @@ type Caller struct {
 	// vouched for this peer's run (docs/external-origin.md). Set only by the
 	// control resolver, never from a request; empty otherwise.
 	External string
+	// externalAgent identifies launcher-verified agent requests, limited to task_add.
+	externalAgent bool
 	// Registered: a registration origin ("trusted T3"): the peer descends
 	// from the configured trusted T3 launcher. It may only task_add/list/show
 	// and, with TrustedLauncher.Manage, create, edit and manage jobs and

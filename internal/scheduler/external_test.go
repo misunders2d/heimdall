@@ -165,7 +165,7 @@ func TestExternalOwnerRunCreatesScheduleAtOnce(t *testing.T) {
 	}
 }
 
-// A verified external human owner admits a durable task into a real
+// A verified external owner or their agent admits a task into a real
 // durable.db: creator, private route and OAuth actor are the bound
 // owner's (Telegram: none, as for live Telegram turns; Slack: only the live
 // verification's), request_id and issue are deduplicated, and a Slack
@@ -210,6 +210,7 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 		return durable.WorkRequest{}
 	}
 
+	f.set(vouch(run, "person:sergey", "agent"))
 	who, valid := bind()
 	add := ControlRequest{Action: "task_add", ID: "MEL-300", Title: "Confirm the supplier PO", RequestID: "ext-task-1"}
 	got := c.executePeer(ctx, op, add, who, valid)
@@ -227,6 +228,8 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 	if q := wake("MEL-300"); q.Owner.Key() != boss.Key() || q.Route != bossDM || !q.Private || q.OAuthActor != "" || q.OAuthInstallation != "" {
 		t.Fatalf("wake not bound to the external owner: %+v", q)
 	}
+	f.set(vouch(run, "person:sergey", "human"))
+	who, valid = bind()
 	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_list"}, who, valid); strings.Count(got.Reply, "MEL-300") != 1 {
 		t.Fatal("list", got)
 	}
@@ -306,17 +309,22 @@ func TestExternalOriginRefusals(t *testing.T) {
 		f.set(vouch(run, "person:alice", "human"))
 		refused(t, c, run.Process.Pid, `agentnet person "person:alice" has no Heimdall identity mapping`)
 	})
-	t.Run("agent authored", func(t *testing.T) {
+	t.Run("unknown author", func(t *testing.T) {
 		_, c, f, run := externalRig(t)
-		f.set(vouch(run, "person:sergey", "agent"))
-		refused(t, c, run.Process.Pid, "was not requested by the person themself")
+		f.set(vouch(run, "person:sergey", "relay"))
+		refused(t, c, run.Process.Pid, "origin answer is not valid")
+	})
+	t.Run("other person's agent", func(t *testing.T) {
+		_, c, f, run := externalRig(t)
+		f.set(vouch(run, "person:alice", "agent"))
+		refused(t, c, run.Process.Pid, `agentnet person "person:alice" has no Heimdall identity mapping`)
 	})
 	t.Run("mapped non-owner", func(t *testing.T) {
 		r, c, f, run := externalRig(t)
 		if _, _, err := r.st.AddInbound(core.Inbound{Conv: workDM, From: worker, Origin: core.OriginLive, Private: true, MsgID: "w"}); err != nil {
 			t.Fatal(err)
 		}
-		f.set(vouch(run, "person:worker", "human"))
+		f.set(vouch(run, "person:worker", "agent"))
 		refused(t, c, run.Process.Pid, `maps to telegram:2, which is not a current owner`)
 	})
 	t.Run("revoked owner", func(t *testing.T) {
@@ -452,8 +460,8 @@ func TestExternalOriginEndToEndOverControlSocket(t *testing.T) {
 		}
 		return got
 	}
-	if got := helper("agent"); !strings.Contains(got.Error, "trusted active request origin unavailable: agentnet run req-1 was not requested by the person themself") {
-		t.Fatal("agent-authored run admitted", got)
+	if got := helper("agent"); got.Error != "external owner agents may only add tasks" {
+		t.Fatal("agent allowed to create a schedule", got)
 	}
 	got := helper("human")
 	if got.Error != "" || !strings.Contains(got.Reply, "created") {

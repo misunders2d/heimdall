@@ -327,10 +327,10 @@ func TestTrustedT3Refusals(t *testing.T) {
 			f.stat[self] = procEntry{self, t3Launcher, 25}
 		})
 		l := newFakeLauncher(t, func(q externalQuery) externalAnswer {
-			return externalAnswer{V: 1, Run: "req-1", Person: "person:sergey", Author: "agent"}
+			return externalAnswer{V: 1, Run: "req-1", Person: "person:alice", Author: "agent"}
 		})
 		r.s.External = []ExternalOrigin{l.origin()}
-		refused(t, c, "not requested by the person themself")
+		refused(t, c, `person "person:alice" has no Heimdall identity mapping`)
 	})
 	t.Run("an unavailable launcher does not block T3", func(t *testing.T) {
 		r, c, _, _ := t3Rig(t)

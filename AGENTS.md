@@ -91,14 +91,13 @@ the `heimdall-live` unit.
   run that a configured trusted local launcher started, only through
   [docs/external-origin.md](docs/external-origin.md): Heimdall connects to the
   launcher's own socket, checks its kernel credentials and that the peer
-  descends from its direct child, and asks live (again before commit). Only
-  `author: human` runs of people explicitly mapped to an existing principal
-  that is a current owner count; environment variables are never identity;
-  no AgentNet code or import. Create/edit apply at once; removal and
-  `rerun_on_timeout` keep human confirmation. A verified external human
-  owner may add, list and show durable tasks (a Slack owner only with the
-  live-verified OAuth actor); employee, agent, scheduled and unknown
-  origins stay refused.
+  descends from its direct child, and asks live again before commit.
+  The launcher-verified requester must map explicitly to a current owner.
+  Environment variables are never identity. A verified external human owner
+  may add, list and show durable tasks. That owner's verified agents may
+  only add tasks. Slack task admission requires a live-verified OAuth actor.
+  External human owner job creates and edits apply at once. Removal and
+  `rerun_on_timeout` require human confirmation.
 - **Roles.**
   - *Owner (root)*: `ADMIN_USER_IDS` authority only. File admins are admitted employees.
     Config owners are only an explicit non-hub fallback.
