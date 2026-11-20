@@ -186,7 +186,7 @@ func (r *Runtime) trackOnly(ctx dbos.Context, w *run) (promoted bool, err error)
 			if err != nil {
 				return childRead{Err: clip(err.Error(), 200)}, nil
 			}
-			return childRead{Obs: obs}, nil
+			return childRead{Obs: childObs{Status: obs.Status, LatestRun: obs.LatestRun, ActiveRun: obs.ActiveRun, Pending: obs.Pending, RunCount: obs.RunCount}}, nil
 		}, dbos.WithStepName("track-observe"))
 		if err != nil {
 			return false, err

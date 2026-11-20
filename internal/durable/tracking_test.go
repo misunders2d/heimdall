@@ -97,8 +97,8 @@ func TestTrackingOnlyNeverWorks(t *testing.T) {
 	if got := e.rt.Wake(owner, "T3-1"); got != "T3-1: not waiting." {
 		t.Fatalf("owner wake %q", got)
 	}
-	if got := e.rt.wakeTask("T3-1", "observer:t3:thread-T"); got != "T3-1: not waiting." {
-		t.Fatalf("observer wake %q", got)
+	if p := e.rt.planWake("T3-1"); p.Key != "" || p.Wait != "T3-1: not waiting." {
+		t.Fatalf("observer wake %+v", p)
 	}
 	waitFor(t, 10*time.Second, "observed", func() bool { return obs.reads("t3:thread-T") >= 3 })
 	obs.set("t3:thread-T", Observation{Status: "completed", LatestRun: "rT", RunCount: 1})
