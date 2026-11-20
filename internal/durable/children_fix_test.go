@@ -244,3 +244,25 @@ func TestFollowNeverChargesANewerRequest(t *testing.T) {
 		t.Fatalf("prompt:\n%s", p)
 	}
 }
+
+// Children with no thread or no run are one row per native call: two
+// calls in one wake stay two rows, the same call reported twice is one.
+func TestRunlessChildrenOneRowPerCall(t *testing.T) {
+	e := open(t, t.TempDir(), Options{Observer: &threadObserver{}, Silence: -1, T3Tracking: true})
+	defer e.close()
+	for _, c := range []Child{{Kind: "launch", Call: "call-1"}, {Kind: "launch", Call: "call-2"}, {Kind: "launch", Call: "call-1"},
+		{Kind: "send", Thread: "T", Call: "call-3"}, {Kind: "send", Thread: "T", Call: "call-4"}, {Kind: "send", Thread: "T", Call: "call-4"}} {
+		if err := e.rt.RecordChild("MEL-417", "MEL-417/1/work/1", c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs, _ := e.rt.Children("MEL-417")
+	if len(cs) != 4 {
+		t.Fatalf("rows %+v", cs)
+	}
+	// A run-less send into an existing thread is never matched to whatever
+	// run the thread shows (another's).
+	if cs[2].Status != "not watched: the send result named no run" {
+		t.Fatalf("run-less send %+v", cs[2])
+	}
+}

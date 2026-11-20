@@ -51,6 +51,7 @@ func terminalRun(status string) bool {
 const (
 	childNoCLI    = "not watched: no T3 CLI here"
 	childTaskGone = "not watched: the task closed"
+	childNoRun    = "not watched: the send result named no run"
 )
 
 // RecordChild records a child of issue's wake key (ISSUE/attempt/work/N)
@@ -85,6 +86,10 @@ func (r *Runtime) RecordChild(issue, key string, c Child) error {
 		status = "in environment " + c.Env + ": not watched here"
 	case r.opt.Observer == nil || !r.opt.Observer.Observable("t3:"+c.Thread):
 		status = childNoCLI
+	case c.Run == "" && c.Kind == "send":
+		// An existing thread's current run may be another's: only a new
+		// thread (a launch or delegation) takes the first run it shows.
+		status = childNoRun
 	}
 	if _, err := r.db.Exec(`INSERT INTO heimdall_t3_children(issue,thread,env,run,ref,kind,task,wake,status,at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(issue,thread,env,run,ref) DO NOTHING`,
 		issue, c.Thread, c.Env, c.Run, ref, c.Kind, c.Task, key, status, time.Now().UnixMilli()); err != nil {
@@ -291,7 +296,7 @@ func (r *Runtime) watchChild(ctx dbos.Context, in childWatch) (string, error) {
 			continue
 		}
 		if run == "" {
-			run = or(o.ActiveRun, o.LatestRun) // launched without a run: the first one it shows
+			run = or(o.ActiveRun, o.LatestRun) // a new thread without a run: the first one it shows
 			if run == "" {
 				continue // no run yet: not finished
 			}

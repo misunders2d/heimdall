@@ -343,7 +343,9 @@ live only in model text. With `durable.t3_tracking`:
   reply among the latest messages, or is the latest run with a terminal
   status, or a later run started (`runCount`) after it was seen. Another
   run is never taken for it: a send queued behind a busy thread's run
-  still waits. It then marks the child and sends the task's wake signal
+  still waits, and a send whose result named no run is recorded but not
+  watched (only a new thread, launched or delegated, takes the first run
+  it shows). It then marks the child and sends the task's wake signal
   itself (the `task_wake` signal), so the task's `WAIT` ends with one
   wake: the key is chosen in one step and sent in the next, so a crash
   between them re-sends the same key. A task that cannot take it now

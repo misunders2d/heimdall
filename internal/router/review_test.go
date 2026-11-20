@@ -525,8 +525,8 @@ func TestAssistantWakeReports(t *testing.T) {
 // With T3 tracking, a wake's native T3 calls are its task's children, from
 // the engine's decoded results (never the model's text): a launch, a
 // delegation and a send under any MCP alias, in Claude's tool_result shape
-// (text content blocks); two results that named no thread stay two rows
-// (one per native call); a failed call started nothing; the message is
+// (text content blocks); results that named no thread stay apart (one row
+// per delegated task id, else per native call id); a failed call started nothing; the message is
 // never stored. They show in !work show.
 func TestWakeRecordsT3Children(t *testing.T) {
 	e, rt := workEnv(t, false, true, true)
@@ -540,6 +540,8 @@ func TestWakeRecordsT3Children(t *testing.T) {
 		call("mcp__t3__t3_thread_send", map[string]any{"threadId": "thread-L", "message": "secret follow-up"}, `{"threadId":"thread-L","runId":"run-L2","status":"accepted"}`, false),
 		call("mcp__t3-code__delegate_task", map[string]any{"task": "secret one"}, `{"taskId":"task-U1","childThreadId":null,"childRunId":null,"status":"queued"}`, false),
 		call("mcp__t3-code__delegate_task", map[string]any{"task": "secret two"}, `{"taskId":"task-U2","childThreadId":null,"childRunId":null,"status":"queued"}`, false),
+		call("mcp__t3__t3_thread_launch", map[string]any{"title": "one"}, `{"threadId":null,"projectId":"p1","runId":null}`, false),
+		call("mcp__t3__t3_thread_launch", map[string]any{"title": "two"}, `{"threadId":null,"projectId":"p1","runId":null}`, false),
 		call("mcp__t3__t3_thread_launch", map[string]any{}, "denied", true),
 	}
 	e.send(owner, "k1", "!work add MEL-96 Fix CI via T3 "+strings.Join(calls, " ")+" "+say("WAIT 2h\nwait for the children"))
@@ -552,9 +554,9 @@ func TestWakeRecordsT3Children(t *testing.T) {
 			}
 		}
 	}
-	// The wake has ended (its WAIT), so every call is in: exactly five.
+	// The wake has ended (its WAIT), so every call is in: exactly seven.
 	waitFor(func() bool { st, _ := rt.State("MEL-96"); return strings.HasPrefix(st.Next, "next wake in 2h0m0s") })
-	if cs, _ = rt.Children("MEL-96"); len(cs) != 5 {
+	if cs, _ = rt.Children("MEL-96"); len(cs) != 7 {
 		t.Fatalf("children %+v", cs)
 	}
 	if c := cs[0]; c.Kind != "launch" || c.Thread != "thread-L" || c.Run != "run-L1" || c.Env != "" || c.Wake != "MEL-96/1/work/1" {
@@ -568,6 +570,9 @@ func TestWakeRecordsT3Children(t *testing.T) {
 	}
 	if cs[3].Task != "task-U1" || cs[4].Task != "task-U2" || cs[3].Thread != "" || cs[4].Thread != "" {
 		t.Fatalf("unbound %+v %+v", cs[3], cs[4])
+	}
+	if cs[5].Kind != "launch" || cs[6].Kind != "launch" || cs[5].Thread != "" || cs[6].Thread != "" {
+		t.Fatalf("thread-less launches (one row per native call) %+v %+v", cs[5], cs[6])
 	}
 	show, _ := rt.Task(durable.Caller{Principal: core.Principal{Platform: "fake", ID: "owner"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "fake", Chat: "k1"}, Live: true}, "show", "MEL-96", "", "")
 	for _, want := range []string{"- t3:thread-L (launch, run run-L1): not watched: no T3 CLI here", "- t3:thread-L (send, run run-L2)", "(task task-U1): unbound", "(task task-U2): unbound"} {

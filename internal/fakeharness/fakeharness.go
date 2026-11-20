@@ -63,6 +63,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -419,16 +420,15 @@ func (f *fake) control(enc string) {
 // t3Send emits one native T3 send tool call (T3SEND=BASE64) in the Claude
 // stream, as Claude reports an MCP tool's use and result.
 func (f *fake) t3Send(session string) {
-	n := 0
 	for _, w := range strings.Fields(f.prompt) {
 		enc, ok := strings.CutPrefix(w, "T3SEND=")
 		if !ok {
 			continue
 		}
-		id := "toolu_t3" // each call its own id, as Claude gives them
-		if n++; n > 1 {
-			id += "_" + strconv.Itoa(n)
-		}
+		// Each call its own id, as Claude gives them; the same token (a
+		// prompt that repeats it) is the same call reported again.
+		sum := sha256.Sum256([]byte(enc))
+		id := "toolu_t3_" + hex.EncodeToString(sum[:6])
 		b, err := base64.StdEncoding.DecodeString(enc)
 		var call struct {
 			Tool   string          `json:"tool"`
