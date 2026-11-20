@@ -165,6 +165,7 @@ INSERT INTO job_alerts(job_id,creator,key,revision,outbound_id) SELECT job_id,cr
 DROP TABLE job_alerts_old;`,
 	`ALTER TABLE turns ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE turns ADD COLUMN no_resume INTEGER NOT NULL DEFAULT 0;`,
+	`ALTER TABLE jobs ADD COLUMN origin TEXT NOT NULL DEFAULT '';`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the

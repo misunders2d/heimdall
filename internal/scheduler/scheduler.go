@@ -76,6 +76,11 @@ type Scheduler struct {
 	// External launchers that may vouch for runs Heimdall did not start
 	// (docs/external-origin.md); tried only when no Heimdall turn owns the peer.
 	External []ExternalOrigin
+	// Launchers: every configured launcher's name and its agent_proposals
+	// opt-in, usable or not. A launcher that could not be set up at this
+	// start (its OS user did not resolve) is missing from External but
+	// keeps its waiting cards; only one removed from the config loses them.
+	Launchers map[string]bool
 	// TrustedT3: the owner-trusted T3 launcher whose descendants may
 	// register durable tasks (task_add/list/show) for the deployment owner
 	// and, with Manage, create, edit and manage that owner's jobs and tasks; tried
@@ -210,6 +215,23 @@ func (s *Scheduler) tick(ctx context.Context) time.Time {
 	if !s.held(now) {
 		soonest(s.start(ctx, now))
 	}
+	// An unanswered launcher proposal leaves one line when it expires; the
+	// minute of grace lets a Yes sent just before expiry finish first. One
+	// whose launcher lost its rights (a config change, so after a restart)
+	// is withdrawn the same way.
+	var expired []core.Outbound
+	if _, err := s.st.ExpireOriginDrafts(func(j store.Job) ([]core.Outbound, bool) {
+		why := s.revoked(j)
+		if why == "" && !j.DraftExpires.Before(now.Add(-time.Minute)) {
+			return nil, false
+		}
+		outs := s.expiredLine(j, why)
+		expired = append(expired, outs...)
+		return outs, true
+	}); err != nil {
+		s.log.Printf("scheduler: expire proposals: %v", err)
+	}
+	s.notify(expired...)
 	if now.Sub(s.pruned) > time.Hour {
 		s.pruned = now
 		if err := s.st.Prune(now, 90*24*time.Hour, 30*24*time.Hour); err != nil {

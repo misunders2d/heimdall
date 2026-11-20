@@ -98,7 +98,14 @@ func vouch(run *exec.Cmd, person, author string) func(externalQuery) externalAns
 
 func externalRig(t *testing.T) (*rig, *Control, *fakeLauncher, *exec.Cmd) {
 	t.Helper()
-	r, c := controlRig(t)
+	r, _ := controlRig(t)
+	return externalRigOn(t, r)
+}
+
+// externalRigOn gives an existing rig a fresh launcher and run.
+func externalRigOn(t *testing.T, r *rig) (*rig, *Control, *fakeLauncher, *exec.Cmd) {
+	t.Helper()
+	c := &Control{s: r.s, owner: boss.Key(), uid: 1234}
 	r.s.ResolveControl = func(int) (Caller, func() bool, error) {
 		return Caller{}, nil, errors.New("no active person turn for scheduler peer")
 	}
@@ -116,45 +123,69 @@ var daily = ControlRequest{Action: "create", RequestID: "daily-1", Definition: j
 
 func alwaysAlive() bool { return true }
 
-func TestExternalOwnerRunCreatesScheduleAtOnce(t *testing.T) {
+// Owner, 2026-11-20: a launcher-vouched create is a card in the owner's
+// private chat; the job exists only after the owner's own Yes there. Edits
+// and removals ask the same way.
+func TestExternalOwnerJobCreateNeedsCard(t *testing.T) {
 	r, c, f, run := externalRig(t)
 	who, valid, err := c.resolvePeer(run.Process.Pid, alwaysAlive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if who.Principal.Key() != boss.Key() || who.Conv != bossDM || !who.Private || who.External != "agentnet req-1" {
+	if who.Principal.Key() != boss.Key() || who.Conv != bossDM || !who.Private || who.External != "agentnet req-1" || who.Vouch == nil || who.Vouch.Author != "human" {
 		t.Fatal("wrong binding", who)
 	}
 	got := c.executePeer(context.Background(), &syscall.Ucred{Uid: 1234}, daily, who, valid)
-	if got.Error != "" || !got.Changed || got.DraftID != "" || got.JobID == "" || !strings.Contains(got.Reply, "created") {
+	if got.Error != "" || !got.Changed || got.DraftID == "" || got.JobID != "" || !strings.Contains(got.Reply, "nothing changes until they reply Yes") {
 		t.Fatal(got)
 	}
-	if !strings.Contains(got.Reply, "Your private Telegram conversation") || strings.Contains(got.Reply, "This private conversation") {
-		t.Fatal("external receipt hides the actual delivery platform", got.Reply)
+	if j := r.job(got.DraftID); j.State != store.JobDraft || j.CreatedIn != bossDM || j.Origin == "" {
+		t.Fatal("create not kept as a draft with its origin", j)
 	}
-	jobs, _ := r.st.Jobs(store.JobFilter{Creator: boss.Key()})
-	if len(jobs) != 1 || jobs[0].State != store.JobActive || jobs[0].CreatedIn != bossDM || jobs[0].NextDue.IsZero() {
-		t.Fatal("schedule not created active for the mapped owner", jobs)
-	}
-	if outs := r.sent(); len(outs) != 1 || outs[0].Conv != bossDM {
-		t.Fatal("audit notice not in the owner's private chat", outs)
+	outs := r.sent()
+	if len(outs) != 1 || outs[0].Conv != bossDM || !strings.Contains(outs[0].Text, "🧑 You asked through agentnet:") || !strings.Contains(outs[0].Text, "Your private Telegram conversation") || idRE.MatchString(outs[0].Text) {
+		t.Fatal("card not in the owner's private chat, or shows raw ids", outs)
 	}
 	if again := c.executePeer(context.Background(), &syscall.Ucred{Uid: 1234}, daily, who, valid); again != got {
 		t.Fatal("request_id replay changed result", again)
 	}
-	if jobs, _ := r.st.Jobs(store.JobFilter{Creator: boss.Key()}); len(jobs) != 1 {
-		t.Fatal("replay created a second job")
+	if jobs, _ := r.st.Jobs(store.JobFilter{Creator: boss.Key()}); len(jobs) != 1 || len(r.sent()) != 0 {
+		t.Fatal("replay made a second draft or card")
 	}
 	if len(f.asked) < 2 {
 		t.Fatal("launcher not asked again before commit", f.asked)
 	}
-	// Edits apply at once too; removal keeps human confirmation.
+	asked := len(f.asked)
+	run.Process.Kill() // the AgentNet run ends before the owner answers
+	run.Wait()
+	if out, ok := r.answer(asBoss, "yes"); !ok || !strings.Contains(out, "created") {
+		t.Fatal("owner's Yes did not create the job", out)
+	}
+	if len(f.asked) != asked {
+		t.Fatal("the Yes asked the launcher again")
+	}
+	jobs, _ := r.st.Jobs(store.JobFilter{Creator: boss.Key()})
+	if len(jobs) != 1 || jobs[0].State != store.JobActive || jobs[0].NextDue.IsZero() {
+		t.Fatal("schedule not created active for the mapped owner", jobs)
+	}
+	// Edits and removals ask too.
+	_, c, f, run = externalRigOn(t, r)
+	who, valid, err = c.resolvePeer(run.Process.Pid, alwaysAlive)
+	if err != nil {
+		t.Fatal(err)
+	}
 	edit := ControlRequest{Action: "edit", ID: jobs[0].ID, RequestID: "edit-1", Definition: json.RawMessage(`{"prompt":"check it twice"}`)}
-	if got := c.executePeer(context.Background(), &syscall.Ucred{Uid: 1234}, edit, who, valid); got.Error != "" || !strings.Contains(got.Reply, "updated") {
+	if got := c.executePeer(context.Background(), &syscall.Ucred{Uid: 1234}, edit, who, valid); got.Error != "" || got.DraftID == "" {
 		t.Fatal(got)
 	}
+	if j := r.job(jobs[0].ID); j.Version != 1 || strings.Contains(j.Def, "check it twice") {
+		t.Fatal("edit applied without the owner's Yes", j)
+	}
+	if out, ok := r.answer(asBoss, "yes"); !ok || !strings.Contains(out, "updated") {
+		t.Fatal(out)
+	}
 	if j := r.job(jobs[0].ID); j.Version != 2 || !strings.Contains(j.Def, "check it twice") {
-		t.Fatal("edit not applied", j)
+		t.Fatal("edit not applied after Yes", j)
 	}
 	rm := ControlRequest{Action: "remove", ID: jobs[0].ID, RequestID: "rm-1"}
 	if got := c.executePeer(context.Background(), &syscall.Ucred{Uid: 1234}, rm, who, valid); got.Error != "" || got.DraftID == "" {
@@ -163,13 +194,15 @@ func TestExternalOwnerRunCreatesScheduleAtOnce(t *testing.T) {
 	if r.job(jobs[0].ID).State != store.JobActive {
 		t.Fatal("removal applied without human confirmation")
 	}
+	_ = f
 }
 
-// A verified external human owner admits a durable task into a real
-// durable.db: creator, private route and OAuth actor are the bound
-// owner's (Telegram: none, as for live Telegram turns; Slack: only the live
-// verification's), request_id and issue are deduplicated, and a Slack
-// verification without an actor admits nothing.
+// A verified external human owner's task_add is a card; the owner's Yes in
+// the private chat admits it into a real durable.db from the stored draft
+// after the AgentNet run has ended (the launcher is not asked again). The
+// creator, private route and OAuth actor are the owner's (Telegram: none,
+// as for live Telegram turns; Slack: the answering message's), and a Slack
+// verification without an actor proposes nothing.
 func TestExternalOwnerTaskAdmission(t *testing.T) {
 	r, c, f, run := externalRig(t)
 	ctx := context.Background()
@@ -183,7 +216,7 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 	}
 	defer work.Close()
 	r.s.Tasks = func(who Caller, action, issue, title, requestID string) (string, bool) {
-		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation}, action, issue, title, requestID)
+		return work.Task(durable.Caller{Principal: who.Principal, Role: who.Role, Conv: who.Conv, Live: who.Job == "", Private: who.Private, OAuthActor: who.OAuthActor, OAuthInstallation: who.OAuthInstallation, Origin: who.Proposed}, action, issue, title, requestID)
 	}
 	op := &syscall.Ucred{Uid: 1234}
 	bind := func() (Caller, func() bool) {
@@ -213,30 +246,50 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 	who, valid := bind()
 	add := ControlRequest{Action: "task_add", ID: "MEL-300", Title: "Confirm the supplier PO", RequestID: "ext-task-1"}
 	got := c.executePeer(ctx, op, add, who, valid)
-	if got.Error != "" || !got.Changed || !strings.HasPrefix(got.Reply, "Tracking MEL-300") {
+	if got.Error != "" || !got.Changed || got.DraftID == "" || !strings.Contains(got.Reply, "nothing is tracked until they reply Yes") {
 		t.Fatal(got)
 	}
 	if again := c.executePeer(ctx, op, add, who, valid); again != got {
 		t.Fatal("request_id replay changed result", again)
 	}
 	dup := add
-	dup.RequestID = "ext-task-2"
-	if got := c.executePeer(ctx, op, dup, who, valid); got.Changed || !strings.Contains(got.Reply, "already tracked") {
-		t.Fatal("same issue admitted twice", got)
+	dup.RequestID = "ext-task-2" // the same run proposes the issue once
+	if again := c.executePeer(ctx, op, dup, who, valid); again != got {
+		t.Fatal("same run proposed the issue twice", again)
+	}
+	outs := r.sent()
+	if len(outs) != 1 || outs[0].Conv != bossDM || !strings.Contains(outs[0].Text, "Confirm the supplier PO") {
+		t.Fatal("one card in the owner's private chat", outs)
+	}
+	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_show", ID: "MEL-300"}, who, valid); !strings.Contains(got.Reply, "not tracked") {
+		t.Fatal("task admitted before the owner's Yes", got)
+	}
+	asked := len(f.asked)
+	run.Process.Kill() // the AgentNet run ends before the owner answers
+	run.Wait()
+	if out, ok := r.answer(asBoss, "Yes!"); !ok || !strings.Contains(out, "Started") {
+		t.Fatal("owner's Yes did not admit", out)
+	}
+	if len(f.asked) != asked {
+		t.Fatal("the Yes asked the launcher again")
 	}
 	if q := wake("MEL-300"); q.Owner.Key() != boss.Key() || q.Route != bossDM || !q.Private || q.OAuthActor != "" || q.OAuthInstallation != "" {
-		t.Fatalf("wake not bound to the external owner: %+v", q)
+		t.Fatalf("wake not bound to the owner: %+v", q)
 	}
-	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_list"}, who, valid); strings.Count(got.Reply, "MEL-300") != 1 {
-		t.Fatal("list", got)
+	if drafts := r.s.proposals(boss); len(drafts) != 0 {
+		t.Fatal("draft kept after admission", drafts)
 	}
-	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_show", ID: "MEL-300"}, who, valid); got.Error != "" || !strings.Contains(got.Reply, "MEL-300") {
-		t.Fatal("show", got)
-	}
-	if outs := r.sent(); len(outs) != 0 {
-		t.Fatal("task admission posted chat output", outs)
+	if out, ok := r.answer(asBoss, "yes"); ok {
+		t.Fatal("a second Yes answered something", out)
 	}
 
+	// Slack: the proposal needs the live-verified actor; the task gets the
+	// answering message's actor.
+	run = exec.Command("sleep", "60")
+	if err := run.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { run.Process.Kill(); run.Wait() })
 	slack := core.SlackPrincipal("owner@example.test", "Ttest", "")
 	slackDM := core.ConvKey{Interface: core.PlatformSlack, Chat: "D1", Thread: "1000.1"}
 	r.s.access.Owners[slack.Key()] = true
@@ -250,18 +303,23 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 	who, valid = bind()
 	noActor := ControlRequest{Action: "task_add", ID: "MEL-301", Title: "Reply to the vendor", RequestID: "slack-task-1"}
 	if got := c.executePeer(ctx, op, noActor, who, valid); !strings.Contains(got.Error, "no native OAuth actor") {
-		t.Fatal("Slack task admitted without a verified actor", got)
-	}
-	if got := c.executePeer(ctx, op, ControlRequest{Action: "task_show", ID: "MEL-301"}, who, valid); !strings.Contains(got.Reply, "not tracked") {
-		t.Fatal("refused task recorded", got)
+		t.Fatal("Slack task proposed without a verified actor", got)
 	}
 	verified.OAuthActor, verified.OAuthInstallation = "sl_user_U1", "sl_user_B1"
 	noActor.RequestID = "slack-task-2"
 	if got := c.executePeer(ctx, op, noActor, who, valid); got.Error != "" || !got.Changed {
 		t.Fatal(got)
 	}
-	if q := wake("MEL-301"); q.Owner.Key() != slack.Key() || q.Route != slackDM || !q.Private || q.OAuthActor != "sl_user_U1" || q.OAuthInstallation != "sl_user_B1" {
-		t.Fatalf("Slack wake not bound to the live-verified actor: %+v", q)
+	asSlack := Caller{Principal: slack, Role: core.RoleOwner, Conv: slackDM, Private: true}
+	if out, ok := r.answer(asSlack, "yes"); !ok || !strings.Contains(out, "could not be verified") {
+		t.Fatal("Slack Yes without an actor admitted", out)
+	}
+	asSlack.OAuthActor, asSlack.OAuthInstallation = "sl_user_U2", "sl_user_B2"
+	if out, ok := r.answer(asSlack, "yes"); !ok || !strings.Contains(out, "Started") {
+		t.Fatal(out)
+	}
+	if q := wake("MEL-301"); q.Owner.Key() != slack.Key() || q.Route != slackDM || !q.Private || q.OAuthActor != "sl_user_U2" || q.OAuthInstallation != "sl_user_B2" {
+		t.Fatalf("Slack wake not bound to the answering message's actor: %+v", q)
 	}
 }
 
@@ -456,11 +514,11 @@ func TestExternalOriginEndToEndOverControlSocket(t *testing.T) {
 		t.Fatal("agent-authored run admitted", got)
 	}
 	got := helper("human")
-	if got.Error != "" || !strings.Contains(got.Reply, "created") {
+	if got.Error != "" || got.DraftID == "" || !strings.Contains(got.Reply, "approval") {
 		t.Fatal(got)
 	}
 	jobs, _ := r.st.Jobs(store.JobFilter{Creator: boss.Key()})
-	if len(jobs) != 1 || jobs[0].State != store.JobActive {
-		t.Fatal("schedule not created", jobs)
+	if len(jobs) != 1 || jobs[0].State != store.JobDraft {
+		t.Fatal("schedule not kept as a draft for the owner's Yes", jobs)
 	}
 }

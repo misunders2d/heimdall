@@ -265,10 +265,17 @@ func TestSchedulerExternalOrigins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o := c.Scheduler.Control.External; len(o) != 1 || o[0].People["person:sergey"].Principal != "slack:Owner@Example.test" {
+	if o := c.Scheduler.Control.External; len(o) != 1 || o[0].People["person:sergey"].Principal != "slack:Owner@Example.test" || o[0].AgentProposals || o[0].Label != "" {
 		t.Fatalf("%+v", o)
 	}
+	c, err = Parse([]byte(wrap(`[{"name":"agentnet","label":"AgentNet","agent_proposals":true,"socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`)))
+	if err != nil || !c.Scheduler.Control.External[0].AgentProposals || c.Scheduler.Control.External[0].Label != "AgentNet" {
+		t.Fatal("agent proposals opt-in", err)
+	}
 	for _, bad := range []string{
+		`[{"name":"a","label":"two\nlines","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
+		`[{"name":"a","agent_proposals":true,"socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
+		`[{"name":"a","label":"` + strings.Repeat("x", 41) + `","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
 		`[{"name":"Agent Net","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
 		`[{"name":"a","socket":"relative.sock","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
 		`[{"name":"a","socket":"/s","people":{"p":{"principal":"telegram:1"}}}]`,
