@@ -83,6 +83,17 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 		return "", nil, false
 	}
 	drafts := s.drafts(c)
+	if external(drafts) {
+		// A launcher proposal arrives unasked and waits in the chat where the
+		// owner talks to his assistant: only the exact word Yes, No or Details
+		// answers it, and only while its card is still the latest thing
+		// there. Otherwise the word is an ordinary message (a steer, an
+		// answer to the assistant, the cancel control) and the owner answers
+		// with !job confirm|discard <id>, which !jobs lists.
+		if (w != "yes" && w != "no" && !details) || !s.cardIsLatest(drafts) {
+			return "", nil, false
+		}
+	}
 	switch {
 	case len(drafts) == 0:
 		return "", nil, false
@@ -110,6 +121,9 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 
 // waiting lists the caller's drafts here: what each would do, no ids.
 func (s *Scheduler) waiting(c Caller, drafts []store.Job) string {
+	if external(drafts) {
+		return s.heading(c, fmt.Sprintf("📋 %d requests are waiting", len(drafts))) + ", so a plain Yes is not enough. Copy the line you want:\n" + s.answerLines(drafts)
+	}
 	lines := []string{s.heading(c, fmt.Sprintf("📋 %d requests wait", len(drafts)))}
 	for _, j := range drafts {
 		action, d := s.draftAction(j)
@@ -119,15 +133,37 @@ func (s *Scheduler) waiting(c Caller, drafts []store.Job) string {
 		}
 		lines = append(lines, line)
 	}
-	if external(drafts) {
-		lines = append(lines, "", "One or more came from outside Heimdall, so a plain Yes or No answers none of them. Answer each one:")
-		for _, j := range drafts {
-			_, d := s.draftAction(j)
-			lines = append(lines, "• "+literal(clip(d.Name, 60))+": !job confirm "+j.ID+" or !job discard "+j.ID)
-		}
-		return strings.Join(lines, "\n")
-	}
 	return strings.Join(lines, "\n") + "\n\n👉 Reply " + bold(c.Conv, "Yes") + " to apply all or " + bold(c.Conv, "No") + " to cancel all."
+}
+
+// answerLines are one copyable line per draft: what it does (untrusted
+// titles quoted, never bold) and its confirm and discard commands.
+func (s *Scheduler) answerLines(drafts []store.Job) string {
+	var lines []string
+	for _, j := range drafts {
+		action, d := s.draftAction(j)
+		what := quoted(d.Name, 80)
+		if _, title, ok := taskOf(j); ok {
+			what = quoted(title, maxTitle)
+		}
+		lines = append(lines, "• "+action+" "+what+": `!job confirm "+j.ID+"` · skip: `!job discard "+j.ID+"`")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// pending heads !jobs while a launcher proposal waits in this chat: its
+// card may no longer be the latest word here, so a plain Yes would not
+// reach it.
+func (s *Scheduler) pending(c Caller) string {
+	drafts := s.drafts(c)
+	if !external(drafts) {
+		return ""
+	}
+	n := "1 request is"
+	if len(drafts) > 1 {
+		n = fmt.Sprintf("%d requests are", len(drafts))
+	}
+	return s.heading(c, "📋 "+n+" waiting for your answer") + ". Copy the line you want:\n" + s.answerLines(drafts)
 }
 
 // external reports whether any draft came from a trusted local launcher.
@@ -139,7 +175,10 @@ func external(drafts []store.Job) bool {
 // removal shows its job's.
 func (s *Scheduler) draftAction(j store.Job) (string, Def) {
 	if _, title, ok := taskOf(j); ok {
-		return "🤖 Start job", Def{Name: clip(title, 80)}
+		if v := vouchOf(j); v != nil && v.Author == "human" {
+			return "🧑 Start", Def{Name: title}
+		}
+		return "🤖 Start", Def{Name: title}
 	}
 	if id := removalID(j); id != "" {
 		orig, _, _ := s.st.Job(id)
@@ -379,7 +418,7 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 		return s.taskCard(c.Conv, j)
 	}
 	if c.Vouch != nil {
-		return asks(c.Conv, c.Vouch, "make this change") + "\n\n" + s.request(c, j) + "\n— heimdall"
+		return asks(c.Conv, c.Vouch, false) + "\n\n" + s.request(c, j) + "\n— heimdall"
 	}
 	return s.request(c, j) + "\n— heimdall"
 }
@@ -499,7 +538,13 @@ func (s *Scheduler) Command(c Caller, text string) (reply string, change *store.
 			}
 			return strings.TrimSpace(b.String()), nil
 		}
-		return s.list(c, strings.EqualFold(rest, "all")), nil
+		list := s.list(c, strings.EqualFold(rest, "all"))
+		if p := s.pending(c); p != "" {
+			// A launcher proposal whose card is no longer the latest word in
+			// this chat is answered from here (Answer).
+			list = p + "\n\n" + list
+		}
+		return list, nil
 	}
 	sub, rest := cut(rest)
 	id, arg := cut(rest)
@@ -626,6 +671,9 @@ func (s *Scheduler) confirm(c Caller, id string) (string, *store.JobChange) {
 	if !j.DraftExpires.After(now) {
 		return "Request expired; nothing was changed.", &store.JobChange{Drop: j.ID}
 	}
+	if why := s.revoked(j); why != "" {
+		return revokedLine(j, why), &store.JobChange{Drop: j.ID}
+	}
 	if _, _, ok := taskOf(j); ok {
 		return s.confirmTask(c, j)
 	}
@@ -684,6 +732,9 @@ func (s *Scheduler) discard(c Caller, id string) (string, *store.JobChange) {
 	j, ok, err := s.st.Job(id)
 	if err != nil || !ok || j.State != store.JobDraft || j.Creator.Key() != c.Principal.Key() || j.CreatedIn != c.Conv {
 		return fmt.Sprintf("No draft %q of yours in this conversation.", id), nil
+	}
+	if j.Origin != "" {
+		return discarded(j), &store.JobChange{Drop: id}
 	}
 	return "Request cancelled; nothing was changed.", &store.JobChange{Drop: id}
 }

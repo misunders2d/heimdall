@@ -143,7 +143,7 @@ func TestExternalOwnerJobCreateNeedsCard(t *testing.T) {
 		t.Fatal("create not kept as a draft with its origin", j)
 	}
 	outs := r.sent()
-	if len(outs) != 1 || outs[0].Conv != bossDM || !strings.Contains(outs[0].Text, "You asked on agentnet") || !strings.Contains(outs[0].Text, "Your private Telegram conversation") || idRE.MatchString(outs[0].Text) {
+	if len(outs) != 1 || outs[0].Conv != bossDM || !strings.Contains(outs[0].Text, "🧑 You asked through agentnet:") || !strings.Contains(outs[0].Text, "Your private Telegram conversation") || idRE.MatchString(outs[0].Text) {
 		t.Fatal("card not in the owner's private chat, or shows raw ids", outs)
 	}
 	if again := c.executePeer(context.Background(), &syscall.Ucred{Uid: 1234}, daily, who, valid); again != got {
@@ -162,7 +162,7 @@ func TestExternalOwnerJobCreateNeedsCard(t *testing.T) {
 		t.Fatal("owner's Yes did not create the job", out)
 	}
 	if len(f.asked) != asked {
-		t.Fatal("the tap asked the launcher again")
+		t.Fatal("the Yes asked the launcher again")
 	}
 	jobs, _ := r.st.Jobs(store.JobFilter{Creator: boss.Key()})
 	if len(jobs) != 1 || jobs[0].State != store.JobActive || jobs[0].NextDue.IsZero() {
@@ -201,7 +201,7 @@ func TestExternalOwnerJobCreateNeedsCard(t *testing.T) {
 // the private chat admits it into a real durable.db from the stored draft
 // after the AgentNet run has ended (the launcher is not asked again). The
 // creator, private route and OAuth actor are the owner's (Telegram: none,
-// as for live Telegram turns; Slack: the tapping message's), and a Slack
+// as for live Telegram turns; Slack: the answering message's), and a Slack
 // verification without an actor proposes nothing.
 func TestExternalOwnerTaskAdmission(t *testing.T) {
 	r, c, f, run := externalRig(t)
@@ -271,7 +271,7 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 		t.Fatal("owner's Yes did not admit", out)
 	}
 	if len(f.asked) != asked {
-		t.Fatal("the tap asked the launcher again")
+		t.Fatal("the Yes asked the launcher again")
 	}
 	if q := wake("MEL-300"); q.Owner.Key() != boss.Key() || q.Route != bossDM || !q.Private || q.OAuthActor != "" || q.OAuthInstallation != "" {
 		t.Fatalf("wake not bound to the owner: %+v", q)
@@ -284,7 +284,7 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 	}
 
 	// Slack: the proposal needs the live-verified actor; the task gets the
-	// tapping message's actor.
+	// answering message's actor.
 	run = exec.Command("sleep", "60")
 	if err := run.Start(); err != nil {
 		t.Fatal(err)
@@ -312,14 +312,14 @@ func TestExternalOwnerTaskAdmission(t *testing.T) {
 	}
 	asSlack := Caller{Principal: slack, Role: core.RoleOwner, Conv: slackDM, Private: true}
 	if out, ok := r.answer(asSlack, "yes"); !ok || !strings.Contains(out, "could not be verified") {
-		t.Fatal("Slack tap without an actor admitted", out)
+		t.Fatal("Slack Yes without an actor admitted", out)
 	}
 	asSlack.OAuthActor, asSlack.OAuthInstallation = "sl_user_U2", "sl_user_B2"
 	if out, ok := r.answer(asSlack, "yes"); !ok || !strings.Contains(out, "Started") {
 		t.Fatal(out)
 	}
 	if q := wake("MEL-301"); q.Owner.Key() != slack.Key() || q.Route != slackDM || !q.Private || q.OAuthActor != "sl_user_U2" || q.OAuthInstallation != "sl_user_B2" {
-		t.Fatalf("Slack wake not bound to the tapping message's actor: %+v", q)
+		t.Fatalf("Slack wake not bound to the answering message's actor: %+v", q)
 	}
 }
 

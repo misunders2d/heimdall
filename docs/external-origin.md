@@ -69,9 +69,10 @@ babble."
 
 - `create`, `edit`, `remove` and `task_add`: **a card** in the mapped
   principal's registered private Heimdall chat. Nothing is created or
-  changed until that owner's own Yes there (a bare `yes`, or
+  changed until that owner's own Yes there (a reply `Yes`, or
   `!job confirm <id>`); `No`, `!job discard <id>` or 24 hours without an
-  answer drop it. The draft row (the existing scheduler drafts table, with
+  answer drop it. The cards have no buttons (none of Heimdall's do): the
+  owner answers by replying. The draft row (the existing scheduler drafts table, with
   the launcher's verified answer in its `origin` column) holds everything
   the Yes needs, so the Yes admits from it and **never asks the launcher
   again**: the run has usually ended by then. The control reply to the run
@@ -80,32 +81,73 @@ babble."
     fixed expiry line in the same private chat (stored with the delete in
     one transaction; a restart neither resends the card nor loses the
     draft).
+  - **Bare words.** The card arrives unasked in the chat where the owner
+    talks to his assistant, so a bare word answers it only when it is
+    exactly `Yes`, `No` or `Details` (any case, trailing punctuation
+    ignored; not `ok`, `confirm`, `cancel` or the Russian/Ukrainian words
+    other drafts take) **and** the card is still the latest thing in that
+    chat: no turn is running there, none ended after the card, and no
+    unprompted delivery (scheduled output, a task notice, another card)
+    followed it. Replies to the owner's own commands (`Details`, `!jobs`)
+    do not count. Otherwise the word is an ordinary message (a steer, an
+    answer to the assistant, the `cancel` control), and the owner answers
+    with `!jobs`, which heads its list with each waiting request and its
+    copyable `!job confirm <id>` / `!job discard <id>` line. The card says
+    so in one line. This narrows the 2026-11-11 "a plain yes answers all"
+    rule for launcher drafts only; the owner's own drafts are unchanged.
   - With several drafts waiting in that chat and one of them from a
-    launcher, a bare yes or no answers none; Heimdall lists each with its
-    `!job confirm` / `!job discard` command, so a request that arrives
-    while the owner answers another is never swept up.
+    launcher, a bare yes or no answers none; Heimdall lists each (title
+    quoted) with its copyable commands, so a request that arrives while
+    the owner answers another is never swept up.
+  - **The title is exactly what the card shows.** A `task_add` title is
+    one line of visible text of at most 160 characters; a title with
+    control, invisible or bidi format, tag, private-use or unassigned
+    characters, or a longer one, is refused (`task_add not sent: …`), never
+    trimmed, so the Yes admits exactly the text on the card. The assistant
+    then works from the Linear issue's own text; the card does not show
+    the issue (owner: no ids on its face), and `Details` says so.
+  - **Revoked launcher.** A Yes checks again that the draft's launcher is
+    still configured and, for an agent's draft, that `agent_proposals` is
+    still on; if not, the Yes answers that it was withdrawn and nothing is
+    started. Config changes take effect on restart, and the scheduler's
+    next tick then withdraws such drafts with one line each.
   - A run proposes an issue once (its record outlives the draft, so a No
     is final for that run); an issue already waiting is not sent twice;
     at most 5 launcher proposals wait per person. Launcher request ids
     have their own namespace (`ext:<launcher>:`), separate from live
     turns'.
   - **Card face** (Telegram/Slack Markdown, fixed template): who asks
-    (`📱 You asked on <label> …` for `author: human`, `🤖 Your agent on
-    <label> wants to start a job for you` for `author: agent`; `label` is
-    launcher config, never request text), the job in one line (the
-    request's title, quoted, trimmed and escaped as untrusted text), where
-    the report goes, and Yes/No. The Linear issue, run, person and draft
-    ids are only in `Details`. A job card shows the usual scheduler card
-    below the same "who asks" line.
+    (`🧑 You asked through <label> to start a job` for `author: human`,
+    `🤖 One of your agents on <label> wants to start a job for you` for
+    `author: agent`; `label` is launcher config, never request text), the
+    job in one line (the request's title, quoted and escaped as untrusted
+    text), where the report goes, and Yes/No (on Slack "Reply Yes in this
+    thread"). The Linear issue, run, person and draft ids are only in
+    `Details`. A job card shows the usual scheduler card below
+    `🧑 You asked through <label>:`. The v1 answer names no agent or
+    device, so the card cannot yet say which agent ("Laptop Claude"); that
+    needs a name field in the launcher's answer.
+  - Answer lines (plain text): Yes `✅ Started “<title>” (<issue>). I'll
+    tell you here when it's done.` (the issue matches the later done and
+    needs-you lines); No `Cancelled: “<title>”. Nothing was started.`;
+    expiry `⌛ Your agent's request expired after 24 hours with no answer:
+    “<title>”. Nothing was started.` ("Your request" for `author: human`).
+    A refused admission answers a fixed `Couldn't start “<title>”. It still
+    waits: …`, never durable's own text.
+  - The same run asking again for a proposal that no longer waits is told
+    it is no longer waiting (answered or expired) and that this run cannot
+    send it again.
   - **Report destination:** the channel where the work started; when that
     is not reachable, the owner's private Heimdall chat. The v1 answer
     names no channel, so today every report goes to that private chat and
-    the card says so ("this private chat"). The channel needs the
-    launcher's v2 contract.
-  - The Yes runs under the tapping message's own identity: a live owner
+    the card says so ("this private chat"): the rule is **partly met**
+    (the fallback half). The origin channel needs the launcher's v2
+    contract.
+  - The Yes runs under the answering message's own identity: a live owner
     message in that private chat (Slack: its verified OAuth actor, which
     the task keeps; without it nothing starts). The task's wakes say
-    "Registered through the owner's Yes to an <label> agent proposal".
+    "Registered through the owner's Yes to an agent proposal from
+    <label>" (or "… to their own request through <label>").
     Yes from a group, or from anyone but the mapped principal, answers
     nothing. The card is sent to the exact registered conversation (for a
     Slack owner, its DM thread); a Yes elsewhere, even in the same DM
@@ -223,8 +265,9 @@ authored by the person themself; the mapped identity is not a current owner.
 optional `source` (`{"interface","chat","thread"}`) selects which of that
 principal's registered private conversations jobs are created in; without it
 the most recent one is used. Unmapped people are refused. Config is read at
-startup: removing an entry revokes it when Heimdall restarts. `label`
-(optional, up to 40 bytes; default `name`) is the launcher's name on cards.
+startup: removing an entry revokes it when Heimdall restarts, and its
+waiting cards are withdrawn. `label` (up to 40 bytes; default `name`;
+required with `agent_proposals`) is the launcher's name on cards.
 `agent_proposals` (default false) admits the mapped owner's own agents to
 propose tasks and wake them, as above. Revoking the
 person's owner role or keys in AgentNet takes effect on the next call.

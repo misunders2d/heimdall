@@ -274,6 +274,7 @@ func TestSchedulerExternalOrigins(t *testing.T) {
 	}
 	for _, bad := range []string{
 		`[{"name":"a","label":"two\nlines","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
+		`[{"name":"a","agent_proposals":true,"socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
 		`[{"name":"a","label":"` + strings.Repeat("x", 41) + `","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
 		`[{"name":"Agent Net","socket":"/s","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,
 		`[{"name":"a","socket":"relative.sock","user":"root","people":{"p":{"principal":"telegram:1"}}}]`,

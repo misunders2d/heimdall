@@ -140,6 +140,7 @@ type ExternalOrigin struct {
 	User   string                    `json:"user"`   // OS user the launcher runs as
 	People map[string]ExternalPerson `json:"people"`
 	// Label names the launcher on approval cards ("AgentNet"); default: Name.
+	// Required with AgentProposals.
 	Label string `json:"label,omitempty"`
 	// AgentProposals (owner opt-in, default off; owner, 2026-11-20): an
 	// answer with author "agent" for a mapped current owner may propose a
@@ -420,6 +421,10 @@ func (c *Config) fill(staged bool) error {
 				}
 				if len(o.Label) > 40 || strings.ContainsFunc(o.Label, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 					return fmt.Errorf("%s.label must be one short line (up to 40 bytes)", at)
+				}
+				if o.AgentProposals && strings.TrimSpace(o.Label) == "" {
+					// The owner's cards name who asks (owner, 2026-11-20).
+					return fmt.Errorf("%s.label is required with agent_proposals: the approval card names the launcher", at)
 				}
 				for person, m := range o.People {
 					q, err := core.ParsePrincipalKey(m.Principal)

@@ -136,7 +136,7 @@ func TestExternalProposalCardFace(t *testing.T) {
 		t.Fatal("one card in the owner's private chat", outs)
 	}
 	card := outs[0].Text
-	for _, want := range []string{"Your agent on AgentNet wants to start a job for you", "“Fix \\*the\\* Windows save bug \\<!here\\> \\[link\\](http://x)”", "When done, I'll tell you in: this private chat", "Yes", "No", "— heimdall"} {
+	for _, want := range []string{"One of your agents on AgentNet wants to start a job for you", "“Fix \\*the\\* Windows save bug \\<!here\\> \\[link\\](http://x)”", "When done, I'll tell you in: this private chat", "Yes", "No", "— heimdall"} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("card lacks %q:\n%s", want, card)
 		}
@@ -163,7 +163,7 @@ func TestExternalProposalAnswers(t *testing.T) {
 		tc := fakeTasks(r)
 		c.executePeer(context.Background(), op, fixWin, who, valid)
 		r.sent()
-		if out, ok := r.answer(asBoss, "no"); !ok || !strings.Contains(out, "cancelled") {
+		if out, ok := r.answer(asBoss, "no"); !ok || out != "Cancelled: “Fix the Windows save bug in AgentNet”. Nothing was started." {
 			t.Fatal(out)
 		}
 		if len(r.s.proposals(boss)) != 0 || len(tc.calls) != 0 {
@@ -175,7 +175,7 @@ func TestExternalProposalAnswers(t *testing.T) {
 			t.Fatal("a cancelled proposal also expired", outs)
 		}
 		// The same run cannot propose the issue again after a No.
-		if got := c.executePeer(context.Background(), op, ControlRequest{Action: "task_add", ID: "MEL-900", Title: "Fix the Windows save bug in AgentNet", RequestID: "agent-2"}, who, valid); got.DraftID == "" || len(r.sent()) != 0 || len(r.s.proposals(boss)) != 0 {
+		if got := c.executePeer(context.Background(), op, ControlRequest{Action: "task_add", ID: "MEL-900", Title: "Fix the Windows save bug in AgentNet", RequestID: "agent-2"}, who, valid); got.DraftID == "" || got.Changed || !strings.Contains(got.Reply, "no longer waiting") || len(r.sent()) != 0 || len(r.s.proposals(boss)) != 0 {
 			t.Fatal("the run raised a second card after No", got)
 		}
 	})
@@ -233,7 +233,9 @@ func TestExternalProposalAnswers(t *testing.T) {
 		}
 		t.Cleanup(func() { st.Close() })
 		r.st = st
+		external := r.s.External
 		r.s = New(r.s.cfg, st, r.s.access, log.New(io.Discard, "", 0))
+		r.s.External = external
 		r.s.now = func() time.Time { return r.now }
 		tc := fakeTasks(r)
 		if err := r.s.Recover(); err != nil {
@@ -244,14 +246,14 @@ func TestExternalProposalAnswers(t *testing.T) {
 			t.Fatal("restart resent the card or lost the draft", outs)
 		}
 		asked := len(f.asked)
-		if out, ok := r.answer(asBoss, "yes"); !ok || !strings.Contains(out, "Started: “Fix the Windows save bug in AgentNet”") || Formatted(out) || strings.Contains(out, "\\") || len(tc.calls) != 1 {
+		if out, ok := r.answer(asBoss, "yes"); !ok || out != "✅ Started “Fix the Windows save bug in AgentNet” (MEL-900). I'll tell you here when it's done." || Formatted(out) || strings.Contains(out, "\\") || len(tc.calls) != 1 {
 			t.Fatal("Yes after restart", out)
 		}
 		if len(f.asked) != asked {
-			t.Fatal("the tap asked the launcher")
+			t.Fatal("the Yes asked the launcher")
 		}
 		w := tc.calls[0]
-		if w.Principal.Key() != boss.Key() || w.Conv != bossDM || !w.Private || w.Vouch != nil || !strings.Contains(w.Proposed, "AgentNet agent proposal") {
+		if w.Principal.Key() != boss.Key() || w.Conv != bossDM || !w.Private || w.Vouch != nil || w.Proposed != "the owner's Yes to an agent proposal from AgentNet" {
 			t.Fatalf("admitted as %+v", w)
 		}
 	})
@@ -265,14 +267,14 @@ func TestExternalProposalBesideOtherDraftsNeedsItsOwnAnswer(t *testing.T) {
 	r.apply(&store.JobChange{Add: j})
 	c.executePeer(context.Background(), op, fixWin, who, valid)
 	out, ok := r.answer(asBoss, "yes")
-	if !ok || !strings.Contains(out, "a plain Yes or No answers none") || len(tc.calls) != 0 {
+	if !ok || !strings.Contains(out, "a plain Yes is not enough") || len(tc.calls) != 0 {
 		t.Fatal(out)
 	}
 	if drafts := r.s.drafts(asBoss); len(drafts) != 2 {
 		t.Fatal("a plain Yes changed drafts", drafts)
 	}
 	p := r.s.proposals(boss)[0]
-	if !strings.Contains(out, "!job confirm "+p.ID) {
+	if !strings.Contains(out, "`!job confirm "+p.ID+"`") {
 		t.Fatal("the list does not say how to answer each", out)
 	}
 	if out := r.cmd(asBoss, "job confirm "+p.ID); !strings.Contains(out, "Started") || len(tc.calls) != 1 {

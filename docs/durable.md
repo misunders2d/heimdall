@@ -297,9 +297,13 @@ review and wake turns cannot admit (wakes have no scheduler control).
 
 From an external launcher's run (AgentNet; owner, 2026-11-20: "my agents
 can assign, other people's agents can't"), `task_add` admits nothing by
-itself: it sends a card to the owner's private Heimdall chat ("Your agent
-on AgentNet wants to start a job for you", the title quoted, "When done,
-I'll tell you in: this private chat", Yes/No). The owner's own Yes there
+itself: it sends a card to the owner's private Heimdall chat ("One of
+your agents on AgentNet wants to start a job for you", the title quoted,
+"When done, I'll tell you in: this private chat", Yes/No; the title must be
+one visible line of at most 160 characters, so the Yes admits exactly what
+the card shows). A bare Yes answers it only while the card is still the
+latest thing in that chat; otherwise `!jobs` lists it with its
+`!job confirm <id>` line. The owner's own Yes there
 admits the task from the stored draft, under that live message's identity
 (route and report: that private chat), even after the AgentNet run has
 ended; No or 24 hours without an answer leave one line and nothing else.

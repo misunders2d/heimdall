@@ -211,12 +211,18 @@ func (s *Scheduler) tick(ctx context.Context) time.Time {
 		soonest(s.start(ctx, now))
 	}
 	// An unanswered launcher proposal leaves one line when it expires; the
-	// minute of grace lets a Yes sent just before expiry finish first.
+	// minute of grace lets a Yes sent just before expiry finish first. One
+	// whose launcher lost its rights (a config change, so after a restart)
+	// is withdrawn the same way.
 	var expired []core.Outbound
-	if _, err := s.st.ExpireOriginDrafts(now.Add(-time.Minute), func(j store.Job) []core.Outbound {
-		outs := s.expiredLine(j)
+	if _, err := s.st.ExpireOriginDrafts(func(j store.Job) ([]core.Outbound, bool) {
+		why := s.revoked(j)
+		if why == "" && !j.DraftExpires.Before(now.Add(-time.Minute)) {
+			return nil, false
+		}
+		outs := s.expiredLine(j, why)
 		expired = append(expired, outs...)
-		return outs
+		return outs, true
 	}); err != nil {
 		s.log.Printf("scheduler: expire proposals: %v", err)
 	}

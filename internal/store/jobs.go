@@ -760,18 +760,23 @@ func (s *Store) Prune(at time.Time, runAge, jobAge time.Duration) error {
 	})
 }
 
-// ExpireOriginDrafts drops each draft with an origin that expired before
-// at, and stores its one line with the delete, in one transaction per
-// draft. A draft a confirm or discard already dropped posts nothing, so a
-// draft ends with exactly one answer or one expiry line.
-func (s *Store) ExpireOriginDrafts(at time.Time, line func(Job) []core.Outbound) (int, error) {
-	expired, err := s.Jobs(JobFilter{States: []string{JobDraft}})
+// ExpireOriginDrafts drops each draft with an origin for which drop
+// returns true (it expired, or its launcher lost its rights), and stores
+// drop's one line with the delete, in one transaction per draft. A draft a
+// confirm or discard already dropped posts nothing, so a draft ends with
+// exactly one answer or one expiry line.
+func (s *Store) ExpireOriginDrafts(drop func(Job) ([]core.Outbound, bool)) (int, error) {
+	drafts, err := s.Jobs(JobFilter{States: []string{JobDraft}})
 	if err != nil {
 		return 0, err
 	}
 	n := 0
-	for _, j := range expired {
-		if j.Origin == "" || !j.DraftExpires.Before(at) {
+	for _, j := range drafts {
+		if j.Origin == "" {
+			continue
+		}
+		outs, ok := drop(j)
+		if !ok {
 			continue
 		}
 		err := s.tx(func(tx *sql.Tx) error {
@@ -783,7 +788,7 @@ func (s *Store) ExpireOriginDrafts(at time.Time, line func(Job) []core.Outbound)
 				return nil
 			}
 			n++
-			return enqueueAll(tx, line(j))
+			return enqueueAll(tx, outs)
 		})
 		if err != nil {
 			return n, err

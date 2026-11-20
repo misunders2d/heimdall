@@ -208,7 +208,7 @@ func run(args []string) error {
 			// The scheduler control's task actions: only a bound live owner
 			// person turn, a verified external owner origin (task_wake, reads)
 			// or the owner's own Yes to an external proposal reaches here
-			// (scheduled runs are refused there). A tapped proposal keeps its
+			// (scheduled runs are refused there). A proposal the owner said Yes to keeps its
 			// provenance in the task's Origin.
 			jobs.Tasks = func(who scheduler.Caller, action, issue, title, requestID string) (string, bool) {
 				origin := who.Registered

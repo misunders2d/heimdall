@@ -101,7 +101,12 @@ the `heimdall-live` unit.
   run is a card in the owner's private Heimdall chat (who asks, the job as
   quoted untrusted text, where the report goes, Yes/No; ids only in
   Details); nothing changes until the owner's own Yes there, which admits
-  from the stored draft without asking the launcher again. A verified
+  from the stored draft without asking the launcher again. A bare word
+  answers such a card only if exactly Yes/No/Details while the card is
+  still the chat's latest (no turn or unprompted delivery since); else it
+  is an ordinary message and `!jobs` lists the request. The title must be
+  one visible line the card shows whole; a revoked launcher's cards are
+  withdrawn. A verified
   external human owner may also list, show, wake, pause, resume and close
   their tasks (a Slack owner only with the live-verified OAuth actor). With
   the launcher's `agent_proposals` opt-in (off by default), an `author:

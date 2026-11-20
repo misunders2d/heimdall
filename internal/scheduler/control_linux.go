@@ -713,7 +713,12 @@ func controlKey(who Caller, id string) string {
 // that run); an issue waiting for an answer is not proposed twice.
 func (c *Control) propose(uid uint32, req ControlRequest, who Caller, valid []func() bool) ControlResult {
 	fail := func(msg string) ControlResult { return ControlResult{Error: msg} }
-	issue, title := strings.ToUpper(req.ID), strings.Join(strings.Fields(req.Title), " ")
+	issue := strings.ToUpper(req.ID)
+	// The card shows the whole title and the Yes admits exactly it.
+	title, err := proposalTitle(req.Title)
+	if err != nil {
+		return fail("task_add not sent: " + err.Error())
+	}
 	switch f := strings.Fields(title); {
 	case !durable.IssuePattern.MatchString(issue):
 		return fail("task_add needs a Linear issue identifier such as ABC-123")
@@ -734,6 +739,11 @@ func (c *Control) propose(uid uint32, req ControlRequest, who Caller, valid []fu
 	} else if ok {
 		var result ControlResult
 		_ = json.Unmarshal([]byte(saved), &result)
+		if result.DraftID != "" && !c.s.stillWaiting(result.DraftID) {
+			// The owner answered it (Yes or No) or it expired: whether the
+			// task is tracked is the owner's to say, not this run's to ask.
+			return ControlResult{Reply: "This proposal is no longer waiting: the owner answered it or it expired. This run cannot send " + issue + " again. — heimdall", DraftID: result.DraftID}
+		}
 		return result
 	}
 	if c.s.waitingTask(who.Principal, issue) {
