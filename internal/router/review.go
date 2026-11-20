@@ -787,7 +787,7 @@ func childOf(n harness.NativeCall) (durable.Child, bool) {
 		Status     string `json:"status"`
 	}
 	_ = json.Unmarshal(toolJSON(n.Result), &v)
-	c := durable.Child{Kind: kind, Thread: v.ThreadID, Env: a.EnvironmentID, Run: v.RunID, Task: v.TaskID}
+	c := durable.Child{Kind: kind, Thread: v.ThreadID, Env: a.EnvironmentID, Run: v.RunID, Task: v.TaskID, Call: n.ID}
 	if kind == "delegate" {
 		c.Thread, c.Run, c.Env, c.Status = v.ChildThreadID, v.ChildRunID, a.Target.EnvironmentID, v.Status
 		if v.RemoteChild != nil {
@@ -795,7 +795,10 @@ func childOf(n harness.NativeCall) (durable.Child, bool) {
 		}
 	}
 	if len(c.Thread) > 512 || strings.ContainsAny(c.Thread+c.Env+c.Run+c.Task, " \t\r\n") {
-		c = durable.Child{Kind: kind} // not a T3 id: unbound
+		c = durable.Child{Kind: kind, Call: n.ID} // not a T3 id: unbound
+	}
+	if len(c.Call) > 256 || strings.ContainsAny(c.Call, " \t\r\n") {
+		c.Call = ""
 	}
 	return c, true
 }

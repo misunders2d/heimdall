@@ -2,6 +2,7 @@ package durable
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -256,6 +257,7 @@ type listIntake struct {
 	threads map[string]IntakeThread
 	list    []ListedThread
 	lists   int
+	fail    int // the next lists that fail
 }
 
 func (f *listIntake) ReadIntake(_ context.Context, thread string) (IntakeThread, error) {
@@ -268,49 +270,103 @@ func (f *listIntake) ListThreads(context.Context, string) ([]ListedThread, error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lists++
+	if f.fail > 0 {
+		f.fail--
+		return nil, errors.New("t3 not up yet")
+	}
 	return f.list, nil
 }
 
+// t3Owner is a switchable trusted T3 owner binding.
+type t3Owner struct {
+	mu    sync.Mutex
+	o     *T3Owner
+	calls int
+	after func(calls int) *T3Owner // when set, decides from the call count
+}
+
+func (b *t3Owner) get(context.Context) (T3Owner, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls++
+	o := b.o
+	if b.after != nil {
+		o = b.after(b.calls)
+	}
+	if o == nil {
+		return T3Owner{}, errors.New("not a current owner")
+	}
+	return *o, nil
+}
+
+func (b *t3Owner) set(o *T3Owner) { b.mu.Lock(); b.o = o; b.mu.Unlock() }
+
+// marked is a thread with a T3-marked owner request.
+func marked(run, text string) IntakeThread {
+	return IntakeThread{Status: "running", LatestRun: run, ActiveRun: run, Project: "proj-1", Request: &IntakeMessage{ID: "m-" + run, Run: run, Text: text}}
+}
+
 // Requests typed into T3 while Heimdall was down are reconciled at the
-// next start: the projects of earlier requests are listed and each owner
-// thread changed since is probed as its hook would have been, bound to the
-// earlier request's owner and route. Agent-created, delegated and child
-// threads are skipped, and so is a request known only by the thread's
-// mark (no hook timing to back it); a second start admits nothing new.
+// next start: the projects of earlier requests are listed (a list that
+// fails while T3 starts is read again) and each owner thread changed since
+// Heimdall was last alive is probed as its hook would have been, bound to
+// the trusted T3 owner as it is now, never to a stored request.
+// Agent-created, delegated and child threads, threads last changed before
+// the downtime, and a request known only by the thread's mark (no hook
+// timing to back it) are skipped, each with a valid owner request of its
+// own; a second start admits nothing new.
 func TestReconcileAfterDowntime(t *testing.T) {
 	defer SetIntakePause(10 * time.Millisecond)()
 	dir := t.TempDir()
-	f := &listIntake{threads: map[string]IntakeThread{
-		"thread-A": {Status: "running", LatestRun: "a1", ActiveRun: "a1", Project: "proj-1", Request: &IntakeMessage{Run: "a1", Text: "First"}},
-	}}
-	opt := Options{Observer: f, Observe: 20 * time.Millisecond, Silence: -1, T3Tracking: true}
+	f := &listIntake{threads: map[string]IntakeThread{"thread-A": marked("a1", "First")}}
+	now := Caller{Principal: core.Principal{Platform: "test", ID: "owner-now"}, Conv: core.ConvKey{Interface: "test", Chat: "c-now"}}
+	b := &t3Owner{o: &T3Owner{Principal: now.Principal, Route: now.Conv}}
+	opt := Options{Observer: f, Observe: 20 * time.Millisecond, Silence: -1, T3Tracking: true, T3Owner: b.get}
 	e := open(t, dir, opt)
 	t3 := Caller{Principal: owner.Principal, Role: core.RoleOwner, Conv: owner.Conv, Live: true, Private: true, Origin: OriginTrustedT3}
 	e.rt.Task(t3, "intake", "thread-A", "", "prompt_submit")
 	e.phase("T3-1", PhaseTracking, 0)
+	// Changed while Heimdall was still up, its hook never fired: not missed
+	// during the downtime.
+	before := time.Now()
+	f.mu.Lock()
+	f.threads["early-E"] = func() IntakeThread {
+		th := marked("e1", "abandoned")
+		th.Status, th.ActiveRun = "failed", ""
+		return th
+	}()
+	f.mu.Unlock()
+	time.Sleep(20 * time.Millisecond)
+	defer func(d time.Duration) { aliveEvery = d }(aliveEvery)
+	aliveEvery = 10 * time.Millisecond // the margin before the last heartbeat
 	e.close()
 
 	// While down: thread-A gets a new request, thread-B is created; an
-	// agent thread and a subagent child also change.
-	now := time.Now()
+	// agent thread, a subagent child and a delegated thread also change.
+	time.Sleep(20 * time.Millisecond)
+	at := time.Now().Add(time.Hour) // later than every restart below
 	parent := "thread-A"
 	f.mu.Lock()
-	f.threads["thread-A"] = IntakeThread{Status: "running", LatestRun: "a2", ActiveRun: "a2", Project: "proj-1", Request: &IntakeMessage{Run: "a2", Text: "Second"}}
-	f.threads["thread-B"] = IntakeThread{Status: "interrupted", LatestRun: "b1", Project: "proj-1", Request: &IntakeMessage{Run: "b1", Text: "Third"}}
+	f.threads["thread-A"] = marked("a2", "Second")
+	f.threads["thread-B"] = IntakeThread{Status: "interrupted", LatestRun: "b1", Project: "proj-1", Request: &IntakeMessage{ID: "m-b1", Run: "b1", Text: "Third"}}
 	f.threads["thread-W"] = IntakeThread{Status: "interrupted", LatestRun: "w1", Project: "proj-1", Request: &IntakeMessage{Run: "w1", Text: "thread mark only", ByThread: true}}
-	f.threads["agent-T"] = IntakeThread{Status: "running", LatestRun: "x1", ActiveRun: "x1", Project: "proj-1", Request: &IntakeMessage{Run: "x1", Text: "agent"}}
-	f.list = []ListedThread{
-		{ID: "thread-A", CreatedBy: "user", Updated: now},
-		{ID: "thread-B", CreatedBy: "user", Updated: now},
-		{ID: "thread-W", CreatedBy: "user", Updated: now},
-		{ID: "agent-T", CreatedBy: "agent", Updated: now},
-		{ID: "kid-K", CreatedBy: "user", Parent: &parent, Updated: now},
-		{ID: "mcp:launch:z", CreatedBy: "user", Updated: now},
-		{ID: "old-O", CreatedBy: "user", Updated: now.Add(-48 * time.Hour)},
+	for _, id := range []string{"agent-T", "kid-K", "mcp:launch:z", "old-O", "titled-D"} {
+		f.threads[id] = marked("x-"+id, "valid owner request in "+id)
 	}
+	f.list = []ListedThread{
+		{ID: "thread-A", CreatedBy: "user", Updated: at},
+		{ID: "thread-B", CreatedBy: "user", Updated: at},
+		{ID: "thread-W", CreatedBy: "user", Updated: at},
+		{ID: "agent-T", CreatedBy: "agent", Updated: at},
+		{ID: "kid-K", CreatedBy: "user", Parent: &parent, Updated: at},
+		{ID: "mcp:launch:z", CreatedBy: "user", Updated: at},
+		{ID: "titled-D", Title: "mcp:launch:q", CreatedBy: "user", Updated: at},
+		{ID: "old-O", CreatedBy: "user", Updated: at.Add(-49 * time.Hour)},
+		{ID: "early-E", CreatedBy: "user", Updated: before},
+	}
+	f.fail = 2
 	f.mu.Unlock()
 	e = open(t, dir, opt)
-	e.phase("T3-2", PhaseTracking, 0)
 	waitFor(t, 10*time.Second, "both admitted", func() bool {
 		_, err2 := e.rt.State("T3-2")
 		_, err3 := e.rt.State("T3-3")
@@ -319,7 +375,7 @@ func TestReconcileAfterDowntime(t *testing.T) {
 	got := map[string]string{}
 	for _, n := range []string{"T3-2", "T3-3"} {
 		cm, _ := e.rt.input(n)
-		if cm.Creator != owner.Principal.Key() || cm.Route != owner.Conv || !cm.Private || cm.Origin != OriginTrustedT3 || !cm.Intake.Follow {
+		if cm.Creator != now.Principal.Key() || cm.Route != now.Conv || !cm.Private || cm.Origin != OriginTrustedT3 || !cm.Intake.Follow || cm.OAuthActor != "" {
 			t.Fatalf("%s binding %+v", n, cm)
 		}
 		got[cm.Intake.Thread] = cm.Intake.Run
@@ -329,14 +385,98 @@ func TestReconcileAfterDowntime(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 	if _, err := e.rt.State("T3-4"); err == nil {
-		t.Fatal("a skipped thread was admitted")
+		cm, _ := e.rt.input("T3-4")
+		t.Fatalf("a skipped thread was admitted: %s", cm.Intake.Thread)
 	}
 	e.close()
 	e = open(t, dir, opt)
 	defer e.close()
-	waitFor(t, 10*time.Second, "second list", func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.lists >= 2 })
+	waitFor(t, 10*time.Second, "second list", func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.lists >= 4 })
 	time.Sleep(500 * time.Millisecond)
 	if _, err := e.rt.State("T3-4"); err == nil {
 		t.Fatal("a second start admitted again")
+	}
+}
+
+// Reconcile admits nothing without a current trusted T3 owner, nor when
+// the owner changes between the plan and a request's admission; with no
+// earlier run recorded there is no downtime to reconcile. Of more changed
+// threads than the cap, the newest are probed.
+func TestReconcileNeedsCurrentOwner(t *testing.T) {
+	defer SetIntakePause(10 * time.Millisecond)()
+	defer func(n int, d time.Duration) { reconcileThreads, aliveEvery = n, d }(reconcileThreads, aliveEvery)
+	reconcileThreads, aliveEvery = 2, 10*time.Millisecond
+	dir := t.TempDir()
+	f := &listIntake{threads: map[string]IntakeThread{"thread-A": marked("a1", "First")}}
+	me := &T3Owner{Principal: owner.Principal, Route: owner.Conv}
+	b := &t3Owner{o: me}
+	opt := Options{Observer: f, Observe: 20 * time.Millisecond, Silence: -1, T3Tracking: true, T3Owner: b.get}
+	e := open(t, dir, opt)
+	t3 := Caller{Principal: owner.Principal, Role: core.RoleOwner, Conv: owner.Conv, Live: true, Private: true, Origin: OriginTrustedT3}
+	e.rt.Task(t3, "intake", "thread-A", "", "prompt_submit")
+	e.phase("T3-1", PhaseTracking, 0)
+	e.close()
+	time.Sleep(20 * time.Millisecond)
+	at := time.Now()
+	f.mu.Lock()
+	for i, id := range []string{"t-1", "t-2", "t-3"} {
+		f.threads[id] = marked("r-"+id, "request "+id)
+		f.list = append(f.list, ListedThread{ID: id, CreatedBy: "user", Updated: at.Add(time.Hour + time.Duration(i)*time.Second)})
+	}
+	f.mu.Unlock()
+	assertNone := func(why string) {
+		t.Helper()
+		time.Sleep(400 * time.Millisecond)
+		if _, err := e.rt.State("T3-2"); err == nil {
+			t.Fatalf("%s: admitted", why)
+		}
+	}
+	// No current owner: nothing.
+	b.set(nil)
+	e = open(t, dir, opt)
+	assertNone("no current owner")
+	e.close()
+	// The owner is current at the plan but not at admission.
+	b.set(me)
+	b.mu.Lock()
+	b.after = func(n int) *T3Owner {
+		if n == 1 {
+			return me
+		}
+		return nil
+	}
+	b.calls = 0
+	b.mu.Unlock()
+	e = open(t, dir, opt)
+	waitFor(t, 10*time.Second, "probes ran", func() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.calls >= 3 })
+	assertNone("owner changed before admission")
+	e.close()
+	// Owner current throughout: only the newest two of three.
+	b.mu.Lock()
+	b.after = nil
+	b.mu.Unlock()
+	e = open(t, dir, opt)
+	defer e.close()
+	waitFor(t, 10*time.Second, "two admitted", func() bool {
+		_, err2 := e.rt.State("T3-2")
+		_, err3 := e.rt.State("T3-3")
+		return err2 == nil && err3 == nil
+	})
+	got := map[string]bool{}
+	for _, n := range []string{"T3-2", "T3-3"} {
+		cm, _ := e.rt.input(n)
+		got[cm.Intake.Thread] = true
+	}
+	if !got["t-2"] || !got["t-3"] {
+		t.Fatalf("not the newest: %v", got)
+	}
+
+	// A fresh data directory has no earlier run: nothing is listed.
+	g := &listIntake{list: f.list, threads: f.threads}
+	fresh := open(t, t.TempDir(), Options{Observer: g, Observe: 20 * time.Millisecond, Silence: -1, T3Tracking: true, T3Owner: b.get})
+	defer fresh.close()
+	time.Sleep(300 * time.Millisecond)
+	if g.lists != 0 {
+		t.Fatal("reconciled with no earlier run")
 	}
 }

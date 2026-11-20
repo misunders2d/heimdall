@@ -63,6 +63,10 @@ type IntakeThread struct {
 	Children  int            `json:"children,omitempty"` // background tasks still pending (pendingBackgroundTasks; a monitor only when awaited)
 	Request   *IntakeMessage `json:"request,omitempty"`  // the latest owner message (see parseIntake)
 	Agent     bool           `json:"agent,omitempty"`    // the latest user-role message is not the owner's
+	// LastOwner is the latest owner message even when an agent's message
+	// followed it (ids only, no text): a followed request is superseded
+	// when it is not this one.
+	LastOwner *IntakeMessage `json:"last_owner,omitempty"`
 }
 
 type IntakeMessage struct {
@@ -177,6 +181,7 @@ func parseIntake(out []byte) (IntakeThread, error) {
 				run, _ := str(m, "runId")
 				text, _ := str(m, "text")
 				th.Request = &IntakeMessage{Run: run, Text: text, ByThread: true}
+				th.LastOwner = &IntakeMessage{Run: run, ByThread: true}
 			}
 		}
 		return th, nil
@@ -197,6 +202,7 @@ func parseIntake(out []byte) (IntakeThread, error) {
 			mid, _ = str(m, "messageId")
 		}
 		th.Agent, th.Request = false, &IntakeMessage{ID: mid, Run: run, Text: text}
+		th.LastOwner = &IntakeMessage{ID: mid, Run: run}
 	}
 	return th, nil
 }
@@ -337,9 +343,14 @@ func (r *Runtime) probe(ctx dbos.Context, in intakeProbe) (string, error) {
 		default:
 			m := got.Th.Request
 			current := m.Run == got.Th.ActiveRun || m.Run == got.Th.LatestRun
-			out, err := dbos.RunAsStep(ctx, func(context.Context) (string, error) {
+			out, err := dbos.RunAsStep(ctx, func(sctx context.Context) (string, error) {
 				if !current {
 					return "", nil
+				}
+				if in.Reconcile && !r.stillT3Owner(sctx, in) {
+					// Asked again before commit: the binding is the live one.
+					r.opt.Log.Printf("durable: T3 intake refused (owner binding changed), thread %s", in.Thread)
+					return "refused: not the current trusted T3 owner", nil
 				}
 				return r.admitIntake(in, *m, got.Th.Project, self)
 			}, dbos.WithStepName("intake-admit"))
@@ -478,6 +489,7 @@ func (r *Runtime) track(ctx dbos.Context, w *run) (done bool, err error) {
 		return false, err
 	}
 	poll := r.opt.Observe
+	followed := in.Run // the thread's run follow is on; in.Run stays the admitted one
 	for {
 		ev, ok, err := r.next(ctx, w, poll)
 		if err != nil {
@@ -488,7 +500,7 @@ func (r *Runtime) track(ctx dbos.Context, w *run) (done bool, err error) {
 			case "close":
 				return false, closed{ev}
 			case "supersede":
-				return true, r.quiet(ctx, w, "superseded by a newer request in the same T3 thread")
+				return true, r.quiet(ctx, w, supersededWhy)
 			case "intake_done":
 				poll = r.opt.Observe
 			default:
@@ -522,7 +534,7 @@ func (r *Runtime) track(ctx dbos.Context, w *run) (done bool, err error) {
 		}
 		th := got.Th
 		if in.Follow && got.Err == "" {
-			if done, act, err := r.follow(ctx, w, th); act || err != nil {
+			if done, act, err := r.follow(ctx, w, th, &followed); act || err != nil {
 				return done, err
 			}
 			continue
@@ -542,18 +554,28 @@ func (r *Runtime) track(ctx dbos.Context, w *run) (done bool, err error) {
 	}
 }
 
+// supersededWhy is the verdict of a request a newer one replaced.
+const supersededWhy = "superseded by a newer request in the same T3 thread"
+
 // follow is track's step for an intake admitted with T3 tracking: it
 // follows the thread's later runs (an agent's report back, a queued
 // message) instead of closing on them, and closes quietly only when the
 // thread is idle (no active run, no pending request) with no pending
 // children and its last run completed, was cancelled or rolled back. A
 // last run that failed or was interrupted makes the request an active task.
-// A newer owner request still supersedes it (a new intake). Any status it
-// does not know keeps tracking. act=false: keep tracking.
-func (r *Runtime) follow(ctx dbos.Context, w *run, th IntakeThread) (done, act bool, err error) {
+// A newer owner request in the thread supersedes it at once, quietly: a
+// later run is never charged to an older request (the newer one has its
+// own intake). Without T3's per-message marks every user-role message
+// counts as the owner's, so there only the admitted run itself can make
+// the request active. Any status it does not know keeps tracking.
+// act=false: keep tracking. *followed is the run followed now.
+func (r *Runtime) follow(ctx dbos.Context, w *run, th IntakeThread, followed *string) (done, act bool, err error) {
 	in := w.c.Intake
-	if run := or(th.ActiveRun, th.LatestRun); run != "" && run != in.Run {
-		in.Run = run // w.c's copy only: deterministic on replay, from the recorded read
+	if last := or2(th.LastOwner, th.Request); last != nil && !in.same(last) {
+		return true, true, r.quiet(ctx, w, supersededWhy)
+	}
+	if run := or(th.ActiveRun, th.LatestRun); run != "" && run != *followed {
+		*followed = run // deterministic on replay: from the recorded read
 		if err := r.publish(ctx, w, PhaseTracking, "follows the owner's T3 thread "+in.Thread+" (now run "+run+"); closes quietly when it and its children finish"); err != nil {
 			return false, true, err
 		}
@@ -574,11 +596,27 @@ func (r *Runtime) follow(ctx dbos.Context, w *run, th IntakeThread) (done, act b
 	case "completed", "cancelled", "rolled_back":
 		return true, true, r.quiet(ctx, w, "finished in T3 ("+th.Status+")")
 	case "failed", "interrupted":
-		w.c.Brief += fmt.Sprintf("\nIts T3 run %s ended %s before finishing, so part of it may already be done: read the thread first, do not repeat what was done, then finish the request.", in.Run, th.Status)
+		w.c.Brief += fmt.Sprintf("\nIts T3 run %s ended %s before finishing, so part of it may already be done: read the thread first, do not repeat what was done, then finish the request.", *followed, th.Status)
 		w.st.Note = ""
 		return false, true, nil
 	}
 	return false, false, nil
+}
+
+// same reports whether m is the admitted request: by T3's message id when
+// either has one, else by its run.
+func (in *Intake) same(m *IntakeMessage) bool {
+	if in.Message != "" || m.ID != "" {
+		return m.ID == in.Message
+	}
+	return m.Run == in.Run
+}
+
+func or2(a, b *IntakeMessage) *IntakeMessage {
+	if a != nil {
+		return a
+	}
+	return b
 }
 
 // yield closes an active T3 request that a newer owner request in its

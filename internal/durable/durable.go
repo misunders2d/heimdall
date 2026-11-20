@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
@@ -273,13 +274,18 @@ type Options struct {
 	// admitted with it follows later runs and its children, yields to a newer
 	// request when active, and missed requests are reconciled at startup.
 	T3Tracking bool
+	// T3Owner reads the trusted T3 launcher's owner binding now (the
+	// scheduler control's); nil: missed T3 requests are never reconciled.
+	T3Owner T3OwnerFunc
 }
 
 type Runtime struct {
-	opt    Options
-	ctx    dbos.Context
-	db     *sql.DB
-	queues map[string]dbos.Queue
+	opt      Options
+	ctx      dbos.Context
+	db       *sql.DB
+	queues   map[string]dbos.Queue
+	beat     chan struct{} // stops the last-alive heartbeat (T3 tracking)
+	beatDone sync.WaitGroup
 }
 
 // Open prepares the runtime; Launch starts it and recovers pending work.
@@ -332,10 +338,16 @@ func Open(opt Options) (*Runtime, error) {
 		r.Close()
 		return nil, fmt.Errorf("durable: t3 intakes: %w", err)
 	}
-	// T3 children of tasks (hub T3 tracking): ids and statuses only.
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS heimdall_t3_children(id INTEGER PRIMARY KEY AUTOINCREMENT, issue TEXT NOT NULL, thread TEXT NOT NULL, env TEXT NOT NULL, run TEXT NOT NULL, kind TEXT NOT NULL, task TEXT NOT NULL, wake TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL, UNIQUE(issue,thread,env,run))`); err != nil {
+	// T3 children of tasks (hub T3 tracking): ids and statuses only. ref
+	// keeps run-less and unbound children apart: one row per native call.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS heimdall_t3_children(id INTEGER PRIMARY KEY AUTOINCREMENT, issue TEXT NOT NULL, thread TEXT NOT NULL, env TEXT NOT NULL, run TEXT NOT NULL, ref TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, task TEXT NOT NULL, wake TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL, UNIQUE(issue,thread,env,run,ref))`); err != nil {
 		r.Close()
 		return nil, fmt.Errorf("durable: t3 children: %w", err)
+	}
+	// The last-alive heartbeat (T3 tracking): the start of a downtime.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS heimdall_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL)`); err != nil {
+		r.Close()
+		return nil, fmt.Errorf("durable: meta: %w", err)
 	}
 	for name, res := range opt.Resources {
 		per := res.PerWorker
@@ -373,6 +385,10 @@ func (r *Runtime) SetWake(f func(iface string)) { r.opt.Wake = f }
 func (r *Runtime) SetDispatcher(d Dispatcher, authorize Authorizer) {
 	r.opt.Dispatcher, r.opt.Authorize = d, authorize
 }
+
+// SetT3Owner connects the trusted T3 owner binding that the startup
+// reconcile admits missed T3 requests under; call before Launch.
+func (r *Runtime) SetT3Owner(f T3OwnerFunc) { r.opt.T3Owner = f }
 
 // SetAssistant connects assistant wakes to the router; call before Launch.
 func (r *Runtime) SetAssistant(a Assistant) { r.opt.Assistant = a }
@@ -415,15 +431,23 @@ func (r *Runtime) Launch() error {
 	if r.opt.Dispatcher != nil && r.opt.Authorize == nil {
 		return errors.New("durable: a dispatcher needs creator revalidation (Authorize)")
 	}
+	prev := r.alive() // before this run records its own
 	if err := dbos.Launch(r.ctx); err != nil {
 		return err
 	}
-	r.startReconcile()
+	r.rearmChildren()
+	r.startReconcile(prev)
+	r.heartbeat()
 	return nil
 }
 
 // Close stops the runtime; pending commitments resume at the next Launch.
 func (r *Runtime) Close() {
+	if r.beat != nil {
+		close(r.beat)
+		r.beatDone.Wait()
+		r.markAlive()
+	}
 	dbos.Shutdown(r.ctx, 10*time.Second)
 	r.db.Close()
 }

@@ -329,20 +329,37 @@ live only in model text. With `durable.t3_tracking`:
   launch `{threadId, projectId, runId|null}`; delegate `{taskId,
   childThreadId|null, remoteChild?, childRunId|null, status}`; send
   `{threadId, runId, …}`. Only ids and statuses are stored, never a
-  message. A failed or denied call started nothing and is skipped; a
-  result naming no thread is recorded as *unbound* (visible).
-- **Shown.** Every later wake prompt and `!work show` list them.
+  message (the watcher's recorded reads too). A child with a thread and a
+  run is one row per (thread, environment, run); any other (no run, or no
+  thread) is one row per delegated task id, else per native call id. A failed or denied call started
+  nothing and is skipped; a result naming no thread is recorded as
+  *unbound* (visible, with its delegated task id).
+- **Shown.** Every later wake prompt and `!work show` list the newest 50,
+  oldest first, saying how many older ones are left out.
 - **Watched.** A child on this host (no `environmentId`, `t3_command` set)
-  is followed read-only by its own workflow (`heimdall.t3child`), backing
-  off from `observe_seconds` to 10 min. When its run ends (no longer
-  active, and a terminal status or a later run), it marks the child and
-  sends the task's wake signal itself (the `task_wake` signal and key), so
-  the task's `WAIT` ends with one wake. A task not in its working phase is
-  not signalled; its next wake lists the child anyway. A read error or an
-  unknown status keeps watching; the watcher ends when the task closes.
-  A child in another environment, or with no T3 CLI here, is recorded but
-  not watched (the wake timer stays the backup; remote watching is later
-  work).
+  is followed read-only by its own workflow (`heimdall.t3child`, one per
+  row), backing off from `observe_seconds` to 10 min. Its run has ended
+  when it is not active, nothing waits for an answer, and it has its own
+  reply among the latest messages, or is the latest run with a terminal
+  status, or a later run started (`runCount`) after it was seen. Another
+  run is never taken for it: a send queued behind a busy thread's run
+  still waits. It then marks the child and sends the task's wake signal
+  itself (the `task_wake` signal), so the task's `WAIT` ends with one
+  wake: the key is chosen in one step and sent in the next, so a crash
+  between them re-sends the same key. A task that cannot take it now
+  (paused, held, not in its working phase, a read error) is asked again
+  with backoff until it does, closes, or starts a later wake on its own
+  (which lists the child). A read error or an unknown status keeps
+  watching; the watcher ends when the task closes. Every active row is
+  watched again at startup (the watcher's id is the row's, so a recorded
+  watcher is never run twice and one whose start was lost starts). A
+  child in another environment, or with no T3 CLI here (also when
+  `t3_command` is removed later: the watcher then ends cleanly), is
+  recorded but not watched (the wake timer stays the backup; remote
+  watching is later work). Unverified live: whether T3 returns a queued
+  send's run before it starts, and a run that ended between two reads
+  with no reply of its own and no later run is not seen to end (the wake
+  timer covers it).
 - **T3 intake follows the thread.** An intake admitted with the flag (frozen
   in its input as `follow`, so a later flag change never alters its
   history) follows the thread's later runs instead of closing on them, and
@@ -350,7 +367,12 @@ live only in model text. With `durable.t3_tracking`:
   request) with no pending background tasks (`pendingBackgroundTasks`; a
   monitor counts only when `awaited`) and its last run completed, was
   cancelled or rolled back. A last run that failed or was interrupted makes
-  it an active task, as before.
+  it an active task, as before. A later run is never charged to an older
+  request: when the thread's latest owner request is not the admitted one
+  (T3's message id, else its run), the intake closes quietly as
+  superseded; the newer request has its own intake. Without per-message
+  marks every user-role message counts as the owner's, so there only the
+  admitted run itself makes the request active.
 - **An active intake yields.** A newer owner request in the same thread (a
   new intake) closes an active (no longer tracking) intake with one line to
   the owner's private chat:
@@ -360,19 +382,28 @@ live only in model text. With `durable.t3_tracking`:
   agent's report back into the thread carries it too) never stops an
   active task. A tracking intake still closes quietly.
 - **Downtime reconcile.** A hook fired while Heimdall was down is lost. At
-  each start Heimdall lists (`thread list --project <id> --json`) the T3
-  projects of requests from the last 7 days and runs the ordinary intake
-  probe for each thread created by the owner (`createdBy=user`, no parent,
-  not `mcp:launch:`) changed since that project's last intake (less an
-  hour), at most 20 per project, bound to the creator, route and sign-ins
-  of that project's latest `T3-<n>`. The probe still decides from T3's own
+  each start Heimdall lists (`thread list --project <id> --json`; a failed
+  list is read again, backing off, up to 8 times) the T3 projects of
+  requests from the last 7 days and runs the ordinary intake probe for each
+  thread created by the owner (`createdBy=user`, no parent, not
+  `mcp:launch:`) changed since Heimdall was last alive (a heartbeat in
+  `durable.db` every minute and at shutdown; with none recorded, nothing is
+  reconciled), newest first, at most 20 per project (a log line counts the
+  rest). It is bound to the trusted T3 owner as the scheduler control
+  binds it now (`scheduler.control.trusted_t3`: the owner's registered
+  private conversation, a current owner, a Slack owner verified live, whose
+  OAuth actor is that check's), never to a stored request, and asked again
+  as each request is admitted; with no such owner nothing is admitted. The
+  probe still decides from T3's own
   marks, and here only a per-message `createdBy=user` mark admits (never
   the thread's mark alone: without the hook's timing it is too weak); its
   (thread, message, run) row makes a repeat a no-op. A reconciled task
   works only if its run ended interrupted or failed, and each wake
   revalidates its creator. A failure
   is one metadata-only log line. Threads in a project Heimdall never took a
-  request from are not found.
+  request from are not found. Limit: T3 lists a thread's last change
+  (`updatedAt`), not its runs' start, so a thread only renamed or organized
+  during the downtime is probed too.
 
 Known limit: the T3 checked here (laptop, 2026-11-20) marks only threads,
 not messages, so yielding and reconcile admit nothing until T3 marks each

@@ -26,6 +26,7 @@ type Progress struct {
 // them (never the model's answer). Only calls named in NativeCalls.Tools are
 // decoded; nothing else is captured.
 type NativeCall struct {
+	ID     string // the native tool call's id
 	Tool   string
 	Args   json.RawMessage
 	Result json.RawMessage
@@ -87,7 +88,7 @@ func (t *progressTracker) nativeEnd(id, tool string, result json.RawMessage, fai
 		return
 	}
 	delete(t.nativeArgs, id)
-	t.native.Done(NativeCall{Tool: tool, Args: args, Result: result, Error: failed})
+	t.native.Done(NativeCall{ID: id, Tool: tool, Args: args, Result: result, Error: failed})
 }
 
 func (t *progressTracker) start(key string, index int, emit func(Progress)) {

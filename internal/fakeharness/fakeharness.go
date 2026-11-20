@@ -419,10 +419,15 @@ func (f *fake) control(enc string) {
 // t3Send emits one native T3 send tool call (T3SEND=BASE64) in the Claude
 // stream, as Claude reports an MCP tool's use and result.
 func (f *fake) t3Send(session string) {
+	n := 0
 	for _, w := range strings.Fields(f.prompt) {
 		enc, ok := strings.CutPrefix(w, "T3SEND=")
 		if !ok {
 			continue
+		}
+		id := "toolu_t3" // each call its own id, as Claude gives them
+		if n++; n > 1 {
+			id += "_" + strconv.Itoa(n)
 		}
 		b, err := base64.StdEncoding.DecodeString(enc)
 		var call struct {
@@ -445,8 +450,8 @@ func (f *fake) t3Send(session string) {
 				call.Args, _ = json.Marshal(args)
 			}
 		}
-		f.emit(map[string]any{"type": "assistant", "session_id": session, "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "toolu_t3", "name": call.Tool, "input": call.Args}}}})
-		f.emit(map[string]any{"type": "user", "session_id": session, "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "toolu_t3", "is_error": call.Error, "content": call.Result}}}})
+		f.emit(map[string]any{"type": "assistant", "session_id": session, "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": id, "name": call.Tool, "input": call.Args}}}})
+		f.emit(map[string]any{"type": "user", "session_id": session, "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "is_error": call.Error, "content": call.Result}}}})
 	}
 }
 

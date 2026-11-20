@@ -264,6 +264,15 @@ func run(args []string) error {
 			jobs.TaskIntake = false // task_add is unreachable: never tell turns to use it
 		} else {
 			defer listener.Close()
+			if work != nil && jobs.TrustedT3 != nil {
+				// The startup reconcile admits a missed T3 request only under
+				// the trusted T3 owner as bound now (docs/durable.md).
+				ctl := cfg.Scheduler.Control
+				work.SetT3Owner(func(ctx context.Context) (durable.T3Owner, error) {
+					p, k, actor, inst, err := jobs.TrustedT3Owner(ctx, ctl.Owner, ctl.Source)
+					return durable.T3Owner{Principal: p, Route: k, OAuthActor: actor, OAuthInstallation: inst}, err
+				})
+			}
 		}
 	}
 	if work != nil {
