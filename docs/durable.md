@@ -272,7 +272,9 @@ the thread's `createdBy=user` (weaker: an agent message in an owner thread
 counts as the owner's, and the task's brief says so). It closes quietly
 when the run completes, is cancelled or rolled back, or a newer request
 supersedes it; an interrupted or failed run makes it an active task under
-the wake rules. `mcp:launch:` and agent-created threads are never admitted.
+the wake rules. With `t3_tracking` it follows later runs and children,
+yields when active, and missed requests are reconciled (see "Hub T3
+tracking"). `mcp:launch:` and agent-created threads are never admitted.
 Requires `durable.t3_command`; one intake or tracking read may take up to
 90 s (a large thread takes about 20 s to show). Laptop-local T3 sessions
 are not covered.
@@ -310,6 +312,63 @@ question not, owned next wake, restart keeps it with no second admission
 or wake, same issue under a new request_id is the existing task) and
 `TestTaskNoteOnlyForOwnerIntake`. The note is a model instruction: it is
 best-effort, not mechanical detection of every request.
+
+## Hub T3 tracking (`t3_tracking`)
+
+Off by default. Owner, 2026-11-20: any coding work an owner agent starts
+in T3 is tracked to completion and never lost; child thread ids must not
+live only in model text. With `durable.t3_tracking`:
+
+- **Children are recorded.** In a wake of an assistant-worked task, the
+  router decodes the engine's own native results of `t3_thread_launch`,
+  `delegate_task` and `t3_thread_send` (any MCP alias: matched by the tool
+  name after the last `__`; the hub's alias is not verified live), never
+  the model's text, and records each child in `durable.db`
+  (`heimdall_t3_children`) as the call finishes, so a wake cut off later
+  still leaves them. Shapes are T3's own (app 0.1.x bundle):
+  launch `{threadId, projectId, runId|null}`; delegate `{taskId,
+  childThreadId|null, remoteChild?, childRunId|null, status}`; send
+  `{threadId, runId, …}`. Only ids and statuses are stored, never a
+  message. A failed or denied call started nothing and is skipped; a
+  result naming no thread is recorded as *unbound* (visible).
+- **Shown.** Every later wake prompt and `!work show` list them.
+- **Watched.** A child on this host (no `environmentId`, `t3_command` set)
+  is followed read-only by its own workflow (`heimdall.t3child`), backing
+  off from `observe_seconds` to 10 min. When its run ends (no longer
+  active, and a terminal status or a later run), it marks the child and
+  sends the task's wake signal itself (the `task_wake` signal and key), so
+  the task's `WAIT` ends with one wake. A task not in its working phase is
+  not signalled; its next wake lists the child anyway. A read error or an
+  unknown status keeps watching; the watcher ends when the task closes.
+  A child in another environment, or with no T3 CLI here, is recorded but
+  not watched (the wake timer stays the backup; remote watching is later
+  work).
+- **T3 intake follows the thread.** An intake admitted with the flag (frozen
+  in its input as `follow`, so a later flag change never alters its
+  history) follows the thread's later runs instead of closing on them, and
+  closes quietly only when the thread is idle (no active run, no pending
+  request) with no pending background tasks (`pendingBackgroundTasks`; a
+  monitor counts only when `awaited`) and its last run completed, was
+  cancelled or rolled back. A last run that failed or was interrupted makes
+  it an active task, as before.
+- **An active intake yields.** A newer owner request in the same thread (a
+  new intake) closes an active (no longer tracking) intake with one line to
+  the owner's private chat:
+  `Task "<title>" (T3-<n>) stopped: a newer request in the same T3 thread replaced it. — heimdall`.
+  A tracking intake still closes quietly.
+- **Downtime reconcile.** A hook fired while Heimdall was down is lost. At
+  each start Heimdall lists (`thread list --project <id> --json`) the T3
+  projects of requests from the last 7 days and runs the ordinary intake
+  probe for each thread created by the owner (`createdBy=user`, no parent,
+  not `mcp:launch:`) changed since that project's last intake (less an
+  hour), at most 20 per project, bound to the creator, route and sign-ins
+  of that project's latest `T3-<n>`. The probe still decides from T3's own
+  marks; its (thread, message, run) row makes a repeat a no-op. A failure
+  is one metadata-only log line. Threads in a project Heimdall never took a
+  request from are not found.
+
+Interrupted runs report to the private chat as today; reporting into a
+hub-local T3 thread waits for an owner decision.
 
 ## Dispatch (`t3_dispatch`)
 
@@ -357,7 +416,7 @@ asks for exactly one `t3_thread_send` to the owner-selected
 
 ```json
 {"durable": {"enabled": true, "linear_workspace": "mellanni", "supervisor_review": true, "assistant_work": true,
-  "t3_dispatch": true,
+  "t3_dispatch": true, "t3_tracking": true,
   "resources": {"default": {"per_worker": 1}, "contabo": {"concurrency": 3, "rate_limit": 2, "rate_period_seconds": 60}}}}
 ```
 
@@ -385,6 +444,12 @@ version.
   that position. Put patches before steps that old workflows have passed
   (see the test).
 - Run only one Heimdall process per data dir.
+- `t3_tracking` changes no recorded step of an existing workflow: an
+  intake's follow mode is frozen in its input, and children are watched by
+  their own workflows (`heimdall.t3child`, `heimdall.t3reconcile`). Rollback
+  limit: an older binary does not know those workflows (DBOS cannot recover
+  them) and replays a following intake differently (it may be marked
+  failed).
 - `wake-rules-v2` is such a patch: workflows started before it keep the old
   hold-until-retry path until `!work retry` moves them onto the wake rules.
 

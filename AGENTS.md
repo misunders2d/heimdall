@@ -66,7 +66,14 @@ the `heimdall-live` unit.
   interrupted tasks. Off by default in code. Production runs it with
   `supervisor_review` and `assistant_work` on and `t3_dispatch` off.
   Wake rules, caps, the one owner line and T3 intake (`deploy/t3-intake`):
-  [docs/durable.md](docs/durable.md).
+  [docs/durable.md](docs/durable.md). Owner, 2026-11-20: T3 work an owner
+  agent starts is tracked to completion, never lost. Opt-in
+  `durable.t3_tracking` (off by default): a wake's native T3
+  launch/delegate/send results (never model text; ids and statuses only)
+  are the task's recorded children, shown in wakes and `!work show`, and a
+  read-only watcher wakes the task once when a local child's run ends; T3
+  intakes follow later runs and children, an active one yields to a newer
+  request with one line, and missed requests are reconciled at startup.
 - **Identity comes from the interface, never from text.** Callers never log
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack

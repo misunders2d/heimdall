@@ -36,12 +36,18 @@ type NativeCall struct {
 // durable dispatch turn's own T3 send). Nil for every other turn.
 type NativeCalls struct {
 	Tools []string
+	// Match, when set, picks the wanted tools by name instead of Tools (a
+	// T3 server's MCP alias differs between installs).
+	Match func(tool string) bool
 	Done  func(NativeCall)
 }
 
 func (n *NativeCalls) wants(tool string) bool {
 	if n == nil || n.Done == nil {
 		return false
+	}
+	if n.Match != nil {
+		return n.Match(tool)
 	}
 	for _, t := range n.Tools {
 		if t == tool {

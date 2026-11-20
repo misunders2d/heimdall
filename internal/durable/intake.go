@@ -46,6 +46,10 @@ type Intake struct {
 	// ByThread: admitted by the thread's createdBy=user mark alone (no
 	// message mark); its brief says so (see parseIntake).
 	ByThread bool `json:"by_thread,omitempty"`
+	// Follow: admitted with T3 tracking (frozen here, never read from config
+	// again): it follows later runs, waits for the thread's children, and an
+	// active task yields to a newer request in its thread.
+	Follow bool `json:"follow,omitempty"`
 }
 
 // IntakeThread is a T3 thread as its host CLI shows it.
@@ -54,8 +58,11 @@ type IntakeThread struct {
 	Status    string         `json:"status"`
 	LatestRun string         `json:"latest_run,omitempty"`
 	ActiveRun string         `json:"active_run,omitempty"`
-	Request   *IntakeMessage `json:"request,omitempty"` // the latest owner message (see parseIntake)
-	Agent     bool           `json:"agent,omitempty"`   // the latest user-role message is not the owner's
+	Project   string         `json:"project,omitempty"`
+	Pending   int            `json:"pending,omitempty"`  // requests waiting for an answer in T3
+	Children  int            `json:"children,omitempty"` // background tasks still pending (pendingBackgroundTasks; a monitor only when awaited)
+	Request   *IntakeMessage `json:"request,omitempty"`  // the latest owner message (see parseIntake)
+	Agent     bool           `json:"agent,omitempty"`    // the latest user-role message is not the owner's
 }
 
 type IntakeMessage struct {
@@ -124,13 +131,26 @@ func parseIntake(out []byte) (IntakeThread, error) {
 			Status      string  `json:"status"`
 			LatestRunID *string `json:"latestRunId"`
 			ActiveRunID *string `json:"activeRunId"`
+			ProjectID   string  `json:"projectId"`
+			Pending     int     `json:"pendingRequestCount"`
+			Background  []struct {
+				Kind    string `json:"kind"`
+				Awaited bool   `json:"awaited"`
+			} `json:"pendingBackgroundTasks"`
 		} `json:"thread"`
 		Messages []map[string]json.RawMessage `json:"messages"`
 	}
 	if !firstObject(out, &v) || v.Thread == nil {
 		return IntakeThread{}, errors.New("t3 thread show: unexpected output")
 	}
-	th := IntakeThread{Title: v.Thread.Title, Status: v.Thread.Status}
+	th := IntakeThread{Title: v.Thread.Title, Status: v.Thread.Status, Project: v.Thread.ProjectID, Pending: v.Thread.Pending}
+	for _, b := range v.Thread.Background {
+		// A monitor (a pull-request watch) may never end; it counts only
+		// when the run waits for it.
+		if b.Kind != "monitor" || b.Awaited {
+			th.Children++
+		}
+	}
 	if v.Thread.LatestRunID != nil {
 		th.LatestRun = *v.Thread.LatestRunID
 	}
@@ -225,6 +245,7 @@ type intakeProbe struct {
 	Private    bool           `json:"private,omitempty"`
 	OAuthActor string         `json:"oauth_actor,omitempty"`
 	OAuthInst  string         `json:"oauth_installation,omitempty"`
+	Follow     bool           `json:"follow,omitempty"` // T3 tracking at the hook (frozen in the probe's input)
 }
 
 // intake answers task_intake at once and leaves the T3 read to a durable
@@ -244,7 +265,7 @@ func (r *Runtime) intake(c Caller, thread string) (string, bool) {
 		r.opt.Log.Printf("durable: T3 intake refused: no T3 CLI configured (thread %s)", thread)
 		return "T3 intake is not configured here.", false
 	}
-	in := intakeProbe{Thread: thread, Creator: c.Principal.Key(), Owner: c.Principal, Route: c.Conv, Private: c.Private, OAuthActor: c.OAuthActor, OAuthInst: c.OAuthInstallation}
+	in := intakeProbe{Thread: thread, Creator: c.Principal.Key(), Owner: c.Principal, Route: c.Conv, Private: c.Private, OAuthActor: c.OAuthActor, OAuthInst: c.OAuthInstallation, Follow: r.opt.T3Tracking}
 	id := "t3intake/" + thread + "/" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	if _, err := dbos.RunWorkflow(r.ctx, r.probe, in, dbos.WithWorkflowID(id)); err != nil {
 		r.opt.Log.Printf("durable: T3 intake not started (thread %s): %v", thread, err)
@@ -313,7 +334,7 @@ func (r *Runtime) probe(ctx dbos.Context, in intakeProbe) (string, error) {
 				if !current {
 					return "", nil
 				}
-				return r.admitIntake(in, *m, self)
+				return r.admitIntake(in, *m, got.Th.Project, self)
 			}, dbos.WithStepName("intake-admit"))
 			if err != nil {
 				return "", err
@@ -335,7 +356,7 @@ func (r *Runtime) probe(ctx dbos.Context, in intakeProbe) (string, error) {
 // a re-executed step of the same probe gets its own row back), admits
 // T3-<n> and supersedes the thread's older intakes. "" means the request
 // was already taken by another probe (nothing new yet).
-func (r *Runtime) admitIntake(in intakeProbe, m IntakeMessage, probe string) (string, error) {
+func (r *Runtime) admitIntake(in intakeProbe, m IntakeMessage, project, probe string) (string, error) {
 	// Look up, then insert, in one (immediate) transaction: a refused
 	// insert would still use up an AUTOINCREMENT number.
 	tx, err := r.db.Begin()
@@ -348,7 +369,7 @@ func (r *Runtime) admitIntake(in intakeProbe, m IntakeMessage, probe string) (st
 	err = tx.QueryRow(`SELECT n,probe FROM heimdall_t3_intakes WHERE thread=? AND message=? AND run=?`, in.Thread, m.ID, m.Run).Scan(&n, &owner)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		res, err := tx.Exec(`INSERT INTO heimdall_t3_intakes(thread,message,run,creator,probe,at) VALUES(?,?,?,?,?,?)`, in.Thread, m.ID, m.Run, in.Creator, probe, time.Now().UnixMilli())
+		res, err := tx.Exec(`INSERT INTO heimdall_t3_intakes(thread,message,run,creator,probe,at,project) VALUES(?,?,?,?,?,?,?)`, in.Thread, m.ID, m.Run, in.Creator, probe, time.Now().UnixMilli(), project)
 		if err != nil {
 			return "", err
 		}
@@ -368,7 +389,7 @@ func (r *Runtime) admitIntake(in intakeProbe, m IntakeMessage, probe string) (st
 	issue := fmt.Sprintf("T3-%d", n)
 	text := strings.Join(strings.Fields(m.Text), " ")
 	cm := Commitment{Issue: issue, Title: or(clip(text, 80), "T3 request"), Creator: in.Creator, Owner: in.Owner, OAuthActor: in.OAuthActor, OAuthInstallation: in.OAuthInst,
-		Route: in.Route, Private: in.Private, Resource: defaultRes, Origin: OriginTrustedT3, Intake: &Intake{Thread: in.Thread, Message: m.ID, Run: m.Run, ByThread: m.ByThread},
+		Route: in.Route, Private: in.Private, Resource: defaultRes, Origin: OriginTrustedT3, Intake: &Intake{Thread: in.Thread, Message: m.ID, Run: m.Run, ByThread: m.ByThread, Follow: in.Follow},
 		Brief: fmt.Sprintf("%s: the owner's request in T3 thread %s (run %s): %s", issue, in.Thread, m.Run, clip(m.Text, 4000))}
 	if m.ByThread {
 		cm.Brief += "\n" + byThreadNote
@@ -485,6 +506,12 @@ func (r *Runtime) track(ctx dbos.Context, w *run) (done bool, err error) {
 			}
 		}
 		th := got.Th
+		if in.Follow && got.Err == "" {
+			if done, act, err := r.follow(ctx, w, th); act || err != nil {
+				return done, err
+			}
+			continue
+		}
 		switch {
 		case got.Err != "", th.ActiveRun == in.Run:
 			continue
@@ -498,6 +525,57 @@ func (r *Runtime) track(ctx dbos.Context, w *run) (done bool, err error) {
 			return false, nil
 		}
 	}
+}
+
+// follow is track's step for an intake admitted with T3 tracking: it
+// follows the thread's later runs (an agent's report back, a queued
+// message) instead of closing on them, and closes quietly only when the
+// thread is idle (no active run, no pending request) with no pending
+// children and its last run completed, was cancelled or rolled back. A
+// last run that failed or was interrupted makes the request an active task.
+// A newer owner request still supersedes it (a new intake). Any status it
+// does not know keeps tracking. act=false: keep tracking.
+func (r *Runtime) follow(ctx dbos.Context, w *run, th IntakeThread) (done, act bool, err error) {
+	in := w.c.Intake
+	if run := or(th.ActiveRun, th.LatestRun); run != "" && run != in.Run {
+		in.Run = run // w.c's copy only: deterministic on replay, from the recorded read
+		if err := r.publish(ctx, w, PhaseTracking, "follows the owner's T3 thread "+in.Thread+" (now run "+run+"); closes quietly when it and its children finish"); err != nil {
+			return false, true, err
+		}
+	}
+	if th.ActiveRun != "" || th.Pending > 0 {
+		return false, false, nil
+	}
+	if th.Children > 0 {
+		if note := fmt.Sprintf("waiting on %d pending T3 child task(s)", th.Children); note != w.st.Note {
+			w.st.Note = note
+			if err := r.publish(ctx, w, w.st.Phase, w.st.Next); err != nil {
+				return false, true, err
+			}
+		}
+		return false, false, nil
+	}
+	switch th.Status {
+	case "completed", "cancelled", "rolled_back":
+		return true, true, r.quiet(ctx, w, "finished in T3 ("+th.Status+")")
+	case "failed", "interrupted":
+		w.c.Brief += fmt.Sprintf("\nIts T3 run %s ended %s before finishing, so part of it may already be done: read the thread first, do not repeat what was done, then finish the request.", in.Run, th.Status)
+		w.st.Note = ""
+		return false, true, nil
+	}
+	return false, false, nil
+}
+
+// yield closes an active T3 request that a newer owner request in its
+// thread replaced, with one line to the owner (its wakes stop).
+func (r *Runtime) yield(ctx dbos.Context, w *run) (State, error) {
+	w.st.Verdict, w.st.Note = "superseded by a newer request in the same T3 thread", ""
+	title := clip(strings.Join(strings.Fields(w.c.Title), " "), 80)
+	text := fmt.Sprintf("Task \"%s\" (%s) stopped: a newer request in the same T3 thread replaced it. — heimdall", title, w.c.Issue)
+	if err := r.send(ctx, w, "superseded", text, false); err != nil {
+		return w.st, err
+	}
+	return w.st, r.publish(ctx, w, PhaseClosed, "none: superseded by a newer T3 request")
 }
 
 // quiet closes an intake without any message.

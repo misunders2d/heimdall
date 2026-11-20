@@ -274,13 +274,35 @@ func (r *Runtime) Wake(c Caller, issue string) string {
 	if cm.Worker != "" || cm.Intake != nil || r.opt.Assistant == nil {
 		return issue + ": not woken by your assistant; task_wake wakes only those tasks."
 	}
+	return r.signalWake(issue, ws[0], c.Principal.Key())
+}
+
+// wakeTask is the T3 child observer's wake: the same signal and key as
+// task_wake, for a task its assistant works (an active T3 request
+// included). A task not in its working phase is not signalled; its next
+// wake lists the child anyway.
+func (r *Runtime) wakeTask(issue, by string) string {
+	ws, err := dbos.ListWorkflows(r.ctx, dbos.WithFilterWorkflowIDs(issue), dbos.WithFilterName(workflowName), dbos.WithFilterLoadInput(true))
+	if err != nil || len(ws) != 1 {
+		return issue + " is not tracked here."
+	}
+	if cm, ok := decodeInput(ws[0].Input); !ok || cm.Worker != "" || r.opt.Assistant == nil {
+		return issue + ": not woken by its assistant."
+	}
+	return r.signalWake(issue, ws[0], by)
+}
+
+// signalWake ends a running task's wait in its working phase now. The key
+// is the attempt's latest wake: every signal until the next wake starts is
+// one event.
+func (r *Runtime) signalWake(issue string, w dbos.WorkflowStatus, by string) string {
 	st, _ := r.State(issue)
-	switch p, _ := ws[0].Attributes["paused_by"].(string); {
+	switch p, _ := w.Attributes["paused_by"].(string); {
 	case p != "":
 		return issue + ": paused: resume first."
-	case ws[0].Status == dbos.WorkflowStatusSuccess || ws[0].Status == dbos.WorkflowStatusCancelled || st.Phase == PhaseClosed:
+	case w.Status == dbos.WorkflowStatusSuccess || w.Status == dbos.WorkflowStatusCancelled || st.Phase == PhaseClosed:
 		return issue + ": closed."
-	case ws[0].Status != dbos.WorkflowStatusPending && ws[0].Status != dbos.WorkflowStatusEnqueued: // enqueued: recovering after a restart
+	case w.Status != dbos.WorkflowStatusPending && w.Status != dbos.WorkflowStatusEnqueued: // enqueued: recovering after a restart
 		return issue + ": not waiting."
 	case st.Phase == PhaseHeld:
 		return issue + ": held: !work retry " + issue + "."
@@ -291,7 +313,7 @@ func (r *Runtime) Wake(c Caller, issue string) string {
 	if err != nil {
 		return issue + ": " + err.Error()
 	}
-	ev := Event{Attempt: st.Attempt, By: c.Principal.Key(), Wake: true}
+	ev := Event{Attempt: st.Attempt, By: by, Wake: true}
 	if err := dbos.Send(r.ctx, issue, ev, topic, dbos.WithIdempotencyKey(fmt.Sprintf("wake/%d/%d", st.Attempt, len(wakes)))); err != nil {
 		return issue + ": " + err.Error()
 	}
@@ -523,7 +545,14 @@ func (r *Runtime) show(issue string) string {
 			if v.cm.Intake != nil {
 				link = "none (T3 thread " + v.cm.Intake.Thread + ", run " + v.cm.Intake.Run + ")"
 			}
-			return fmt.Sprintf("%s %s\n%s\nLinear: %s\nworker: %s\nattempt: %d%s\ndispatched run: %s\nevidence: %s\nverdict: %s\nreceipts: %v", v.Issue, v.Title, v.line(), link, or(v.Worker, "owner-dispatched"), s.Attempt, map[bool]string{true: " (authorized next step)"}[s.Stage == "next"], or(s.Dispatched, "none"), or(s.Evidence, "none"), or(s.Verdict, "none"), s.Receipts)
+			out := fmt.Sprintf("%s %s\n%s\nLinear: %s\nworker: %s\nattempt: %d%s\ndispatched run: %s\nevidence: %s\nverdict: %s\nreceipts: %v", v.Issue, v.Title, v.line(), link, or(v.Worker, "owner-dispatched"), s.Attempt, map[bool]string{true: " (authorized next step)"}[s.Stage == "next"], or(s.Dispatched, "none"), or(s.Evidence, "none"), or(s.Verdict, "none"), s.Receipts)
+			if cs, err := r.Children(v.Issue); err == nil && len(cs) > 0 {
+				out += "\nT3 children:"
+				for _, c := range cs {
+					out += "\n" + c.line()
+				}
+			}
+			return out
 		}
 	}
 	return issue + " is not tracked."

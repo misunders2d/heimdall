@@ -1922,6 +1922,20 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 					t.mu.Unlock()
 				})}
 			}
+			if b := t.review; b.Work && c.r.opt.Work != nil && c.r.opt.Work.TracksChildren() {
+				// A wake: its native T3 launches, delegations and sends are
+				// recorded as the task's children as each call finishes, so a
+				// wake cut off later still leaves them recorded.
+				spec.NativeCalls = &harness.NativeCalls{Match: isT3ChildTool, Done: guarded(c.r, "harness native call", func(n harness.NativeCall) {
+					ch, ok := childOf(n)
+					if !ok {
+						return
+					}
+					if err := c.r.opt.Work.RecordChild(b.Issue, b.Key, ch); err != nil {
+						c.r.log.Printf("durable: %s: T3 child not recorded: %v", b.Key, err)
+					}
+				})}
+			}
 		}
 		if t.job == nil && t.review == nil {
 			spec.Continuation = func(ev harness.Continuation) (ok bool) {

@@ -52,6 +52,8 @@ Heimdall then:
   (and ideally a message id; without one dedupe is per thread + run).
 - Not checked live: that Codex runs these hooks under T3's app-server mode,
   and that `T3CODE_THREAD_ID` reaches the hook environment of either harness.
-- A hook fired while Heimdall is down is lost; nothing replays it.
+- A hook fired while Heimdall is down is lost; nothing replays it, unless
+  `durable.t3_tracking` is on: then each start reconciles owner threads of
+  known projects changed meanwhile (docs/durable.md, "Hub T3 tracking").
 - T3 sessions local to a laptop (not under the trusted T3 launcher) are out of
   scope.

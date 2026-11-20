@@ -736,3 +736,66 @@ func parseVerdict(answer string) string {
 	}
 	return "malformed answer: no verdict"
 }
+
+// T3 tools whose native results name a child a wake started (hub T3
+// tracking). The MCP server's alias differs between installs (t3, t3-code),
+// so a tool is matched by its own name after the last "__".
+var t3ChildTools = map[string]string{"t3_thread_launch": "launch", "delegate_task": "delegate", "t3_thread_send": "send"}
+
+func isT3ChildTool(name string) bool {
+	if i := strings.LastIndex(name, "__"); i >= 0 {
+		name = name[i+2:]
+	}
+	_, ok := t3ChildTools[name]
+	return ok
+}
+
+// childOf decodes a finished native T3 call into the child it started or
+// sent work to, from T3's own result shapes (app 0.1.x):
+// t3_thread_launch {threadId, projectId, runId|null},
+// delegate_task {taskId, childThreadId|null, remoteChild?{environmentId,
+// threadId}, childRunId|null, status}, t3_thread_send {threadId, runId,
+// taskId?, status}. A failed or denied call started nothing and is skipped;
+// a result that names no thread is still recorded (unbound, visible).
+// Only ids and statuses are taken; the message is never read.
+func childOf(n harness.NativeCall) (durable.Child, bool) {
+	name := n.Tool
+	if i := strings.LastIndex(name, "__"); i >= 0 {
+		name = name[i+2:]
+	}
+	kind, ok := t3ChildTools[name]
+	if !ok || n.Error {
+		return durable.Child{}, false
+	}
+	var a struct {
+		EnvironmentID string `json:"environmentId"`
+		Target        struct {
+			EnvironmentID string `json:"environmentId"`
+		} `json:"target"`
+	}
+	_ = json.Unmarshal(n.Args, &a)
+	var v struct {
+		ThreadID      string `json:"threadId"`
+		ChildThreadID string `json:"childThreadId"`
+		RemoteChild   *struct {
+			EnvironmentID string `json:"environmentId"`
+			ThreadID      string `json:"threadId"`
+		} `json:"remoteChild"`
+		RunID      string `json:"runId"`
+		ChildRunID string `json:"childRunId"`
+		TaskID     string `json:"taskId"`
+		Status     string `json:"status"`
+	}
+	_ = json.Unmarshal(toolJSON(n.Result), &v)
+	c := durable.Child{Kind: kind, Thread: v.ThreadID, Env: a.EnvironmentID, Run: v.RunID, Task: v.TaskID}
+	if kind == "delegate" {
+		c.Thread, c.Run, c.Env, c.Status = v.ChildThreadID, v.ChildRunID, a.Target.EnvironmentID, v.Status
+		if v.RemoteChild != nil {
+			c.Thread, c.Env = v.RemoteChild.ThreadID, v.RemoteChild.EnvironmentID
+		}
+	}
+	if len(c.Thread) > 512 || strings.ContainsAny(c.Thread+c.Env+c.Run+c.Task, " \t\r\n") {
+		c = durable.Child{Kind: kind} // not a T3 id: unbound
+	}
+	return c, true
+}
