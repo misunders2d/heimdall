@@ -1,6 +1,7 @@
 package durable
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,17 @@ func TestAutoTrackOncePerThread(t *testing.T) {
 	notLive.Live = false
 	if ids, _ := e.rt.TrackUntracked(notLive, time.Now(), []Child{{Kind: "launch", Thread: "thread-C"}}); len(ids) != 0 {
 		t.Fatalf("not live %v", ids)
+	}
+
+	// A number taken whose task never got admitted (an exit in between) is
+	// admitted on the next try, under that number.
+	if _, err := e.rt.db.Exec(`INSERT INTO heimdall_t3_intakes(thread,message,run,creator,probe,at) VALUES('thread-O','track','',?,'turn:x',?)`, owner.Principal.Key(), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	_ = e.rt.db.QueryRow(`SELECT max(n) FROM heimdall_t3_intakes`).Scan(&n)
+	if ids, err := e.rt.TrackUntracked(owner, time.Now(), []Child{{Kind: "launch", Thread: "thread-O"}}); err != nil || len(ids) != 1 || ids[0] != fmt.Sprintf("T3-%d", n) {
+		t.Fatalf("orphan number %v %v (n=%d)", ids, err, n)
 	}
 
 	off := open(t, t.TempDir(), Options{Silence: -1})

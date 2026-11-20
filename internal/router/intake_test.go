@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -36,13 +37,13 @@ func (e *env) askBoss(text string) core.Outbound {
 // intakeStart runs the router with the scheduler, its control socket and
 // durable assistant wakes wired as cmd/heimdall does (TaskIntake on), over
 // the given databases; stop ends it as a process exit would.
-func intakeStart(t *testing.T, e *env, durablePath, ctlDir string) (rt *durable.Runtime, stop func()) {
+func intakeStart(t *testing.T, e *env, durablePath, ctlDir string, autoTrack ...bool) (rt *durable.Runtime, stop func()) {
 	t.Helper()
 	st, err := store.Open(e.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rt, err = durable.Open(durable.Options{Path: durablePath, Outbox: st, Silence: -1}); err != nil {
+	if rt, err = durable.Open(durable.Options{Path: durablePath, Outbox: st, Silence: -1, AutoTrack: len(autoTrack) > 0 && autoTrack[0]}); err != nil {
 		t.Fatal(err)
 	}
 	e.st, e.f = st, newFakeIface()
@@ -215,5 +216,40 @@ func TestTaskNoteOnlyForOwnerIntake(t *testing.T) {
 	// before intake must not miss it); the jobs note stays first-only.
 	if s := in[2].Text + in[2].Context; !strings.Contains(s, scheduler.TaskNote) || strings.Contains(s, "Heimdall jobs:") {
 		t.Fatalf("resumed owner request: %q", s)
+	}
+}
+
+// With auto-track, a live owner turn that starts T3 work and registers it
+// itself (its native task_add through the control socket, bound to the
+// same chat) gets no tracking-only task; a later turn that starts work in
+// another thread without task_add does.
+func TestTaskAddTurnIsNotAutoTracked(t *testing.T) {
+	ctlDir := filepath.Join(t.TempDir(), "ctl")
+	t.Setenv("FAKE_CONTROL_SOCKET", filepath.Join(ctlDir, "control.sock"))
+	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.platform = "telegram"
+	e.opt.Access.Owners = map[string]bool{tgBoss.Key(): true}
+	e.sched = &scheduler.Config{DefaultTZ: "Europe/Kyiv", MaxConcurrent: 2, PerCreator: 1, GraceRecurring: 2 * time.Hour, GraceOneOff: 24 * time.Hour, PauseAfter: 3, Interfaces: []string{"telegram"}}
+	rt, _ := intakeStart(t, e, filepath.Join(t.TempDir(), "durable.db"), ctlDir, true)
+	launch := func(thread string) string {
+		b, _ := json.Marshal(map[string]any{"tool": "mcp__t3__t3_thread_launch", "args": map[string]any{"title": "Fix CI"},
+			"result": map[string]any{"structuredContent": map[string]any{"threadId": thread, "projectId": "p1", "runId": "run-1"}}})
+		return "T3SEND=" + base64.StdEncoding.EncodeToString(b)
+	}
+	args, _ := json.Marshal(map[string]string{"action": "task_add", "id": "MEL-310", "title": "Fix CI " + say("WAIT 2h\nrecheck CI"), "request_id": "req-310"})
+	e.askBoss("please fix CI " + launch("thread-K") + " " + control(string(args)))
+	if recs := controlRecords(t, e.state); len(recs) != 1 || !strings.Contains(recs[0].Text, "Tracking MEL-310") {
+		t.Fatalf("task_add %+v", recs)
+	}
+	phase(t, rt, "MEL-310", durable.PhaseWorking)
+	time.Sleep(300 * time.Millisecond)
+	if views, _ := rt.Views(); len(views) != 1 || views[0].Issue != "MEL-310" {
+		t.Fatalf("auto-tracked despite task_add: %+v", views)
+	}
+	e.askBoss("also fix lint " + launch("thread-M"))
+	if st := phase(t, rt, "T3-1", durable.PhaseTracking); !strings.Contains(st.Next, "t3:thread-M") {
+		t.Fatalf("%+v", st)
 	}
 }

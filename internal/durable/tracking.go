@@ -27,7 +27,8 @@ type Track struct {
 	Thread string `json:"thread"`
 	Env    string `json:"env,omitempty"` // another environment: not observed here
 	Run    string `json:"run,omitempty"`
-	Kind   string `json:"kind"` // launch | delegate | send
+	Kind   string `json:"kind"`            // launch | delegate | send
+	Watch  bool   `json:"watch,omitempty"` // observed read-only, frozen at admission (replay never rereads config)
 }
 
 func (t Track) ref() string {
@@ -90,32 +91,21 @@ func (r *Runtime) TrackUntracked(c Caller, since time.Time, children []Child) ([
 }
 
 // admitTrack numbers and admits one thread's tracking-only task, once per
-// thread and environment ("" when it is tracked already).
+// thread and environment ("" when it is tracked already). A number taken
+// whose task never got admitted (a failure or exit in between) is admitted
+// on the next try.
 func (r *Runtime) admitTrack(c Caller, t Track) (string, error) {
-	tx, err := r.db.Begin()
+	n, fresh, err := r.trackNumber(c, t)
 	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback()
-	var n int64
-	err = tx.QueryRow(`SELECT n FROM heimdall_t3_intakes WHERE thread=? AND message='track' AND run=?`, t.Thread, t.Env).Scan(&n)
-	if err == nil {
-		return "", nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	res, err := tx.Exec(`INSERT INTO heimdall_t3_intakes(thread,message,run,creator,probe,at) VALUES(?,'track',?,?,?,?)`, t.Thread, t.Env, c.Principal.Key(), "turn:"+c.MsgID, time.Now().UnixMilli())
-	if err != nil {
-		return "", err
-	}
-	if n, err = res.LastInsertId(); err != nil {
-		return "", err
-	}
-	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	issue := fmt.Sprintf("T3-%d", n)
+	if !fresh {
+		if _, ok := r.input(issue); ok {
+			return "", nil
+		}
+	}
+	t.Watch = t.Env == "" && r.opt.Observer != nil && r.opt.Observer.Observable("t3:"+t.Thread)
 	cm := Commitment{Issue: issue, Title: clip("T3 "+t.Kind+" "+t.ref()+" (started in chat; tracked, not worked)", 120), Creator: c.Principal.Key(), Owner: c.Principal,
 		OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Route: c.Conv, Private: c.Private, ReplyTo: c.MsgID, Resource: defaultRes, Track: &t,
 		Brief: fmt.Sprintf("%s: T3 work (%s) the owner's assistant started from chat in %s without tracking it. The owner promoted it to you: read the thread, check what is done, finish it or report what is left. It was not your request; the thread holds the request.", issue, t.Kind, t.ref())}
@@ -125,6 +115,30 @@ func (r *Runtime) admitTrack(c Caller, t Track) (string, error) {
 	return issue, nil
 }
 
+// trackNumber is the thread's tracking number: fresh when taken now.
+func (r *Runtime) trackNumber(c Caller, t Track) (n int64, fresh bool, err error) {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRow(`SELECT n FROM heimdall_t3_intakes WHERE thread=? AND message='track' AND run=?`, t.Thread, t.Env).Scan(&n)
+	if err == nil {
+		return n, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
+	}
+	res, err := tx.Exec(`INSERT INTO heimdall_t3_intakes(thread,message,run,creator,probe,at) VALUES(?,'track',?,?,?,?)`, t.Thread, t.Env, c.Principal.Key(), "turn:"+c.MsgID, time.Now().UnixMilli())
+	if err != nil {
+		return 0, false, err
+	}
+	if n, err = res.LastInsertId(); err != nil {
+		return 0, false, err
+	}
+	return n, true, tx.Commit()
+}
+
 // trackOnly runs a tracking-only task: it observes, never works. When the
 // thread's run ends it tells the owner one fixed line; a finished run
 // closes it, a failed or interrupted one leaves it open for the owner
@@ -132,7 +146,7 @@ func (r *Runtime) admitTrack(c Caller, t Track) (string, error) {
 func (r *Runtime) trackOnly(ctx dbos.Context, w *run) (promoted bool, err error) {
 	t := w.c.Track
 	o := r.opt.Observer
-	watch := t.Env == "" && o != nil && o.Observable("t3:"+t.Thread)
+	watch := t.Watch
 	next := "observes " + t.ref() + "; never works; !work promote " + w.c.Issue + " hands it to your assistant"
 	if !watch {
 		next = "not observed here (" + t.ref() + "); never works; !work promote " + w.c.Issue + " or !work close " + w.c.Issue
@@ -165,6 +179,9 @@ func (r *Runtime) trackOnly(ctx dbos.Context, w *run) (promoted bool, err error)
 		}
 		poll = min(poll*2, 10*time.Minute)
 		got, err := dbos.RunAsStep(ctx, func(sctx context.Context) (childRead, error) {
+			if o == nil {
+				return childRead{Err: "no T3 CLI here"}, nil
+			}
 			obs, err := o.Observe(sctx, "t3:"+t.Thread)
 			if err != nil {
 				return childRead{Err: clip(err.Error(), 200)}, nil

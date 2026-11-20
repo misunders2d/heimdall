@@ -445,7 +445,11 @@ With `durable.t3_auto_track`:
   are hidden from `!work list`.
 
 Limits: `task_add` detection is in memory, per chat; a turn cut off by a
-restart before its end is not auto-tracked. Tracking grants no permission.
+restart before its end is not auto-tracked, and T3 work started by
+autonomous output after a turn settled is not seen. Only auto-tracked
+threads are checked: a thread already followed by a T3 intake or a
+`worker=t3:` task can still get a tracking-only task. Tracking grants no
+permission.
 
 ## Dispatch (`t3_dispatch`)
 

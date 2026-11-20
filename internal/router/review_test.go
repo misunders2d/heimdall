@@ -615,6 +615,18 @@ func TestLiveTurnAutoTracksUnregisteredT3Work(t *testing.T) {
 	}
 }
 
+// A live owner turn that started T3 work and then failed (no answer) is
+// still tracked: whatever the turn's outcome, work it started is not lost.
+func TestFailedLiveTurnStillAutoTracks(t *testing.T) {
+	e, rt := workEnv(t, false, true, false, true)
+	b, _ := json.Marshal(map[string]any{"tool": "mcp__t3__t3_thread_launch", "args": map[string]any{"title": "Fix CI"},
+		"result": map[string]any{"structuredContent": map[string]any{"threadId": "thread-F", "projectId": "p1", "runId": "run-F1"}}})
+	e.send(owner, "a1", "please fix CI T3SEND="+base64.StdEncoding.EncodeToString(b)+" DENIAL_EMPTY")
+	if st := phase(t, rt, "T3-1", durable.PhaseTracking); !strings.Contains(st.Next, "t3:thread-F") {
+		t.Fatalf("%+v", st)
+	}
+}
+
 func TestParseWork(t *testing.T) {
 	for in, want := range map[string]string{
 		"REPORT\nDone: invoice sent.":   "work report: Done: invoice sent.",
