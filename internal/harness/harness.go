@@ -221,6 +221,7 @@ type Result struct {
 
 // Run is one started native turn.
 type Run struct {
+	native           *NativeCalls // this turn's named native call sink (a warm worker's decoder reads it per turn)
 	contextTaken     func()
 	contextOnce      sync.Once
 	schedulerControl bool
@@ -500,7 +501,7 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		b.progress = spec.Progress
 		b.telemetry.native = spec.NativeCalls
 	}
-	r.continuation, r.progress = spec.Continuation, spec.Progress
+	r.continuation, r.progress, r.native = spec.Continuation, spec.Progress, spec.NativeCalls
 	cmd.Stdout = r.bridge
 	if spec.warm {
 		cmd.Stdin = nativeStdin

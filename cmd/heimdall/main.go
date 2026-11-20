@@ -317,7 +317,7 @@ func openDurable(cfg *config.Config, st *store.Store, logger *log.Logger) (*dura
 		}
 		obs = durable.T3{Command: d.T3Command}
 	}
-	return durable.Open(durable.Options{Path: filepath.Join(cfg.DataDir, "durable.db"), Outbox: st, Observer: obs, Observe: time.Duration(d.ObserveSeconds) * time.Second, Resources: res, Silence: time.Duration(d.SilenceSeconds) * time.Second, Linear: d.Linear, Log: logger, T3Tracking: d.T3Tracking})
+	return durable.Open(durable.Options{Path: filepath.Join(cfg.DataDir, "durable.db"), Outbox: st, Observer: obs, Observe: time.Duration(d.ObserveSeconds) * time.Second, Resources: res, Silence: time.Duration(d.SilenceSeconds) * time.Second, Linear: d.Linear, Log: logger, T3Tracking: d.T3Tracking, AutoTrack: d.AutoTrack})
 }
 
 // guardLog is the prompt-injection log: metadata of flagged messages, never

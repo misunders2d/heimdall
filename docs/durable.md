@@ -122,6 +122,7 @@ before any repeat. Platform delivery is at least once.
 !work add ISSUE [worker=REF] [resource=NAME] [gate=git:/repo]... title [| next: …]
 !work report ISSUE evidence… | !work accept ISSUE | !work reject ISSUE reason…
 !work retry ISSUE | !work pause ISSUE | !work resume ISSUE | !work close ISSUE [note]
+!work promote T3-N
 ```
 
 The caller is the router's verified ingress caller, the same one `!job`
@@ -412,6 +413,40 @@ not messages, so yielding and reconcile admit nothing until T3 marks each
 message. Interrupted runs report to the private chat as today; reporting
 into a hub-local T3 thread waits for an owner decision.
 
+## Tracking-only tasks (`t3_auto_track`)
+
+Off by default. Registering T3 work (`task_add`) is the model's optional
+choice; a chat turn that starts T3 work and registers nothing loses it.
+With `durable.t3_auto_track`:
+
+- **Admitted from native results only.** In a live owner turn (not a wake,
+  dispatch or review; not a scheduled run), the router decodes the same
+  native `t3_thread_launch` / `delegate_task` / `t3_thread_send` results
+  as above (cold and warm engines alike). At the turn's end, if it started
+  T3 work and made no `task_add` (an admission, or "already tracked")
+  since it began, each child thread becomes a tracking-only task `T3-<n>`
+  (its own number from the T3 intake sequence), bound to the turn's
+  verified caller, chat, privacy and sign-ins. Model text naming a thread
+  counts for nothing.
+- **Once per thread.** A thread (and environment) already auto-tracked is
+  never admitted again, open or closed.
+- **Never works.** No wake, dispatch, review or worker runs for it. It
+  observes the thread read-only (local threads only; another environment
+  is shown as not observed and waits for the owner), backing off from
+  `observe_seconds` to 10 min. When the run ends it sends one line:
+  `T3 work t3:<thread> (T3-<n>) finished (<status>); no longer tracked. — heimdall`
+  and closes; a failed or interrupted run instead sends
+  `T3 work t3:<thread> (T3-<n>) ended <status>. Reply "!work promote T3-<n>" to have your assistant finish it, or "!work close T3-<n>". — heimdall`
+  and stays open.
+- **`!work promote T3-<n>`** (creator only, tracking or open) hands it to
+  hub work: from then on the creator's assistant works it under the wake
+  rules (`assistant_work`), with a brief to read the thread and finish or
+  report what is left. `!work close` ends it. Closed tracking-only tasks
+  are hidden from `!work list`.
+
+Limits: `task_add` detection is in memory, per chat; a turn cut off by a
+restart before its end is not auto-tracked. Tracking grants no permission.
+
 ## Dispatch (`t3_dispatch`)
 
 Each attempt is dispatched by one server-initiated turn of the creator's
@@ -458,7 +493,7 @@ asks for exactly one `t3_thread_send` to the owner-selected
 
 ```json
 {"durable": {"enabled": true, "linear_workspace": "mellanni", "supervisor_review": true, "assistant_work": true,
-  "t3_dispatch": true, "t3_tracking": true,
+  "t3_dispatch": true, "t3_tracking": true, "t3_auto_track": true,
   "resources": {"default": {"per_worker": 1}, "contabo": {"concurrency": 3, "rate_limit": 2, "rate_period_seconds": 60}}}}
 ```
 
@@ -492,6 +527,9 @@ version.
   limit: an older binary does not know those workflows (DBOS cannot recover
   them) and replays a following intake differently (it may be marked
   failed).
+- `t3_auto_track` adds tracking-only commitments (`track` in the input);
+  existing workflows are unchanged. Rollback limit: an older binary would
+  work a tracking-only task as an ordinary one.
 - `wake-rules-v2` is such a patch: workflows started before it keep the old
   hold-until-retry path until `!work retry` moves them onto the wake rules.
 

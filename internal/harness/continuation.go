@@ -436,6 +436,7 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		if bridgeDone(w.current.bridge) && len(w.continuing) == 0 && w.background == nil {
 			w.background = w.passiveLocked(w.current)
 		}
+		w.telemetry.native = w.current.native // named native calls belong to the current turn
 		w.telemetry.event("claude", raw, w.current.progress)
 		// Results carry the native origin. Delay assistant blocks until that
 		// boundary so an autonomous answer cannot contaminate a pending user run.
@@ -447,6 +448,15 @@ func (w *worker) claudeLineLocked(raw []byte) {
 		}
 		w.frames = append(w.frames, append([]byte(nil), raw...))
 		w.frameBytes += len(raw)
+	case "user":
+		// The worker decoder saw this turn's assistant frames (above), so it
+		// alone pairs their tool calls with these results for the current
+		// turn's named native call sink; the bridge still gets the frame.
+		if !e.Replay && w.current.native != nil {
+			w.telemetry.native = w.current.native
+			w.telemetry.event("claude", raw, nil)
+		}
+		writeLine(w.current.bridge, raw)
 	case "stream_event":
 		// Public telemetry is optional; decoder content/answers remain held for
 		// origin attribution. No private native frame is exposed directly.

@@ -75,6 +75,11 @@ the `heimdall-live` unit.
   intakes follow later runs and children, an active one yields to a newer
   request with one line, and requests missed while Heimdall was down are
   reconciled at startup, only under the trusted T3 owner as bound now.
+  Opt-in `durable.t3_auto_track` (off by default): a live owner turn whose
+  native results start T3 work with no `task_add` gets one tracking-only
+  task per thread (`T3-<n>`) that only observes and never works, tells the
+  owner one line when the run ends, and works only after
+  `!work promote`.
 - **Identity comes from the interface, never from text.** Callers never log
   in. Each interface supplies a platform-verified principal: the numeric
   Telegram user ID; for Slack the verified email, which is the Slack

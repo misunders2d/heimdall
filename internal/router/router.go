@@ -702,6 +702,8 @@ type turn struct {
 	toolErrors   []string
 	signIn       []string             // services a tool result said need a sign-in, for the job's outcome (t.mu)
 	native       []harness.NativeCall // a dispatch turn's own native T3 sends (t.mu)
+	t3Kids       []durable.Child      // a live owner turn's native T3 work, for tracking-only admission (t.mu)
+	t3Since      time.Time            // when that capture started
 }
 
 type readyEvent struct {
@@ -1937,6 +1939,21 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				})}
 			}
 		}
+		if w := c.r.opt.Work; t.job == nil && t.review == nil && w != nil && w.AutoTracks() && liveOwnerChat(t, batch[0].row) {
+			// A live owner turn: T3 work it starts with its native tools and
+			// does not register (task_add) becomes a tracking-only task at
+			// its end, from the engine's decoded results only.
+			if t.t3Since.IsZero() {
+				t.t3Since = time.Now()
+			}
+			spec.NativeCalls = &harness.NativeCalls{Match: isT3ChildTool, Done: guarded(c.r, "harness native call", func(n harness.NativeCall) {
+				if ch, ok := childOf(n); ok {
+					t.mu.Lock()
+					t.t3Kids = append(t.t3Kids, ch)
+					t.mu.Unlock()
+				}
+			})}
+		}
 		if t.job == nil && t.review == nil {
 			spec.Continuation = func(ev harness.Continuation) (ok bool) {
 				defer func() {
@@ -2227,6 +2244,27 @@ func (c *conv) requeue(items ...item) {
 
 // finish settles a turn: its messages, its session binding and its reply in
 // one transaction. Steers never handed over become follow-ups.
+// trackUntracked admits a tracking-only task for each T3 thread a live
+// owner turn started with its native tools without a task_add (durable
+// t3_auto_track). Whatever the turn's outcome: work it started is tracked.
+func (c *conv) trackUntracked(t *turn) {
+	w := c.r.opt.Work
+	t.mu.Lock()
+	kids := slices.Clone(t.t3Kids)
+	t.mu.Unlock()
+	if w == nil || len(kids) == 0 || len(t.batch) == 0 {
+		return
+	}
+	row := t.batch[0].row
+	ids, err := w.TrackUntracked(durable.Caller{Principal: row.From, Role: t.role, Conv: c.key, MsgID: row.MsgID, Live: row.Origin == core.OriginLive, Private: row.Private, OAuthActor: row.OAuthActor, OAuthInstallation: row.OAuthInstallation}, t.t3Since, kids)
+	if err != nil {
+		c.r.log.Printf("durable: turn %d: tracking-only admission failed: %v", t.id, err)
+	}
+	if len(ids) > 0 {
+		c.r.log.Printf("durable: turn %d: tracking-only %s", t.id, strings.Join(ids, ","))
+	}
+}
+
 func (c *conv) finish(ctx context.Context, t *turn) {
 	d := t.done
 	if ctx.Err() != nil {
@@ -2285,6 +2323,7 @@ func (c *conv) finish(ctx context.Context, t *turn) {
 		c.settle(ctx, t, c.jobEnd(t, d, res))
 		return
 	}
+	c.trackUntracked(t)
 	var draft *store.Job
 	var jobChange *store.JobChange
 	var card string

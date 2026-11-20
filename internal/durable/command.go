@@ -60,7 +60,8 @@ Slice 1 is PARTIAL: a configured T3 observer turns finished worker runs into rep
 !work accept ISSUE | !work reject ISSUE reason…
 !work retry ISSUE   (after reconciling a permanently failed delivery)
 !work pause ISSUE | !work resume ISSUE   (owner pause never expires)
-!work close ISSUE [note…]`
+!work close ISSUE [note…]
+!work promote T3-N   (a tracking-only T3 task: your assistant works it from now on)`
 
 // Task is the durable-task surface of the scheduler control for a bound
 // live owner turn: "add" (a plain title only: no worker, resource, gate or
@@ -104,6 +105,9 @@ func (r *Runtime) Task(c Caller, action, issue, title, requestID string) (reply 
 			return "A task needs a plain title: no worker, resource, gate or next step from a tool call.", false
 		}
 		reply = r.Command(c, "add "+issue+" "+title)
+		if strings.HasPrefix(reply, "Tracking ") || strings.Contains(reply, " is already tracked:") {
+			r.added.note(c.Conv.String()) // this turn registered its work: no tracking-only task
+		}
 		return reply, strings.HasPrefix(reply, "Tracking ")
 	}
 	return "Unsupported task action.", false
@@ -146,6 +150,8 @@ func (r *Runtime) Command(c Caller, text string) string {
 	switch sub {
 	case "show":
 		return r.show(issue)
+	case "promote":
+		return r.promote(c, issue)
 	case "add":
 		var cm Commitment
 		if cm, err = parseAdd(c, issue, f[2:]); err == nil {
@@ -441,7 +447,7 @@ func exportJSON(vs []View, now time.Time) []byte {
 			since = v.Created
 		}
 		origin := "chat"
-		if v.cm.Intake != nil || v.cm.Origin == OriginTrustedT3 {
+		if v.cm.Intake != nil || v.cm.Track != nil || v.cm.Origin == OriginTrustedT3 {
 			origin = "t3"
 		} else if v.cm.Origin != "" {
 			origin = "external"
@@ -516,7 +522,7 @@ func (r *Runtime) list(c Caller) string {
 	}
 	var vs []View
 	for _, v := range all {
-		if v.cm.Intake != nil && v.State.Phase == PhaseClosed {
+		if (v.cm.Intake != nil || v.cm.Track != nil) && v.State.Phase == PhaseClosed {
 			continue // a finished T3 request: !work show still has it
 		}
 		if c.sees(v.cm) {
@@ -544,6 +550,9 @@ func (r *Runtime) show(issue string) string {
 			link := r.linearURL(v.Issue)
 			if v.cm.Intake != nil {
 				link = "none (T3 thread " + v.cm.Intake.Thread + ", run " + v.cm.Intake.Run + ")"
+			}
+			if v.cm.Track != nil {
+				link = "none (tracking-only " + v.cm.Track.ref() + ")"
 			}
 			out := fmt.Sprintf("%s %s\n%s\nLinear: %s\nworker: %s\nattempt: %d%s\ndispatched run: %s\nevidence: %s\nverdict: %s\nreceipts: %v", v.Issue, v.Title, v.line(), link, or(v.Worker, "owner-dispatched"), s.Attempt, map[bool]string{true: " (authorized next step)"}[s.Stage == "next"], or(s.Dispatched, "none"), or(s.Evidence, "none"), or(s.Verdict, "none"), s.Receipts)
 			if ls := r.childLines(v.Issue); len(ls) > 0 {

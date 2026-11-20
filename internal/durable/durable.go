@@ -277,6 +277,9 @@ type Options struct {
 	// T3Owner reads the trusted T3 launcher's owner binding now (the
 	// scheduler control's); nil: missed T3 requests are never reconciled.
 	T3Owner T3OwnerFunc
+	// AutoTrack (durable.t3_auto_track): a live owner turn that starts T3
+	// work and makes no task_add gets a tracking-only task (tracking.go).
+	AutoTrack bool
 }
 
 type Runtime struct {
@@ -286,6 +289,7 @@ type Runtime struct {
 	queues   map[string]dbos.Queue
 	beat     chan struct{} // stops the last-alive heartbeat (T3 tracking)
 	beatDone sync.WaitGroup
+	added    adds // task_add admissions per conversation (tracking-only)
 }
 
 // Open prepares the runtime; Launch starts it and recovers pending work.
@@ -473,6 +477,7 @@ type Commitment struct {
 	Next              string       `json:"next,omitempty"`   // authorized work left after acceptance; "" = single step
 	Origin            string       `json:"origin,omitempty"` // registration source when not a live message, e.g. "trusted T3"
 	Intake            *Intake      `json:"intake,omitempty"` // a T3 request this follows (T3-<n>); no Linear issue
+	Track             *Track       `json:"track,omitempty"`  // a tracking-only T3 thread (T3-<n>): observed, never worked until promoted
 }
 
 // Event is an attributed signal to a commitment. By is the verified
@@ -575,6 +580,16 @@ func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {
 			return w.st, err
 		}
 		w.v2 = v2
+	}
+	if w.v2 && c.Track != nil {
+		promoted, err := r.trackOnly(ctx, w)
+		var cl closed
+		if errors.As(err, &cl) {
+			return r.close(ctx, w, cl.ev)
+		}
+		if err != nil || !promoted {
+			return w.st, err
+		}
 	}
 	if w.v2 && c.Intake != nil {
 		done, err := r.track(ctx, w)

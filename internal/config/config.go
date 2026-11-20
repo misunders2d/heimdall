@@ -77,6 +77,7 @@ type Durable struct {
 	Assistant      bool                       `json:"assistant_work,omitempty"`    // a commitment without a worker is worked by server-initiated wakes of the creator's own assistant (normal native tools); default off (!work report)
 	Dispatch       bool                       `json:"t3_dispatch,omitempty"`       // each attempt's brief is sent by a server-initiated turn of the creator's harness with its native t3_thread_send; default off (owner-dispatched)
 	T3Tracking     bool                       `json:"t3_tracking,omitempty"`       // a wake's native T3 launches, delegations and sends are recorded and watched; T3 intakes follow later runs and children, yield to newer requests, reconcile at startup; default off
+	AutoTrack      bool                       `json:"t3_auto_track,omitempty"`     // a live owner turn that starts T3 work (native launch, delegate or send) without task_add gets a tracking-only T3-<n>, once per thread; observed, never worked until !work promote; default off
 }
 
 // DurableResource is one capacity class (a host or provider).

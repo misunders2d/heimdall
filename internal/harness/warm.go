@@ -248,7 +248,7 @@ func (w *worker) next(spec Spec, deadline time.Time, born time.Time) (*Run, erro
 		return nil, err
 	}
 	cmd := &exec.Cmd{Env: []string{"HD_CONTEXT_DIR=" + w.root.contextDir}, Dir: spec.Launch.Dir, Stdin: &warmInput{WriteCloser: input.WriteCloser, thread: spec.Session.ID, gate: gate, start: spec.StartContext}}
-	r := &Run{contextTaken: consumed, schedulerControl: spec.SchedulerControl, scheduledJob: spec.ScheduledJob, scheduledRun: spec.ScheduledRun, contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress}
+	r := &Run{contextTaken: consumed, schedulerControl: spec.SchedulerControl, scheduledJob: spec.ScheduledJob, scheduledRun: spec.ScheduledRun, contextDir: w.root.contextDir, worker: w, caller: spec.Caller, harness: spec.Harness, cmd: w.cmd, ctx: old.ctx, cancel: old.cancel, bridgeCancel: cancel, done: make(chan struct{}), exited: w.exited, term: old.term, log: spec.Log, continuation: spec.Continuation, progress: spec.Progress, native: spec.NativeCalls}
 	var err error
 	switch spec.Harness {
 	case "pi", "omp":
@@ -266,13 +266,15 @@ func (w *worker) next(spec Spec, deadline time.Time, born time.Time) (*Run, erro
 	switch b := r.bridge.(type) {
 	case *piRPCBridge:
 		b.progress = spec.Progress
+		b.telemetry.native = spec.NativeCalls
 		if spec.Caller.Role == core.RoleOwner && spec.Caller.Private {
 			b.mcpNotify = spec.MCPNotify
 		}
 	case *claudeStreamBridge:
-		b.progress = spec.Progress
+		b.progress = spec.Progress // native calls: the worker decodes them (continuation.go)
 	case *codexBridge:
 		b.progress = spec.Progress
+		b.telemetry.native = spec.NativeCalls
 	}
 	if spec.Harness == "claude" {
 		w.pending = r // exact native replay chooses the new decoder, never timing

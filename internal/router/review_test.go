@@ -18,7 +18,7 @@ import (
 )
 
 // workEnv is the router with durable commitments and supervisor review on.
-// flags: [0] T3 dispatch, [1] assistant wakes, [2] T3 tracking.
+// flags: [0] T3 dispatch, [1] assistant wakes, [2] T3 tracking, [3] auto-track.
 func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 	t.Helper()
 	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
@@ -27,7 +27,7 @@ func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := durable.Open(durable.Options{Path: filepath.Join(t.TempDir(), "durable.db"), Outbox: st, Silence: -1, T3Tracking: len(dispatch) > 2 && dispatch[2]})
+	rt, err := durable.Open(durable.Options{Path: filepath.Join(t.TempDir(), "durable.db"), Outbox: st, Silence: -1, T3Tracking: len(dispatch) > 2 && dispatch[2], AutoTrack: len(dispatch) > 3 && dispatch[3]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,6 +582,36 @@ func TestWakeRecordsT3Children(t *testing.T) {
 	}
 	if strings.Contains(show, "secret") {
 		t.Fatalf("show:\n%s", show)
+	}
+}
+
+// With auto-track, a live owner turn whose native results show a T3
+// launch and that made no task_add gets one tracking-only task for the
+// thread, bound to the turn's caller and chat; a second turn starting work
+// in the same thread adds none. Model text naming a thread counts for
+// nothing.
+func TestLiveTurnAutoTracksUnregisteredT3Work(t *testing.T) {
+	e, rt := workEnv(t, false, true, false, true)
+	b, _ := json.Marshal(map[string]any{"tool": "mcp__t3__t3_thread_launch", "args": map[string]any{"title": "Fix CI", "message": "do it"},
+		"result": map[string]any{"structuredContent": map[string]any{"threadId": "thread-Q", "projectId": "p1", "runId": "run-Q1"}}})
+	launch := "T3SEND=" + base64.StdEncoding.EncodeToString(b)
+	e.send(owner, "a1", "please fix CI "+launch+" "+say("Started thread-Q."))
+	e.replyIn("a1", "Started thread-Q.")
+	st := phase(t, rt, "T3-1", durable.PhaseTracking)
+	if !strings.Contains(st.Next, "t3:thread-Q") {
+		t.Fatalf("%+v", st)
+	}
+	views, _ := rt.Views()
+	if len(views) != 1 || views[0].Issue != "T3-1" {
+		t.Fatalf("%+v", views)
+	}
+	e.send(owner, "a1", "send more "+launch+" "+say("Sent again."))
+	e.replyIn("a1", "Sent again.")
+	e.send(owner, "a1", "thread-Z is running "+say("I launched t3:thread-Z"))
+	e.replyIn("a1", "I launched")
+	time.Sleep(300 * time.Millisecond)
+	if views, _ := rt.Views(); len(views) != 1 {
+		t.Fatalf("admitted again: %+v", views)
 	}
 }
 
