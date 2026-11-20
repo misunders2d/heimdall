@@ -26,6 +26,7 @@ type Progress struct {
 // them (never the model's answer). Only calls named in NativeCalls.Tools are
 // decoded; nothing else is captured.
 type NativeCall struct {
+	ID     string // the native tool call's id
 	Tool   string
 	Args   json.RawMessage
 	Result json.RawMessage
@@ -36,12 +37,18 @@ type NativeCall struct {
 // durable dispatch turn's own T3 send). Nil for every other turn.
 type NativeCalls struct {
 	Tools []string
+	// Match, when set, picks the wanted tools by name instead of Tools (a
+	// T3 server's MCP alias differs between installs).
+	Match func(tool string) bool
 	Done  func(NativeCall)
 }
 
 func (n *NativeCalls) wants(tool string) bool {
 	if n == nil || n.Done == nil {
 		return false
+	}
+	if n.Match != nil {
+		return n.Match(tool)
 	}
 	for _, t := range n.Tools {
 		if t == tool {
@@ -81,7 +88,7 @@ func (t *progressTracker) nativeEnd(id, tool string, result json.RawMessage, fai
 		return
 	}
 	delete(t.nativeArgs, id)
-	t.native.Done(NativeCall{Tool: tool, Args: args, Result: result, Error: failed})
+	t.native.Done(NativeCall{ID: id, Tool: tool, Args: args, Result: result, Error: failed})
 }
 
 func (t *progressTracker) start(key string, index int, emit func(Progress)) {

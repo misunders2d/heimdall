@@ -264,6 +264,15 @@ func run(args []string) error {
 			jobs.TaskIntake = false // task_add is unreachable: never tell turns to use it
 		} else {
 			defer listener.Close()
+			if work != nil && jobs.TrustedT3 != nil {
+				// The startup reconcile admits a missed T3 request only under
+				// the trusted T3 owner as bound now (docs/durable.md).
+				ctl := cfg.Scheduler.Control
+				work.SetT3Owner(func(ctx context.Context) (durable.T3Owner, error) {
+					p, k, actor, inst, err := jobs.TrustedT3Owner(ctx, ctl.Owner, ctl.Source)
+					return durable.T3Owner{Principal: p, Route: k, OAuthActor: actor, OAuthInstallation: inst}, err
+				})
+			}
 		}
 	}
 	if work != nil {
@@ -308,7 +317,7 @@ func openDurable(cfg *config.Config, st *store.Store, logger *log.Logger) (*dura
 		}
 		obs = durable.T3{Command: d.T3Command}
 	}
-	return durable.Open(durable.Options{Path: filepath.Join(cfg.DataDir, "durable.db"), Outbox: st, Observer: obs, Observe: time.Duration(d.ObserveSeconds) * time.Second, Resources: res, Silence: time.Duration(d.SilenceSeconds) * time.Second, Linear: d.Linear, Log: logger})
+	return durable.Open(durable.Options{Path: filepath.Join(cfg.DataDir, "durable.db"), Outbox: st, Observer: obs, Observe: time.Duration(d.ObserveSeconds) * time.Second, Resources: res, Silence: time.Duration(d.SilenceSeconds) * time.Second, Linear: d.Linear, Log: logger, T3Tracking: d.T3Tracking})
 }
 
 // guardLog is the prompt-injection log: metadata of flagged messages, never

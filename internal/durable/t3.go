@@ -2,7 +2,6 @@ package durable
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -117,7 +116,7 @@ func (t T3) show(ctx context.Context, id string, messages int) (shown, error) {
 	if err != nil {
 		return v, fmt.Errorf("t3 thread show: %w", err)
 	}
-	if err := json.Unmarshal(out, &v); err != nil || v.Thread == nil {
+	if !firstObject(out, &v) || v.Thread == nil { // the CLI may print log lines first
 		return v, errors.New("t3 thread show: unexpected output")
 	}
 	return v, nil

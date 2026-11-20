@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -115,6 +116,36 @@ func (c *Control) resolveTrustedT3(pid int, alive func() bool) (Caller, func() b
 	// caller() re-verifies Slack live (OAuth actor from that check only) and
 	// re-decides the role per call; executeLocked limits it (Control.manages).
 	return Caller{Principal: p, Role: role, Conv: k, Private: true, External: trustedT3, Registered: trustedT3}, valid, nil
+}
+
+// TrustedT3Owner is the owner a trusted T3 registration binds to right
+// now, with no peer: the same registered private conversation and
+// current-owner check as resolveTrustedT3, and for a Slack owner the live
+// re-verification caller() runs (the OAuth actor is that check's, never a
+// stored one). The durable startup reconcile admits a T3 request missed
+// during a downtime only under it, asked again before each admission.
+// owner and source are the control's configured binding selectors.
+func (s *Scheduler) TrustedT3Owner(ctx context.Context, owner string, source *core.ConvKey) (p core.Principal, k core.ConvKey, actor, installation string, err error) {
+	if s.TrustedT3 == nil {
+		return p, k, "", "", errors.New("no trusted T3 launcher")
+	}
+	if p, k, err = s.st.ControlBinding(owner, source); err != nil {
+		return p, k, "", "", fmt.Errorf("trusted T3: deployment owner %s: %v", owner, err)
+	}
+	if p.Platform == core.PlatformSlack {
+		if s.Reverify == nil {
+			return p, k, "", "", errors.New("live Slack verification unavailable")
+		}
+		v, ok, err := s.Reverify(ctx, p)
+		if err != nil || !ok || v.Principal.Key() != p.Key() || v.Principal.Team != p.Team {
+			return p, k, "", "", errors.New("live owner identity verification failed")
+		}
+		p, actor, installation = v.Principal, v.OAuthActor, v.OAuthInstallation
+	}
+	if role, _, ok := s.access.Decide(p, k); !ok || role != core.RoleOwner {
+		return p, k, "", "", fmt.Errorf("trusted T3: deployment owner %s is not a current owner", owner)
+	}
+	return p, k, actor, installation, nil
 }
 
 // t3Lineage finds the nearest strict ancestor of pid that runs exe as the

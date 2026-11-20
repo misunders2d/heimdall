@@ -44,8 +44,8 @@
 //	SAY=BASE64     answer exactly the decoded text (standard encoding)
 //	WRITE64=NAME:BASE64 save NAME in the outbox with the decoded content
 //	T3SEND=BASE64  (claude) before answering, report a native
-//	               mcp__t3__t3_thread_send tool call: the decoded JSON's
-//	               "args" as its input, "result" as its tool_result content
+//	               mcp__t3__t3_thread_send tool call (or the decoded
+//	               JSON's "tool"): its "args" as its input, "result" as its tool_result content
 //	               and "error" as is_error; an args "message" of
 //	               "{MESSAGE}" is the prompt's text between BEGIN MESSAGE
 //	               and END MESSAGE, copied as a model would
@@ -63,6 +63,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -424,14 +425,22 @@ func (f *fake) t3Send(session string) {
 		if !ok {
 			continue
 		}
+		// Each call its own id, as Claude gives them; the same token (a
+		// prompt that repeats it) is the same call reported again.
+		sum := sha256.Sum256([]byte(enc))
+		id := "toolu_t3_" + hex.EncodeToString(sum[:6])
 		b, err := base64.StdEncoding.DecodeString(enc)
 		var call struct {
+			Tool   string          `json:"tool"`
 			Args   json.RawMessage `json:"args"`
 			Result json.RawMessage `json:"result"`
 			Error  bool            `json:"error"`
 		}
 		if err != nil || json.Unmarshal(b, &call) != nil {
 			continue
+		}
+		if call.Tool == "" {
+			call.Tool = "mcp__t3__t3_thread_send"
 		}
 		var args map[string]any
 		if json.Unmarshal(call.Args, &args) == nil && args["message"] == "{MESSAGE}" {
@@ -441,8 +450,8 @@ func (f *fake) t3Send(session string) {
 				call.Args, _ = json.Marshal(args)
 			}
 		}
-		f.emit(map[string]any{"type": "assistant", "session_id": session, "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "toolu_t3", "name": "mcp__t3__t3_thread_send", "input": call.Args}}}})
-		f.emit(map[string]any{"type": "user", "session_id": session, "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "toolu_t3", "is_error": call.Error, "content": call.Result}}}})
+		f.emit(map[string]any{"type": "assistant", "session_id": session, "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": id, "name": call.Tool, "input": call.Args}}}})
+		f.emit(map[string]any{"type": "user", "session_id": session, "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "is_error": call.Error, "content": call.Result}}}})
 	}
 }
 

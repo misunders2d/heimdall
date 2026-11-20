@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
@@ -268,13 +269,23 @@ type Options struct {
 	Wake       func(iface string)
 	Linear     string // Linear workspace slug for issue links
 	Log        *log.Logger
+	// T3Tracking (durable.t3_tracking): a wake's native T3 launches, delegations
+	// and sends are recorded and watched (children.go); a T3 request intake
+	// admitted with it follows later runs and its children, yields to a newer
+	// request when active, and missed requests are reconciled at startup.
+	T3Tracking bool
+	// T3Owner reads the trusted T3 launcher's owner binding now (the
+	// scheduler control's); nil: missed T3 requests are never reconciled.
+	T3Owner T3OwnerFunc
 }
 
 type Runtime struct {
-	opt    Options
-	ctx    dbos.Context
-	db     *sql.DB
-	queues map[string]dbos.Queue
+	opt      Options
+	ctx      dbos.Context
+	db       *sql.DB
+	queues   map[string]dbos.Queue
+	beat     chan struct{} // stops the last-alive heartbeat (T3 tracking)
+	beatDone sync.WaitGroup
 }
 
 // Open prepares the runtime; Launch starts it and recovers pending work.
@@ -322,6 +333,22 @@ func Open(opt Options) (*Runtime, error) {
 		r.Close()
 		return nil, fmt.Errorf("durable: t3 intakes: %w", err)
 	}
+	// The project of an intake's thread (reconcile lists it after a restart).
+	if _, err := db.Exec(`ALTER TABLE heimdall_t3_intakes ADD COLUMN project TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		r.Close()
+		return nil, fmt.Errorf("durable: t3 intakes: %w", err)
+	}
+	// T3 children of tasks (hub T3 tracking): ids and statuses only. ref
+	// keeps run-less and unbound children apart: one row per native call.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS heimdall_t3_children(id INTEGER PRIMARY KEY AUTOINCREMENT, issue TEXT NOT NULL, thread TEXT NOT NULL, env TEXT NOT NULL, run TEXT NOT NULL, ref TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, task TEXT NOT NULL, wake TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL, UNIQUE(issue,thread,env,run,ref))`); err != nil {
+		r.Close()
+		return nil, fmt.Errorf("durable: t3 children: %w", err)
+	}
+	// The last-alive heartbeat (T3 tracking): the start of a downtime.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS heimdall_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL)`); err != nil {
+		r.Close()
+		return nil, fmt.Errorf("durable: meta: %w", err)
+	}
 	for name, res := range opt.Resources {
 		per := res.PerWorker
 		if per <= 0 {
@@ -345,6 +372,8 @@ func Open(opt Options) (*Runtime, error) {
 	dbos.RegisterWorkflow(ctx, r.dispatch, dbos.WithWorkflowName(dispatchName))
 	dbos.RegisterWorkflow(ctx, r.workTurn, dbos.WithWorkflowName(workTurnName))
 	dbos.RegisterWorkflow(ctx, r.probe, dbos.WithWorkflowName(intakeName))
+	dbos.RegisterWorkflow(ctx, r.watchChild, dbos.WithWorkflowName(childName))
+	dbos.RegisterWorkflow(ctx, r.reconcile, dbos.WithWorkflowName(reconcileName))
 	return r, nil
 }
 
@@ -356,6 +385,10 @@ func (r *Runtime) SetWake(f func(iface string)) { r.opt.Wake = f }
 func (r *Runtime) SetDispatcher(d Dispatcher, authorize Authorizer) {
 	r.opt.Dispatcher, r.opt.Authorize = d, authorize
 }
+
+// SetT3Owner connects the trusted T3 owner binding that the startup
+// reconcile admits missed T3 requests under; call before Launch.
+func (r *Runtime) SetT3Owner(f T3OwnerFunc) { r.opt.T3Owner = f }
 
 // SetAssistant connects assistant wakes to the router; call before Launch.
 func (r *Runtime) SetAssistant(a Assistant) { r.opt.Assistant = a }
@@ -398,11 +431,23 @@ func (r *Runtime) Launch() error {
 	if r.opt.Dispatcher != nil && r.opt.Authorize == nil {
 		return errors.New("durable: a dispatcher needs creator revalidation (Authorize)")
 	}
-	return dbos.Launch(r.ctx)
+	prev := r.alive() // before this run records its own
+	if err := dbos.Launch(r.ctx); err != nil {
+		return err
+	}
+	r.rearmChildren()
+	r.startReconcile(prev)
+	r.heartbeat()
+	return nil
 }
 
 // Close stops the runtime; pending commitments resume at the next Launch.
 func (r *Runtime) Close() {
+	if r.beat != nil {
+		close(r.beat)
+		r.beatDone.Wait()
+		r.markAlive()
+	}
 	dbos.Shutdown(r.ctx, 10*time.Second)
 	r.db.Close()
 }
@@ -502,6 +547,24 @@ type closed struct{ ev Event }
 
 func (closed) Error() string { return "closed by owner" }
 
+// superseded carries a newer T3 request out of an active intake's wait
+// (an intake admitted with T3 tracking only; see yields).
+type superseded struct{}
+
+func (superseded) Error() string { return "superseded by a newer T3 request" }
+
+// yields reports whether ev ends w as a superseded active T3 request: the
+// intake was admitted with T3 tracking (frozen in its input, so a flag
+// change never alters a recorded history) and is past its tracking phase,
+// and the newer request is the same creator's, admitted by T3's own
+// per-message createdBy=user mark. A request admitted by the thread's mark
+// only (an agent's report back into the thread carries it too) never stops
+// an active task.
+func yields(w *run, ev Event) bool {
+	return ev.Kind == "supersede" && w.c.Intake != nil && w.c.Intake.Follow && w.st.Phase != PhaseTracking &&
+		ev.By == w.c.Creator && ev.Note != byThreadOnly
+}
+
 func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {
 	w := &run{c: c, st: State{Attempt: 1}}
 	if !forceOldPath {
@@ -527,6 +590,9 @@ func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {
 	var cl closed
 	if errors.As(err, &cl) {
 		return r.close(ctx, w, cl.ev)
+	}
+	if errors.As(err, new(superseded)) {
+		return r.yield(ctx, w)
 	}
 	return w.st, err
 }
@@ -681,6 +747,9 @@ func (r *Runtime) next(ctx dbos.Context, w *run, wait time.Duration) (ev Event, 
 	ev, err = dbos.Recv[Event](ctx, topic, wait)
 	if errors.Is(err, dbos.ErrTimeout) {
 		return Event{}, false, nil
+	}
+	if err == nil && yields(w, ev) {
+		return ev, true, superseded{}
 	}
 	return ev, err == nil && ev.Kind != "", err
 }
@@ -1118,7 +1187,11 @@ func continuation(key string, malformed bool) string {
 func (r *Runtime) workTurn(ctx dbos.Context, req WorkRequest) (WorkResult, error) {
 	pause := 10 * time.Minute
 	for {
-		res, err := attempt(ctx, "work", func(sctx context.Context) (WorkResult, error) { return r.opt.Assistant.Work(sctx, req) })
+		res, err := attempt(ctx, "work", func(sctx context.Context) (WorkResult, error) {
+			q := req
+			q.Prompt += r.childNote(q.Issue) // inside the step: recorded children so far, no new step
+			return r.opt.Assistant.Work(sctx, q)
+		})
 		var p Permanent
 		if errors.As(err, &p) {
 			return WorkResult{Held: p.Error(), Class: WakeRefused}, nil
@@ -1434,6 +1507,9 @@ func (r *Runtime) stop(ctx dbos.Context, w *run, why, reason string) error {
 		}
 		if ev.Kind == "close" {
 			return closed{ev}
+		}
+		if yields(w, ev) {
+			return superseded{}
 		}
 		if ev.Kind == "retry" {
 			break

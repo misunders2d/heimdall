@@ -240,6 +240,29 @@ func TestTrustedT3TaskAdmission(t *testing.T) {
 	}
 }
 
+// The durable reconcile's owner binding is the trusted T3 registration's,
+// read now: the deployment owner's registered private conversation while a
+// current owner, and nothing without a trusted launcher or once the owner
+// loses the role.
+func TestTrustedT3Owner(t *testing.T) {
+	r, c, _, _ := t3Rig(t)
+	ctx := context.Background()
+	p, k, actor, _, err := r.s.TrustedT3Owner(ctx, c.owner, c.source)
+	if err != nil || p.Key() != boss.Key() || k != bossDM || actor != "" {
+		t.Fatalf("%v %v %q %v", p, k, actor, err)
+	}
+	launcher := r.s.TrustedT3
+	r.s.TrustedT3 = nil
+	if _, _, _, _, err := r.s.TrustedT3Owner(ctx, c.owner, c.source); err == nil {
+		t.Fatal("bound without a trusted launcher")
+	}
+	r.s.TrustedT3 = launcher
+	delete(r.s.access.Owners, boss.Key())
+	if _, _, _, _, err := r.s.TrustedT3Owner(ctx, c.owner, c.source); err == nil || !strings.Contains(err.Error(), "not a current owner") {
+		t.Fatal(err)
+	}
+}
+
 // waitAssistant answers the first wake with WAIT and later ones with REPORT.
 type waitAssistant struct {
 	wait time.Duration

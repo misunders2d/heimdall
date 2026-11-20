@@ -51,8 +51,17 @@ func TestParseIntakeRealShape(t *testing.T) {
 	// Message marks win over the thread's: an agent's message in an owner
 	// thread is not admitted, an owner's message in an agent thread is.
 	agent := logBlock + thread + `,"messages":[{"role":"user","createdBy":"user","runId":"r1","text":"first"},{"role":"user","createdBy":"agent","runId":"r2","text":"delegated"}]}`
-	if th, err := parseIntake([]byte(agent)); err != nil || !th.Agent || th.Request != nil {
+	if th, err := parseIntake([]byte(agent)); err != nil || !th.Agent || th.Request != nil || th.LastOwner == nil || *th.LastOwner != (IntakeMessage{Run: "r1"}) {
 		t.Fatalf("agent prompt: %+v %v", th, err)
+	}
+	// The latest owner message stays known (ids only) after an agent's
+	// message: owner A, owner B, agent → B.
+	abAgent := logBlock + thread + `,"messages":[{"role":"user","createdBy":"user","id":"mA","runId":"r1","text":"A"},{"role":"user","createdBy":"user","id":"mB","runId":"r2","text":"B"},{"role":"user","createdBy":"agent","id":"mX","runId":"r3","text":"report"}]}`
+	if th, err := parseIntake([]byte(abAgent)); err != nil || !th.Agent || th.Request != nil || th.LastOwner == nil || *th.LastOwner != (IntakeMessage{ID: "mB", Run: "r2"}) {
+		t.Fatalf("owner, owner, agent: %+v %v", th, err)
+	}
+	if th, _ := parseIntake([]byte(logBlock + thread + unmarkedMsgs)); th.LastOwner == nil || *th.LastOwner != (IntakeMessage{Run: "r2", ByThread: true}) {
+		t.Fatalf("thread mode last owner: %+v", th)
 	}
 	ownerInAgentThread := logBlock + threadBy("agent") + `,"messages":[{"role":"user","createdBy":"user","runId":"r2","text":"mine"}]}`
 	if th, err := parseIntake([]byte(ownerInAgentThread)); err != nil || th.Agent || th.Request == nil || *th.Request != (IntakeMessage{Run: "r2", Text: "mine"}) {

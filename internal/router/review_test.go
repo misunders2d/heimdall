@@ -18,7 +18,7 @@ import (
 )
 
 // workEnv is the router with durable commitments and supervisor review on.
-// flags: [0] T3 dispatch, [1] assistant wakes.
+// flags: [0] T3 dispatch, [1] assistant wakes, [2] T3 tracking.
 func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 	t.Helper()
 	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
@@ -27,7 +27,7 @@ func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := durable.Open(durable.Options{Path: filepath.Join(t.TempDir(), "durable.db"), Outbox: st, Silence: -1})
+	rt, err := durable.Open(durable.Options{Path: filepath.Join(t.TempDir(), "durable.db"), Outbox: st, Silence: -1, T3Tracking: len(dispatch) > 2 && dispatch[2]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,6 +519,69 @@ func TestAssistantWakeReports(t *testing.T) {
 	conv := core.ConvKey{Interface: "fake", Chat: core.ReviewChat("MEL-95")}
 	if n := count(t, e.dbPath, `SELECT count(*) FROM inbound WHERE chat=? AND msg_id=? AND text LIKE '%Goal: MEL-95: Reply to the supplier%REPORT on the first line%WAIT <duration>%'`, conv.Chat, "MEL-95/1/work/1"); n != 1 {
 		t.Fatalf("wake prompt not bound: %d", n)
+	}
+}
+
+// With T3 tracking, a wake's native T3 calls are its task's children, from
+// the engine's decoded results (never the model's text): a launch, a
+// delegation and a send under any MCP alias, in Claude's tool_result shape
+// (text content blocks); results that named no thread stay apart (one row
+// per delegated task id, else per native call id); a failed call started nothing; the message is
+// never stored. They show in !work show.
+func TestWakeRecordsT3Children(t *testing.T) {
+	e, rt := workEnv(t, false, true, true)
+	call := func(tool string, args map[string]any, result string, failed bool) string {
+		b, _ := json.Marshal(map[string]any{"tool": tool, "args": args, "result": []map[string]string{{"type": "text", "text": result}}, "error": failed})
+		return "T3SEND=" + base64.StdEncoding.EncodeToString(b)
+	}
+	calls := []string{
+		call("mcp__t3__t3_thread_launch", map[string]any{"title": "Fix CI", "message": "secret brief text"}, `{"threadId":"thread-L","projectId":"p1","runId":"run-L1"}`, false),
+		call("mcp__t3-code__delegate_task", map[string]any{"task": "secret task text", "target": map[string]string{"environmentId": "env-R"}}, `{"taskId":"task-D","childThreadId":"thread-D","childRunId":"run-D1","status":"running"}`, false),
+		call("mcp__t3__t3_thread_send", map[string]any{"threadId": "thread-L", "message": "secret follow-up"}, `{"threadId":"thread-L","runId":"run-L2","status":"accepted"}`, false),
+		call("mcp__t3-code__delegate_task", map[string]any{"task": "secret one"}, `{"taskId":"task-U1","childThreadId":null,"childRunId":null,"status":"queued"}`, false),
+		call("mcp__t3-code__delegate_task", map[string]any{"task": "secret two"}, `{"taskId":"task-U2","childThreadId":null,"childRunId":null,"status":"queued"}`, false),
+		call("mcp__t3__t3_thread_launch", map[string]any{"title": "one"}, `{"threadId":null,"projectId":"p1","runId":null}`, false),
+		call("mcp__t3__t3_thread_launch", map[string]any{"title": "two"}, `{"threadId":null,"projectId":"p1","runId":null}`, false),
+		call("mcp__t3__t3_thread_launch", map[string]any{}, "denied", true),
+	}
+	e.send(owner, "k1", "!work add MEL-96 Fix CI via T3 "+strings.Join(calls, " ")+" "+say("WAIT 2h\nwait for the children"))
+	e.replyIn("k1", "MEL-96")
+	var cs []durable.ChildRow
+	waitFor := func(cond func() bool) {
+		for end := time.Now().Add(60 * time.Second); !cond(); time.Sleep(20 * time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatalf("timed out; children %+v", cs)
+			}
+		}
+	}
+	// The wake has ended (its WAIT), so every call is in: exactly seven.
+	waitFor(func() bool { st, _ := rt.State("MEL-96"); return strings.HasPrefix(st.Next, "next wake in 2h0m0s") })
+	if cs, _ = rt.Children("MEL-96"); len(cs) != 7 {
+		t.Fatalf("children %+v", cs)
+	}
+	if c := cs[0]; c.Kind != "launch" || c.Thread != "thread-L" || c.Run != "run-L1" || c.Env != "" || c.Wake != "MEL-96/1/work/1" {
+		t.Fatalf("launch %+v", c)
+	}
+	if c := cs[1]; c.Kind != "delegate" || c.Thread != "thread-D" || c.Run != "run-D1" || c.Env != "env-R" || c.Task != "task-D" || !strings.Contains(c.Status, "not watched here") {
+		t.Fatalf("delegate %+v", c)
+	}
+	if c := cs[2]; c.Kind != "send" || c.Thread != "thread-L" || c.Run != "run-L2" {
+		t.Fatalf("send %+v", c)
+	}
+	if cs[3].Task != "task-U1" || cs[4].Task != "task-U2" || cs[3].Thread != "" || cs[4].Thread != "" {
+		t.Fatalf("unbound %+v %+v", cs[3], cs[4])
+	}
+	if cs[5].Kind != "launch" || cs[6].Kind != "launch" || cs[5].Thread != "" || cs[6].Thread != "" {
+		t.Fatalf("thread-less launches (one row per native call) %+v %+v", cs[5], cs[6])
+	}
+	show, _ := rt.Task(durable.Caller{Principal: core.Principal{Platform: "fake", ID: "owner"}, Role: core.RoleOwner, Conv: core.ConvKey{Interface: "fake", Chat: "k1"}, Live: true}, "show", "MEL-96", "", "")
+	for _, want := range []string{"- t3:thread-L (launch, run run-L1): not watched: no T3 CLI here", "- t3:thread-L (send, run run-L2)", "(task task-U1): unbound", "(task task-U2): unbound"} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("show lacks %q:\n%s", want, show)
+		}
+	}
+	if strings.Contains(show, "secret") {
+		t.Fatalf("show:\n%s", show)
 	}
 }
 
