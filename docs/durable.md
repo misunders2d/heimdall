@@ -355,7 +355,10 @@ live only in model text. With `durable.t3_tracking`:
   new intake) closes an active (no longer tracking) intake with one line to
   the owner's private chat:
   `Task "<title>" (T3-<n>) stopped: a newer request in the same T3 thread replaced it. — heimdall`.
-  A tracking intake still closes quietly.
+  Only the same creator's newer request admitted by T3's own per-message
+  `createdBy=user` mark counts: one known by the thread's mark alone (an
+  agent's report back into the thread carries it too) never stops an
+  active task. A tracking intake still closes quietly.
 - **Downtime reconcile.** A hook fired while Heimdall was down is lost. At
   each start Heimdall lists (`thread list --project <id> --json`) the T3
   projects of requests from the last 7 days and runs the ordinary intake
@@ -363,12 +366,18 @@ live only in model text. With `durable.t3_tracking`:
   not `mcp:launch:`) changed since that project's last intake (less an
   hour), at most 20 per project, bound to the creator, route and sign-ins
   of that project's latest `T3-<n>`. The probe still decides from T3's own
-  marks; its (thread, message, run) row makes a repeat a no-op. A failure
+  marks, and here only a per-message `createdBy=user` mark admits (never
+  the thread's mark alone: without the hook's timing it is too weak); its
+  (thread, message, run) row makes a repeat a no-op. A reconciled task
+  works only if its run ended interrupted or failed, and each wake
+  revalidates its creator. A failure
   is one metadata-only log line. Threads in a project Heimdall never took a
   request from are not found.
 
-Interrupted runs report to the private chat as today; reporting into a
-hub-local T3 thread waits for an owner decision.
+Known limit: the T3 checked here (laptop, 2026-11-20) marks only threads,
+not messages, so yielding and reconcile admit nothing until T3 marks each
+message. Interrupted runs report to the private chat as today; reporting
+into a hub-local T3 thread waits for an owner decision.
 
 ## Dispatch (`t3_dispatch`)
 

@@ -246,6 +246,11 @@ type intakeProbe struct {
 	OAuthActor string         `json:"oauth_actor,omitempty"`
 	OAuthInst  string         `json:"oauth_installation,omitempty"`
 	Follow     bool           `json:"follow,omitempty"` // T3 tracking at the hook (frozen in the probe's input)
+	// Reconcile: started by the startup reconcile, not by a hook. Only a
+	// request with T3's own per-message createdBy=user mark is admitted:
+	// without the hook's timing, the thread's mark alone (which an agent's
+	// report back into the thread also carries) is too weak.
+	Reconcile bool `json:"reconcile,omitempty"`
 }
 
 // intake answers task_intake at once and leaves the T3 read to a durable
@@ -321,6 +326,8 @@ func (r *Runtime) probe(ctx dbos.Context, in intakeProbe) (string, error) {
 			return "delegated", nil
 		case got.Th.Agent:
 			return "not the owner's message", nil // an agent's prompt: nothing to track
+		case in.Reconcile && got.Th.Request != nil && got.Th.Request.ByThread:
+			return "refused: reconcile needs a message mark", nil
 		case got.Th.Request == nil || got.Th.Request.Run == "":
 			if i < intakeRetries {
 				break
@@ -411,10 +418,18 @@ func (r *Runtime) admitIntake(in intakeProbe, m IntakeMessage, project, probe st
 	rows.Close()
 	for _, o := range older {
 		// Only a tracking intake acts on it; an active task ignores it.
-		_ = dbos.Send(r.ctx, fmt.Sprintf("T3-%d", o), Event{Kind: "supersede", By: in.Creator}, topic, dbos.WithIdempotencyKey(fmt.Sprintf("supersede/T3-%d/%s", o, issue)))
+		ev := Event{Kind: "supersede", By: in.Creator}
+		if m.ByThread {
+			ev.Note = byThreadOnly // too weak to stop an active task (yields)
+		}
+		_ = dbos.Send(r.ctx, fmt.Sprintf("T3-%d", o), ev, topic, dbos.WithIdempotencyKey(fmt.Sprintf("supersede/T3-%d/%s", o, issue)))
 	}
 	return "admitted " + issue, nil
 }
+
+// byThreadOnly marks a supersede from a request admitted by the thread's
+// mark only.
+const byThreadOnly = "by_thread"
 
 // byThreadNote is the brief's attribution sentence for a request admitted
 // by the thread's mark only.

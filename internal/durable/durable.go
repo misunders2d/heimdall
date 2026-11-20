@@ -531,9 +531,14 @@ func (superseded) Error() string { return "superseded by a newer T3 request" }
 
 // yields reports whether ev ends w as a superseded active T3 request: the
 // intake was admitted with T3 tracking (frozen in its input, so a flag
-// change never alters a recorded history) and is past its tracking phase.
+// change never alters a recorded history) and is past its tracking phase,
+// and the newer request is the same creator's, admitted by T3's own
+// per-message createdBy=user mark. A request admitted by the thread's mark
+// only (an agent's report back into the thread carries it too) never stops
+// an active task.
 func yields(w *run, ev Event) bool {
-	return ev.Kind == "supersede" && w.c.Intake != nil && w.c.Intake.Follow && w.st.Phase != PhaseTracking
+	return ev.Kind == "supersede" && w.c.Intake != nil && w.c.Intake.Follow && w.st.Phase != PhaseTracking &&
+		ev.By == w.c.Creator && ev.Note != byThreadOnly
 }
 
 func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {

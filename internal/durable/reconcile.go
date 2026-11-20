@@ -18,7 +18,10 @@ import (
 // intake probe for each owner-created thread changed since its last intake
 // there, bound to the creator, route and sign-ins of that project's latest
 // T3 request. The probe still decides alone from T3's own createdBy mark,
-// and its (thread, message, run) row makes a repeat a no-op.
+// and only a per-message mark admits here (never the thread's mark alone);
+// its (thread, message, run) row makes a repeat a no-op. A reconciled task
+// works only if its run ended interrupted or failed, and each wake
+// revalidates its creator as it starts.
 
 const reconcileName = "heimdall.t3reconcile"
 
@@ -187,5 +190,5 @@ func (r *Runtime) probeBinding(issue string) (intakeProbe, bool) {
 	if !ok || cm.Intake == nil || cm.Origin != OriginTrustedT3 {
 		return intakeProbe{}, false
 	}
-	return intakeProbe{Creator: cm.Creator, Owner: cm.Owner, Route: cm.Route, Private: cm.Private, OAuthActor: cm.OAuthActor, OAuthInst: cm.OAuthInstallation, Follow: true}, true
+	return intakeProbe{Creator: cm.Creator, Owner: cm.Owner, Route: cm.Route, Private: cm.Private, OAuthActor: cm.OAuthActor, OAuthInst: cm.OAuthInstallation, Follow: true, Reconcile: true}, true
 }

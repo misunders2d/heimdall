@@ -206,7 +206,8 @@ func TestIntakeWithoutTrackingClosesOnLaterRun(t *testing.T) {
 // An active T3 request (its run was interrupted, so the assistant works
 // it) yields to a newer owner request in its own thread: it closes with
 // exactly one line to the owner, and its wakes stop. The newer request is
-// tracked.
+// tracked. Only the same creator's request with T3's own message mark
+// counts.
 func TestActiveIntakeYieldsToNewerRequest(t *testing.T) {
 	defer SetIntakePause(10 * time.Millisecond)()
 	f := &fakeIntake{}
@@ -222,9 +223,18 @@ func TestActiveIntakeYieldsToNewerRequest(t *testing.T) {
 		st, _ := e.rt.State("T3-1")
 		return strings.HasPrefix(st.Next, "next wake in 1h0m0s")
 	})
-	f.set(IntakeThread{Status: "running", LatestRun: "r2", ActiveRun: "r2", Request: &IntakeMessage{Run: "r2", Text: "Actually, call them instead"}})
+	// A request known only by the thread's mark (an agent's report back
+	// carries it too) never stops the active task.
+	f.set(IntakeThread{Status: "running", LatestRun: "r2", ActiveRun: "r2", Request: &IntakeMessage{Run: "r2", Text: "child report", ByThread: true}})
 	e.rt.Task(t3, "intake", "thread-Y", "", "prompt_submit")
 	e.phase("T3-2", PhaseTracking, 0)
+	time.Sleep(300 * time.Millisecond)
+	if st, _ := e.rt.State("T3-1"); st.Phase == PhaseClosed {
+		t.Fatalf("a thread-mark request stopped the active task: %+v", st)
+	}
+	f.set(IntakeThread{Status: "running", LatestRun: "r3", ActiveRun: "r3", Request: &IntakeMessage{Run: "r3", Text: "Actually, call them instead"}})
+	e.rt.Task(t3, "intake", "thread-Y", "", "prompt_submit")
+	e.phase("T3-3", PhaseTracking, 0)
 	e.phase("T3-1", PhaseClosed, 0)
 	waitFor(t, 5*time.Second, "one line", func() bool { return len(outbound(t, e.dir, "(T3-1) stopped")) == 1 })
 	time.Sleep(300 * time.Millisecond)
@@ -265,7 +275,8 @@ func (f *listIntake) ListThreads(context.Context, string) ([]ListedThread, error
 // next start: the projects of earlier requests are listed and each owner
 // thread changed since is probed as its hook would have been, bound to the
 // earlier request's owner and route. Agent-created, delegated and child
-// threads are skipped; a second start admits nothing new.
+// threads are skipped, and so is a request known only by the thread's
+// mark (no hook timing to back it); a second start admits nothing new.
 func TestReconcileAfterDowntime(t *testing.T) {
 	defer SetIntakePause(10 * time.Millisecond)()
 	dir := t.TempDir()
@@ -286,10 +297,12 @@ func TestReconcileAfterDowntime(t *testing.T) {
 	f.mu.Lock()
 	f.threads["thread-A"] = IntakeThread{Status: "running", LatestRun: "a2", ActiveRun: "a2", Project: "proj-1", Request: &IntakeMessage{Run: "a2", Text: "Second"}}
 	f.threads["thread-B"] = IntakeThread{Status: "interrupted", LatestRun: "b1", Project: "proj-1", Request: &IntakeMessage{Run: "b1", Text: "Third"}}
+	f.threads["thread-W"] = IntakeThread{Status: "interrupted", LatestRun: "w1", Project: "proj-1", Request: &IntakeMessage{Run: "w1", Text: "thread mark only", ByThread: true}}
 	f.threads["agent-T"] = IntakeThread{Status: "running", LatestRun: "x1", ActiveRun: "x1", Project: "proj-1", Request: &IntakeMessage{Run: "x1", Text: "agent"}}
 	f.list = []ListedThread{
 		{ID: "thread-A", CreatedBy: "user", Updated: now},
 		{ID: "thread-B", CreatedBy: "user", Updated: now},
+		{ID: "thread-W", CreatedBy: "user", Updated: now},
 		{ID: "agent-T", CreatedBy: "agent", Updated: now},
 		{ID: "kid-K", CreatedBy: "user", Parent: &parent, Updated: now},
 		{ID: "mcp:launch:z", CreatedBy: "user", Updated: now},
