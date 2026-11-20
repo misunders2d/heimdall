@@ -86,11 +86,14 @@ babble."
     exactly `Yes`, `No` or `Details` (any case, trailing punctuation
     ignored; not `ok`, `confirm`, `cancel` or the Russian/Ukrainian words
     other drafts take) **and** the card is still the latest thing in that
-    chat: no turn is running there, none ended after the card, and no
-    unprompted delivery (scheduled output, a task notice, another card)
-    followed it. Replies to the owner's own commands (`Details`, `!jobs`)
-    do not count. Otherwise the word is an ordinary message (a steer, an
-    answer to the assistant, the `cancel` control), and the owner answers
+    chat: no turn is running there, none ended after the card, and nothing
+    else was delivered after it (scheduled output, a task notice, another
+    card). Replies to messages sent after the card (`Details`, `!jobs`,
+    other commands) do not count; a message's platform time gets a minute
+    of slack. Otherwise the word never reaches the proposal: it answers
+    the owner's own drafts there as usual, or is an ordinary message (a
+    steer, an answer to the assistant, the `cancel` control), and the owner
+    answers
     with `!jobs`, which heads its list with each waiting request and its
     copyable `!job confirm <id>` / `!job discard <id>` line. The card says
     so in one line. This narrows the 2026-11-11 "a plain yes answers all"
@@ -110,7 +113,9 @@ babble."
     still configured and, for an agent's draft, that `agent_proposals` is
     still on; if not, the Yes answers that it was withdrawn and nothing is
     started. Config changes take effect on restart, and the scheduler's
-    next tick then withdraws such drafts with one line each.
+    next tick then withdraws such drafts with one line each. A launcher
+    still in the config whose OS user did not resolve at this start keeps
+    its cards.
   - A run proposes an issue once (its record outlives the draft, so a No
     is final for that run); an issue already waiting is not sent twice;
     at most 5 launcher proposals wait per person. Launcher request ids

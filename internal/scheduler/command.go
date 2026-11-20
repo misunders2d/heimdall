@@ -83,16 +83,15 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 		return "", nil, false
 	}
 	drafts := s.drafts(c)
-	if external(drafts) {
+	if external(drafts) && ((w != "yes" && w != "no" && !details) || !s.cardIsLatest(drafts)) {
 		// A launcher proposal arrives unasked and waits in the chat where the
 		// owner talks to his assistant: only the exact word Yes, No or Details
 		// answers it, and only while its card is still the latest thing
-		// there. Otherwise the word is an ordinary message (a steer, an
-		// answer to the assistant, the cancel control) and the owner answers
-		// with !job confirm|discard <id>, which !jobs lists.
-		if (w != "yes" && w != "no" && !details) || !s.cardIsLatest(drafts) {
-			return "", nil, false
-		}
+		// there. Otherwise the word never reaches it: it answers the owner's
+		// own drafts as usual, or is an ordinary message (a steer, an answer
+		// to the assistant, the cancel control); !jobs lists the proposal
+		// with its !job confirm|discard <id>.
+		drafts = slices.DeleteFunc(drafts, func(j store.Job) bool { return j.Origin != "" })
 	}
 	switch {
 	case len(drafts) == 0:
@@ -418,7 +417,11 @@ func (s *Scheduler) card(c Caller, j store.Job) string {
 		return s.taskCard(c.Conv, j)
 	}
 	if c.Vouch != nil {
-		return asks(c.Conv, c.Vouch, false) + "\n\n" + s.request(c, j) + "\n— heimdall"
+		card := s.request(c, j)
+		if c.Conv.Interface == core.PlatformSlack && c.Conv.Thread != "" {
+			card = strings.Replace(card, " to apply or ", " in this thread to apply or ", 1)
+		}
+		return asks(c.Conv, c.Vouch, false) + "\n\n" + card + "\nIf other messages come first, send !jobs to answer it.\n— heimdall"
 	}
 	return s.request(c, j) + "\n— heimdall"
 }

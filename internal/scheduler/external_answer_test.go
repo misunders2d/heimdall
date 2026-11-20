@@ -68,17 +68,47 @@ func TestExternalProposalBareWordOnlyWhileCardIsLatest(t *testing.T) {
 		}
 	})
 	t.Run("unprompted delivery after the card", func(t *testing.T) {
+		for name, out := range map[string]core.Outbound{
+			"scheduled output": {Conv: bossDM, Text: "daily check: all fine"},
+			// A task notice replies to the task's original, older message.
+			"task notice": {Conv: bossDM, ReplyTo: "old", Text: "MEL-1 needs you: a question"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				r, tc := propose(t)
+				if _, _, err := r.st.AddInbound(core.Inbound{Conv: bossDM, MsgID: "old", From: boss, Origin: core.OriginLive, Text: "do MEL-1", At: time.Now().Add(-time.Hour), Private: true}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := r.st.Enqueue(out); err != nil {
+					t.Fatal(err)
+				}
+				if out, ok := r.answer(asBoss, "yes"); ok || len(tc.calls) != 0 {
+					t.Fatal("a yes after another delivery answered the proposal", out)
+				}
+			})
+		}
+	})
+	t.Run("own draft after a stale card", func(t *testing.T) {
 		r, tc := propose(t)
-		if _, err := r.st.Enqueue(core.Outbound{Conv: bossDM, Text: "MEL-1 needs you: a question"}); err != nil {
+		turn, err := r.st.StartTurn(bossDM, core.RoleOwner, boss.Key(), "m1", nil)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if out, ok := r.answer(asBoss, "yes"); ok || len(tc.calls) != 0 {
-			t.Fatal("a yes after another notice answered the proposal", out)
+		if _, err := r.st.EndTurn(turn, bossDM, boss.Key(), store.TurnEnd{State: store.TurnDone, ItemState: store.InDone}); err != nil {
+			t.Fatal(err)
+		}
+		_, j, _ := r.s.Draft(asBoss, []string{"```heimdall-job\n{\"name\":\"mine\",\"schedule\":{\"every\":\"1h\"},\"prompt\":\"p\"}\n```"})
+		r.apply(&store.JobChange{Add: j})
+		// The owner's own draft answers as usual; the proposal never.
+		if out, ok := r.answer(asBoss, "ok"); !ok || !strings.Contains(out, "task created") || len(tc.calls) != 0 || len(r.s.proposals(boss)) != 1 {
+			t.Fatal("own draft after a stale card", out)
 		}
 	})
 	t.Run("details then yes", func(t *testing.T) {
 		r, tc := propose(t)
-		// The router stores command replies with reply_to set.
+		// The router stores the message, then the command's reply to it.
+		if _, _, err := r.st.AddInbound(core.Inbound{Conv: bossDM, MsgID: "m2", From: boss, Origin: core.OriginLive, Text: "Details", Private: true}); err != nil {
+			t.Fatal(err)
+		}
 		if out, ok := r.answer(asBoss, "Details"); !ok || !strings.Contains(out, "MEL-900") {
 			t.Fatal(out)
 		}
@@ -155,6 +185,21 @@ func TestExternalProposalRevokedLauncher(t *testing.T) {
 		r.tick()
 		if outs := r.sent(); len(outs) != 0 {
 			t.Fatal("answered proposal also withdrawn", outs)
+		}
+	})
+	t.Run("launcher unusable at this start keeps its cards", func(t *testing.T) {
+		r, c, _, who, valid := agentRig(t)
+		tc := fakeTasks(r)
+		c.executePeer(context.Background(), op, fixWin, who, valid)
+		r.sent()
+		// Still configured, but its OS user did not resolve this time.
+		r.s.External, r.s.Launchers = nil, map[string]bool{"agentnet": true}
+		r.tick()
+		if outs := r.sent(); len(outs) != 0 || len(r.s.proposals(boss)) != 1 {
+			t.Fatal("an unusable launcher's card was withdrawn", outs)
+		}
+		if out, ok := r.answer(asBoss, "yes"); !ok || !strings.Contains(out, "Started") || len(tc.calls) != 1 {
+			t.Fatal(out)
 		}
 	})
 	t.Run("opt-in off withdraws on the next tick", func(t *testing.T) {

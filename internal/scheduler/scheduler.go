@@ -76,6 +76,11 @@ type Scheduler struct {
 	// External launchers that may vouch for runs Heimdall did not start
 	// (docs/external-origin.md); tried only when no Heimdall turn owns the peer.
 	External []ExternalOrigin
+	// Launchers: every configured launcher's name and its agent_proposals
+	// opt-in, usable or not. A launcher that could not be set up at this
+	// start (its OS user did not resolve) is missing from External but
+	// keeps its waiting cards; only one removed from the config loses them.
+	Launchers map[string]bool
 	// TrustedT3: the owner-trusted T3 launcher whose descendants may
 	// register durable tasks (task_add/list/show) for the deployment owner
 	// and, with Manage, create, edit and manage that owner's jobs and tasks; tried

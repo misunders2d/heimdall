@@ -150,11 +150,14 @@ func (s *Scheduler) revoked(j store.Job) string {
 	if v == nil {
 		return ""
 	}
-	i := slices.IndexFunc(s.External, func(o ExternalOrigin) bool { return o.Name == v.Launcher })
+	agents, ok := s.Launchers[v.Launcher]
+	if i := slices.IndexFunc(s.External, func(o ExternalOrigin) bool { return o.Name == v.Launcher }); i >= 0 {
+		agents, ok = s.External[i].Agents, true
+	}
 	switch {
-	case v.Launcher == "" || i < 0:
+	case v.Launcher == "" || !ok:
 		return "no longer configured"
-	case v.Author != "human" && !s.External[i].Agents:
+	case v.Author != "human" && !agents:
 		return "no longer allowed to send agent requests"
 	}
 	return ""

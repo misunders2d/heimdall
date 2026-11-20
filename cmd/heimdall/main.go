@@ -235,7 +235,9 @@ func run(args []string) error {
 			if err != nil {
 				return nil, err
 			}
+			jobs.Launchers = map[string]bool{}
 			for _, o := range cfg.Scheduler.Control.External {
+				jobs.Launchers[o.Name] = o.AgentProposals
 				lu, err := user.Lookup(o.User)
 				var luid uint64
 				if err == nil {
