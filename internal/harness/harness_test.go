@@ -161,8 +161,8 @@ func TestOMPUnsettledPromptWaitsForSettle(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := r.Result()
-	if res.Failure != "" || !strings.HasPrefix(res.Answer, "omp#1 ") {
-		t.Fatalf("answer %q failure %q", res.Answer, res.Failure)
+	if res.Failure != "" || len(res.Answers) == 0 || res.Answers[len(res.Answers)-1] != "late reply" {
+		t.Fatalf("answers %q failure %q", res.Answers, res.Failure)
 	}
 }
 

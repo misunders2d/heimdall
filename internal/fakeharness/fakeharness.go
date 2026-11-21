@@ -683,6 +683,11 @@ func (f *fake) piRPC() {
 		f.emit(map[string]any{"type": "agent_end"})
 		if omp && f.has("UNSETTLED") {
 			f.emit(map[string]any{"type": "prompt_result", "id": id, "status": "completed", "sessionSettled": false})
+			// A steer queued at completion is answered before the session settles.
+			f.emit(map[string]any{"type": "message_start", "messageId": "u-late", "message": map[string]any{"role": "user", "content": "late steer", "steering": true, "attribution": "user"}})
+			f.emit(map[string]any{"type": "message_start", "messageId": "a-late", "message": map[string]any{"role": "assistant", "content": []any{}}})
+			f.emit(map[string]any{"type": "message_end", "messageId": "a-late", "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": "late reply"}}}})
+			f.emit(map[string]any{"type": "agent_end"})
 			f.emit(map[string]any{"type": "session_settled"})
 		} else if omp {
 			f.emit(map[string]any{"type": "prompt_result", "id": id, "status": "completed", "sessionSettled": true})
