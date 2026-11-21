@@ -148,6 +148,24 @@ func TestAnswerKeepsTheReplyToEachInput(t *testing.T) {
 	}
 }
 
+// OMP may complete the prompt before its session settles (owner steers
+// still queued); the answer must wait for session_settled, not be dropped
+// (live 2026-11-21: "OMP completed the prompt without settling its session").
+func TestOMPUnsettledPromptWaitsForSettle(t *testing.T) {
+	bin, _ := fakeharness.Install(t, "omp")
+	l := launch(t, bin, "omp", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	r, err := harness.Start(ctx, harness.Spec{Harness: "omp", Prompt: "work UNSETTLED", Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: l, Caller: protocolCaller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := r.Result()
+	if res.Failure != "" || !strings.HasPrefix(res.Answer, "omp#1 ") {
+		t.Fatalf("answer %q failure %q", res.Answer, res.Failure)
+	}
+}
+
 // A steer Codex accepts after it completed a final answer, before the turn
 // completed, gets its own answer; the earlier one is kept (review of
 // 5b3c62f, finding 3: the last final answer replaced it).

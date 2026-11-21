@@ -51,6 +51,7 @@ type piRPCBridge struct {
 	active, done, failed bool
 	omp, ended           bool
 	detached             bool // owned by a passive continuation, with no prompt request
+	awaitSettle          bool // prompt completed while steers were still queued; publish on session_settled
 	published            bool
 	failure, human       string
 	session              string // the session directory name
@@ -443,14 +444,16 @@ func (b *piRPCBridge) event(raw []byte) {
 			return
 		}
 		if !e.Settled {
-			b.failLocked("OMP completed the prompt without settling its session")
+			// Steers queued during the prompt keep OMP working; wait for
+			// session_settled instead of dropping the answer.
+			b.awaitSettle = true
 			return
 		}
 		b.publishLocked()
 	case "session_settled":
 		// This OMP event has no request ID. Only a detached run can end
 		// here; a prompt always waits for its own prompt_result.
-		if b.omp && b.detached {
+		if b.omp && (b.detached || b.awaitSettle) {
 			b.publishLocked()
 		}
 	case "agent_settled":
