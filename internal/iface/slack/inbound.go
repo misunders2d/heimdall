@@ -86,6 +86,9 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if !pending {
 		return nil
 	}
+	if !s.acceptEvent(raw) {
+		return s.opt.Store.CompleteEvent(e.ID)
+	}
 	var payload struct {
 		Type           string
 		ControlIngress int `json:"heimdall_control_ingress,omitempty"`
@@ -250,7 +253,7 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if conversationWork && in.InterfaceReply == "" {
 		in.ConversationWork, in.Ambient = true, !addressed
 		in.Attachments = nil // thread context includes file names; work returns shareable links
-		in.Context, _ = s.context(ctx, m, in.Conv)
+		in.Context, _ = s.contextWith(ctx, m, in.Conv, s.workClient(m.Channel))
 		if embedded != "" {
 			in.Context += "\n" + router.Untrusted("Slack embedded/forwarded message content", embedded)
 		}
@@ -322,6 +325,10 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	return finish()
 }
 func (s *Slack) context(ctx context.Context, m eventMessage, k core.ConvKey) (string, []slackFile) {
+	return s.contextWith(ctx, m, k, s.bot)
+}
+
+func (s *Slack) contextWith(ctx context.Context, m eventMessage, k core.ConvKey, api *apiClient) (string, []slackFile) {
 	var blocks []string
 	var images []slackFile
 	method := "conversations.history"
@@ -347,7 +354,7 @@ func (s *Slack) context(ctx context.Context, m eventMessage, k core.ConvKey) (st
 				Next string `json:"next_cursor"`
 			} `json:"response_metadata"`
 		}
-		fetchErr = s.bot.call(ctx, method, args, &response)
+		fetchErr = api.call(ctx, method, args, &response)
 		if fetchErr != nil {
 			break
 		}

@@ -19,6 +19,10 @@ func metadata(id, event string) map[string]any {
 	return map[string]any{"event_type": event, "event_payload": map[string]string{"delivery_id": id}}
 }
 func (s *Slack) findDelivery(ctx context.Context, k core.ConvKey, id, event string, oldest ...string) (string, error) {
+	return s.bot.findDelivery(ctx, k, id, event, oldest...)
+}
+
+func (api *apiClient) findDelivery(ctx context.Context, k core.ConvKey, id, event string, oldest ...string) (string, error) {
 	cursor := ""
 	for page := 0; page < 100; page++ {
 		args := map[string]any{"channel": k.Chat, "ts": k.Thread, "include_all_metadata": true, "limit": 100, "cursor": cursor}
@@ -49,7 +53,7 @@ func (s *Slack) findDelivery(ctx context.Context, k core.ConvKey, id, event stri
 			method = "conversations.history"
 			delete(args, "ts")
 		}
-		if err := s.bot.call(ctx, method, args, &result); err != nil {
+		if err := api.call(ctx, method, args, &result); err != nil {
 			return "", err
 		}
 		for _, m := range result.Messages {
@@ -155,12 +159,19 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 	} else {
 		text = escapeText(text)
 	}
-	if slackMemberID.MatchString(out.SlackOwnerMention) {
-		text = "AI assistant covering for <@" + out.SlackOwnerMention + "> while they’re away.\n\n" + text
-	}
+	api := s.bot
 	parts := splitReply(text)
+	if out.SlackOwnerMention != "" {
+		if !slackMemberID.MatchString(out.SlackOwnerMention) || out.SlackOwnerMention != s.opt.WorkOwnerID || s.opt.ConversationWork[out.Conv.Chat] == "" {
+			return router.PermanentError{Err: errors.New("slack: conversation work is no longer authorized")}
+		}
+		api = s.workClient(out.Conv.Chat)
+		for i := range parts {
+			parts[i] = workAttribution(out.SlackOwnerMention) + "\n\n" + parts[i]
+		}
+	}
 	if out.Attempt > 0 && len(parts) > 1 {
-		ts, err := s.findDelivery(ctx, out.Conv, strconv.FormatInt(out.ID, 10), "heimdall_reply", reconciliationOldest(out))
+		ts, err := api.findDelivery(ctx, out.Conv, strconv.FormatInt(out.ID, 10), "heimdall_reply", reconciliationOldest(out))
 		if err != nil {
 			return err
 		}
@@ -176,7 +187,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		// Reconcile each part before a router-driven resend. Fresh parts do
 		// not depend on history availability; ambiguous posts reconcile below.
 		if out.Attempt > 0 {
-			ts, err := s.findDelivery(ctx, out.Conv, id, "heimdall_reply", reconciliationOldest(out))
+			ts, err := api.findDelivery(ctx, out.Conv, id, "heimdall_reply", reconciliationOldest(out))
 			if err != nil {
 				return err
 			}
@@ -185,7 +196,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 			}
 		}
 		if index > 0 {
-			if err := s.bot.pause(ctx, s.partEvery); err != nil {
+			if err := api.pause(ctx, s.partEvery); err != nil {
 				return err
 			}
 		}
@@ -207,7 +218,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		var response struct {
 			TS string `json:"ts"`
 		}
-		err := s.bot.call(ctx, "chat.postMessage", args, &response)
+		err := api.call(ctx, "chat.postMessage", args, &response)
 		if err == nil && response.TS != "" {
 			continue
 		}
@@ -218,10 +229,10 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		if errors.As(err, &ae) && ae.Ambiguous {
 			found := false
 			for _, delay := range []time.Duration{250 * time.Millisecond, 750 * time.Millisecond, 1500 * time.Millisecond} {
-				if e := s.bot.pause(ctx, delay); e != nil {
+				if e := api.pause(ctx, delay); e != nil {
 					return e
 				}
-				ts, _ := s.findDelivery(ctx, out.Conv, id, "heimdall_reply", reconciliationOldest(out))
+				ts, _ := api.findDelivery(ctx, out.Conv, id, "heimdall_reply", reconciliationOldest(out))
 				if ts != "" {
 					found = true
 					break
