@@ -66,13 +66,15 @@ func (r *Router) Work(ctx context.Context, q durable.WorkRequest) (durable.WorkR
 	}
 	in := core.Inbound{Conv: core.ConvKey{Interface: q.Route.Interface, Chat: core.ReviewChat(q.Issue)}, MsgID: q.Key, From: q.Owner,
 		Origin: core.OriginCommitment, Text: q.Prompt, At: time.Now(), OAuthActor: q.OAuthActor, OAuthInstallation: q.OAuthInstallation,
-		Review: &core.Review{Issue: q.Issue, Attempt: q.Attempt, Key: q.Key, Target: q.Route, Private: q.Private, Work: true}}
+		Review: &core.Review{Issue: q.Issue, Attempt: q.Attempt, Key: q.Key, Target: q.Route, Private: q.Private, Work: true, SlackWork: q.SlackWork}}
 	o, err := r.commitmentTurn(ctx, in, true)
 	if err != nil {
 		return durable.WorkResult{}, err
 	}
 	res := durable.WorkResult{Turn: o.Turn}
 	switch d := o.TurnDetail; {
+	case o.TurnState == store.TurnDone && d == workSilent:
+		res.Silent = true
 	case o.TurnState == store.TurnDone && strings.HasPrefix(d, workReport):
 		res.Report = strings.TrimPrefix(d, workReport)
 	case o.TurnState == store.TurnDone && strings.HasPrefix(d, workWait):
@@ -86,7 +88,7 @@ func (r *Router) Work(ctx context.Context, q durable.WorkRequest) (durable.WorkR
 	default:
 		res.Failure = o.State + ": " + or(d, o.Detail)
 	}
-	if res.Report == "" && res.Next == "" {
+	if res.Report == "" && res.Next == "" && !res.Silent {
 		res.Class = turnClass(o)
 	}
 	return res, nil
@@ -94,6 +96,7 @@ func (r *Router) Work(ctx context.Context, q durable.WorkRequest) (durable.WorkR
 
 const (
 	workReport = "work report: "
+	workSilent = "work stayed silent"
 	workWait   = "work wait "
 )
 
@@ -691,7 +694,12 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 	default:
 		e.State, e.ItemState, e.Clean = store.TurnDone, store.InDone, !res.Unclean
 		if t.review.Work {
-			e.Detail = parseWork(c.r.scrub(stripHarnessTag(res.Answer, d.harness)))
+			answer := c.r.scrub(stripHarnessTag(res.Answer, d.harness))
+			if t.review.SlackWork != nil && strings.TrimSpace(answer) == "SILENT" {
+				e.Detail = workSilent
+			} else {
+				e.Detail = parseWork(answer)
+			}
 		} else if t.review.Worker != "" {
 			t.mu.Lock()
 			calls := slices.Clone(t.native)

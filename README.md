@@ -210,6 +210,55 @@ connect an additional Socket Mode client during normal hub operation and
 never touch `heimdall-live`. Live checks (including token scopes and metadata
 visibility) remain unverified until that window. See [parity evidence](docs/slack-parity.md).
 
+### Conversation work
+
+An owner can authorize work for anyone in an individual Slack channel or group
+conversation. Add the owner’s Slack member ID and a plain-language rule per
+conversation to the existing `slack` config block:
+
+```json
+{
+  "team_id": "TEXAMPLE",
+  "work_owner_id": "UOWNER",
+  "conversation_work": {
+    "GCREATIVE": "Members can request artwork and landing-page drafts. Publishing requires my approval."
+  }
+}
+```
+
+Enable `durable.enabled` and `durable.assistant_work`. The owner ID must resolve
+to a current Heimdall owner. An enabled conversation admits verified
+same-workspace members to this work path under the rule, subject to existing
+denials.
+
+For conversations the owner can see, including groups without the bot, use the
+same Socket Mode app's [user event subscriptions](https://docs.slack.dev/apis/events-api/).
+Deploy a version with user-event filtering before enabling these subscriptions.
+Under Event Subscriptions, subscribe on behalf of users for the requested
+conversation types. Under OAuth & Permissions, grant the corresponding **User
+Token Scopes**:
+
+| Conversation | User event | User scopes |
+|---|---|---|
+| Public channel | `message.channels` | `channels:history`, `channels:read` |
+| Private channel | `message.groups` | `groups:history`, `groups:read` |
+| Group DM | `message.mpim` | `mpim:history`, `mpim:read` |
+
+Add user scope `chat:write` for attributed replies. Reinstall or authorize the
+app as the configured owner and supply the resulting **User OAuth Token** to
+the service as `HEIMDALL_SLACK_WORK_USER_TOKEN`. The same listener discards
+user-authorized events outside configured work conversations before persistence.
+For bot-only access, invite the bot to the conversation and grant its
+corresponding membership read scope.
+
+A new post can trigger work without a mention. The assistant receives the rule,
+requester and thread context, and uses its normal tools. After launch it follows
+the rule as task instructions. It can finish work, answer a relevant question
+with shareable evidence, or stay silent. Results and shareable artifact links
+return to the original thread and identify the sender as the AI assistant covering
+for the owner while they're away. The rule is active whenever configured;
+disable it by removing the conversation entry.
+
 ## Use
 
 Commands work the same on every interface:

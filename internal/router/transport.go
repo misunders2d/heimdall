@@ -181,3 +181,6 @@ func IsControl(text string) bool { k := parseCommand(text).Kind; return k == cmd
 
 // IsTurnInput shares the router command classification with ingress fences.
 func IsTurnInput(text string) bool { return parseCommand(text).Kind == cmdMessage }
+
+// IsConversationMessage distinguishes ordinary text from router commands.
+func IsConversationMessage(text string) bool { return parseCommand(text).Kind == cmdMessage }

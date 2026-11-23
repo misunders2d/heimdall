@@ -29,20 +29,21 @@ type apiCall struct {
 	Body   map[string]any
 }
 type slackFake struct {
-	t         *testing.T
-	srv       *httptest.Server
-	mu        sync.Mutex
-	seq       int
-	messages  []map[string]any
-	calls     []apiCall
-	events    chan []byte
-	acks      chan string
-	connected chan struct{}
-	once      sync.Once
-	hook      func(http.ResponseWriter, *http.Request, map[string]any) bool
-	users     map[string]User
-	file      []byte
-	uploads   []string // "content-type=body" of each upload endpoint POST
+	t             *testing.T
+	allowWorkUser bool
+	srv           *httptest.Server
+	mu            sync.Mutex
+	seq           int
+	messages      []map[string]any
+	calls         []apiCall
+	events        chan []byte
+	acks          chan string
+	connected     chan struct{}
+	once          sync.Once
+	hook          func(http.ResponseWriter, *http.Request, map[string]any) bool
+	users         map[string]User
+	file          []byte
+	uploads       []string // "content-type=body" of each upload endpoint POST
 }
 
 func newSlackFake(t *testing.T) *slackFake {
@@ -151,7 +152,8 @@ func (f *slackFake) serve(w http.ResponseWriter, r *http.Request) {
 	if method == "apps.connections.open" {
 		expected = "Bearer test-app"
 	}
-	if r.Header.Get("Authorization") != expected {
+	authorization := r.Header.Get("Authorization")
+	if authorization != expected && !(f.allowWorkUser && authorization == "Bearer test-work-user") {
 		f.t.Error("wrong API token")
 	}
 	f.mu.Lock()
@@ -282,8 +284,16 @@ func (f *slackFake) event(channel, surface, user, text, thread string) eventMess
 	return eventMessage{Type: "message", Channel: channel, ChannelType: surface, User: user, Text: text, ThreadTS: thread, TS: ts}
 }
 func (f *slackFake) push(m eventMessage) string {
+	return f.pushAuthorized(m, "")
+}
+
+func (f *slackFake) pushAuthorized(m eventMessage, owner string) string {
 	id := "E" + m.TS
-	raw, _ := json.Marshal(map[string]any{"type": "events_api", "envelope_id": id, "payload": map[string]any{"type": "event_callback", "event_id": id, "event": m}})
+	payload := map[string]any{"type": "event_callback", "event_id": id, "event": m}
+	if owner != "" {
+		payload["authorizations"] = []map[string]any{{"team_id": "Ttest", "user_id": owner, "is_bot": false}}
+	}
+	raw, _ := json.Marshal(map[string]any{"type": "events_api", "envelope_id": id, "payload": payload})
 	body, _ := json.Marshal(m)
 	var object map[string]any
 	_ = json.Unmarshal(body, &object)

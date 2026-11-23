@@ -196,10 +196,13 @@ func (c *Config) UnmentionedCommands() []string {
 
 // Slack configures Socket Mode; both tokens come only from HEIMDALL_SLACK_*.
 type Slack struct {
-	DispatchConcurrency int    `json:"dispatch_concurrency,omitempty"`
-	IngressRetrySeconds int    `json:"ingress_retry_seconds,omitempty"`
-	EventDedupeHours    int    `json:"event_dedupe_hours,omitempty"`
-	TeamID              string `json:"team_id"`
+	// ConversationWork is an opt-in, plain-language rule per Slack conversation ID.
+	ConversationWork    map[string]string `json:"conversation_work,omitempty"`
+	WorkOwnerID         string            `json:"work_owner_id,omitempty"`
+	DispatchConcurrency int               `json:"dispatch_concurrency,omitempty"`
+	IngressRetrySeconds int               `json:"ingress_retry_seconds,omitempty"`
+	EventDedupeHours    int               `json:"event_dedupe_hours,omitempty"`
+	TeamID              string            `json:"team_id"`
 
 	MaxFileBytes  int64  `json:"max_file_bytes,omitempty"`
 	StatusName    string `json:"status_name,omitempty"`
@@ -321,6 +324,20 @@ func (c *Config) fill(staged bool) error {
 	if c.Slack != nil {
 		if c.Slack.TeamID == "" || strings.ContainsAny(c.Slack.TeamID, " \t\r\n") {
 			return errors.New("slack.team_id is required")
+		}
+		if len(c.Slack.ConversationWork) > 0 {
+			if !c.Durable.On() || !c.Durable.Assistant {
+				return errors.New("slack.conversation_work requires durable.assistant_work")
+			}
+			if !regexp.MustCompile(`^[UW][A-Z0-9]+$`).MatchString(c.Slack.WorkOwnerID) {
+				return errors.New("slack.conversation_work requires a Slack work_owner_id")
+			}
+			id := regexp.MustCompile(`^[CG][A-Z0-9]+$`)
+			for channel, rule := range c.Slack.ConversationWork {
+				if !id.MatchString(channel) || strings.TrimSpace(rule) == "" || len(rule) > 4000 {
+					return errors.New("slack.conversation_work requires channel or group IDs and non-empty rules of at most 4000 bytes")
+				}
+			}
 		}
 		if c.Slack.DispatchConcurrency == 0 {
 			c.Slack.DispatchConcurrency = 8

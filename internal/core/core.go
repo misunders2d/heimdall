@@ -174,6 +174,9 @@ const (
 
 // Inbound is one message from an interface.
 type Inbound struct {
+	// ConversationWork marks ordinary Slack text offered under a configured rule.
+	// It is set by the Slack adapter, never parsed from the message.
+	ConversationWork          bool
 	MCPControl                bool   // set only by router eligibility rewrite
 	SlackPrivateOwnerVerified bool   // live owner + conversations.info verified 1:1 DM
 	SlackReadVerified         bool   // private owner verification AND owner_slack enabled
@@ -205,9 +208,8 @@ type Inbound struct {
 	// parts of one group until none has arrived for a moment, then handles
 	// them as one message.
 	Group string
-	// Ambient marks a group chat message not addressed to the bot. It is
-	// never run or answered; it is kept, bounded, as untrusted context for
-	// the conversation's next turns (the hub's recent group context).
+	// Ambient marks an unaddressed group message kept as bounded, untrusted
+	// context. An opted-in Slack conversation may also offer it for work.
 	Ambient bool
 	// Announce says a part of Group from From is on its way (the interface
 	// is downloading its files), so the router keeps holding the group. It
@@ -221,15 +223,22 @@ type Inbound struct {
 	Review *Review
 }
 
+// SlackWork records the requester separately from the owner authorizing the work.
+type SlackWork struct {
+	Requester Principal `json:"requester"`
+	Rule      string    `json:"rule"`
+}
+
 // Review binds a supervisor review turn to one durable commitment attempt.
 // Its conversation is the commitment's own (ReviewChat), isolated from the
 // creator's chats and from scheduled runs; nothing is sent there.
 type Review struct {
-	Issue   string  `json:"issue"`
-	Attempt int     `json:"attempt"`
-	Key     string  `json:"key"` // the durable effect identity; also the MsgID
-	Target  ConvKey `json:"target"`
-	Private bool    `json:"private,omitempty"`
+	SlackWork *SlackWork `json:"slack_work,omitempty"`
+	Issue     string     `json:"issue"`
+	Attempt   int        `json:"attempt"`
+	Key       string     `json:"key"` // the durable effect identity; also the MsgID
+	Target    ConvKey    `json:"target"`
+	Private   bool       `json:"private,omitempty"`
 	// Worker is set for a dispatch turn: the creator's harness sends the
 	// attempt's brief to this owner-selected T3 thread with its own native
 	// T3 tool, and answers with the tool's receipt.
@@ -308,8 +317,10 @@ func (in Inbound) Validate() error {
 
 // Outbound is one reply to deliver.
 type Outbound struct {
-	Window    *DeliveryWindow // optional schedule for delivery attempts, including retries
-	CreatedAt time.Time       // durable queue creation time, bounds reconciliation
+	// SlackOwnerMention is a verified owner ID set by the conversation-work path.
+	SlackOwnerMention string
+	Window            *DeliveryWindow // optional schedule for delivery attempts, including retries
+	CreatedAt         time.Time       // durable queue creation time, bounds reconciliation
 
 	ID      int64 // stable outbound row ID, set by delivery
 	TurnID  int64 // originating turn, zero for commands

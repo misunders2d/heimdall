@@ -21,6 +21,7 @@ import (
 
 const BotTokenEnv = "HEIMDALL_SLACK_BOT_TOKEN"
 const AppTokenEnv = "HEIMDALL_SLACK_APP_TOKEN"
+const WorkUserTokenEnv = "HEIMDALL_SLACK_WORK_USER_TOKEN"
 
 // apiError contains only allowlisted protocol metadata, never response text,
 // request URLs (Socket Mode tickets), or credentials.

@@ -121,6 +121,17 @@ func (a Access) Decide(p Principal, conv ConvKey) (Role, []string, bool) {
 // Check is Decide that tells unavailable access files (ErrAccessUnavailable,
 // not admitted) apart from a denial (nil error, not admitted).
 func (a Access) Check(p Principal, conv ConvKey) (Role, []string, bool, error) {
+	return a.check(p, conv, false)
+}
+
+// CheckConversationWork admits a verified member to the configured work path.
+// A rule replaces the ordinary whitelist for this path only; denials still apply.
+func (a Access) CheckConversationWork(p Principal, conv ConvKey) (bool, error) {
+	_, _, ok, err := a.check(p, conv, true)
+	return ok, err
+}
+
+func (a Access) check(p Principal, conv ConvKey, conversationWork bool) (Role, []string, bool, error) {
 	if _, ok := (Access{}).Role(p); !ok {
 		return "", nil, false, nil
 	}
@@ -159,7 +170,7 @@ func (a Access) Check(p Principal, conv ConvKey) (Role, []string, bool, error) {
 	if !fileAdmin && (has(f.Black.Users, ids) || has(f.Black.Chats, chats)) {
 		return "", nil, false, nil
 	}
-	if !fileAdmin && !has(f.White.Users, ids) && !has(f.White.Chats, chats) {
+	if !conversationWork && !fileAdmin && !has(f.White.Users, ids) && !has(f.White.Chats, chats) {
 		return "", nil, false, nil
 	}
 	var caps []string

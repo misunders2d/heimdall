@@ -86,6 +86,9 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if !pending {
 		return nil
 	}
+	if !s.acceptEvent(raw) {
+		return s.opt.Store.CompleteEvent(e.ID)
+	}
 	var payload struct {
 		Type           string
 		ControlIngress int `json:"heimdall_control_ingress,omitempty"`
@@ -127,7 +130,8 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		s.opt.Log.Print("slack: ignored unidentified caller")
 		return finish()
 	}
-	if s.opt.Access != nil {
+	conversationWork := s.workPost(m, commandText)
+	if s.opt.Access != nil && !conversationWork {
 		_, _, admitted, err := s.opt.Access.Check(principal, core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: m.ThreadTS})
 		if err != nil {
 			// Not finished: the event stays pending and is retried with
@@ -246,6 +250,21 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if len(m.Files) > 0 {
 		a.File = clip(router.Scrub(first(m.Files[0].Name, m.Files[0].Title, "file")), 160)
 	}
+	if conversationWork && in.InterfaceReply == "" {
+		in.ConversationWork, in.Ambient = true, !addressed
+		in.Attachments = nil // thread context includes file names; work returns shareable links
+		in.Context, _ = s.contextWith(ctx, m, in.Conv, s.workClient(m.Channel))
+		if embedded != "" {
+			in.Context += "\n" + router.Untrusted("Slack embedded/forwarded message content", embedded)
+		}
+		if err := s.opt.Store.AddAmbient(a); err != nil {
+			return err
+		}
+		if err := accept(ctx, in); err != nil {
+			return err
+		}
+		return finish()
+	}
 	if !addressed {
 		// Router performs generic prompt-guard scoring on the admitted ambient
 		// input; storage failure must still keep the durable interface event.
@@ -306,6 +325,10 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	return finish()
 }
 func (s *Slack) context(ctx context.Context, m eventMessage, k core.ConvKey) (string, []slackFile) {
+	return s.contextWith(ctx, m, k, s.bot)
+}
+
+func (s *Slack) contextWith(ctx context.Context, m eventMessage, k core.ConvKey, api *apiClient) (string, []slackFile) {
 	var blocks []string
 	var images []slackFile
 	method := "conversations.history"
@@ -331,7 +354,7 @@ func (s *Slack) context(ctx context.Context, m eventMessage, k core.ConvKey) (st
 				Next string `json:"next_cursor"`
 			} `json:"response_metadata"`
 		}
-		fetchErr = s.bot.call(ctx, method, args, &response)
+		fetchErr = api.call(ctx, method, args, &response)
 		if fetchErr != nil {
 			break
 		}

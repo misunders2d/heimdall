@@ -29,6 +29,9 @@ const DefaultMaxFileBytes int64 = 200_000_000
 const diskReserve int64 = 1 << 30
 
 type Options struct {
+	ConversationWork                                map[string]string
+	WorkOwnerID                                     string
+	WorkUserToken                                   string
 	Access                                          *core.Access // root-side Pi admission; nil only in standalone adapter tests
 	BotToken, AppToken, TeamID, DataDir, StatusName string
 	Store                                           *store.Store
@@ -48,6 +51,7 @@ type Options struct {
 type Slack struct {
 	opt           Options
 	bot, app      *apiClient
+	workUser      *apiClient // initialized before ready, for explicitly granted conversations
 	socket        socketTransport
 	ready         chan struct{}
 	readyOnce     sync.Once // Run may run again after a failure (router restart)
@@ -196,6 +200,7 @@ func (s *Slack) initialize(ctx context.Context) error {
 		return nil
 	}
 	s.botID = auth.UserID
+	s.initializeWorkUser(ctx)
 	s.name = safeName(auth.User)
 	var bot struct {
 		User User `json:"user"`
@@ -273,6 +278,9 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 	var callbackWG sync.WaitGroup
 	defer callbackWG.Wait()
 	s.socket.acknowledged = func(raw json.RawMessage) error {
+		if !s.acceptEvent(raw) {
+			return nil
+		}
 		if callbackValue(raw) != "" {
 			callbackWG.Add(1)
 			go func() {
@@ -294,6 +302,9 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 	sockDone := make(chan error, 1)
 	go func() {
 		sockDone <- s.socket.run(ctx, func(ctx context.Context, raw json.RawMessage) error {
+			if !s.acceptEvent(raw) {
+				return nil
+			}
 			if callbackValue(raw) != "" {
 				return nil // Ephemeral callback: relay only after socket acknowledgement.
 			}
@@ -665,6 +676,12 @@ func (s *Slack) addressed(m eventMessage) bool {
 }
 func (s *Slack) exhaustEvent(ctx context.Context, e store.InterfaceEvent) error {
 	m := decodeEvent(e.Payload)
+	if s.opt.ConversationWork[m.Channel] != "" {
+		command := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), s.mention()), s.botID)
+		if s.workPost(m, command) {
+			return s.opt.Store.CompleteEvent(e.ID)
+		}
+	}
 	addressed := s.addressed(m) || (m.ThreadTS != "" && m.ParentUserID == s.botID)
 	if !addressed && m.ThreadTS != "" {
 		replies, _ := s.opt.Store.RecentDeliveries(core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: m.ThreadTS})

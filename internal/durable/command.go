@@ -126,7 +126,7 @@ func (r *Runtime) Command(c Caller, text string) string {
 		return usage
 	}
 	issue := strings.ToUpper(f[1])
-	if !IssuePattern.MatchString(issue) {
+	if !IssuePattern.MatchString(issue) && !(sub != "add" && slackWorkID.MatchString(issue)) {
 		return "Not a Linear issue identifier: " + f[1]
 	}
 	rest := strings.Join(f[2:], " ")

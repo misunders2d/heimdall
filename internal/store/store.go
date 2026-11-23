@@ -202,17 +202,18 @@ func (x inExtra) apply(in *core.Inbound) {
 
 // outExtra is the outbound extra column: delivery details beyond the text.
 type outExtra struct {
-	Window    *core.DeliveryWindow `json:"delivery_window,omitempty"`
-	TurnID    int64                `json:"turn_id,omitempty"`
-	Formatted bool                 `json:"formatted,omitempty"`
-	Reactions []core.Reaction      `json:"reactions,omitempty"`
-	File      *core.File           `json:"file,omitempty"`
-	Effect    string               `json:"effect,omitempty"` // EnqueueEffect's idempotency key
+	SlackOwnerMention string               `json:"slack_owner_mention,omitempty"`
+	Window            *core.DeliveryWindow `json:"delivery_window,omitempty"`
+	TurnID            int64                `json:"turn_id,omitempty"`
+	Formatted         bool                 `json:"formatted,omitempty"`
+	Reactions         []core.Reaction      `json:"reactions,omitempty"`
+	File              *core.File           `json:"file,omitempty"`
+	Effect            string               `json:"effect,omitempty"` // EnqueueEffect's idempotency key
 }
 
 func outExtraOf(out core.Outbound) (string, error) {
-	x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File}
-	if x.Window == nil && x.TurnID == 0 && !x.Formatted && len(x.Reactions) == 0 && x.File == nil {
+	x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File, SlackOwnerMention: out.SlackOwnerMention}
+	if x.Window == nil && x.TurnID == 0 && !x.Formatted && len(x.Reactions) == 0 && x.File == nil && x.SlackOwnerMention == "" {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -221,6 +222,7 @@ func outExtraOf(out core.Outbound) (string, error) {
 
 func (x outExtra) apply(out *core.Outbound) {
 	out.Window = x.Window
+	out.SlackOwnerMention = x.SlackOwnerMention
 	out.Formatted, out.Reactions, out.File, out.TurnID = x.Formatted, x.Reactions, x.File, x.TurnID
 }
 
