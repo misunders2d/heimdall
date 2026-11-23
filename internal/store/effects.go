@@ -38,7 +38,7 @@ func (s *Store) EnqueueEffect(effect string, out core.Outbound) (id int64, err e
 		if err := out.Window.Validate(); err != nil {
 			return err
 		}
-		x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File, Effect: effect}
+		x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File, Effect: effect, SlackOwnerMention: out.SlackOwnerMention}
 		b, err := json.Marshal(x)
 		if err != nil {
 			return err

@@ -366,6 +366,11 @@ func (r *Router) acceptMessage(ctx context.Context, in core.Inbound) error {
 		r.release(in)
 		return errors.New("interface message claims a commitment review")
 	}
+	if in.ConversationWork {
+		in.Text = core.RedactMCPCallbacks(in.Text)
+		in.Context = core.RedactMCPCallbacks(in.Context)
+		return r.admitConversationWork(ctx, in)
+	}
 	role, _, ok, err := r.opt.Access.Check(in.From, in.Conv)
 	if err != nil {
 		// Not acknowledged: the interface offers the message again later.
@@ -1675,8 +1680,12 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		// dispatch, wait or read captures no memory; an assistant wake
 		// keeps the owner's ordinary memory decision.
 		target = t.review.Target
-		if !t.review.Work {
+		if !t.review.Work || t.review.SlackWork != nil {
 			memory = false
+		}
+		if work := t.review.SlackWork; work != nil {
+			identity = c.r.checkSlackWork(t.startCtx, target, work, from)
+			refused = identity != nil
 		}
 	}
 	for _, h := range t.candidates {

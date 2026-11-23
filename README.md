@@ -210,6 +210,36 @@ connect an additional Socket Mode client during normal hub operation and
 never touch `heimdall-live`. Live checks (including token scopes and metadata
 visibility) remain unverified until that window. See [parity evidence](docs/slack-parity.md).
 
+### Conversation work
+
+An owner can authorize work for anyone in an individual Slack channel or group
+conversation. Add the owner’s Slack member ID and a plain-language rule per
+conversation to the existing `slack` config block:
+
+```json
+{
+  "team_id": "TEXAMPLE",
+  "work_owner_id": "UOWNER",
+  "conversation_work": {
+    "GCREATIVE": "Members can request artwork and landing-page drafts. Publishing requires my approval."
+  }
+}
+```
+
+Enable `durable.enabled` and `durable.assistant_work`. Grant the bot membership
+read access for the conversation type (`channels:read`, `groups:read`, or
+`mpim:read`). The owner ID must resolve to a current Heimdall owner. An enabled
+conversation admits verified same-workspace members to this work path under the
+rule, subject to existing denials.
+
+A new post can trigger work without a mention. The assistant receives the rule,
+requester and thread context, and uses its normal tools. After launch it follows
+the rule as task instructions. It can finish work, answer a relevant question
+with shareable evidence, or stay silent. Results and shareable artifact links
+return to the original thread and identify the bot as the AI assistant covering
+for the owner while they're away. The rule is active whenever configured;
+disable it by removing the conversation entry.
+
 ## Use
 
 Commands work the same on every interface:

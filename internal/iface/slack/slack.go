@@ -29,6 +29,8 @@ const DefaultMaxFileBytes int64 = 200_000_000
 const diskReserve int64 = 1 << 30
 
 type Options struct {
+	ConversationWork                                map[string]string
+	WorkOwnerID                                     string
 	Access                                          *core.Access // root-side Pi admission; nil only in standalone adapter tests
 	BotToken, AppToken, TeamID, DataDir, StatusName string
 	Store                                           *store.Store
@@ -665,6 +667,12 @@ func (s *Slack) addressed(m eventMessage) bool {
 }
 func (s *Slack) exhaustEvent(ctx context.Context, e store.InterfaceEvent) error {
 	m := decodeEvent(e.Payload)
+	if s.opt.ConversationWork[m.Channel] != "" {
+		command := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), s.mention()), s.botID)
+		if s.workPost(m, command) {
+			return s.opt.Store.CompleteEvent(e.ID)
+		}
+	}
 	addressed := s.addressed(m) || (m.ThreadTS != "" && m.ParentUserID == s.botID)
 	if !addressed && m.ThreadTS != "" {
 		replies, _ := s.opt.Store.RecentDeliveries(core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: m.ThreadTS})

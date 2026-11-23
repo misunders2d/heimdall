@@ -127,7 +127,8 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		s.opt.Log.Print("slack: ignored unidentified caller")
 		return finish()
 	}
-	if s.opt.Access != nil {
+	conversationWork := s.workPost(m, commandText)
+	if s.opt.Access != nil && !conversationWork {
 		_, _, admitted, err := s.opt.Access.Check(principal, core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: m.ThreadTS})
 		if err != nil {
 			// Not finished: the event stays pending and is retried with
@@ -245,6 +246,21 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	a := store.Ambient{Conv: ambientKey, MsgID: m.TS, At: in.At, Who: principal.Key(), Text: clip(router.Scrub(hideOAuth(text+"\n"+embedded)), 4000)}
 	if len(m.Files) > 0 {
 		a.File = clip(router.Scrub(first(m.Files[0].Name, m.Files[0].Title, "file")), 160)
+	}
+	if conversationWork && in.InterfaceReply == "" {
+		in.ConversationWork, in.Ambient = true, !addressed
+		in.Attachments = nil // thread context includes file names; work returns shareable links
+		in.Context, _ = s.context(ctx, m, in.Conv)
+		if embedded != "" {
+			in.Context += "\n" + router.Untrusted("Slack embedded/forwarded message content", embedded)
+		}
+		if err := s.opt.Store.AddAmbient(a); err != nil {
+			return err
+		}
+		if err := accept(ctx, in); err != nil {
+			return err
+		}
+		return finish()
 	}
 	if !addressed {
 		// Router performs generic prompt-guard scoring on the admitted ambient

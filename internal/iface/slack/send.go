@@ -155,6 +155,9 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 	} else {
 		text = escapeText(text)
 	}
+	if slackMemberID.MatchString(out.SlackOwnerMention) {
+		text = "AI assistant covering for <@" + out.SlackOwnerMention + "> while they’re away.\n\n" + text
+	}
 	parts := splitReply(text)
 	if out.Attempt > 0 && len(parts) > 1 {
 		ts, err := s.findDelivery(ctx, out.Conv, strconv.FormatInt(out.ID, 10), "heimdall_reply", reconciliationOldest(out))

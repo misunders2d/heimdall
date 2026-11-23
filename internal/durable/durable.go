@@ -48,6 +48,8 @@ const (
 // IssuePattern is a Linear identifier.
 var IssuePattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}-[1-9][0-9]{0,8}$`)
 
+var slackWorkID = regexp.MustCompile(`^SLACK-[0-9A-F]{32}$`)
+
 // Outbox is the slice of the store a commitment delivers through.
 type Outbox interface {
 	EnqueueEffect(effect string, out core.Outbound) (int64, error)
@@ -171,6 +173,7 @@ type Assistant interface {
 
 // WorkRequest binds a wake to its commitment, attempt, creator and route.
 type WorkRequest struct {
+	SlackWork         *core.SlackWork
 	Key               string // ISSUE/attempt/work/N: the turn's identity
 	Issue             string
 	Attempt           int
@@ -186,6 +189,7 @@ type WorkRequest struct {
 // the verifier), or Wait plus Next (the owned next action). Held and
 // Failure are as in ReviewResult.
 type WorkResult struct {
+	Silent  bool          `json:"silent,omitempty"`
 	Turn    int64         `json:"turn"`
 	Report  string        `json:"report,omitempty"`
 	Wait    time.Duration `json:"wait,omitempty"`
@@ -452,13 +456,14 @@ func (r *Runtime) Close() {
 	r.db.Close()
 }
 
-// Commitment is the workflow input. Creator and Route come from the
-// verified live owner message that admitted it, never from arguments.
+// Commitment is the workflow input. Creator and Route come from verified
+// admission. Slack work also records the actual requesting member.
 type Commitment struct {
-	Issue   string         `json:"issue"` // Linear identifier; the workflow ID
-	Title   string         `json:"title"`
-	Creator string         `json:"creator"` // principal key
-	Owner   core.Principal `json:"owner"`   // the creator as verified at admission
+	SlackWork *core.SlackWork `json:"slack_work,omitempty"`
+	Issue     string          `json:"issue"` // task identifier; the workflow ID
+	Title     string          `json:"title"`
+	Creator   string          `json:"creator"` // principal key
+	Owner     core.Principal  `json:"owner"`   // the creator as verified at admission
 	// The admitting message's verified native OAuth actor: a dispatch turn
 	// runs with the creator's own native sign-ins, as a !job run does.
 	OAuthActor        string       `json:"oauth_actor,omitempty"`
@@ -647,6 +652,9 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		if err != nil {
 			return err
 		}
+		if c.SlackWork != nil && ev.Kind == "silent" {
+			return r.publish(ctx, w, PhaseClosed, "none: conversation work stayed silent")
+		}
 		w.st.Evidence = ev.Evidence
 		why, err := dbos.RunAsStep(ctx, func(context.Context) (string, error) { return precheck(c.Gates, ev.Evidence), nil }, dbos.WithStepName("precheck"))
 		if err != nil {
@@ -670,6 +678,8 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 				return err
 			}
 			v, err = r.review(ctx, w)
+		} else if c.SlackWork != nil {
+			v = Event{Kind: "accept", By: "conversation rule"}
 		} else {
 			if err := r.publish(ctx, w, PhaseReported, "verify the evidence: !work accept or !work reject"); err != nil {
 				return err
@@ -703,7 +713,11 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		if err := r.publish(ctx, w, PhaseAccepted, next); err != nil {
 			return err
 		}
-		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), fmt.Sprintf("%s done: %s", c.Issue, summary(w.st.Evidence)), true); err != nil {
+		result := fmt.Sprintf("%s done: %s", c.Issue, summary(w.st.Evidence))
+		if c.SlackWork != nil {
+			result = w.st.Evidence
+		}
+		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), result, true); err != nil {
 			return err
 		}
 		if c.Next == "" || w.st.Stage == "next" {
@@ -1043,14 +1057,21 @@ func (r *Runtime) work(ctx dbos.Context, w *run) (Event, error) {
 	failed, malformed, waits := 0, 0, 0
 	for n := 1; ; n++ {
 		req := WorkRequest{Key: effectKey(c.Issue, w.st.Attempt, fmt.Sprintf("work/%d", n)), Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route,
-			Private: c.Private, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Prompt: workPrompt(w, action, resume)}
-		h, err := dbos.RunWorkflow(ctx, r.workTurn, req, dbos.WithWorkflowID(req.Key), dbos.WithQueue(r.queues[c.Resource]), dbos.WithQueuePartitionKey(c.Issue))
+			Private: c.Private, OAuthActor: c.OAuthActor, OAuthInstallation: c.OAuthInstallation, Prompt: workPrompt(w, action, resume), SlackWork: c.SlackWork}
+		partition := c.Issue
+		if c.SlackWork != nil {
+			partition = c.Route.String()
+		}
+		h, err := dbos.RunWorkflow(ctx, r.workTurn, req, dbos.WithWorkflowID(req.Key), dbos.WithQueue(r.queues[c.Resource]), dbos.WithQueuePartitionKey(partition))
 		if err != nil {
 			return Event{}, err
 		}
 		res, err := h.GetResult()
 		if err != nil {
 			return Event{}, err
+		}
+		if c.SlackWork != nil && (res.Silent || res.Class == WakeRefused) {
+			return Event{Kind: "silent"}, nil
 		}
 		if strings.TrimSpace(res.Report) != "" && res.Held == "" && res.Failure == "" {
 			w.st.Note = ""
@@ -1227,8 +1248,12 @@ func workPrompt(w *run, action, resume string) string {
 	if st.Note != "" {
 		fmt.Fprintf(&b, "State note: %s\n", st.Note)
 	}
-	b.WriteString("Do the next step now with your normal tools, within your own permissions. Then answer in one of two forms only:\n")
-	b.WriteString("REPORT on the first line, then the evidence that the goal is done (it will be verified; it is not accepted by you). The owner sees only the evidence's first line: make it one plain caveman-terse sentence with the result and anything the owner must do; put the proof below it. Or\n")
+	if c.SlackWork != nil {
+		b.WriteString("Answer in one of these forms only:\nSILENT on its own if the Slack post needs no reply or action.\nREPORT on the first line followed by the complete, audience-safe reply for the Slack thread, including its evidence or deliverable links. Heimdall adds the attribution.\n")
+	} else {
+		b.WriteString("Do the next step now with your normal tools, within your own permissions. Then answer in one of two forms only:\n")
+		b.WriteString("REPORT on the first line, then the evidence that the goal is done (it will be verified; it is not accepted by you). The owner sees only the evidence's first line: make it one plain caveman-terse sentence with the result and anything the owner must do; put the proof below it. Or\n")
+	}
 	b.WriteString("WAIT <duration> on the first line (e.g. WAIT 30m, between 1m and 168h), then the next action you will take when woken.")
 	return b.String()
 }
@@ -1444,7 +1469,11 @@ func (r *Runtime) send(ctx dbos.Context, w *run, effect, text string, blocking b
 			key = fmt.Sprintf("%s#retry%d", key, n)
 		}
 		id, err := step(r, ctx, w, "deliver", func(context.Context) (int64, error) {
-			id, err := r.opt.Outbox.EnqueueEffect(key, core.Outbound{Conv: c.Route, ReplyTo: c.ReplyTo, Text: text})
+			out := core.Outbound{Conv: c.Route, ReplyTo: c.ReplyTo, Text: text}
+			if c.SlackWork != nil {
+				out.SlackOwnerMention, out.Formatted = c.Owner.SlackUserID, true
+			}
+			id, err := r.opt.Outbox.EnqueueEffect(key, out)
 			if errors.Is(err, store.ErrEffectConflict) {
 				err = Permanent{err}
 			}
@@ -1540,7 +1569,7 @@ func (r *Runtime) upgrade(ctx dbos.Context, w *run) error {
 // under a fixed key per stop so it is never repeated. A failed send is a
 // note; it never stops the task again.
 func (r *Runtime) tell(ctx dbos.Context, w *run, reason string) error {
-	if !w.v2 {
+	if !w.v2 || w.c.SlackWork != nil {
 		return nil
 	}
 	w.stops++
