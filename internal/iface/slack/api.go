@@ -73,14 +73,14 @@ func pause(ctx context.Context, d time.Duration) error {
 // call retries idempotent reads/updates and explicit rate-limit rejections.
 // An ambiguous post is returned immediately so Send can reconcile metadata
 // before any resend. Retrying it blindly can duplicate a landed message.
-func (a *apiClient) call(ctx context.Context, method string, args any, out any) error {
+func (a *apiClient) call(ctx context.Context, method string, args any, out any, before ...func() error) error {
 	data, err := json.Marshal(args)
 	if err != nil {
 		return errors.New("slack: invalid API arguments")
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		delay := time.Duration(1<<attempt) * 200 * time.Millisecond
-		err, retry, after := a.once(ctx, method, data, out)
+		err, retry, after := a.once(ctx, method, data, out, before...)
 		if err == nil {
 			return nil
 		}
@@ -123,7 +123,7 @@ func formArguments(data []byte) ([]byte, error) {
 	return []byte(form.Encode()), nil
 }
 
-func (a *apiClient) once(parent context.Context, method string, data []byte, out any) (error, bool, time.Duration) {
+func (a *apiClient) once(parent context.Context, method string, data []byte, out any, before ...func() error) (error, bool, time.Duration) {
 	data, err := formArguments(data)
 	if err != nil {
 		return err, false, 0
@@ -141,6 +141,11 @@ func (a *apiClient) once(parent context.Context, method string, data []byte, out
 	}
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, check := range before {
+		if err := check(); err != nil {
+			return err, false, 0
+		}
+	}
 	res, err := a.http.Do(req)
 	if err != nil {
 		if parent.Err() != nil {

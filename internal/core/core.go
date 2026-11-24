@@ -176,7 +176,7 @@ const (
 type Inbound struct {
 	// ConversationWork marks ordinary Slack text offered under a configured rule.
 	// It is set by the Slack adapter, never parsed from the message.
-	ConversationWork          bool
+	ConversationWork          *SlackWatchRef
 	MCPControl                bool   // set only by router eligibility rewrite
 	SlackPrivateOwnerVerified bool   // live owner + conversations.info verified 1:1 DM
 	SlackReadVerified         bool   // private owner verification AND owner_slack enabled
@@ -225,8 +225,43 @@ type Inbound struct {
 
 // SlackWork records the requester separately from the owner authorizing the work.
 type SlackWork struct {
-	Requester Principal `json:"requester"`
-	Rule      string    `json:"rule"`
+	Requester Principal  `json:"requester"`
+	Rule      string     `json:"rule"`
+	Watch     SlackWatch `json:"watch,omitzero"`
+	Via       string     `json:"via,omitempty"` // Slack authorization that received the request
+}
+
+// SlackWatch is the effective owner grant for one channel or root thread.
+// Revision zero denotes a legacy grant from the startup config.
+type SlackWatch struct {
+	Thread   string `json:"thread,omitempty"`
+	Mode     string `json:"mode,omitempty"`
+	Rule     string `json:"rule,omitempty"`
+	Revision int64  `json:"revision,omitempty"`
+	Changed  int64  `json:"changed,omitempty"`
+}
+
+const (
+	SlackWatchOff    = "off"
+	SlackWatchAnswer = "answer"
+	SlackWatchWork   = "work"
+)
+
+var ErrSlackWatchRevoked = errors.New("slack: watch is no longer authorized")
+
+// SlackWatchRef is enough to fence a queued delivery after an owner edit.
+type SlackWatchRef struct {
+	Thread   string `json:"thread,omitempty"`
+	Revision int64  `json:"revision,omitempty"`
+	Via      string `json:"via,omitempty"`
+}
+
+func (w SlackWatch) Ref() SlackWatchRef {
+	return SlackWatchRef{Thread: w.Thread, Revision: w.Revision}
+}
+
+func (w SlackWatch) Matches(ref SlackWatchRef) bool {
+	return w.Thread == ref.Thread && w.Revision == ref.Revision
 }
 
 // Review binds a supervisor review turn to one durable commitment attempt.
@@ -319,6 +354,7 @@ func (in Inbound) Validate() error {
 type Outbound struct {
 	// SlackOwnerMention is a verified owner ID set by the conversation-work path.
 	SlackOwnerMention string
+	SlackWatch        SlackWatchRef
 	Window            *DeliveryWindow // optional schedule for delivery attempts, including retries
 	CreatedAt         time.Time       // durable queue creation time, bounds reconciliation
 

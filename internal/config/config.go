@@ -325,11 +325,14 @@ func (c *Config) fill(staged bool) error {
 		if c.Slack.TeamID == "" || strings.ContainsAny(c.Slack.TeamID, " \t\r\n") {
 			return errors.New("slack.team_id is required")
 		}
+		if c.Slack.WorkOwnerID != "" && !regexp.MustCompile(`^[UW][A-Z0-9]+$`).MatchString(c.Slack.WorkOwnerID) {
+			return errors.New("slack.work_owner_id must be a Slack member ID")
+		}
+		if c.Slack.WorkOwnerID != "" && (!c.Durable.On() || !c.Durable.Assistant) {
+			return errors.New("slack.work_owner_id requires durable.assistant_work")
+		}
 		if len(c.Slack.ConversationWork) > 0 {
-			if !c.Durable.On() || !c.Durable.Assistant {
-				return errors.New("slack.conversation_work requires durable.assistant_work")
-			}
-			if !regexp.MustCompile(`^[UW][A-Z0-9]+$`).MatchString(c.Slack.WorkOwnerID) {
+			if c.Slack.WorkOwnerID == "" {
 				return errors.New("slack.conversation_work requires a Slack work_owner_id")
 			}
 			id := regexp.MustCompile(`^[CG][A-Z0-9]+$`)

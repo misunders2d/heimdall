@@ -208,13 +208,16 @@ the `heimdall-live` unit.
   deletion fails, and recovered after restart. Files out use checked outboxes
   and the supported external-upload flow, a `.caption` sidecar as the
   initial comment; reactions use Slack names.
-- **Slack conversation work** (opt-in): an owner-set rule allows verified
-  members of one Slack channel or group to request covered work in ordinary
-  posts. A verified owner sponsors the durable run and the actual requester
-  stays recorded. The harness uses the owner's normal tools and follows the
-  rule as task instructions. Results are attributed as AI coverage and go to
-  the original thread. Irrelevant, unsupported, and out-of-scope posts stay
-  silent. Setup is in [README.md](README.md#conversation-work).
+- **Slack watches** (opt-in): `heimdall slack-watch` changes durable channel,
+  thread or DM rules on the running service. An owner sponsors the run and the
+  verified requester stays recorded. Work uses the owner's normal tools and
+  follows the rule as task instructions. Answer-only follows normal harness
+  selection and asks for general knowledge, native read-only Memento and
+  Mellanni MCP. The harness can delegate reads through its native tools.
+  Tool permissions stay with the harnesses and connectors. New launches and
+  unsent replies are fenced by the watch revision.
+  Relevant results are attributed as AI coverage and go to the original
+  thread. Setup is in [README.md](README.md#slack-watches).
 - **Harness choice.** Default order `codex → claude → pi`
   (configurable). Fall back to the next harness only when the previous one
   failed before its turn started (before any side effect is possible).

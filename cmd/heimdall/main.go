@@ -55,6 +55,8 @@ const usage = `usage:
       one owner-authenticated JSON operation from stdin; no direct store access
   heimdall sched mcp -socket PATH
       stdio MCP adapter for the shared owner tool catalog
+  heimdall slack-watch -config FILE show|off|answer|work CHANNEL[/THREAD] [RULE]
+      read or change a Slack watch live from the data directory's operator account
   heimdall drain -config FILE [-timeout 30m]
       hold new scheduled runs and wait until no turn runs and every reply is
       delivered: exit 0 when idle, 75 on timeout (run before a restart)
@@ -93,6 +95,8 @@ func main() {
 		err = checkConfig(os.Args[2:])
 	case "sched":
 		err = sched(os.Args[2:])
+	case "slack-watch":
+		err = slackWatch(os.Args[2:])
 	case "drain":
 		err = drain(os.Args[2:])
 	case "version":

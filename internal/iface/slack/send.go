@@ -161,11 +161,16 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 	}
 	api := s.bot
 	parts := splitReply(text)
+	var before []func() error
 	if out.SlackOwnerMention != "" {
-		if !slackMemberID.MatchString(out.SlackOwnerMention) || out.SlackOwnerMention != s.opt.WorkOwnerID || s.opt.ConversationWork[out.Conv.Chat] == "" {
-			return router.PermanentError{Err: errors.New("slack: conversation work is no longer authorized")}
+		if err := s.checkWatchDelivery(out); err != nil {
+			return err
 		}
-		api = s.workClient(out.Conv.Chat)
+		api = s.workClient(out.SlackWatch.Via)
+		if api == nil {
+			return router.PermanentError{Err: errors.New("slack: owner-authorized delivery route is unavailable")}
+		}
+		before = append(before, func() error { return s.checkWatchDelivery(out) })
 		for i := range parts {
 			parts[i] = workAttribution(out.SlackOwnerMention) + "\n\n" + parts[i]
 		}
@@ -218,7 +223,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		var response struct {
 			TS string `json:"ts"`
 		}
-		err := api.call(ctx, "chat.postMessage", args, &response)
+		err := api.call(ctx, "chat.postMessage", args, &response, before...)
 		if err == nil && response.TS != "" {
 			continue
 		}
@@ -258,6 +263,18 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		}
 		s.setDeliveryStatus(ctx, out, "could not complete this request. Final answer not sent.")
 		return err
+	}
+	return nil
+}
+
+func (s *Slack) checkWatchDelivery(out core.Outbound) error {
+	w, err := s.watch(out.Conv.Chat, out.Conv.Thread)
+	if err != nil {
+		return err
+	}
+	if out.SlackOwnerMention != s.opt.WorkOwnerID || !slackMemberID.MatchString(out.SlackOwnerMention) ||
+		(w.Mode != core.SlackWatchWork && w.Mode != core.SlackWatchAnswer) || !w.Matches(out.SlackWatch) {
+		return router.PermanentError{Err: core.ErrSlackWatchRevoked}
 	}
 	return nil
 }

@@ -138,13 +138,14 @@ type Reviewer interface {
 
 // ReviewRequest binds a review to its commitment, attempt and route.
 type ReviewRequest struct {
-	Key     string // ISSUE/attempt/review[#retryN]: the turn's identity
-	Issue   string
-	Attempt int
-	Owner   core.Principal // the commitment's creator; revalidated at launch
-	Route   core.ConvKey   // the creator's original route (harness choice, admission)
-	Private bool
-	Prompt  string
+	SlackWork *core.SlackWork
+	Key       string // ISSUE/attempt/review[#retryN]: the turn's identity
+	Issue     string
+	Attempt   int
+	Owner     core.Principal // the commitment's creator; revalidated at launch
+	Route     core.ConvKey   // the creator's original route (harness choice, admission)
+	Private   bool
+	Prompt    string
 }
 
 // ReviewResult is a finished review turn's persisted outcome. Verdict is
@@ -670,7 +671,9 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 			continue
 		}
 		var v Event
-		if r.opt.Reviewer != nil {
+		if c.SlackWork != nil && c.SlackWork.Watch.Mode == core.SlackWatchAnswer {
+			v = Event{Kind: "accept", By: "answer-only watch"}
+		} else if r.opt.Reviewer != nil {
 			// Automated review stays internal: the report, the review and
 			// its rejections are execution state (!work show), not chat
 			// messages. Only the accepted result is delivered.
@@ -691,6 +694,9 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		}
 		if err != nil {
 			return err
+		}
+		if c.SlackWork != nil && v.Kind == "silent" {
+			return r.publish(ctx, w, PhaseClosed, "none: Slack watch no longer authorized")
 		}
 		if v.Kind == "reject" {
 			if err := r.reject(ctx, w, "rejected by "+v.By+": "+v.Note, r.opt.Reviewer == nil); err != nil {
@@ -717,7 +723,9 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		if c.SlackWork != nil {
 			result = w.st.Evidence
 		}
-		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), result, true); err != nil {
+		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), result, true); errors.Is(err, core.ErrSlackWatchRevoked) {
+			return r.publish(ctx, w, PhaseClosed, "none: Slack watch no longer authorized")
+		} else if err != nil {
 			return err
 		}
 		if c.Next == "" || w.st.Stage == "next" {
@@ -1070,7 +1078,8 @@ func (r *Runtime) work(ctx dbos.Context, w *run) (Event, error) {
 		if err != nil {
 			return Event{}, err
 		}
-		if c.SlackWork != nil && (res.Silent || res.Class == WakeRefused) {
+		if c.SlackWork != nil && (res.Silent || res.Class == WakeRefused ||
+			c.SlackWork.Watch.Mode == core.SlackWatchAnswer && strings.TrimSpace(res.Report) == "" && res.Wait == 0) {
 			return Event{Kind: "silent"}, nil
 		}
 		if strings.TrimSpace(res.Report) != "" && res.Held == "" && res.Failure == "" {
@@ -1275,7 +1284,7 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 		if n > 0 {
 			key = fmt.Sprintf("%s#retry%d", key, n)
 		}
-		req := ReviewRequest{Key: key, Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Private: c.Private, Prompt: reviewPrompt(w)}
+		req := ReviewRequest{Key: key, Issue: c.Issue, Attempt: w.st.Attempt, Owner: c.Owner, Route: c.Route, Private: c.Private, Prompt: reviewPrompt(w), SlackWork: c.SlackWork}
 		res, err := step(r, ctx, w, "review", func(sctx context.Context) (ReviewResult, error) { return r.opt.Reviewer.Review(sctx, req) })
 		var perm Permanent
 		switch {
@@ -1307,6 +1316,9 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 				w.st.Note = ""
 			}
 			return Event{Kind: res.Verdict, Attempt: w.st.Attempt, By: fmt.Sprintf("supervisor (turn %d)", res.Turn), Note: clip(res.Reason, 500), auto: true}, nil
+		}
+		if c.SlackWork != nil && res.Class == WakeRefused {
+			return Event{Kind: "silent"}, nil
 		}
 		if res.Held == "" {
 			if failed++; failed > reviewRetries {
@@ -1472,6 +1484,8 @@ func (r *Runtime) send(ctx dbos.Context, w *run, effect, text string, blocking b
 			out := core.Outbound{Conv: c.Route, ReplyTo: c.ReplyTo, Text: text}
 			if c.SlackWork != nil {
 				out.SlackOwnerMention, out.Formatted = c.Owner.SlackUserID, true
+				out.SlackWatch = c.SlackWork.Watch.Ref()
+				out.SlackWatch.Via = c.SlackWork.Via
 			}
 			id, err := r.opt.Outbox.EnqueueEffect(key, out)
 			if errors.Is(err, store.ErrEffectConflict) {
@@ -1494,6 +1508,9 @@ func (r *Runtime) send(ctx dbos.Context, w *run, effect, text string, blocking b
 			if rc.State == store.OutSent {
 				w.st.Receipts = append(w.st.Receipts, id)
 				return nil
+			}
+			if c.SlackWork != nil && rc.Error == core.ErrSlackWatchRevoked.Error() {
+				return core.ErrSlackWatchRevoked
 			}
 			why = fmt.Sprintf("outbound %d (%s) failed: %s", id, key, rc.Error)
 		}

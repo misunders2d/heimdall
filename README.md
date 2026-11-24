@@ -210,26 +210,34 @@ connect an additional Socket Mode client during normal hub operation and
 never touch `heimdall-live`. Live checks (including token scopes and metadata
 visibility) remain unverified until that window. See [parity evidence](docs/slack-parity.md).
 
-### Conversation work
+### Slack watches
 
-An owner can authorize work for anyone in an individual Slack channel or group
-conversation. Add the owner’s Slack member ID and a plain-language rule per
-conversation to the existing `slack` config block:
+Set the owner’s Slack member ID in the existing `slack` config block:
 
 ```json
 {
   "team_id": "TEXAMPLE",
-  "work_owner_id": "UOWNER",
-  "conversation_work": {
-    "GCREATIVE": "Members can request artwork and landing-page drafts. Publishing requires my approval."
-  }
+  "work_owner_id": "UOWNER"
 }
 ```
 
-Enable `durable.enabled` and `durable.assistant_work`. The owner ID must resolve
-to a current Heimdall owner. An enabled conversation admits verified
-same-workspace members to this work path under the rule, subject to existing
-denials.
+Enable `durable.enabled` and `durable.assistant_work`. The ID must resolve to
+a current Heimdall owner. On the running host, use the account with access to
+Heimdall’s data directory:
+
+```sh
+heimdall slack-watch -config /etc/heimdall/config.json work GCREATIVE 'Update existing ad images or videos.'
+heimdall slack-watch -config /etc/heimdall/config.json answer CCHANNEL
+heimdall slack-watch -config /etc/heimdall/config.json answer DEXAMPLE/1712345678.000001
+heimdall slack-watch -config /etc/heimdall/config.json show DEXAMPLE/1712345678.000001
+heimdall slack-watch -config /etc/heimdall/config.json off DEXAMPLE/1712345678.000001
+```
+
+Watch changes take effect on the running service and survive restarts. Use a
+conversation ID for the whole conversation, or add the root message timestamp
+to set a separate thread rule. A thread rule, including `off`, takes precedence
+over the conversation rule. Existing `slack.conversation_work` entries are
+defaults where there is no live setting.
 
 For conversations the owner can see, including groups without the bot, use the
 same Socket Mode app's [user event subscriptions](https://docs.slack.dev/apis/events-api/).
@@ -243,21 +251,33 @@ Token Scopes**:
 | Public channel | `message.channels` | `channels:history`, `channels:read` |
 | Private channel | `message.groups` | `groups:history`, `groups:read` |
 | Group DM | `message.mpim` | `mpim:history`, `mpim:read` |
+| One-to-one DM | `message.im` | `im:history`, `im:read` |
 
 Add user scope `chat:write` for attributed replies. Reinstall or authorize the
 app as the configured owner and supply the resulting **User OAuth Token** to
 the service as `HEIMDALL_SLACK_WORK_USER_TOKEN`. The same listener discards
-user-authorized events outside configured work conversations before persistence.
+user-authorized events outside active watches before persistence.
 For bot-only access, invite the bot to the conversation and grant its
 corresponding membership read scope.
 
-A new post can trigger work without a mention. The assistant receives the rule,
-requester and thread context, and uses its normal tools. After launch it follows
-the rule as task instructions. It can finish work, answer a relevant question
-with shareable evidence, or stay silent. Results and shareable artifact links
-return to the original thread and identify the sender as the AI assistant covering
-for the owner while they're away. The rule is active whenever configured;
-disable it by removing the conversation entry.
+A new post by a verified same-workspace member can trigger a turn without a
+mention. `work` uses the owner’s normal harness and tools with the configured
+rule. `answer` uses the conversation’s selected harness or the normal harness
+order. It can use general knowledge, the thread, native Memento recall and
+read-only Mellanni MCP. If a tool is unavailable, it can ask another configured
+harness for evidence through its native delegation tools. The harnesses need
+their own connector access. The read-only instruction applies to the original
+and delegated turns. Tool permissions come from native harness and connector
+configuration. Automatic memory capture stays off in Heimdall’s watch turn.
+For Pi and OMP, configure Memento as a native MCP server for these turns.
+Their bundled Memento extension disables both capture and its tools under
+`MEMENTO_PROCESSING=1`; an independently configured MCP connection can still
+expose recall. Enable the read operations in the harness and connector policy
+before relying on them for a watch.
+
+Replies go to the original thread and identify the AI assistant. Posts that
+need no answer stay silent. `off` prevents new launches and unsent watch
+replies. Work already running may still finish its tool actions.
 
 ## Use
 

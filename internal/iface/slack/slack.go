@@ -278,10 +278,14 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 	var callbackWG sync.WaitGroup
 	defer callbackWG.Wait()
 	s.socket.acknowledged = func(raw json.RawMessage) error {
-		if !s.acceptEvent(raw) {
+		ok, _, admissionErr := s.eventAdmission(raw)
+		if !ok && admissionErr == nil {
 			return nil
 		}
 		if callbackValue(raw) != "" {
+			if admissionErr != nil {
+				return nil
+			}
 			callbackWG.Add(1)
 			go func() {
 				defer callbackWG.Done()
@@ -302,7 +306,11 @@ func (s *Slack) Run(parent context.Context, accept func(context.Context, core.In
 	sockDone := make(chan error, 1)
 	go func() {
 		sockDone <- s.socket.run(ctx, func(ctx context.Context, raw json.RawMessage) error {
-			if !s.acceptEvent(raw) {
+			ok, _, err := s.eventAdmission(raw)
+			if err != nil {
+				return err
+			}
+			if !ok {
 				return nil
 			}
 			if callbackValue(raw) != "" {
@@ -676,11 +684,12 @@ func (s *Slack) addressed(m eventMessage) bool {
 }
 func (s *Slack) exhaustEvent(ctx context.Context, e store.InterfaceEvent) error {
 	m := decodeEvent(e.Payload)
-	if s.opt.ConversationWork[m.Channel] != "" {
-		command := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), s.mention()), s.botID)
-		if s.workPost(m, command) {
-			return s.opt.Store.CompleteEvent(e.ID)
-		}
+	if ok, ownerOnly, _ := s.eventAdmission(e.Payload); !ok || ownerOnly {
+		return s.opt.Store.CompleteEvent(e.ID)
+	}
+	command := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), s.mention()), s.botID)
+	if w, _ := s.watch(m.Channel, first(m.ThreadTS, m.TS)); workPost(m, command, w.Mode) {
+		return s.opt.Store.CompleteEvent(e.ID)
 	}
 	addressed := s.addressed(m) || (m.ThreadTS != "" && m.ParentUserID == s.botID)
 	if !addressed && m.ThreadTS != "" {

@@ -165,6 +165,10 @@ INSERT INTO job_alerts(job_id,creator,key,revision,outbound_id) SELECT job_id,cr
 DROP TABLE job_alerts_old;`,
 	`ALTER TABLE turns ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE turns ADD COLUMN no_resume INTEGER NOT NULL DEFAULT 0;`,
+	`CREATE TABLE slack_watches(
+		chat TEXT NOT NULL, thread TEXT NOT NULL, mode TEXT NOT NULL,
+		rule TEXT NOT NULL, revision INTEGER NOT NULL,
+		changed INTEGER NOT NULL, PRIMARY KEY(chat, thread));`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -203,6 +207,7 @@ func (x inExtra) apply(in *core.Inbound) {
 // outExtra is the outbound extra column: delivery details beyond the text.
 type outExtra struct {
 	SlackOwnerMention string               `json:"slack_owner_mention,omitempty"`
+	SlackWatch        core.SlackWatchRef   `json:"slack_watch,omitzero"`
 	Window            *core.DeliveryWindow `json:"delivery_window,omitempty"`
 	TurnID            int64                `json:"turn_id,omitempty"`
 	Formatted         bool                 `json:"formatted,omitempty"`
@@ -212,7 +217,7 @@ type outExtra struct {
 }
 
 func outExtraOf(out core.Outbound) (string, error) {
-	x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File, SlackOwnerMention: out.SlackOwnerMention}
+	x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File, SlackOwnerMention: out.SlackOwnerMention, SlackWatch: out.SlackWatch}
 	if x.Window == nil && x.TurnID == 0 && !x.Formatted && len(x.Reactions) == 0 && x.File == nil && x.SlackOwnerMention == "" {
 		return "", nil
 	}
@@ -223,6 +228,7 @@ func outExtraOf(out core.Outbound) (string, error) {
 func (x outExtra) apply(out *core.Outbound) {
 	out.Window = x.Window
 	out.SlackOwnerMention = x.SlackOwnerMention
+	out.SlackWatch = x.SlackWatch
 	out.Formatted, out.Reactions, out.File, out.TurnID = x.Formatted, x.Reactions, x.File, x.TurnID
 }
 
