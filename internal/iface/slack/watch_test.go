@@ -238,6 +238,7 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 			!strings.Contains(prompt, "sl_user_UOWNER in thread history") ||
 			!strings.Contains(prompt, "Slack bot (sl_user_Ubot in thread history)") ||
 			!strings.Contains(prompt, "calls for that person's response") ||
+			!strings.Contains(prompt, "make a targeted read-only lookup before deciding to stay silent") ||
 			!strings.Contains(prompt, "read-only Mellanni MCP") || !strings.Contains(prompt, "another configured harness") {
 			t.Fatalf("selected harness did not receive answer and delegation instructions: %+v", in)
 		}
