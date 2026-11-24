@@ -269,6 +269,11 @@ harness for evidence through its native delegation tools. The harnesses need
 their own connector access. The read-only instruction applies to the original
 and delegated turns. Tool permissions come from native harness and connector
 configuration. Automatic memory capture stays off in Heimdall’s watch turn.
+For Pi and OMP, configure Memento as a native MCP server for these turns.
+Their bundled Memento extension disables both capture and its tools under
+`MEMENTO_PROCESSING=1`; an independently configured MCP connection can still
+expose recall. Enable the read operations in the harness and connector policy
+before relying on them for a watch.
 
 Replies go to the original thread and identify the AI assistant. Posts that
 need no answer stay silent. `off` prevents new launches and unsent watch
