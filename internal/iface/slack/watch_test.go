@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/durable"
@@ -91,6 +93,7 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 		u.Profile.Email = strings.ToLower(id) + "@example.test"
 		f.users[id] = u
 	}
+	ownerReplyCheck := make(chan time.Time, 1)
 	f.setHook(func(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
 		userToken := r.Header.Get("Authorization") == "Bearer test-work-user"
 		if r.URL.Path == "/auth.test" && userToken {
@@ -99,8 +102,15 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 		}
 		switch r.URL.Path {
 		case "/conversations.members", "/conversations.replies", "/chat.postMessage":
-			if args["channel"] == "D1" && !userToken || args["channel"] == "C1" && userToken {
+			channelGuard := args["channel"] == "C1" && r.URL.Path == "/conversations.replies" && args["oldest"] != nil
+			if (args["channel"] == "D1" || channelGuard) != userToken {
 				t.Errorf("wrong token for %s on %s", r.URL.Path, args["channel"])
+			}
+			if channelGuard {
+				select {
+				case ownerReplyCheck <- time.Now():
+				default:
+				}
 			}
 		}
 		if r.URL.Path == "/conversations.members" {
@@ -195,8 +205,23 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 			t.Fatalf("excluded user-token event %s was staged: found=%t, err=%v", id, found, err)
 		}
 	}
-	post("C1", "channel", "UCOLLEAGUE", "981.000002", "REPORT\nA general-knowledge answer.", "")
+	question := f.event("C1", "channel", "UCOLLEAGUE", "What is the project? SAY="+
+		base64.StdEncoding.EncodeToString([]byte("REPORT\nA general-knowledge answer.")), "981.000002")
+	// Put the post just inside the two-minute grace period so the fake
+	// exercise checks the real deadline without waiting two minutes.
+	deadline := time.Now().Truncate(time.Millisecond).Add(2 * time.Second)
+	posted := deadline.Add(-2 * time.Minute)
+	question.TS = fmt.Sprintf("%d.%06d", posted.Unix(), posted.Nanosecond()/1000)
+	waitAck(t, f, f.pushAuthorized(question, ""))
 	waitFor(t, "answer from bot-visible channel", func() bool { return f.hasText("A general-knowledge answer.") })
+	select {
+	case checkedAt := <-ownerReplyCheck:
+		if checkedAt.Before(deadline) {
+			t.Fatalf("owner reply check ran %s before the grace period ended", deadline.Sub(checkedAt))
+		}
+	default:
+		t.Fatal("away answer skipped the live owner reply check")
+	}
 	posts := f.all("chat.postMessage")
 	if len(posts) != 2 || posts[0].Body["thread_ts"] != thread ||
 		!strings.HasPrefix(str(posts[0].Body["text"]), workAttribution("UOWNER")) {
@@ -216,5 +241,43 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 			!strings.Contains(prompt, "read-only Mellanni MCP") || !strings.Contains(prompt, "another configured harness") {
 			t.Fatalf("selected harness did not receive answer and delegation instructions: %+v", in)
 		}
+	}
+}
+
+func TestSlackOwnerReplySuppressesAwayDelivery(t *testing.T) {
+	for _, chat := range []string{"C1", "D1"} {
+		t.Run(chat, func(t *testing.T) {
+			f := newSlackFake(t)
+			s, st := testSlack(t, f)
+			s.opt.WorkOwnerID = "UOWNER"
+			const post = "980.000001"
+			replyThread := post
+			if chat == "D1" {
+				replyThread = "" // a direct reply outside the original DM thread
+			}
+			f.messages = []map[string]any{
+				{"channel": chat, "thread_ts": replyThread, "ts": "980.000000", "user": "UOWNER"},
+				{"channel": chat, "thread_ts": replyThread, "ts": "980.000002", "user": "UOWNER", "text": workAttribution("UOWNER")},
+			}
+			watch := core.SlackWatch{Mode: core.SlackWatchAnswer, Revision: 1}
+			if err := st.SetSlackWatch(chat, watch); err != nil {
+				t.Fatal(err)
+			}
+			route := core.ConvKey{Interface: "slack", Chat: chat, Thread: post}
+			if err := s.CheckSlackOwnerReply(context.Background(), route, post, "bot"); err != nil {
+				t.Fatalf("earlier post or AI attribution counted as owner reply: %v", err)
+			}
+			f.mu.Lock()
+			f.messages = append(f.messages, map[string]any{"channel": chat, "thread_ts": replyThread, "ts": "980.000003", "user": "UOWNER"})
+			f.mu.Unlock()
+			out := core.Outbound{Conv: route, ReplyTo: post, Text: "Away answer", SlackOwnerMention: "UOWNER", SlackWatch: watch.Ref()}
+			var permanent router.PermanentError
+			if err := s.sendText(context.Background(), out); !errors.Is(err, core.ErrSlackOwnerReplied) || !errors.As(err, &permanent) {
+				t.Fatalf("owner's reply did not cancel away delivery: %v", err)
+			}
+			if posts := f.all("chat.postMessage"); len(posts) != 0 {
+				t.Fatalf("sent %d replies after the owner answered", len(posts))
+			}
+		})
 	}
 }

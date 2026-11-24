@@ -278,7 +278,10 @@ expose recall. Enable the read operations in the harness and connector policy
 before relying on them for a watch.
 
 Replies go to the original thread and identify the AI assistant. Posts that
-need no answer stay silent. `off` prevents new launches and unsent watch
+need no answer stay silent. Answer watches wait two minutes after the Slack
+post. An owner reply in the same thread, or directly in the same 1:1 DM,
+suppresses coverage. Heimdall checks before launching and again before posting.
+`off` prevents new launches and unsent watch
 replies. Work already running may still finish its tool actions.
 
 ## Use

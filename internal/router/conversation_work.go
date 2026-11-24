@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/durable"
@@ -15,7 +17,10 @@ import (
 type slackWorkInterface interface {
 	ConversationWork(context.Context, core.ConvKey, core.Principal, string) (core.Principal, core.SlackWatch, error)
 	Reverify(context.Context, core.Principal) (scheduler.Verified, bool, error)
+	CheckSlackOwnerReply(context.Context, core.ConvKey, string, string) error
 }
+
+const slackAnswerGrace = 2 * time.Minute
 
 // admitConversationWork reuses durable commitments. The Slack sender is the
 // requester and the configured, verified owner authorizes the launch. The
@@ -44,7 +49,17 @@ If the post requests work allowed by the rule, do the work with your normal tool
 %s
 
 %s`, in.From.Key(), in.From.SlackUserID, watch.Rule, context, post)
+	work := &core.SlackWork{Requester: in.From, Rule: watch.Rule, Watch: watch, Via: ref.Via}
 	if watch.Mode == core.SlackWatchAnswer {
+		posted := in.At
+		seconds, micros, exact := strings.Cut(in.MsgID, ".")
+		sec, secErr := strconv.ParseInt(seconds, 10, 64)
+		usec, usecErr := strconv.ParseInt(micros, 10, 64)
+		if exact && len(micros) == 6 && secErr == nil && usecErr == nil && sec > 0 && usec >= 0 {
+			posted = time.Unix(sec, usec*int64(time.Microsecond))
+		}
+		work.MessageTS = in.MsgID
+		work.AnswerAt = posted.Add(slackAnswerGrace).UnixMilli()
 		surface := "a shared Slack conversation"
 		if in.Private {
 			surface = "a one-to-one Slack DM with that user"
@@ -62,7 +77,7 @@ Use general knowledge, this thread, native Memento recall and read-only Mellanni
 		Issue: "SLACK-" + strings.ToUpper(fmt.Sprintf("%x", id[:16])), Title: "Slack conversation request",
 		Creator: owner.Key(), Owner: owner, Route: in.Conv, ReplyTo: in.MsgID,
 		OAuthActor: "sl_user_" + owner.SlackUserID, OAuthInstallation: in.OAuthInstallation,
-		Resource: "default", Brief: brief, SlackWork: &core.SlackWork{Requester: in.From, Rule: watch.Rule, Watch: watch, Via: ref.Via},
+		Resource: "default", Brief: brief, SlackWork: work,
 	})
 	return err
 }
@@ -110,6 +125,9 @@ func (r *Router) checkSlackWork(ctx context.Context, route core.ConvKey, work *c
 	if watch.Mode == "" || watch.Ref() != work.Watch.Ref() || watch.Rule != work.Rule ||
 		now.Key() != owner.Key() || now.SlackUserID != owner.SlackUserID {
 		return denied
+	}
+	if watch.Mode == core.SlackWatchAnswer && work.MessageTS != "" {
+		return verifier.CheckSlackOwnerReply(ctx, route, work.MessageTS, work.Via)
 	}
 	return nil
 }
