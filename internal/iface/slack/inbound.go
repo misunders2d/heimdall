@@ -140,6 +140,10 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		return err
 	}
 	conversationWork := workPost(m, commandText, watch.Mode)
+	// Live owner requests to the bot take precedence over away coverage.
+	if conversationWork && watch.Mode == core.SlackWatchAnswer && addressed && !ownerOnly && s.owner(principal) {
+		conversationWork = false
+	}
 	if ownerOnly && !conversationWork || conversationWork && watch.Changed > e.ReceivedAt.UnixMilli() {
 		return finish()
 	}

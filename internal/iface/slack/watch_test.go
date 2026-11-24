@@ -21,6 +21,41 @@ import (
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
+func TestSlackAnswerWatchKeepsAddressedOwnerMessagesLive(t *testing.T) {
+	f := newSlackFake(t)
+	s, st := testSlack(t, f)
+	s.botID = "Ubot"
+	s.opt.WorkOwnerID = "Uowner"
+	s.opt.Access = &core.Access{Owners: map[string]bool{"slack:uowner@example.test": true}}
+	for _, chat := range []string{"D1", "C1"} {
+		if err := st.SetSlackWatch(chat, core.SlackWatch{Mode: core.SlackWatchAnswer}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, chat, surface, user, text, thread string
+		wantWatch                               bool
+	}{
+		{name: "owner DM", chat: "D1", surface: "im", user: "Uowner", text: "Merge the approved changes"},
+		{name: "owner DM thread", chat: "D1", surface: "im", user: "Uowner", text: "Proceed", thread: "980.000001"},
+		{name: "owner bot mention", chat: "C1", surface: "channel", user: "Uowner", text: "<@Ubot> Merge the approved changes"},
+		{name: "unaddressed owner", chat: "C1", surface: "channel", user: "Uowner", text: "What is the project?", wantWatch: true},
+		{name: "colleague", chat: "C1", surface: "channel", user: "Uemployee", text: "<@Ubot> What is the project?", wantWatch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := f.event(tc.chat, tc.surface, tc.user, tc.text, tc.thread)
+			var got core.Inbound
+			directEvent(t, s, m, func(_ context.Context, in core.Inbound) error { got = in; return nil })
+			if got.MsgID != m.TS || got.Origin != core.OriginLive || (got.ConversationWork != nil) != tc.wantWatch {
+				t.Fatalf("message %q: got %q (origin %q, watch %v), want watch %t", m.TS, got.MsgID, got.Origin, got.ConversationWork, tc.wantWatch)
+			}
+			if !tc.wantWatch && (got.Ambient || got.From.Key() != "slack:uowner@example.test" || got.Conv.Thread != first(m.ThreadTS, m.TS)) {
+				t.Fatalf("wrong live owner route: %+v", got)
+			}
+		})
+	}
+}
+
 func TestLiveSlackAnswerWatch(t *testing.T) {
 	for _, engine := range []string{"omp", "codex"} {
 		t.Run(engine, func(t *testing.T) { testLiveSlackAnswerWatch(t, engine) })
