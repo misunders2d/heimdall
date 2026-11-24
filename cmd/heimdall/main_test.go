@@ -23,19 +23,52 @@ func TestSlackWatchCommandUpdatesOpenStore(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(dir, "heimdall.db"))
+	const chat, thread = "DFAKE", "1712345678.000001"
+	dbPath := filepath.Join(dir, "heimdall.db")
+	if err := store.CreateAtSchema(dbPath, 19); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO slack_watches(chat,thread,mode,rule,revision,changed) VALUES(?,?,'answer','',1,1)`, chat, thread)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	const chat, thread = "DFAKE", "1712345678.000001"
-	for i, mode := range []string{core.SlackWatchAnswer, core.SlackWatchOff} {
-		if err := slackWatch([]string{"-config", path, mode, chat + "/" + thread}); err != nil {
+	before, err := st.SlackWatch(chat, thread)
+	if err != nil || before.AnswerDelay() != core.DefaultSlackWatchDelay {
+		t.Fatalf("legacy watch lost the default delay: %+v, %v", before, err)
+	}
+	target := chat + "/" + thread
+	for _, tt := range []struct {
+		args     []string
+		delay    int64
+		revision int64
+	}{
+		{[]string{core.SlackWatchAnswer, target}, 0, 1},
+		{[]string{core.SlackWatchAnswer, target, "2m"}, 0, 1},
+		{[]string{core.SlackWatchAnswer, target, "5m"}, 300, 2},
+		{[]string{core.SlackWatchAnswer, target, "300s"}, 300, 2},
+		{[]string{core.SlackWatchOff, target}, 0, 3},
+	} {
+		if err := slackWatch(append([]string{"-config", path}, tt.args...)); err != nil {
 			t.Fatal(err)
 		}
 		w, err := st.SlackWatch(chat, thread)
-		if err != nil || w.Mode != mode || w.Revision != int64(i+1) {
+		if err != nil || w.Mode != tt.args[0] || w.Revision != tt.revision || w.DelaySeconds != tt.delay {
 			t.Fatalf("already-open store saw %+v, %v", w, err)
+		}
+	}
+	for _, bad := range []string{"five", "-5m", "0s", "1.1s"} {
+		if err := slackWatch([]string{"-config", path, core.SlackWatchAnswer, target, bad}); err == nil {
+			t.Errorf("accepted invalid delay %q", bad)
 		}
 	}
 }

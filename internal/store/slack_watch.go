@@ -12,10 +12,10 @@ import (
 func (s *Store) SlackWatch(chat, thread string) (core.SlackWatch, error) {
 	var watch core.SlackWatch
 	err := s.db.QueryRow(`
-		SELECT thread,mode,rule,revision,changed FROM slack_watches
+		SELECT thread,mode,rule,delay_seconds,revision,changed FROM slack_watches
 		WHERE chat=? AND thread IN ('',?)
 		ORDER BY thread DESC LIMIT 1`, chat, thread).
-		Scan(&watch.Thread, &watch.Mode, &watch.Rule, &watch.Revision, &watch.Changed)
+		Scan(&watch.Thread, &watch.Mode, &watch.Rule, &watch.DelaySeconds, &watch.Revision, &watch.Changed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return watch, nil
 	}
@@ -26,11 +26,12 @@ func (s *Store) SlackWatch(chat, thread string) (core.SlackWatch, error) {
 // pending work cannot inherit a later grant with the same wording.
 func (s *Store) SetSlackWatch(chat string, watch core.SlackWatch) error {
 	_, err := s.db.Exec(`
-		INSERT INTO slack_watches(chat,thread,mode,rule,revision,changed)
-		VALUES(?,?,?,?,1,?)
+		INSERT INTO slack_watches(chat,thread,mode,rule,delay_seconds,revision,changed)
+		VALUES(?,?,?,?,?,1,?)
 		ON CONFLICT(chat,thread) DO UPDATE SET mode=excluded.mode,rule=excluded.rule,
+		delay_seconds=excluded.delay_seconds,
 		revision=slack_watches.revision+1,changed=excluded.changed
-		WHERE mode<>excluded.mode OR rule<>excluded.rule`,
-		chat, watch.Thread, watch.Mode, watch.Rule, now())
+		WHERE mode<>excluded.mode OR rule<>excluded.rule OR delay_seconds<>excluded.delay_seconds`,
+		chat, watch.Thread, watch.Mode, watch.Rule, watch.DelaySeconds, now())
 	return err
 }

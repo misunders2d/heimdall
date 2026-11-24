@@ -55,7 +55,7 @@ const usage = `usage:
       one owner-authenticated JSON operation from stdin; no direct store access
   heimdall sched mcp -socket PATH
       stdio MCP adapter for the shared owner tool catalog
-  heimdall slack-watch -config FILE show|off|answer|work CHANNEL[/THREAD] [RULE]
+  heimdall slack-watch -config FILE show|off|answer|work CHANNEL[/THREAD] [DELAY for answer, RULE for work]
       read or change a Slack watch live from the data directory's operator account
   heimdall drain -config FILE [-timeout 30m]
       hold new scheduled runs and wait until no turn runs and every reply is
@@ -141,7 +141,8 @@ func openAdminStore(cfg *config.Config) (*store.Store, error) {
 // run routes the configured chat interfaces until a signal or an interface
 // failure (such as a token that belongs to another bot) stops it.
 func run(args []string) error {
-	cfg, err := loadConfig(flag.NewFlagSet("run", flag.ExitOnError), args)
+	flags := flag.NewFlagSet("run", flag.ExitOnError)
+	cfg, err := loadConfig(flags, args)
 	if err != nil {
 		return err
 	}
@@ -222,7 +223,11 @@ func run(args []string) error {
 			jobs.TaskIntake = cfg.Scheduler.On() && cfg.Scheduler.Control != nil && cfg.Durable.Assistant
 		}
 	}
-	r := router.New(router.Options{Work: work, Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
+	watchCommand := ""
+	if cfg.Slack != nil && cfg.Slack.WorkOwnerID != "" && work != nil && cfg.Durable.Assistant {
+		watchCommand = slackWatchCommand(flags.Lookup("config").Value.String())
+	}
+	r := router.New(router.Options{Work: work, Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), SlackWatchCommand: watchCommand, Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
 	if cfg.Scheduler.On() && cfg.Scheduler.Control != nil {
 		listener, err := func() (*net.UnixListener, error) {
 			u, err := user.Lookup(cfg.RunAs[core.RoleOwner].User)

@@ -228,7 +228,7 @@ Heimdall’s data directory:
 ```sh
 heimdall slack-watch -config /etc/heimdall/config.json work GCREATIVE 'Update existing ad images or videos.'
 heimdall slack-watch -config /etc/heimdall/config.json answer CCHANNEL
-heimdall slack-watch -config /etc/heimdall/config.json answer DEXAMPLE/1712345678.000001
+heimdall slack-watch -config /etc/heimdall/config.json answer DEXAMPLE/1712345678.000001 5m
 heimdall slack-watch -config /etc/heimdall/config.json show DEXAMPLE/1712345678.000001
 heimdall slack-watch -config /etc/heimdall/config.json off DEXAMPLE/1712345678.000001
 ```
@@ -238,6 +238,12 @@ conversation ID for the whole conversation, or add the root message timestamp
 to set a separate thread rule. A thread rule, including `off`, takes precedence
 over the conversation rule. Existing `slack.conversation_work` entries are
 defaults where there is no live setting.
+
+In a private chat with Heimdall, the owner can ask “Turn on the Slack watch
+for this link with a five-minute delay.” Include the target Slack conversation
+or thread link. The owner’s harness needs shell access to the host command.
+To change the delay, run `answer` again with the new duration. Existing
+unsent answers under the old setting are cancelled by the watch revision.
 
 For conversations the owner can see, including groups without the bot, use the
 same Socket Mode app's [user event subscriptions](https://docs.slack.dev/apis/events-api/).
@@ -280,7 +286,9 @@ before relying on them for a watch.
 
 Replies go to the original thread and identify the AI assistant. Posts that
 need no answer stay silent. Answer watches wait two minutes after the Slack
-post. An owner reply in the same thread, or directly in the same 1:1 DM,
+post by default. Supply an optional duration such as `5m` to change it for
+that watch. `show` reports the effective delay in seconds.
+An owner reply in the same thread, or directly in the same 1:1 DM,
 suppresses coverage. Heimdall checks before launching and again before posting.
 `off` prevents new launches and unsent watch
 replies. Work already running may still finish its tool actions.

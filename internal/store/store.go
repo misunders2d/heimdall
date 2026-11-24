@@ -169,6 +169,7 @@ ALTER TABLE turns ADD COLUMN no_resume INTEGER NOT NULL DEFAULT 0;`,
 		chat TEXT NOT NULL, thread TEXT NOT NULL, mode TEXT NOT NULL,
 		rule TEXT NOT NULL, revision INTEGER NOT NULL,
 		changed INTEGER NOT NULL, PRIMARY KEY(chat, thread));`,
+	`ALTER TABLE slack_watches ADD COLUMN delay_seconds INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the

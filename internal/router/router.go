@@ -66,6 +66,7 @@ type Options struct {
 	Harness           harness.WarmConfig
 	OwnerSlack        *harness.OwnerSlack
 	SlackTeam         string
+	SlackWatchCommand string // host command prefix for private live owner turns
 	Access            core.Access
 	Order             []string // default harness order
 	MaxParallel       int
@@ -1851,9 +1852,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				nativePrompt = prompt
 			}
 		}
+		note := ""
 		if c.r.opt.Jobs != nil && t.job == nil && t.review == nil && !t.detached && !batch[0].row.MCPControl {
 			// A new native session learns once how to propose a job.
-			note := ""
 			if !sess.Resume {
 				note = scheduler.Note
 				if t.role == core.RoleOwner {
@@ -1866,17 +1867,19 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			if t.role == core.RoleOwner && batch[0].row.Origin == core.OriginLive && c.r.opt.Jobs.TaskIntake && c.r.opt.Work != nil {
 				note = strings.TrimSpace(note + "\n" + scheduler.TaskNote)
 			}
-			// Pi reads notes after the prompt in the message: as turn
-			// context, live Pi ignored them.
-			switch {
-			case note == "":
-			case h == "pi":
-				nativePrompt = strings.TrimSpace(nativePrompt + "\n\n" + note)
-			case turnContext != "" || nativePrompt != prompt:
-				turnContext = strings.TrimSpace(note + "\n\n" + turnContext)
-			default:
-				nativePrompt = note + "\n\n" + nativePrompt
-			}
+		}
+		if cmd := c.r.opt.SlackWatchCommand; cmd != "" && t.private && !t.detached && liveOwnerChat(t, batch[0].row) {
+			note = strings.TrimSpace(note + "\n\n" + slackWatchNote(cmd))
+		}
+		// Pi reads notes in the message itself.
+		switch {
+		case note == "":
+		case h == "pi":
+			nativePrompt = strings.TrimSpace(nativePrompt + "\n\n" + note)
+		case turnContext != "" || nativePrompt != prompt:
+			turnContext = strings.TrimSpace(note + "\n\n" + turnContext)
+		default:
+			nativePrompt = note + "\n\n" + nativePrompt
 		}
 		if sessionNote != "" {
 			if h == "pi" {

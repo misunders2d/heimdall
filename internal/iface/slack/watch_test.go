@@ -193,7 +193,7 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 		t.Fatalf("old delivery was not rejected after off/on: %v", err)
 	}
 
-	set("C1", core.SlackWatch{Mode: core.SlackWatchAnswer})
+	set("C1", core.SlackWatch{Mode: core.SlackWatchAnswer, DelaySeconds: 300})
 	for _, m := range []eventMessage{
 		f.event("C1", "channel", "UCOLLEAGUE", "<@Ubot> What is the project?", ""),
 		f.event("C1", "channel", "UOWNER", "What is the project?", ""),
@@ -207,10 +207,10 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 	}
 	question := f.event("C1", "channel", "UCOLLEAGUE", "What is the project? SAY="+
 		base64.StdEncoding.EncodeToString([]byte("REPORT\nA general-knowledge answer.")), "981.000002")
-	// Put the post just inside the two-minute grace period so the fake
-	// exercise checks the real deadline without waiting two minutes.
+	// Put the post just inside the configured grace period so the fake
+	// exercise checks the real deadline without waiting five minutes.
 	deadline := time.Now().Truncate(time.Millisecond).Add(2 * time.Second)
-	posted := deadline.Add(-2 * time.Minute)
+	posted := deadline.Add(-5 * time.Minute)
 	question.TS = fmt.Sprintf("%d.%06d", posted.Unix(), posted.Nanosecond()/1000)
 	waitAck(t, f, f.pushAuthorized(question, ""))
 	waitFor(t, "answer from bot-visible channel", func() bool { return f.hasText("A general-knowledge answer.") })
