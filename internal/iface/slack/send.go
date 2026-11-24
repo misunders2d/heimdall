@@ -160,7 +160,6 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		text = escapeText(text)
 	}
 	api := s.bot
-	parts := splitReply(text)
 	var before []func() error
 	if out.SlackOwnerMention != "" {
 		watch, err := s.checkWatchDelivery(out)
@@ -170,6 +169,9 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		api = s.workClient(out.SlackWatch.Via)
 		if api == nil {
 			return router.PermanentError{Err: errors.New("slack: owner-authorized delivery route is unavailable")}
+		}
+		if watch.Mode == core.SlackWatchAnswer {
+			text = s.coverageNames(ctx, text)
 		}
 		before = append(before, func() error {
 			if watch.Mode == core.SlackWatchAnswer && out.ReplyTo != "" {
@@ -184,6 +186,9 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 			_, err := s.checkWatchDelivery(out)
 			return err
 		})
+	}
+	parts := splitReply(text)
+	if out.SlackOwnerMention != "" {
 		for i := range parts {
 			parts[i] = workAttribution(out.SlackOwnerMention) + "\n\n" + parts[i]
 		}
@@ -337,10 +342,16 @@ func (s *Slack) cleanupStatus(ctx context.Context, out core.Outbound, reacted bo
 	s.mu.Unlock()
 	return s.opt.Store.DeleteProgress(out.TurnID)
 }
+
+const (
+	slackReplyPartRunes  = 3200
+	slackReplyTokenRunes = 3000
+)
+
 func splitReply(text string) []string {
 	// Oversize Slack tokens degrade to escaped text before boundary selection.
 	text = regexp.MustCompile(`<[^>]*>`).ReplaceAllStringFunc(text, func(token string) string {
-		if len([]rune(token)) > 3000 {
+		if len([]rune(token)) > slackReplyTokenRunes {
 			return escapeText(token)
 		}
 		return token
@@ -350,7 +361,7 @@ func splitReply(text string) []string {
 	prefix := ""
 	for text != "" {
 		runes := []rune(text)
-		n := min(len(runes), 3200-len([]rune(prefix)))
+		n := min(len(runes), slackReplyPartRunes-len([]rune(prefix)))
 		if n < len(runes) {
 			for _, sep := range []string{"\n\n", "\n", " "} {
 				candidate := string(runes[:n])

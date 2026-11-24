@@ -14,6 +14,52 @@ import (
 
 var slackMemberID = regexp.MustCompile(`^[UW][A-Z0-9]+$`)
 
+var coverageMention = regexp.MustCompile(`&(?:amp;)?lt;@[UW][A-Z0-9]+(?:\|[^\r\n]*?)?&(?:amp;)?gt;`)
+var coverageNamePunctuation = strings.NewReplacer("*", "∗", "_", "＿", "`", "ˋ", "~", "∼")
+
+// coverageNames runs on already escaped text. Only the separately appended
+// attribution may produce a real Slack mention.
+func (s *Slack) coverageNames(ctx context.Context, text string) string {
+	if !coverageMention.MatchString(text) {
+		return text
+	}
+	const genericName = "a Slack member"
+	plain := coverageMention.ReplaceAllString(text, genericName)
+	// Slack delivery reconciles multipart replies by their part IDs. A failed
+	// name lookup must never change the number or boundaries of those parts.
+	if len(plain) > slackReplyTokenRunes {
+		return plain
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	names := make(map[string]string)
+	resolved := coverageMention.ReplaceAllStringFunc(text, func(token string) string {
+		_, id, _ := strings.Cut(token, "@")
+		id, _, _ = strings.Cut(id, "&")
+		id, _, _ = strings.Cut(id, "|")
+		if name, ok := names[id]; ok {
+			return name
+		}
+		name := genericName
+		if len(names) < 8 && ctx.Err() == nil {
+			if user, err := s.liveUser(ctx, id); err == nil {
+				if person, verified := Verify(user, s.opt.TeamID); verified {
+					display := strings.Join(strings.Fields(router.Scrub(person.Name)), " ")
+					if display != "" {
+						name = escapeText(coverageNamePunctuation.Replace(display))
+					}
+				}
+			}
+		}
+		names[id] = name
+		return name
+	})
+	if len(resolved) > slackReplyTokenRunes {
+		return plain
+	}
+	return resolved
+}
+
 func (s *Slack) initializeWorkUser(ctx context.Context) {
 	if s.opt.WorkUserToken == "" || s.opt.WorkOwnerID == "" {
 		return

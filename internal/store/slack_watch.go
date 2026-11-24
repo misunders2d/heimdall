@@ -8,11 +8,15 @@ import (
 )
 
 // SlackWatch finds the thread override first, including an explicit off.
-// A missing row leaves the existing startup config as the fallback.
+// An empty chat is reserved for the shared delay and never grants coverage.
+// A missing conversation row leaves the startup config as the fallback.
 func (s *Store) SlackWatch(chat, thread string) (core.SlackWatch, error) {
 	var watch core.SlackWatch
 	err := s.db.QueryRow(`
-		SELECT thread,mode,rule,delay_seconds,revision,changed FROM slack_watches
+		SELECT thread,mode,rule,
+			CASE WHEN mode='answer' THEN COALESCE(NULLIF(delay_seconds,0),
+				(SELECT delay_seconds FROM slack_watches WHERE chat='' AND thread=''),0)
+			ELSE delay_seconds END,revision,changed FROM slack_watches
 		WHERE chat=? AND thread IN ('',?)
 		ORDER BY thread DESC LIMIT 1`, chat, thread).
 		Scan(&watch.Thread, &watch.Mode, &watch.Rule, &watch.DelaySeconds, &watch.Revision, &watch.Changed)

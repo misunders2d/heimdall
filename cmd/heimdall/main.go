@@ -57,6 +57,8 @@ const usage = `usage:
       stdio MCP adapter for the shared owner tool catalog
   heimdall slack-watch -config FILE show|off|answer|work CHANNEL[/THREAD] [DELAY for answer, RULE for work]
       read or change a Slack watch live from the data directory's operator account
+  heimdall slack-watch -config FILE default-delay [DELAY]
+      read or change the live delay for Slack answer watches that inherit it
   heimdall drain -config FILE [-timeout 30m]
       hold new scheduled runs and wait until no turn runs and every reply is
       delivered: exit 0 when idle, 75 on timeout (run before a restart)
