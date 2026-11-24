@@ -93,6 +93,9 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 		u.Profile.Email = strings.ToLower(id) + "@example.test"
 		f.users[id] = u
 	}
+	colleague := f.users["UCOLLEAGUE"]
+	colleague.Profile.DisplayName = "Ava Example"
+	f.users[colleague.ID] = colleague
 	ownerReplyCheck := make(chan time.Time, 1)
 	f.setHook(func(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
 		userToken := r.Header.Get("Authorization") == "Bearer test-work-user"
@@ -193,7 +196,8 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 		t.Fatalf("old delivery was not rejected after off/on: %v", err)
 	}
 
-	set("C1", core.SlackWatch{Mode: core.SlackWatchAnswer, DelaySeconds: 300})
+	set("", core.SlackWatch{Mode: core.SlackWatchAnswer, DelaySeconds: 300})
+	set("C1", core.SlackWatch{Mode: core.SlackWatchAnswer})
 	for _, m := range []eventMessage{
 		f.event("C1", "channel", "UCOLLEAGUE", "<@Ubot> What is the project?", ""),
 		f.event("C1", "channel", "UOWNER", "What is the project?", ""),
@@ -206,14 +210,16 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 		}
 	}
 	question := f.event("C1", "channel", "UCOLLEAGUE", "What is the project? SAY="+
-		base64.StdEncoding.EncodeToString([]byte("REPORT\nA general-knowledge answer.")), "981.000002")
+		base64.StdEncoding.EncodeToString([]byte("REPORT\n<@UCOLLEAGUE>, a general-knowledge answer for <@UUNKNOWN>.")), "981.000002")
 	// Put the post just inside the configured grace period so the fake
 	// exercise checks the real deadline without waiting five minutes.
 	deadline := time.Now().Truncate(time.Millisecond).Add(2 * time.Second)
 	posted := deadline.Add(-5 * time.Minute)
 	question.TS = fmt.Sprintf("%d.%06d", posted.Unix(), posted.Nanosecond()/1000)
 	waitAck(t, f, f.pushAuthorized(question, ""))
-	waitFor(t, "answer from bot-visible channel", func() bool { return f.hasText("A general-knowledge answer.") })
+	waitFor(t, "answer with display names from bot-visible channel", func() bool {
+		return f.hasText("Ava Example, a general-knowledge answer for a Slack member.")
+	})
 	select {
 	case checkedAt := <-ownerReplyCheck:
 		if checkedAt.Before(deadline) {

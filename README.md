@@ -229,6 +229,8 @@ Heimdall’s data directory:
 heimdall slack-watch -config /etc/heimdall/config.json work GCREATIVE 'Update existing ad images or videos.'
 heimdall slack-watch -config /etc/heimdall/config.json answer CCHANNEL
 heimdall slack-watch -config /etc/heimdall/config.json answer DEXAMPLE/1712345678.000001 5m
+heimdall slack-watch -config /etc/heimdall/config.json default-delay 5m
+heimdall slack-watch -config /etc/heimdall/config.json default-delay
 heimdall slack-watch -config /etc/heimdall/config.json show DEXAMPLE/1712345678.000001
 heimdall slack-watch -config /etc/heimdall/config.json off DEXAMPLE/1712345678.000001
 ```
@@ -244,6 +246,10 @@ for this link with a five-minute delay.” Include the target Slack conversation
 or thread link. The owner’s harness needs shell access to the host command.
 To change the delay, run `answer` again with the new duration. Existing
 unsent answers under the old setting are cancelled by the watch revision.
+The owner can also ask “Set the global Slack watch delay to five minutes.”
+The shared delay applies to new questions on answer watches without an
+explicit delay. Existing queued questions keep their deadline. An `answer`
+command without a duration restores inheritance for that watch.
 
 For conversations the owner can see, including groups without the bot, use the
 same Socket Mode app's [user event subscriptions](https://docs.slack.dev/apis/events-api/).
@@ -285,8 +291,8 @@ expose recall. Enable the read operations in the harness and connector policy
 before relying on them for a watch.
 
 Replies go to the original thread and identify the AI assistant. Posts that
-need no answer stay silent. Answer watches wait two minutes after the Slack
-post by default. Supply an optional duration such as `5m` to change it for
+need no answer stay silent. The initial shared delay is two minutes from
+the Slack post. Supply an optional duration such as `5m` to override it for
 that watch. `show` reports the effective delay in seconds.
 An owner reply in the same thread, or directly in the same 1:1 DM,
 suppresses coverage. Heimdall checks before launching and again before posting.

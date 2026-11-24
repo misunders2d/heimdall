@@ -53,10 +53,10 @@ func TestSlackWatchCommandUpdatesOpenStore(t *testing.T) {
 		revision int64
 	}{
 		{[]string{core.SlackWatchAnswer, target}, 0, 1},
-		{[]string{core.SlackWatchAnswer, target, "2m"}, 0, 1},
-		{[]string{core.SlackWatchAnswer, target, "5m"}, 300, 2},
-		{[]string{core.SlackWatchAnswer, target, "300s"}, 300, 2},
-		{[]string{core.SlackWatchOff, target}, 0, 3},
+		{[]string{core.SlackWatchAnswer, target, "2m"}, 120, 2},
+		{[]string{core.SlackWatchAnswer, target, "5m"}, 300, 3},
+		{[]string{core.SlackWatchAnswer, target, "300s"}, 300, 3},
+		{[]string{core.SlackWatchOff, target}, 0, 4},
 	} {
 		if err := slackWatch(append([]string{"-config", path}, tt.args...)); err != nil {
 			t.Fatal(err)
@@ -70,6 +70,36 @@ func TestSlackWatchCommandUpdatesOpenStore(t *testing.T) {
 		if err := slackWatch([]string{"-config", path, core.SlackWatchAnswer, target, bad}); err == nil {
 			t.Errorf("accepted invalid delay %q", bad)
 		}
+	}
+	for _, args := range [][]string{
+		{"answer", chat},
+		{"answer", "COVERRIDE", "2m"},
+		{"default-delay", "5m"},
+		{"default-delay"},
+	} {
+		if err := slackWatch(append([]string{"-config", path}, args...)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tt := range []struct {
+		chat, thread, mode string
+		delay              int64
+	}{
+		{chat, "", core.SlackWatchAnswer, 300},
+		{chat, thread, core.SlackWatchOff, 0},
+		{"COVERRIDE", "", core.SlackWatchAnswer, 120},
+		{"CUNWATCHED", "", "", 0},
+	} {
+		w, err := st.SlackWatch(tt.chat, tt.thread)
+		if err != nil || w.Mode != tt.mode || w.DelaySeconds != tt.delay {
+			t.Fatalf("%s/%s with shared delay set: %+v, %v", tt.chat, tt.thread, w, err)
+		}
+	}
+	if err := slackWatch([]string{"-config", path, "answer", "COVERRIDE"}); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := st.SlackWatch("COVERRIDE", ""); err != nil || w.DelaySeconds != 300 {
+		t.Fatalf("override did not resume inheritance: %+v, %v", w, err)
 	}
 }
 
