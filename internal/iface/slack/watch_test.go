@@ -38,6 +38,7 @@ func TestSlackAnswerWatchLeavesBotConversationsAlone(t *testing.T) {
 		wantWatch, wantAmbient, ignored bool
 	}{
 		{name: "owner DM", chat: "D1", surface: "im", user: "Uowner", text: "Please update the project"},
+		{name: "owner DM thread", chat: "D1", surface: "im", user: "Uowner", text: "Proceed", botThread: true},
 		{name: "colleague DM", chat: "D1", surface: "im", user: "Uemployee", text: "What is the project?"},
 		{name: "owner bot mention", chat: "C1", surface: "channel", user: "Uowner", text: "<@Ubot> Please update the project"},
 		{name: "colleague bot mention", chat: "C1", surface: "channel", user: "Uemployee", text: "<@Ubot> What is the project?"},
@@ -175,6 +176,17 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 	}
 
 	set("C1", core.SlackWatch{Mode: core.SlackWatchAnswer})
+	for _, m := range []eventMessage{
+		f.event("C1", "channel", "UCOLLEAGUE", "<@Ubot> What is the project?", ""),
+		f.event("C1", "channel", "UOWNER", "What is the project?", ""),
+		{Type: "message", Channel: "C1", ChannelType: "channel", User: "UCOLLEAGUE", TS: "1000.000099", ThreadTS: "979.000001", ParentUserID: "Ubot", Text: "What is the project?"},
+	} {
+		id := f.pushAuthorized(m, "UOWNER")
+		waitAck(t, f, id)
+		if _, found, err := st.Event("slack", id); err != nil || found {
+			t.Fatalf("excluded user-token event %s was staged: found=%t, err=%v", id, found, err)
+		}
+	}
 	post("C1", "channel", "UCOLLEAGUE", "981.000002", "REPORT\nA general-knowledge answer.", "")
 	waitFor(t, "answer from bot-visible channel", func() bool { return f.hasText("A general-knowledge answer.") })
 	posts := f.all("chat.postMessage")
@@ -190,6 +202,8 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 		prompt := in.Text + "\n" + in.Context
 		if in.Harness != engine || !strings.Contains(prompt, "native Memento recall") ||
 			!strings.Contains(prompt, "covering for the Slack user <@UOWNER>") ||
+			!strings.Contains(prompt, "sl_user_UOWNER in thread history") ||
+			!strings.Contains(prompt, "Slack bot (sl_user_Ubot in thread history)") ||
 			!strings.Contains(prompt, "calls for that person's response") ||
 			!strings.Contains(prompt, "read-only Mellanni MCP") || !strings.Contains(prompt, "another configured harness") {
 			t.Fatalf("selected harness did not receive answer and delegation instructions: %+v", in)
