@@ -255,7 +255,8 @@ Token Scopes**:
 
 Add user scope `chat:write` for attributed replies. Reinstall or authorize the
 app as the configured owner and supply the resulting **User OAuth Token** to
-the service as `HEIMDALL_SLACK_WORK_USER_TOKEN`. The same listener discards
+the service as `HEIMDALL_SLACK_WORK_USER_TOKEN`. The listener preserves the
+owner's verified direct conversation with the bot and discards other
 user-authorized events outside active watches before persistence.
 For bot-only access, invite the bot to the conversation and grant its
 corresponding membership read scope.

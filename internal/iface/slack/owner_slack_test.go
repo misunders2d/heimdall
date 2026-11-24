@@ -9,9 +9,74 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 )
+
+func TestOwnerAuthorizedBotDMStaysLive(t *testing.T) {
+	f := newSlackFake(t)
+	f.allowWorkUser = true
+	u := User{ID: "UOWNER", TeamID: "Ttest", Name: "Owner"}
+	u.Profile.Email = "owner@example.test"
+	f.users[u.ID] = u
+	f.setHook(func(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
+		if r.Header.Get("Authorization") == "Bearer test-work-user" {
+			switch r.URL.Path {
+			case "/auth.test":
+				fmt.Fprint(w, `{"ok":true,"team_id":"Ttest","user_id":"UOWNER"}`)
+				return true
+			case "/users.conversations":
+				if args["types"] != "im" {
+					t.Errorf("expected direct conversations, got %v", args)
+				}
+				if args["cursor"] == "next" {
+					fmt.Fprint(w, `{"ok":true,"channels":[{"id":"DOWNERBOT","user":"Ubot","is_im":true}]}`)
+				} else {
+					fmt.Fprint(w, `{"ok":true,"channels":[{"id":"DOTHER","user":"Uemployee","is_im":true}],"response_metadata":{"next_cursor":"next"}}`)
+				}
+				return true
+			}
+		}
+		if r.URL.Path == "/conversations.info" && args["channel"] == "DOWNERBOT" {
+			fmt.Fprint(w, `{"ok":true,"channel":{"is_im":true,"user":"UOWNER"}}`)
+			return true
+		}
+		return false
+	})
+	s, st := testSlack(t, f)
+	s.opt.WorkOwnerID, s.opt.WorkUserToken = "UOWNER", "test-work-user"
+	s.opt.Owners = []string{"slack:owner@example.test"}
+	got := make(chan core.Inbound, 3)
+	runSlack(t, s, func(_ context.Context, in core.Inbound) error { got <- in; return nil })
+	waitFor(t, "Slack ready", s.started)
+	for _, mode := range []string{core.SlackWatchOff, core.SlackWatchAnswer} {
+		if err := st.SetSlackWatch("DOWNERBOT", core.SlackWatch{Mode: mode}); err != nil {
+			t.Fatal(err)
+		}
+		m := f.event("DOWNERBOT", "im", "UOWNER", "Find this in my memory", "")
+		waitAck(t, f, f.pushAuthorized(m, "UOWNER"))
+		select {
+		case in := <-got:
+			if in.MsgID != m.TS || in.From.Key() != "slack:owner@example.test" || in.Origin != core.OriginLive ||
+				in.Ambient || in.ConversationWork != nil || !in.SlackPrivateOwnerVerified {
+				t.Fatalf("%s: wrong route for owner-authorized bot DM: %+v", mode, in)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: owner-authorized bot DM was dropped", mode)
+		}
+	}
+	for _, m := range []eventMessage{
+		f.event("DOTHER", "im", "UOWNER", "A private message to someone else", ""),
+		f.event("DOWNERBOT", "im", "UOWNER", workAttribution("UOWNER")+"\n\nAn attributed reply", ""),
+	} {
+		id := f.pushAuthorized(m, "UOWNER")
+		waitAck(t, f, id)
+		if _, found, err := st.Event("slack", id); err != nil || found {
+			t.Fatalf("unrelated or assistant-authored event was staged: found=%t, err=%v", found, err)
+		}
+	}
+}
 
 func TestOwnerSlackLiveDMVerification(t *testing.T) {
 	for _, kind := range []string{"im", "mpim", "wrong-user", "unavailable"} {

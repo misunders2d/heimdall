@@ -6,6 +6,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/router"
@@ -30,6 +31,37 @@ func (s *Slack) initializeWorkUser(ctx context.Context) {
 		return
 	}
 	s.workUser = api
+	// Slack's event envelope may list the owner alone even in the bot DM.
+	// Resolve the actual bot peer before opening the event stream.
+	lookup, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for cursor := ""; ; {
+		var page struct {
+			Channels []struct {
+				ID   string `json:"id"`
+				User string `json:"user"`
+				IsIM bool   `json:"is_im"`
+			} `json:"channels"`
+			Metadata struct {
+				Next string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		args := map[string]any{"types": "im", "limit": 200, "cursor": cursor}
+		if err := api.call(lookup, "users.conversations", args, &page); err != nil {
+			s.opt.Log.Print("slack: could not verify the owner's direct conversation with the bot")
+			break
+		}
+		for _, ch := range page.Channels {
+			if ch.IsIM && ch.User == s.botID && strings.HasPrefix(ch.ID, "D") {
+				s.ownerBotDM = ch.ID
+				return
+			}
+		}
+		if page.Metadata.Next == "" || page.Metadata.Next == cursor {
+			break
+		}
+		cursor = page.Metadata.Next
+	}
 }
 
 func (s *Slack) workClient(via string) *apiClient {
@@ -59,8 +91,8 @@ func workAttribution(id string) string {
 	return "AI assistant covering for <@" + id + "> while they’re away."
 }
 
-// eventAdmission filters user-authorized events before persistence. Those
-// events can never fall through to ordinary addressed handling.
+// eventAdmission filters user-authorized events before persistence. The
+// verified DM with the bot can still use ordinary addressed handling.
 func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err error) {
 	var p struct {
 		Event          eventMessage
@@ -94,6 +126,9 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 	}
 	if !workUser || m.Type != "message" || m.BotID != "" || m.User == "" || m.User == s.botID {
 		return false, false, nil
+	}
+	if s.ownerBotDM != "" && m.Channel == s.ownerBotDM && m.ChannelType == "im" && m.User == s.opt.WorkOwnerID {
+		return true, false, nil
 	}
 	command := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), s.mention()), s.botID)
 	w, err := s.watch(m.Channel, first(m.ThreadTS, m.TS))

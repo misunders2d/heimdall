@@ -52,6 +52,7 @@ type Slack struct {
 	opt           Options
 	bot, app      *apiClient
 	workUser      *apiClient // initialized before ready, for explicitly granted conversations
+	ownerBotDM    string     // the verified work owner's 1:1 conversation with the bot
 	socket        socketTransport
 	ready         chan struct{}
 	readyOnce     sync.Once // Run may run again after a failure (router restart)
