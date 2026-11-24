@@ -337,9 +337,9 @@ func TestReconcileAfterDowntime(t *testing.T) {
 	}()
 	f.mu.Unlock()
 	time.Sleep(20 * time.Millisecond)
+	e.close()
 	defer func(d time.Duration) { aliveEvery = d }(aliveEvery)
 	aliveEvery = 10 * time.Millisecond // the margin before the last heartbeat
-	e.close()
 
 	// While down: thread-A gets a new request, thread-B is created; an
 	// agent thread, a subagent child and a delegated thread also change.
