@@ -688,7 +688,7 @@ func (s *Slack) exhaustEvent(ctx context.Context, e store.InterfaceEvent) error 
 		return s.opt.Store.CompleteEvent(e.ID)
 	}
 	command := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), s.mention()), s.botID)
-	if w, _ := s.watch(m.Channel, first(m.ThreadTS, m.TS)); workPost(m, command, w.Mode) {
+	if w, _ := s.watch(m.Channel, first(m.ThreadTS, m.TS)); s.watchPost(m, command, w.Mode, s.addressed(m)) {
 		return s.opt.Store.CompleteEvent(e.ID)
 	}
 	addressed := s.addressed(m) || (m.ThreadTS != "" && m.ParentUserID == s.botID)

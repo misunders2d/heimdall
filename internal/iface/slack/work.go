@@ -99,14 +99,16 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 	if err != nil {
 		return false, true, err
 	}
-	if w.Mode == core.SlackWatchAnswer && m.User == s.opt.WorkOwnerID {
-		return false, true, nil
-	}
-	return workPost(m, command, w.Mode), true, nil
+	return s.watchPost(m, command, w.Mode, s.mention().MatchString(m.Text)), true, nil
 }
 
-// workPost keeps commands and sign-in out of conversation work.
-func workPost(m eventMessage, commandText, mode string) bool {
+// watchPost keeps commands and sign-in on the normal path. Answer watches
+// cover the owner, leaving existing bot conversations on their normal path.
+func (s *Slack) watchPost(m eventMessage, commandText, mode string, addressedToBot bool) bool {
+	if mode == core.SlackWatchAnswer && (addressedToBot || m.User == s.opt.WorkOwnerID ||
+		(m.ThreadTS != "" && m.ParentUserID == s.botID)) {
+		return false
+	}
 	return (mode == core.SlackWatchAnswer || mode == core.SlackWatchWork && m.ChannelType != "im") &&
 		commandText != "" && router.IsConversationMessage(commandText) &&
 		!mcpCommand.MatchString(commandText) && core.GoogleCommand(commandText) == ""
