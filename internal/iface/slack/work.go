@@ -91,7 +91,7 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 			workUser = true
 		}
 	}
-	if !workUser || m.Type != "message" || m.BotID != "" {
+	if !workUser || m.Type != "message" || m.BotID != "" || m.User == "" || m.User == s.botID {
 		return false, false, nil
 	}
 	command := router.NormalizeSlash(stripBoundaryMention(strings.TrimSpace(unescape(m.Text)), s.mention()), s.botID)
@@ -99,16 +99,19 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 	if err != nil {
 		return false, true, err
 	}
-	if w.Mode == core.SlackWatchAnswer && m.User == s.opt.WorkOwnerID {
-		return false, true, nil
-	}
-	return workPost(m, command, w.Mode), true, nil
+	// A human sender in the owner's 1:1 DM is talking to the owner.
+	// A bot mention there may be a reference, so leave it to the brief.
+	return s.watchPost(m, command, w.Mode, m.ChannelType != "im" && s.mention().MatchString(m.Text)), true, nil
 }
 
-// workPost keeps commands and sign-in out of conversation work.
-func workPost(m eventMessage, commandText, mode string) bool {
+// watchPost keeps commands and sign-in on the normal path. Answer watches
+// cover the owner, leaving existing bot conversations on their normal path.
+func (s *Slack) watchPost(m eventMessage, commandText, mode string, addressedToBot bool) bool {
+	if addressedToBot || mode == core.SlackWatchAnswer && m.User == s.opt.WorkOwnerID {
+		return false
+	}
 	return (mode == core.SlackWatchAnswer || mode == core.SlackWatchWork && m.ChannelType != "im") &&
-		commandText != "" && router.IsConversationMessage(commandText) &&
+		commandText != "" && !router.IsCommand(commandText) &&
 		!mcpCommand.MatchString(commandText) && core.GoogleCommand(commandText) == ""
 }
 

@@ -262,8 +262,10 @@ corresponding membership read scope.
 
 A new post by a verified same-workspace member can trigger a turn without a
 mention. `work` uses the owner’s normal harness and tools with the configured
-rule. `answer` uses the conversation’s selected harness or the normal harness
-order. It can use general knowledge, the thread, native Memento recall and
+rule. `answer` covers questions that call for the owner’s response, including
+untagged questions. Messages to the bot still follow its ordinary routing.
+Coverage uses the conversation’s selected harness or the normal harness order.
+It can use general knowledge, the thread, native Memento recall and
 read-only Mellanni MCP. If a tool is unavailable, it can ask another configured
 harness for evidence through its native delegation tools. The harnesses need
 their own connector access. The read-only instruction applies to the original

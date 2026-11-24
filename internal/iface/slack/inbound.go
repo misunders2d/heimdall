@@ -103,7 +103,7 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	}
 	m := payload.Event
 	finish := func() error { return s.opt.Store.CompleteEvent(e.ID) }
-	if m.Type != "message" || m.BotID != "" || m.User == "" || m.Channel == "" || m.TS == "" || !slices.Contains([]string{"", "file_share", "thread_broadcast"}, m.Subtype) {
+	if m.Type != "message" || m.BotID != "" || m.User == "" || m.User == s.botID || m.Channel == "" || m.TS == "" || !slices.Contains([]string{"", "file_share", "thread_broadcast"}, m.Subtype) {
 		s.opt.Log.Print("slack: ignored non-person or unsupported message event")
 		return finish()
 	}
@@ -113,7 +113,8 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	}
 	text := strings.TrimSpace(unescape(m.Text))
 	mention := s.mention()
-	addressed := m.ChannelType == "im" || mention.MatchString(m.Text)
+	mentionsBot := mention.MatchString(m.Text)
+	addressed := m.ChannelType == "im" || mentionsBot
 	commandText := stripBoundaryMention(text, mention)
 	commandText = router.NormalizeSlash(commandText, s.botID)
 	if router.UnmentionedCommand(text, commandText, s.botID, s.opt.UnmentionedCommands) {
@@ -139,7 +140,8 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if err != nil {
 		return err
 	}
-	conversationWork := workPost(m, commandText, watch.Mode)
+	addressedToBot := addressed && !ownerOnly || mentionsBot && m.ChannelType != "im"
+	conversationWork := s.watchPost(m, commandText, watch.Mode, addressedToBot)
 	if ownerOnly && !conversationWork || conversationWork && watch.Changed > e.ReceivedAt.UnixMilli() {
 		return finish()
 	}
