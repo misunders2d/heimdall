@@ -32,6 +32,9 @@ func TestSlackAnswerWatchLeavesBotConversationsAlone(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := st.SetSlackWatch("C2", core.SlackWatch{Mode: core.SlackWatchWork, Rule: "Update project files."}); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, chat, surface, user, text string
 		botThread                       bool
@@ -42,7 +45,10 @@ func TestSlackAnswerWatchLeavesBotConversationsAlone(t *testing.T) {
 		{name: "colleague DM", chat: "D1", surface: "im", user: "Uemployee", text: "What is the project?"},
 		{name: "owner bot mention", chat: "C1", surface: "channel", user: "Uowner", text: "<@Ubot> Please update the project"},
 		{name: "colleague bot mention", chat: "C1", surface: "channel", user: "Uemployee", text: "<@Ubot> What is the project?"},
-		{name: "untagged bot thread reply", chat: "C1", surface: "channel", user: "Uemployee", text: "What is the project?", botThread: true, wantAmbient: true},
+		{name: "colleague bot mention with work watch", chat: "C2", surface: "channel", user: "Uemployee", text: "<@Ubot> What is the project?"},
+		{name: "next command", chat: "C1", surface: "channel", user: "Uemployee", text: "!next What is the project?", wantAmbient: true},
+		{name: "harness command", chat: "C1", surface: "channel", user: "Uemployee", text: "!codex What is the project?", wantAmbient: true},
+		{name: "question for owner in bot thread", chat: "C1", surface: "channel", user: "Uemployee", text: "<@Uowner> What is the project?", botThread: true, wantWatch: true, wantAmbient: true},
 		{name: "owner's own post", chat: "C1", surface: "channel", user: "Uowner", text: "What is the project?", wantAmbient: true},
 		{name: "bot's scheduled post", chat: "C1", surface: "channel", user: "Ubot", text: "What is the project?", ignored: true},
 		{name: "question for owner", chat: "C1", surface: "channel", user: "Uemployee", text: "<@Uowner> What is the project?", wantWatch: true, wantAmbient: true},
@@ -159,7 +165,9 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 	set("D1", core.SlackWatch{Mode: core.SlackWatchAnswer, Thread: thread})
 	post("D1", "im", "UCOLLEAGUE", "980.000003", "", "UOWNER")
 	post("D1", "im", "UOWNER", thread, "", "UOWNER")
-	post("D1", "im", "UCOLLEAGUE", thread, "REPORT\nThe project is Maple.", "UOWNER")
+	humanDM := f.event("D1", "im", "UCOLLEAGUE", "What project did <@Ubot> report? SAY="+
+		base64.StdEncoding.EncodeToString([]byte("REPORT\nThe project is Maple.")), thread)
+	waitAck(t, f, f.pushAuthorized(humanDM, "UOWNER"))
 	waitFor(t, "attributed answer from owner-visible DM", func() bool { return f.hasText("The project is Maple.") })
 
 	w, err := operator.SlackWatch("D1", thread)
@@ -179,7 +187,7 @@ func testLiveSlackAnswerWatch(t *testing.T, engine string) {
 	for _, m := range []eventMessage{
 		f.event("C1", "channel", "UCOLLEAGUE", "<@Ubot> What is the project?", ""),
 		f.event("C1", "channel", "UOWNER", "What is the project?", ""),
-		{Type: "message", Channel: "C1", ChannelType: "channel", User: "UCOLLEAGUE", TS: "1000.000099", ThreadTS: "979.000001", ParentUserID: "Ubot", Text: "What is the project?"},
+		f.event("C1", "channel", "Ubot", "Scheduled project report", ""),
 	} {
 		id := f.pushAuthorized(m, "UOWNER")
 		waitAck(t, f, id)

@@ -140,7 +140,8 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if err != nil {
 		return err
 	}
-	conversationWork := s.watchPost(m, commandText, watch.Mode, mentionsBot || addressed && !ownerOnly)
+	addressedToBot := addressed && !ownerOnly || mentionsBot && m.ChannelType != "im"
+	conversationWork := s.watchPost(m, commandText, watch.Mode, addressedToBot)
 	if ownerOnly && !conversationWork || conversationWork && watch.Changed > e.ReceivedAt.UnixMilli() {
 		return finish()
 	}
