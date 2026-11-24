@@ -236,18 +236,27 @@ type SlackWork struct {
 // SlackWatch is the effective owner grant for one channel or root thread.
 // Revision zero denotes a legacy grant from the startup config.
 type SlackWatch struct {
-	Thread   string `json:"thread,omitempty"`
-	Mode     string `json:"mode,omitempty"`
-	Rule     string `json:"rule,omitempty"`
-	Revision int64  `json:"revision,omitempty"`
-	Changed  int64  `json:"changed,omitempty"`
+	Thread       string `json:"thread,omitempty"`
+	Mode         string `json:"mode,omitempty"`
+	Rule         string `json:"rule,omitempty"`
+	DelaySeconds int64  `json:"delay_seconds,omitempty"` // zero uses the default for answer watches
+	Revision     int64  `json:"revision,omitempty"`
+	Changed      int64  `json:"changed,omitempty"`
 }
 
 const (
-	SlackWatchOff    = "off"
-	SlackWatchAnswer = "answer"
-	SlackWatchWork   = "work"
+	SlackWatchOff          = "off"
+	SlackWatchAnswer       = "answer"
+	SlackWatchWork         = "work"
+	DefaultSlackWatchDelay = 2 * time.Minute
 )
+
+func (w SlackWatch) AnswerDelay() time.Duration {
+	if w.DelaySeconds == 0 {
+		return DefaultSlackWatchDelay
+	}
+	return time.Duration(w.DelaySeconds) * time.Second
+}
 
 var ErrSlackWatchRevoked = errors.New("slack: watch is no longer authorized")
 var ErrSlackOwnerReplied = errors.New("slack: the owner replied")
