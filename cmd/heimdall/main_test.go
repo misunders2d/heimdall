@@ -11,9 +11,34 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/scheduler"
 	"github.com/misunders2d/heimdall/internal/store"
 )
+
+func TestSlackWatchCommandUpdatesOpenStore(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := fmt.Sprintf(`{"data_dir":%q,"mode":"corporate","owners":["telegram:1"],"run_as":{"owner":{"user":"root"},"employee":{"user":"nobody"}},"durable":{"enabled":true,"assistant_work":true},"slack":{"team_id":"TFAKE","work_owner_id":"UOWNER"}}`, dir)
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "heimdall.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	const chat, thread = "DFAKE", "1712345678.000001"
+	for i, mode := range []string{core.SlackWatchAnswer, core.SlackWatchOff} {
+		if err := slackWatch([]string{"-config", path, mode, chat + "/" + thread}); err != nil {
+			t.Fatal(err)
+		}
+		w, err := st.SlackWatch(chat, thread)
+		if err != nil || w.Mode != mode || w.Revision != int64(i+1) {
+			t.Fatalf("already-open store saw %+v, %v", w, err)
+		}
+	}
+}
 
 func TestCheckConfigOffline(t *testing.T) {
 	t.Setenv("ADMIN_USER_IDS", "1")

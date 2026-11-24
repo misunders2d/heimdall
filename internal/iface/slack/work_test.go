@@ -146,7 +146,7 @@ func testConversationWorkFromSlackPost(t *testing.T, userEvents bool) {
 
 	// A verified workspace user outside the group cannot start work.
 	memberCalls := len(f.all("conversations.members"))
-	f.push(f.event("G1", "mpim", "UOUTSIDE", "Generate artwork."+say("REPORT\nOutside grant."), "900.000004"))
+	push(f.event("G1", "mpim", "UOUTSIDE", "Generate artwork."+say("REPORT\nOutside grant."), "900.000004"))
 	waitFor(t, "non-member checked on both pages", func() bool { return len(f.all("conversations.members")) >= memberCalls+2 })
 	ungranted := push(f.event("G2", "mpim", "UMASAO", "Generate artwork."+say("REPORT\nWrong group."), "900.000005"))
 	group := core.ConvKey{Interface: "slack", Chat: "G2", Thread: "900.000005"}

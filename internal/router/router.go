@@ -366,7 +366,7 @@ func (r *Router) acceptMessage(ctx context.Context, in core.Inbound) error {
 		r.release(in)
 		return errors.New("interface message claims a commitment review")
 	}
-	if in.ConversationWork {
+	if in.ConversationWork != nil {
 		in.Text = core.RedactMCPCallbacks(in.Text)
 		in.Context = core.RedactMCPCallbacks(in.Context)
 		return r.admitConversationWork(ctx, in)
@@ -1992,6 +1992,14 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 					return
 				}
 				spec.Timeout = min(spec.Timeout, remaining)
+			}
+		}
+		if t.review != nil && t.review.SlackWork != nil {
+			live, err := c.r.store.SlackWatch(target.Chat, target.Thread)
+			if err != nil || !live.Matches(t.review.SlackWork.Watch.Ref()) {
+				refused = true
+				c.unbind(t, h, prev, clean)
+				break
 			}
 		}
 		run, err := c.startCandidate(ctx, t, spec)

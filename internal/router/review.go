@@ -38,7 +38,7 @@ func (r *Router) Review(ctx context.Context, q durable.ReviewRequest) (durable.R
 	}
 	in := core.Inbound{Conv: core.ConvKey{Interface: q.Route.Interface, Chat: core.ReviewChat(q.Issue)}, MsgID: q.Key, From: q.Owner,
 		Origin: core.OriginCommitment, Text: q.Prompt, At: time.Now(),
-		Review: &core.Review{Issue: q.Issue, Attempt: q.Attempt, Key: q.Key, Target: q.Route, Private: q.Private}}
+		Review: &core.Review{Issue: q.Issue, Attempt: q.Attempt, Key: q.Key, Target: q.Route, Private: q.Private, SlackWork: q.SlackWork}}
 	o, err := r.commitmentTurn(ctx, in, true)
 	if err != nil {
 		return durable.ReviewResult{}, err

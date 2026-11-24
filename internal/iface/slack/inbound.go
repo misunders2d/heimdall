@@ -86,7 +86,11 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if !pending {
 		return nil
 	}
-	if !s.acceptEvent(raw) {
+	accepted, ownerOnly, err := s.eventAdmission(raw)
+	if err != nil {
+		return err
+	}
+	if !accepted {
 		return s.opt.Store.CompleteEvent(e.ID)
 	}
 	var payload struct {
@@ -130,7 +134,15 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		s.opt.Log.Print("slack: ignored unidentified caller")
 		return finish()
 	}
-	conversationWork := s.workPost(m, commandText)
+	thread := first(m.ThreadTS, m.TS)
+	watch, err := s.watch(m.Channel, thread)
+	if err != nil {
+		return err
+	}
+	conversationWork := workPost(m, commandText, watch.Mode)
+	if ownerOnly && !conversationWork || conversationWork && watch.Changed > e.ReceivedAt.UnixMilli() {
+		return finish()
+	}
 	if s.opt.Access != nil && !conversationWork {
 		_, _, admitted, err := s.opt.Access.Check(principal, core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: m.ThreadTS})
 		if err != nil {
@@ -147,10 +159,9 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 	if text == "" && embedded == "" && len(m.Files) == 0 {
 		return finish()
 	}
-	thread := first(m.ThreadTS, m.TS)
 	in := core.Inbound{Conv: core.ConvKey{Interface: "slack", Chat: m.Channel, Thread: thread}, MsgID: m.TS, From: principal, Origin: core.OriginLive, Text: commandText, Private: m.ChannelType == "im", At: time.Now()}
 	in.OAuthActor, in.OAuthInstallation = "sl_user_"+user.ID, "sl_user_"+s.botID
-	if in.Private && !s.controlMessage(m) && s.owner(principal) {
+	if in.Private && !conversationWork && !s.controlMessage(m) && s.owner(principal) {
 		in.SlackPrivateOwnerVerified = s.privateOwner(ctx, m, principal)
 		in.SlackReadVerified = in.SlackPrivateOwnerVerified && s.opt.OwnerSlackEnabled
 	}
@@ -251,9 +262,15 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		a.File = clip(router.Scrub(first(m.Files[0].Name, m.Files[0].Title, "file")), 160)
 	}
 	if conversationWork && in.InterfaceReply == "" {
-		in.ConversationWork, in.Ambient = true, !addressed
+		ref := watch.Ref()
+		ref.Via = "bot"
+		if ownerOnly {
+			ref.Via = "user"
+		}
+		in.ConversationWork, in.Ambient = &ref, !addressed
+		in.At = e.ReceivedAt
 		in.Attachments = nil // thread context includes file names; work returns shareable links
-		in.Context, _ = s.contextWith(ctx, m, in.Conv, s.workClient(m.Channel))
+		in.Context, _ = s.contextWith(ctx, m, in.Conv, s.workClient(ref.Via))
 		if embedded != "" {
 			in.Context += "\n" + router.Untrusted("Slack embedded/forwarded message content", embedded)
 		}
