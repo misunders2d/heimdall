@@ -229,6 +229,8 @@ type SlackWork struct {
 	Rule      string     `json:"rule"`
 	Watch     SlackWatch `json:"watch,omitzero"`
 	Via       string     `json:"via,omitempty"` // Slack authorization that received the request
+	MessageTS string     `json:"message_ts,omitempty"`
+	AnswerAt  int64      `json:"answer_at,omitempty"` // earliest launch for an answer watch, Unix milliseconds
 }
 
 // SlackWatch is the effective owner grant for one channel or root thread.
@@ -248,6 +250,7 @@ const (
 )
 
 var ErrSlackWatchRevoked = errors.New("slack: watch is no longer authorized")
+var ErrSlackOwnerReplied = errors.New("slack: the owner replied")
 
 // SlackWatchRef is enough to fence a queued delivery after an owner edit.
 type SlackWatchRef struct {

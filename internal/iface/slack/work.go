@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 
@@ -113,6 +114,56 @@ func (s *Slack) watchPost(m eventMessage, commandText, mode string, addressedToB
 	return (mode == core.SlackWatchAnswer || mode == core.SlackWatchWork && m.ChannelType != "im") &&
 		commandText != "" && !router.IsCommand(commandText) &&
 		!mcpCommand.MatchString(commandText) && core.GoogleCommand(commandText) == ""
+}
+
+// CheckSlackOwnerReply reads the thread live so replies received during a
+// restart or after the model started still suppress away coverage.
+func (s *Slack) CheckSlackOwnerReply(ctx context.Context, route core.ConvKey, posted, via string) error {
+	api := s.workUser // includes shared-channel thread history
+	if api == nil {
+		api = s.workClient(via)
+	}
+	if api == nil {
+		return errors.New("slack: no client for owner reply check")
+	}
+	methods := []string{"conversations.replies"}
+	if strings.HasPrefix(route.Chat, "D") {
+		methods = append(methods, "conversations.history") // a 1:1 DM can continue outside the thread
+	}
+	for _, method := range methods {
+		args := map[string]any{"channel": route.Chat, "oldest": posted, "limit": 200}
+		if method == "conversations.replies" {
+			args["ts"] = route.Thread
+		}
+		for page, cursor := 0, ""; ; page++ {
+			args["cursor"] = cursor
+			var result struct {
+				Messages []eventMessage `json:"messages"`
+				HasMore  bool           `json:"has_more"`
+				Metadata struct {
+					Next string `json:"next_cursor"`
+				} `json:"response_metadata"`
+			}
+			if err := api.call(ctx, method, args, &result); err != nil {
+				return err
+			}
+			for _, m := range result.Messages {
+				if m.User == s.opt.WorkOwnerID && m.BotID == "" && compareTS(m.TS, posted) > 0 &&
+					!strings.HasPrefix(m.Text, workAttribution(m.User)) {
+					return core.ErrSlackOwnerReplied
+				}
+			}
+			next := result.Metadata.Next
+			if next == "" && !result.HasMore {
+				break
+			}
+			if next == "" || next == cursor || page == 24 {
+				return errors.New("slack: owner reply check could not read complete history")
+			}
+			cursor = next
+		}
+	}
+	return nil
 }
 
 // ConversationWork returns the current rule and its live-verified owner for

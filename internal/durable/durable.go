@@ -592,6 +592,11 @@ func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {
 			return w.st, err
 		}
 	}
+	if c.SlackWork != nil && c.SlackWork.AnswerAt > 0 {
+		if _, err := dbos.Sleep(ctx, max(0, time.Until(time.UnixMilli(c.SlackWork.AnswerAt)))); err != nil {
+			return w.st, err
+		}
+	}
 	err := r.supervise(ctx, w)
 	var cl closed
 	if errors.As(err, &cl) {
@@ -725,6 +730,8 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		}
 		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), result, true); errors.Is(err, core.ErrSlackWatchRevoked) {
 			return r.publish(ctx, w, PhaseClosed, "none: Slack watch no longer authorized")
+		} else if errors.Is(err, core.ErrSlackOwnerReplied) {
+			return r.publish(ctx, w, PhaseClosed, "none: the Slack owner replied")
 		} else if err != nil {
 			return err
 		}
@@ -1511,6 +1518,9 @@ func (r *Runtime) send(ctx dbos.Context, w *run, effect, text string, blocking b
 			}
 			if c.SlackWork != nil && rc.Error == core.ErrSlackWatchRevoked.Error() {
 				return core.ErrSlackWatchRevoked
+			}
+			if c.SlackWork != nil && rc.Error == core.ErrSlackOwnerReplied.Error() {
+				return core.ErrSlackOwnerReplied
 			}
 			why = fmt.Sprintf("outbound %d (%s) failed: %s", id, key, rc.Error)
 		}

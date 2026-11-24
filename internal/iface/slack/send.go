@@ -163,14 +163,27 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 	parts := splitReply(text)
 	var before []func() error
 	if out.SlackOwnerMention != "" {
-		if err := s.checkWatchDelivery(out); err != nil {
+		watch, err := s.checkWatchDelivery(out)
+		if err != nil {
 			return err
 		}
 		api = s.workClient(out.SlackWatch.Via)
 		if api == nil {
 			return router.PermanentError{Err: errors.New("slack: owner-authorized delivery route is unavailable")}
 		}
-		before = append(before, func() error { return s.checkWatchDelivery(out) })
+		before = append(before, func() error {
+			if watch.Mode == core.SlackWatchAnswer && out.ReplyTo != "" {
+				err := s.CheckSlackOwnerReply(ctx, out.Conv, out.ReplyTo, out.SlackWatch.Via)
+				if errors.Is(err, core.ErrSlackOwnerReplied) {
+					return router.PermanentError{Err: err}
+				}
+				if err != nil {
+					return err
+				}
+			}
+			_, err := s.checkWatchDelivery(out)
+			return err
+		})
 		for i := range parts {
 			parts[i] = workAttribution(out.SlackOwnerMention) + "\n\n" + parts[i]
 		}
@@ -267,16 +280,16 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 	return nil
 }
 
-func (s *Slack) checkWatchDelivery(out core.Outbound) error {
+func (s *Slack) checkWatchDelivery(out core.Outbound) (core.SlackWatch, error) {
 	w, err := s.watch(out.Conv.Chat, out.Conv.Thread)
 	if err != nil {
-		return err
+		return w, err
 	}
 	if out.SlackOwnerMention != s.opt.WorkOwnerID || !slackMemberID.MatchString(out.SlackOwnerMention) ||
 		(w.Mode != core.SlackWatchWork && w.Mode != core.SlackWatchAnswer) || !w.Matches(out.SlackWatch) {
-		return router.PermanentError{Err: core.ErrSlackWatchRevoked}
+		return w, router.PermanentError{Err: core.ErrSlackWatchRevoked}
 	}
-	return nil
+	return w, nil
 }
 func (s *Slack) setDeliveryStatus(ctx context.Context, out core.Outbound, message string) {
 	if p, ok, _ := s.opt.Store.Progress(out.TurnID); ok && p.TS != "" {
