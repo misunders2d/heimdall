@@ -43,7 +43,7 @@ func TestSlackWatchCommandUpdatesOpenStore(t *testing.T) {
 	}
 	defer st.Close()
 	before, err := st.SlackWatch(chat, thread)
-	if err != nil || before.AnswerDelay() != core.DefaultSlackWatchDelay {
+	if err != nil || before.Delay() != core.DefaultSlackWatchDelay {
 		t.Fatalf("legacy watch lost the default delay: %+v, %v", before, err)
 	}
 	target := chat + "/" + thread
@@ -74,6 +74,8 @@ func TestSlackWatchCommandUpdatesOpenStore(t *testing.T) {
 	for _, args := range [][]string{
 		{"answer", chat},
 		{"answer", "COVERRIDE", "2m"},
+		{"work", "GDELAYED", "Prepare previews.", "5m"},
+		{"work", "GIMMEDIATE", "Prepare previews."},
 		{"default-delay", "5m"},
 		{"default-delay"},
 	} {
@@ -88,6 +90,8 @@ func TestSlackWatchCommandUpdatesOpenStore(t *testing.T) {
 		{chat, "", core.SlackWatchAnswer, 300},
 		{chat, thread, core.SlackWatchOff, 0},
 		{"COVERRIDE", "", core.SlackWatchAnswer, 120},
+		{"GDELAYED", "", core.SlackWatchWork, 300},
+		{"GIMMEDIATE", "", core.SlackWatchWork, 0},
 		{"CUNWATCHED", "", "", 0},
 	} {
 		w, err := st.SlackWatch(tt.chat, tt.thread)

@@ -226,7 +226,7 @@ a current Heimdall owner. On the running host, use the account with access to
 Heimdall’s data directory:
 
 ```sh
-heimdall slack-watch -config /etc/heimdall/config.json work GCREATIVE 'Update existing ad images or videos.'
+heimdall slack-watch -config /etc/heimdall/config.json work GCREATIVE 'Update existing ad images or videos.' 5m
 heimdall slack-watch -config /etc/heimdall/config.json answer CCHANNEL
 heimdall slack-watch -config /etc/heimdall/config.json answer DEXAMPLE/1712345678.000001 5m
 heimdall slack-watch -config /etc/heimdall/config.json default-delay 5m
@@ -244,8 +244,9 @@ defaults where there is no live setting.
 In a private chat with Heimdall, the owner can ask “Turn on the Slack watch
 for this link with a five-minute delay.” Include the target Slack conversation
 or thread link. The owner’s harness needs shell access to the host command.
-To change the delay, run `answer` again with the new duration. Existing
-unsent answers under the old setting are cancelled by the watch revision.
+To change the delay, run `answer` or `work` again with the new duration and
+the existing rule for `work`. Watch revisions cancel pending launches and
+unsent replies under the old setting.
 The owner can also ask “Set the global Slack watch delay to five minutes.”
 The shared delay applies to new questions on answer watches without an
 explicit delay. Existing queued questions keep their deadline. An `answer`
@@ -295,7 +296,10 @@ need no answer stay silent. The initial shared delay is two minutes from
 the Slack post. Supply an optional duration such as `5m` to override it for
 that watch. `show` reports the effective delay in seconds.
 An owner reply in the same thread, or directly in the same 1:1 DM,
-suppresses coverage. Heimdall checks before launching and again before posting.
+suppresses answer coverage. Heimdall checks before launching and again
+before posting. Work watches start immediately unless an explicit delay
+is set. With a delay, an owner reply in the same thread before the first
+launch skips that request.
 `off` prevents new launches and unsent watch
 replies. Work already running may still finish its tool actions.
 

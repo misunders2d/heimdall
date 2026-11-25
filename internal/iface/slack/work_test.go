@@ -36,6 +36,7 @@ func testConversationWorkFromSlackPost(t *testing.T, userEvents bool) {
 		u.Profile.Email = strings.ToLower(id) + "@example.test"
 		f.users[id] = u
 	}
+	ownerChecks := make(chan time.Time, 2)
 	f.setHook(func(w http.ResponseWriter, r *http.Request, args map[string]any) bool {
 		userToken := r.Header.Get("Authorization") == "Bearer test-work-user"
 		if r.URL.Path == "/auth.test" && userToken {
@@ -48,6 +49,12 @@ func testConversationWorkFromSlackPost(t *testing.T, userEvents bool) {
 				t.Errorf("wrong identity for %s in work group", r.URL.Path)
 				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "channel_not_found"})
 				return true
+			}
+		}
+		if r.URL.Path == "/conversations.replies" && args["oldest"] != nil {
+			select {
+			case ownerChecks <- time.Now():
+			default:
 			}
 		}
 		if r.URL.Path != "/conversations.members" {
@@ -168,6 +175,45 @@ func testConversationWorkFromSlackPost(t *testing.T, userEvents bool) {
 	}
 	if got := f.all("chat.postMessage"); len(got) != 2 {
 		t.Fatalf("out-of-scope Slack response: %v", got)
+	}
+
+	if err := st.SetSlackWatch("G1", core.SlackWatch{Mode: core.SlackWatchWork, Rule: s.opt.ConversationWork["G1"], DelaySeconds: 300}); err != nil {
+		t.Fatal(err)
+	}
+	// Compute recent original timestamps so the harness exercises the real
+	// five-minute deadline with only a short wait in the test.
+	deadline := time.Now().Truncate(time.Millisecond).Add(2 * time.Second)
+	posted := deadline.Add(-5 * time.Minute)
+	slackTS := func(at time.Time) string { return fmt.Sprintf("%d.%06d", at.Unix(), at.Nanosecond()/1000) }
+	delayed := f.event("G1", "mpim", "UMASAO", "Prepare an alternate preview."+say("REPORT\nDelayed preview."), "900.000007")
+	delayed.TS = slackTS(posted)
+	taken := f.event("G1", "mpim", "UMASAO", "Prepare another preview."+say("REPORT\nDuplicate preview."), "900.000008")
+	taken.TS = slackTS(posted.Add(time.Millisecond))
+	f.mu.Lock()
+	f.messages = append(f.messages, map[string]any{
+		"channel": taken.Channel, "thread_ts": taken.ThreadTS, "ts": slackTS(posted.Add(time.Second)), "user": "UOWNER",
+	})
+	f.mu.Unlock()
+	push(delayed)
+	push(taken)
+	takenID := sha256.Sum256([]byte("Ttest\x00G1\x00" + taken.TS))
+	waitFor(t, "work handled by owner skipped", func() bool {
+		state, err := rt.State(fmt.Sprintf("SLACK-%X", takenID[:16]))
+		return err == nil && state.Phase == durable.PhaseClosed
+	})
+	waitFor(t, "delayed work delivered", func() bool { return f.hasText("Delayed preview.") })
+	for range 2 {
+		select {
+		case checkedAt := <-ownerChecks:
+			if checkedAt.Before(deadline) {
+				t.Fatalf("work was eligible to launch before its delay ended: %v", checkedAt)
+			}
+		default:
+			t.Fatal("delayed work skipped the owner reply check")
+		}
+	}
+	if got := len(fakeharness.Inputs(state)); got != len(inputs)+1 || f.hasText("Duplicate preview.") {
+		t.Fatalf("work already handled by the owner launched or delivered: %d harness inputs", got)
 	}
 }
 

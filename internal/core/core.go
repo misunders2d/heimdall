@@ -230,7 +230,7 @@ type SlackWork struct {
 	Watch     SlackWatch `json:"watch,omitzero"`
 	Via       string     `json:"via,omitempty"` // Slack authorization that received the request
 	MessageTS string     `json:"message_ts,omitempty"`
-	AnswerAt  int64      `json:"answer_at,omitempty"` // earliest launch for an answer watch, Unix milliseconds
+	AnswerAt  int64      `json:"answer_at,omitempty"` // earliest watch launch, Unix milliseconds
 }
 
 // SlackWatch is the effective owner grant for one channel or root thread.
@@ -251,8 +251,8 @@ const (
 	DefaultSlackWatchDelay = 2 * time.Minute
 )
 
-func (w SlackWatch) AnswerDelay() time.Duration {
-	if w.DelaySeconds == 0 {
+func (w SlackWatch) Delay() time.Duration {
+	if w.Mode == SlackWatchAnswer && w.DelaySeconds == 0 {
 		return DefaultSlackWatchDelay
 	}
 	return time.Duration(w.DelaySeconds) * time.Second
