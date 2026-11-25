@@ -1684,8 +1684,8 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		if !t.review.Work || t.review.SlackWork != nil {
 			memory = false
 		}
-		if work := t.review.SlackWork; work != nil {
-			identity = c.r.checkSlackWork(t.startCtx, target, work, from)
+		if t.review.SlackWork != nil {
+			identity = c.r.checkSlackWork(t.startCtx, t.review, from)
 			refused = identity != nil
 		}
 	}

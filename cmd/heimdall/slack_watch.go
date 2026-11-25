@@ -34,7 +34,7 @@ var (
 func parseSlackWatchDelay(input string) (int64, error) {
 	delay, err := time.ParseDuration(input)
 	if err != nil || delay <= 0 || delay%time.Second != 0 {
-		return 0, errors.New("answer delay must be a positive duration in whole seconds, such as 5m")
+		return 0, errors.New("watch delay must be a positive duration in whole seconds, such as 5m")
 	}
 	return int64(delay / time.Second), nil
 }
@@ -48,7 +48,7 @@ func slackWatch(args []string) error {
 		return err
 	}
 	if *path == "" || fs.NArg() == 0 {
-		return errors.New("usage: heimdall slack-watch -config FILE default-delay [DELAY] | show|off|answer|work CHANNEL[/THREAD] [DELAY for answer, RULE for work]")
+		return errors.New("usage: heimdall slack-watch -config FILE default-delay [DELAY] | show|off CHANNEL[/THREAD] | answer CHANNEL[/THREAD] [DELAY] | work CHANNEL[/THREAD] RULE [DELAY]")
 	}
 	mode, target := fs.Arg(0), fs.Arg(1)
 	global := mode == "default-delay"
@@ -88,8 +88,15 @@ func slackWatch(args []string) error {
 		}
 	case core.SlackWatchWork:
 		w.Rule = strings.TrimSpace(fs.Arg(2))
-		if chat[0] == 'D' || fs.NArg() != 3 || w.Rule == "" || len(w.Rule) > 4000 {
-			return errors.New("work takes one quoted rule of up to 4000 bytes and a channel or group target")
+		if chat[0] == 'D' || fs.NArg() < 3 || fs.NArg() > 4 || w.Rule == "" || len(w.Rule) > 4000 {
+			return errors.New("work takes a channel or group target, one quoted rule of up to 4000 bytes, and an optional delay such as 5m")
+		}
+		if fs.NArg() == 4 {
+			delay, err := parseSlackWatchDelay(fs.Arg(3))
+			if err != nil {
+				return err
+			}
+			w.DelaySeconds = delay
 		}
 	default:
 		return errors.New("watch mode must be show, off, answer or work")
@@ -120,19 +127,20 @@ func slackWatch(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Slack watch default delay: %s\n", w.AnswerDelay())
+		w.Mode = core.SlackWatchAnswer
+		fmt.Printf("Slack watch default delay: %s\n", w.Delay())
 		return nil
 	}
 	if mode != "show" {
 		if err := st.SetSlackWatch(chat, w); err != nil {
 			return err
 		}
-		if mode == core.SlackWatchAnswer {
+		if mode == core.SlackWatchAnswer || w.DelaySeconds > 0 {
 			w, err = st.SlackWatch(chat, thread)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Slack watch %s: answer (delay %s)\n", target, w.AnswerDelay())
+			fmt.Printf("Slack watch %s: %s (delay %s)\n", target, w.Mode, w.Delay())
 		} else {
 			fmt.Printf("Slack watch %s: %s\n", target, mode)
 		}
@@ -150,7 +158,7 @@ func slackWatch(args []string) error {
 		}
 	}
 	if w.Mode == core.SlackWatchAnswer {
-		w.DelaySeconds = int64(w.AnswerDelay() / time.Second)
+		w.DelaySeconds = int64(w.Delay() / time.Second)
 	}
 	return json.NewEncoder(os.Stdout).Encode(w)
 }

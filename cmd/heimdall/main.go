@@ -55,7 +55,9 @@ const usage = `usage:
       one owner-authenticated JSON operation from stdin; no direct store access
   heimdall sched mcp -socket PATH
       stdio MCP adapter for the shared owner tool catalog
-  heimdall slack-watch -config FILE show|off|answer|work CHANNEL[/THREAD] [DELAY for answer, RULE for work]
+  heimdall slack-watch -config FILE show|off CHANNEL[/THREAD]
+  heimdall slack-watch -config FILE answer CHANNEL[/THREAD] [DELAY]
+  heimdall slack-watch -config FILE work CHANNEL[/THREAD] RULE [DELAY]
       read or change a Slack watch live from the data directory's operator account
   heimdall slack-watch -config FILE default-delay [DELAY]
       read or change the live delay for Slack answer watches that inherit it
