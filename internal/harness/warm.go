@@ -347,9 +347,19 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 	key := warmKey{s.Caller.Conv, s.Caller.Principal.Key(), s.Harness}
 	fp := launchFingerprint(s)
 	if s.OneShot {
+		limit := s.Timeout
+		if s.CheckClaudeAuth {
+			var cancel context.CancelFunc
+			s.authStatusContext, cancel = context.WithTimeout(s.StartContext, p.runLimit(limit))
+			defer cancel()
+		}
 		r, err := Start(ctx, s)
 		if err == nil {
-			p.watch(r, key, fp, time.Now(), 0, s.Timeout)
+			if s.authStatusContext != nil {
+				deadline, _ := s.authStatusContext.Deadline()
+				limit = max(time.Nanosecond, time.Until(deadline))
+			}
+			p.watch(r, key, fp, time.Now(), 0, limit)
 		}
 		return r, err
 	}

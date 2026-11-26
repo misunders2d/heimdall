@@ -65,7 +65,7 @@ One JSON object, used by `!job add`, `!job edit` and model drafts (§5). The sam
 | `schedule` | `{"cron": [...]}`: one or more 5-field specs, unioned. `{"every": "15m"}`: fixed duration from creation, UTC arithmetic; minimum 1 min owner, 1 h employee. `{"every": "2w", "at": "12:15", "from": "2026-11-14"}`: N days or weeks, wall-clock stable in `tz`. `{"at": "2026-12-05T08:00"}`: one-off, local time in `tz`. |
 | `tz` | IANA zone name. Default `scheduler.default_tz`. |
 | `to` | Delivery target (§2.3). Default `here`. |
-| `harness` | Empty: the creator-bound source conversation's current `!use` selection at turn start, or the default order when unset; fallback only before the ready signal. A name: that harness only, no fallback (AGENTS.md "Harness choice"). |
+| `harness` | A name selects the first harness for an owner job. When empty, use the creator-bound source conversation's current `!use` choice or the configured order. Owner jobs can advance through the remaining configured harnesses after a confirmed pre-launch rejection. Employee selection and eligibility follow the existing policy. |
 | `quiet` | If the answer is exactly `NO_UPDATE`, nothing is sent and the run is `quiet`. |
 | `grace` | How late a slot may start. Defaults: 2 h recurring, 24 h one-off. |
 | `until` | Expiry date or duration. Optional. (Planned as required for watches; checker watch jobs as built do not require it, §6.0.) |
@@ -186,12 +186,14 @@ Scheduled runs never capture memory (`MEMENTO_PROCESSING=1`). There is no per-jo
 
 ### 3.8 Retries and result checks
 
-- **Retries.** Only failures before the turn's ready signal are retried. That is the same no-side-effects boundary as harness fallback.
+- **Owner fallback.** A missing executable, failed process launch, or confirmed Claude sign-out before job launch can move to the next eligible harness in the same run with a fresh native session. Heimdall records possible effects before spawning the job process. Hooks can run before native ready, so every later failure settles on that harness. Existing explicitly repeat-safe recovery still applies.
+  - Claude's native status command can refresh credentials. Heimdall serializes its own checks and lets a running check finish when the job stops waiting. A completed but inconclusive status leaves Claude eligible for one launch. A check that outlasts the job's startup budget ends the slot without handing its prompt to any engine. An expired login can still appear present in native status until a normal request detects expiry. If that happens after launch, the run fails on Claude and can be surfaced for review.
+- **Retries.** Owner jobs retry startup only after a confirmed pre-launch failure. Other jobs retain their native-ready boundary.
   - Backoff 1 min, 5 min, 15 min (±20%), at most 3 retries after the first attempt, all within `grace`.
   - Timeout and worker lifetime limits fail without retry, even before ready, unless the explicit repeat-safe timeout option below applies. A turn may have produced effects without acknowledging readiness.
   - Owner agent jobs may set `"rerun_on_timeout":true` together with `"idempotent":true`, explicit `timeout`, `session:"fresh"`, and a platform target (never AgentNet). This asserts that repeating the entire prompt and its effects is safe. It is a rerun, not checkpoint continuation or exactly-once execution.
   - At most one timeout rerun uses the existing run/slot and durable replay flag. The first execution keeps its configured timeout within ordinary grace, even if queued. A rerun must finish within twice `timeout` from the slot due time, also constrained by grace; native interruption/termination can add shutdown grace. The old native process exits before retry is persisted. No native interrupted session is resumed.
-  - Explicit stop, pause and deletion fence pending retries transactionally. Confirmed removal of the opt-in cancels pending timeout retries. Restart discards timeout retries with a notice; ordinary pre-ready recovery of a first execution stays unchanged. Creator admission and role are checked again at dispatch and turn start. Auth/approval failures and lifetime expiry never trigger a timeout rerun. A repeated hang exhausts the single retry; no semantic progress is inferred.
+  - Explicit stop, pause and deletion fence pending retries transactionally. Confirmed removal of the opt-in cancels pending timeout retries. Restart discards timeout retries with a notice. A first owner execution interrupted after its launch fence uses the existing interrupted-run rules. Creator admission and role are checked again at dispatch and turn start. Auth/approval failures and lifetime expiry never trigger a timeout rerun. A repeated hang exhausts the single retry; no semantic progress is inferred.
   - After the ready signal, nothing is replayed except that explicit repeat-safe timeout option.
 - **Always checked:** the answer is not empty (unless it is the quiet token), and the turn ended at the harness's native result event.
 - **Optional `expect` checks:**

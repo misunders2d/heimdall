@@ -132,9 +132,12 @@ type Spec struct {
 	// the router sets them, from the scheduler's own run handover; never input.
 	ScheduledJob string
 	ScheduledRun int64
-	// CheckClaudeAuth is set only for an inherited Claude preference with a
-	// fallback. A signed-out status can reject launch before handing over input.
-	CheckClaudeAuth bool
+	// CheckClaudeAuth is set for an owner scheduled Claude candidate with a
+	// successor. A signed-out status rejects launch before handing over input.
+	CheckClaudeAuth   bool
+	authStatusContext context.Context
+	// BeforeLaunch records any durable fence needed before the process can act.
+	BeforeLaunch func() error
 
 	// Continuation receives native work emitted without a new person input.
 	// The callback stays bound to this exact caller, conversation and outbox.
@@ -361,11 +364,18 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		}
 	}
 	if spec.CheckClaudeAuth && spec.Harness == "claude" && spec.OneShot && spec.ScheduledRun != 0 && spec.Caller.Role == core.RoleOwner {
-		start := spec.StartContext
+		start := spec.authStatusContext
+		if start == nil {
+			start = spec.StartContext
+		}
 		if start == nil {
 			start = ctx
 		}
-		if claudeSignedOut(start, spec.Launch, env) {
+		signedOut, err := claudeSignedOut(start, spec.Launch, env)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrClaudeAuthStatusPending, err)
+		}
+		if signedOut {
 			return nil, ErrClaudeSignedOut
 		}
 	}
@@ -524,6 +534,18 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		r.bridge.close()
 		cancel()
 		return nil, spec.StartContext.Err()
+	}
+	if spec.BeforeLaunch != nil {
+		if err := spec.BeforeLaunch(); err != nil {
+			r.bridge.close()
+			cancel()
+			return nil, fmt.Errorf("%s launch fence: %w", spec.Harness, err)
+		}
+		if spec.StartContext != nil && spec.StartContext.Err() != nil {
+			r.bridge.close()
+			cancel()
+			return nil, spec.StartContext.Err()
+		}
 	}
 	if err := cmd.Start(); err != nil {
 		r.bridge.close()

@@ -222,6 +222,9 @@ the `heimdall-live` unit.
   (configurable). Fall back to the next harness only when the previous one
   failed before its turn started (before any side effect is possible).
   Explicit choices (`!use <harness>`, `!<harness> <msg>`) never fall back.
+  An owner scheduled run treats its job harness or inherited `!use` as its
+  first choice, then tries the configured order only after a confirmed
+  pre-launch rejection. A started process may act before native ready.
   Harness replies carry no signature (owner, 2026-11-03); `!which` names the
   conversation's harness and its configured thinking level (read from the
   harness's own config; agents change it themselves), the running turn's,
@@ -291,7 +294,8 @@ the `heimdall-live` unit.
     Shared native policy hooks remain enabled; `owner_slack` stays live-only.
     A fresh session by
     default; no progress messages; never a warm worker.
-  - Retry only before the ready signal, except explicit owner-only
+  - Retry only before launch for owner jobs and before native ready for
+    other jobs, except explicit owner-only
     `rerun_on_timeout` jobs: declared idempotent, fresh session, explicit
     timeout, platform target; one repeat-safe rerun within twice the timeout
     from due time, after old process exit. Stop/pause/delete fence retries;
@@ -377,9 +381,8 @@ thinking stream and live-session reply registration.
   required; replay, subagent and session-switch checks remain enforced.
 - Heimdall keeps its own adapters. T3 Code is for coding only, never a
   route for chat turns (owner, 2026-10-30).
-- The turn's ready signal is the side-effect boundary used for fallback. A
-  harness that answers, or asks for an approval, before that signal has
-  taken the turn too: no fallback.
+- Outside owner scheduled runs, the native ready signal is the side-effect
+  boundary for fallback. An answer or approval request also commits the turn.
 
 ## Code layout
 

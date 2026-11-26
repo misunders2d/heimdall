@@ -572,34 +572,57 @@ func TestScheduledWakeUsesCurrentSourceConversationHarness(t *testing.T) {
 	}
 }
 
-func TestInheritedClaudeSignOutFallback(t *testing.T) {
+func TestOwnerScheduledFallback(t *testing.T) {
 	for _, tc := range []struct {
-		name, status, pin, extra, want string
-		inputs                         []string
-		probe, effect                  bool
+		name, status, selection, pin, extra, want string
+		inputs                                    []string
+		probe, tool, hook, brokenExec             bool
 	}{
 		{
-			name: "signed out before launch", status: "signed-out", extra: " FAILPRE=omp",
-			want: "codex#1", inputs: []string{"omp", "codex"}, probe: true,
+			name: "inherited Claude signed out", status: "signed-out", selection: "claude",
+			want: "codex#1", inputs: []string{"codex"}, probe: true,
 		},
 		{
-			name: "prompt replay signals ready before auth error", status: "unknown",
+			name: "selected Claude signed out", status: "signed-out", selection: "codex", pin: "claude",
+			want: "codex#1", inputs: []string{"codex"}, probe: true,
+		},
+		{
+			name: "default chain Claude after earlier engine unavailable", status: "signed-out",
+			want: "codex#1", inputs: []string{"codex"}, probe: true,
+		},
+		{
+			name: "selected executable fails to launch", pin: "omp", status: "signed-out", brokenExec: true,
+			want: "codex#1", inputs: []string{"codex"}, probe: true,
+		},
+		{
+			name: "prompt replay signals ready before auth error", status: "unknown", selection: "claude",
 			want: "failed", inputs: []string{"claude"}, probe: true,
 		},
 		{
-			name: "tool may already have run", status: "signed-in", extra: " CLAUDE_TOOL_BEFORE_AUTH",
-			want: "failed", inputs: []string{"claude"}, probe: true, effect: true,
+			name: "tool already ran", status: "signed-in", pin: "claude", extra: " CLAUDE_TOOL_BEFORE_AUTH",
+			want: "failed", inputs: []string{"claude"}, probe: true, tool: true,
 		},
 		{
-			name: "explicit pin", status: "signed-out", pin: `,"harness":"claude"`,
-			want: "failed", inputs: []string{"claude"},
+			name: "unknown auth and hook before ready", status: "unknown", extra: " CLAUDE_HOOK_BEFORE_READY",
+			want: "failed", inputs: []string{"claude"}, probe: true, hook: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("FAKE_CLAUDE_AUTH_STATUS", tc.status)
-			e := schedEnv(t, []string{"omp", "claude", "codex"}, "claude", "codex", "omp")
-			want(t, e.ask(ownerDM, "!use claude"), "now uses claude")
-			id := e.addJob(`{"name":"auth check","schedule":{"every":"1h"},"prompt":"CLAUDE_AUTH_REJECTED` + tc.extra + `"` + tc.pin + `}`)
+			e := schedEnv(t, []string{"omp", "claude", "codex"}, "claude", "codex")
+			if tc.brokenExec {
+				if err := os.WriteFile(filepath.Join(e.bin, "omp"), []byte("#!/missing-test-interpreter\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.selection != "" {
+				want(t, e.ask(ownerDM, "!use "+tc.selection), "now uses "+tc.selection)
+			}
+			pin := ""
+			if tc.pin != "" {
+				pin = `,"harness":"` + tc.pin + `"`
+			}
+			id := e.addJob(`{"name":"auth check","schedule":{"every":"1h"},"prompt":"CLAUDE_AUTH_REJECTED` + tc.extra + `"` + pin + `}`)
 			j, ok, err := e.st.Job(id)
 			if err != nil || !ok {
 				t.Fatal(j, err)
@@ -609,11 +632,15 @@ func TestInheritedClaudeSignOutFallback(t *testing.T) {
 				t.Fatal(created, err)
 			}
 			e.r.opt.Jobs.Wake()
-			want(t, e.reply(), tc.want)
+			out := e.reply()
+			want(t, out, tc.want)
 			runs, err := e.st.Runs(store.RunFilter{Job: id})
 			state := store.RunFailed
 			if tc.want == "codex#1" {
 				state = store.RunOK
+				want(t, out, "resumed=false", "mem=1", "PI_EXTERNAL_USER_ID=fake_user_owner")
+			} else {
+				want(t, out, "Automatic retry: no")
 			}
 			if err != nil || len(runs) != 1 || runs[0].Attempt != 0 || runs[0].State != state {
 				t.Fatalf("scheduled slot = %+v, error %v", runs, err)
@@ -621,14 +648,20 @@ func TestInheritedClaudeSignOutFallback(t *testing.T) {
 			if h, err := e.st.LastTurnHarness(core.ConvKey{Interface: "telegram", Chat: core.SchedChat(id)}); state == store.RunOK && (err != nil || h != "codex") {
 				t.Fatalf("recorded harness = %q, error %v", h, err)
 			}
-			if h, err := e.st.ChatHarness(ownerDM); err != nil || h != "claude" {
+			if h, err := e.st.ChatHarness(ownerDM); err != nil || h != tc.selection {
 				t.Fatalf("stored choice = %q, error %v", h, err)
+			}
+			if saved, ok, err := e.st.Job(id); err != nil || !ok || saved.Def != j.Def || saved.Version != j.Version {
+				t.Fatalf("stored job selection changed: exists=%v, version=%d, error=%v", ok, saved.Version, err)
 			}
 			if _, err := os.Stat(filepath.Join(e.state, "claude-auth-status")); (err == nil) != tc.probe {
 				t.Fatalf("auth status called = %v, stat error %v", err == nil, err)
 			}
-			if _, err := os.Stat(filepath.Join(e.state, "claude-tool-effect")); (err == nil) != tc.effect {
+			if _, err := os.Stat(filepath.Join(e.state, "claude-tool-effect")); (err == nil) != tc.tool {
 				t.Fatalf("tool ran = %v, stat error %v", err == nil, err)
+			}
+			if _, err := os.Stat(filepath.Join(e.state, "claude-hook-effect")); (err == nil) != tc.hook {
+				t.Fatalf("hook ran = %v, stat error %v", err == nil, err)
 			}
 			var got []string
 			for _, in := range fakeharness.Inputs(e.state) {
@@ -652,5 +685,27 @@ func TestInteractiveClaudeSelectionIgnoresScheduledAuthFallback(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.state, "claude-auth-status")); !os.IsNotExist(err) {
 		t.Fatalf("interactive turn checked auth status: %v", err)
+	}
+}
+
+func TestOwnerScheduledFallbackStartsFreshDespitePriorCleanSession(t *testing.T) {
+	t.Setenv("FAKE_CLAUDE_AUTH_STATUS", "signed-out")
+	e := schedEnv(t, []string{"codex", "claude"}, "codex", "claude")
+	want(t, e.ask(ownerDM, "!use codex"), "now uses codex")
+	id := e.addJob(`{"name":"session fallback","schedule":{"every":"1h"},"prompt":"wake","session":"job"}`)
+	want(t, e.ask(ownerDM, "!job run "+id), "queued")
+	want(t, e.reply(), "codex#1 resumed=false")
+	conv := core.ConvKey{Interface: "telegram", Chat: core.SchedChat(id)}
+	before, clean, err := e.st.Session(conv, tgOwner.Key(), "codex")
+	if err != nil || before == "" || !clean {
+		t.Fatalf("first session = (%q, clean %v, %v)", before, clean, err)
+	}
+
+	want(t, e.ask(ownerDM, "!use claude"), "now uses claude")
+	want(t, e.ask(ownerDM, "!job run "+id), "queued")
+	want(t, e.reply(), "codex#1 resumed=false")
+	after, clean, err := e.st.Session(conv, tgOwner.Key(), "codex")
+	if err != nil || after == "" || after == before || !clean {
+		t.Fatalf("fallback session = (%q, clean %v, %v), old %q", after, clean, err, before)
 	}
 }

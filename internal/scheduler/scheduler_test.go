@@ -878,6 +878,17 @@ func timeoutJob(t *testing.T) (*rig, string) {
 	return r, id
 }
 
+func TestScheduledUnresolvedAuthStatusDoesNotRetry(t *testing.T) {
+	r, id := timeoutJob(t)
+	e := r.finish("", Outcome{Result: harness.Result{Failure: harness.ErrClaudeAuthStatusPending.Error()}})
+	if e.Run.State != store.RunFailed || !e.Run.Retry.IsZero() {
+		t.Fatalf("unresolved auth was retried: %+v", e.Run)
+	}
+	if runs := r.runs(id); len(runs) != 1 || runs[0].Attempt != 0 {
+		t.Fatalf("unexpected attempts: %+v", runs)
+	}
+}
+
 func TestRepeatSafeTimeoutOnce(t *testing.T) {
 	r, _ := timeoutJob(t)
 	r.now = r.now.Add(time.Minute)

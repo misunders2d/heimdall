@@ -702,8 +702,8 @@ FROM job_runs r LEFT JOIN inbound i ON i.id=r.inbound_id LEFT JOIN turns t ON t.
 	return out, rows.Err()
 }
 
-// TurnReady records that a turn's harness signalled ready: from then on an
-// interruption may have had side effects.
+// TurnReady records that an interruption may have had side effects. Owner
+// scheduled turns set it before spawning a process that can run startup hooks.
 func (s *Store) TurnReady(turn int64) error {
 	_, err := s.db.Exec(`UPDATE turns SET ready=1 WHERE id=?`, turn)
 	return err

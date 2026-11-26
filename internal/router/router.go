@@ -682,8 +682,6 @@ type turn struct {
 	replyTo    string
 	started    time.Time
 
-	checkClaudeAuth bool
-
 	// loop-owned
 	harness string
 
@@ -1511,20 +1509,23 @@ func (c *conv) start(ctx context.Context) {
 		t.private, t.replyTo = false, ""
 	}
 	switch sticky, _ := c.r.store.ChatHarness(route); {
-	case job != nil && job.Def.Harness != "":
-		t.candidates, t.explicit = []string{job.Def.Harness}, true
-	case job != nil && sticky != "":
-		t.candidates, t.explicit = []string{sticky}, true
-		if sticky == "claude" && t.role == core.RoleOwner {
-			for _, h := range c.r.opt.Order {
-				if h != sticky {
+	case job != nil:
+		t.candidates = c.r.opt.Order
+		preferred := job.Def.Harness
+		if preferred == "" {
+			preferred = sticky
+		}
+		if preferred != "" {
+			t.candidates, t.explicit = []string{preferred}, true
+			if t.role == core.RoleOwner {
+				for _, h := range c.r.opt.Order {
+					if h == preferred {
+						continue
+					}
 					t.candidates = append(t.candidates, h)
 				}
 			}
-			t.checkClaudeAuth = len(t.candidates) > 1
 		}
-	case job != nil:
-		t.candidates = c.r.opt.Order
 	case first.harness != "":
 		t.candidates, t.explicit = []string{first.harness}, true
 	case sticky != "":
@@ -1699,11 +1700,8 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			refused = identity != nil
 		}
 	}
-	authRejected := false
+	ownerScheduled := t.job != nil && t.role == core.RoleOwner
 	for i, h := range t.candidates {
-		if i > 0 && t.checkClaudeAuth && !authRejected {
-			break // An inherited choice remains binding unless its auth check rejected launch.
-		}
 		if ctx.Err() != nil || t.stopped.Load() || identity != nil {
 			break
 		}
@@ -1798,7 +1796,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				continue
 			}
 			sess = harness.Session{ID: prev, Resume: true, RecoveryPath: t.resume.Record}
-		case t.job != nil && t.job.Def.Session != "job", t.review != nil:
+		case t.job != nil && (t.job.Def.Session != "job" || ownerScheduled && i > 0), t.review != nil:
 			sess.ID = harness.NewSessionID(h)
 		case prev != "" && (clean || liveID == prev):
 			sess = harness.Session{ID: prev, Resume: true}
@@ -1993,7 +1991,13 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			// scheduler re-verifies the run, creator and owner per call.
 			spec.ScheduledJob, spec.ScheduledRun = t.job.Job, t.job.Run
 			spec.OneShot, spec.Timeout = true, t.job.Timeout
-			spec.CheckClaudeAuth = i == 0 && t.checkClaudeAuth
+			if ownerScheduled {
+				// A launched native process can act before emitting Ready, for
+				// example through a startup hook. Persist the restart fence
+				// before spawn. A Start error still proves no job process ran.
+				spec.BeforeLaunch = func() error { return c.r.store.TurnReady(t.id) }
+				spec.CheckClaudeAuth = h == "claude" && i+1 < len(t.candidates)
+			}
 			if t.job.Def.RerunOnTimeout {
 				// All candidates share this execution's limit. A rerun additionally
 				// shares the slot's absolute recovery deadline.
@@ -2028,11 +2032,18 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			if t.stopped.Load() || t.startCtx != nil && t.startCtx.Err() != nil {
 				break
 			}
-			notes = append(notes, err.Error())
-			if errors.Is(err, harness.ErrClaudeSignedOut) {
-				authRejected = true
+			if errors.Is(err, harness.ErrClaudeAuthStatusPending) {
+				// An unfinished auth check isn't a rejection. End this slot
+				// without handing off its prompt or creating a startup retry.
+				c.sendDone(ctx, doneEvent{t: t, res: harness.Result{Failure: err.Error()}, notes: notes})
+				return
 			}
+			notes = append(notes, err.Error())
 			continue
+		}
+		if ownerScheduled {
+			c.commit(ctx, t, h, run, notes)
+			return
 		}
 		t.mu.Lock()
 		t.run = run
@@ -2090,7 +2101,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 // commit ends the turn with harness h's outcome: h took the turn, so no
 // other harness runs it.
 func (c *conv) commit(ctx context.Context, t *turn, h string, run *harness.Run, notes []string) {
-	if t.job != nil {
+	if t.job != nil && t.role != core.RoleOwner {
 		// Past the side-effect boundary: a restart now never re-runs it.
 		if err := c.r.store.TurnReady(t.id); err != nil {
 			c.r.log.Printf("turn %d: ready not recorded: %v", t.id, err)

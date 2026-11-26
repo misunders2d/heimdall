@@ -761,6 +761,11 @@ func (f *fake) claude() {
 			f.read()
 			return
 		}
+		if f.has("CLAUDE_HOOK_BEFORE_READY") {
+			f.emit(map[string]any{"type": "system", "subtype": "hook_started", "session_id": id, "hook_event": "UserPromptSubmit"})
+			_ = os.WriteFile(filepath.Join(f.state, "claude-hook-effect"), nil, 0o600)
+			os.Exit(1)
+		}
 		replay("u0", msg["content"])
 		if f.has("CLAUDE_AUTH_REJECTED") {
 			if f.has("CLAUDE_TOOL_BEFORE_AUTH") {

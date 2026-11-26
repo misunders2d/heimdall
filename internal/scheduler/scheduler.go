@@ -779,7 +779,7 @@ func (s *Scheduler) Begin(row store.InboundRow) (*Turn, bool) {
 type Outcome struct {
 	Turn       *Turn
 	TurnID     int64
-	Harness    string // "" when no harness became ready
+	Harness    string // "" when no harness took the turn
 	Result     harness.Result
 	Stopped    bool     // !job stop or !job rm
 	Refused    bool     // the creator's admission or role changed between candidates
@@ -852,7 +852,7 @@ func (s *Scheduler) End(o Outcome) store.TurnEnd {
 			s.now().Before(t.Due.Add(2*limit)) && s.now().Sub(t.Due) <= s.grace(t.Def, sched) {
 			run = store.RunEnd{ID: t.Run, Job: t.Job, Retry: s.now(), Replay: true, Cause: "repeat-safe timeout retry"}
 		}
-	case o.Harness == "":
+	case o.Harness == "" && res.Failure == "":
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, "no harness could start"
 		cause := "harness did not start"
 		if len(o.Notes) > 0 {
