@@ -2,11 +2,14 @@ package scheduler
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,7 +28,7 @@ import (
 // is a source the owner trusts, not an attestation that a human typed the
 // request.
 type TrustedLauncher struct {
-	Path   string // configured launcher path (a stable symlink is fine); resolved per request
+	Path   string // configured launcher path (a stable symlink or T3's standard shell launcher); resolved per request
 	UID    uint32 // the OS user the launcher process runs as
 	Manage bool   // owner opt-in: job and task management as above
 	root   string // tests only: where path protection checks start ("/" when empty)
@@ -205,7 +208,60 @@ func trustedExecutable(t *TrustedLauncher) (string, error) {
 	if info, err := pathLstat(real); err != nil || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%s is not a regular file", real)
 	}
-	return real, nil
+	target, ok, err := shellLauncherTarget(real)
+	if err != nil || !ok {
+		return real, err
+	}
+	// T3's installer writes the launcher as a one-line /bin/sh exec of the
+	// versioned native binary (so it gets its own absolute argv[0]); the
+	// running process is that binary. Read the script, never run it, and
+	// apply the same checks to its target. One hop only.
+	native, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", err
+	}
+	for _, p := range []string{target, native} {
+		if err := protectedPath(p, t.root, t.UID); err != nil {
+			return "", err
+		}
+	}
+	if info, err := pathLstat(native); err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", native)
+	}
+	if _, again, err := shellLauncherTarget(native); err != nil || again {
+		return "", fmt.Errorf("%s: launcher target is itself a script", native)
+	}
+	return native, nil
+}
+
+// t3ShellLauncher is the exact script T3's installer writes
+// (scripts/install.sh): exec '<absolute versioned binary>' "$@".
+var t3ShellLauncher = regexp.MustCompile(`\A#!/bin/sh\nexec '(/[^'\n]+)' "\$@"\n?\z`)
+
+// shellLauncherTarget reports the native target when path is exactly T3's
+// standard shell launcher. A file starting with "#!" in any other form is
+// refused; a file without "#!" is not a script (ok false, no error).
+func shellLauncherTarget(path string) (string, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	buf := make([]byte, 4097)
+	n, _ := io.ReadFull(f, buf)
+	b := buf[:n]
+	if !bytes.HasPrefix(b, []byte("#!")) {
+		return "", false, nil
+	}
+	m := t3ShellLauncher.FindSubmatch(b)
+	if n > 4096 || m == nil {
+		return "", false, fmt.Errorf("%s is a script but not the standard T3 launcher", path)
+	}
+	target := string(m[1])
+	if filepath.Clean(target) != target {
+		return "", false, fmt.Errorf("%s: launcher target %q is not a clean absolute path", path, target)
+	}
+	return target, true, nil
 }
 
 // protectedPath walks path from root: every component must be writable by
