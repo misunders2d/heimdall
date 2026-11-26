@@ -132,6 +132,9 @@ type Spec struct {
 	// the router sets them, from the scheduler's own run handover; never input.
 	ScheduledJob string
 	ScheduledRun int64
+	// CheckClaudeAuth is set only for an inherited Claude preference with a
+	// fallback. A signed-out status can reject launch before handing over input.
+	CheckClaudeAuth bool
 
 	// Continuation receives native work emitted without a new person input.
 	// The callback stays bound to this exact caller, conversation and outbox.
@@ -355,6 +358,15 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 				}
 			}
 			env = filtered
+		}
+	}
+	if spec.CheckClaudeAuth && spec.Harness == "claude" && spec.OneShot && spec.ScheduledRun != 0 && spec.Caller.Role == core.RoleOwner {
+		start := spec.StartContext
+		if start == nil {
+			start = ctx
+		}
+		if claudeSignedOut(start, spec.Launch, env) {
+			return nil, ErrClaudeSignedOut
 		}
 	}
 	if spec.Harness == "pi" && spec.Caller.Role != core.RoleEmployee {

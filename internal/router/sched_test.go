@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -568,5 +569,88 @@ func TestScheduledWakeUsesCurrentSourceConversationHarness(t *testing.T) {
 				t.Fatal(got)
 			}
 		})
+	}
+}
+
+func TestInheritedClaudeSignOutFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, pin, extra, want string
+		inputs                         []string
+		probe, effect                  bool
+	}{
+		{
+			name: "signed out before launch", status: "signed-out", extra: " FAILPRE=omp",
+			want: "codex#1", inputs: []string{"omp", "codex"}, probe: true,
+		},
+		{
+			name: "prompt replay signals ready before auth error", status: "unknown",
+			want: "failed", inputs: []string{"claude"}, probe: true,
+		},
+		{
+			name: "tool may already have run", status: "signed-in", extra: " CLAUDE_TOOL_BEFORE_AUTH",
+			want: "failed", inputs: []string{"claude"}, probe: true, effect: true,
+		},
+		{
+			name: "explicit pin", status: "signed-out", pin: `,"harness":"claude"`,
+			want: "failed", inputs: []string{"claude"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FAKE_CLAUDE_AUTH_STATUS", tc.status)
+			e := schedEnv(t, []string{"omp", "claude", "codex"}, "claude", "codex", "omp")
+			want(t, e.ask(ownerDM, "!use claude"), "now uses claude")
+			id := e.addJob(`{"name":"auth check","schedule":{"every":"1h"},"prompt":"CLAUDE_AUTH_REJECTED` + tc.extra + `"` + tc.pin + `}`)
+			j, ok, err := e.st.Job(id)
+			if err != nil || !ok {
+				t.Fatal(j, err)
+			}
+			created, err := e.st.CreateRun(store.Run{Job: id, Version: j.Version, Slot: "synthetic-due", Due: time.Now(), Trigger: "schedule", State: store.RunPending}, j.NextSlot, j.NextDue)
+			if err != nil || !created {
+				t.Fatal(created, err)
+			}
+			e.r.opt.Jobs.Wake()
+			want(t, e.reply(), tc.want)
+			runs, err := e.st.Runs(store.RunFilter{Job: id})
+			state := store.RunFailed
+			if tc.want == "codex#1" {
+				state = store.RunOK
+			}
+			if err != nil || len(runs) != 1 || runs[0].Attempt != 0 || runs[0].State != state {
+				t.Fatalf("scheduled slot = %+v, error %v", runs, err)
+			}
+			if h, err := e.st.LastTurnHarness(core.ConvKey{Interface: "telegram", Chat: core.SchedChat(id)}); state == store.RunOK && (err != nil || h != "codex") {
+				t.Fatalf("recorded harness = %q, error %v", h, err)
+			}
+			if h, err := e.st.ChatHarness(ownerDM); err != nil || h != "claude" {
+				t.Fatalf("stored choice = %q, error %v", h, err)
+			}
+			if _, err := os.Stat(filepath.Join(e.state, "claude-auth-status")); (err == nil) != tc.probe {
+				t.Fatalf("auth status called = %v, stat error %v", err == nil, err)
+			}
+			if _, err := os.Stat(filepath.Join(e.state, "claude-tool-effect")); (err == nil) != tc.effect {
+				t.Fatalf("tool ran = %v, stat error %v", err == nil, err)
+			}
+			var got []string
+			for _, in := range fakeharness.Inputs(e.state) {
+				got = append(got, in.Harness)
+			}
+			if !slices.Equal(got, tc.inputs) {
+				t.Fatalf("prompt recipients = %v, want %v", got, tc.inputs)
+			}
+		})
+	}
+}
+
+func TestInteractiveClaudeSelectionIgnoresScheduledAuthFallback(t *testing.T) {
+	t.Setenv("FAKE_CLAUDE_AUTH_STATUS", "signed-out")
+	e := schedEnv(t, []string{"codex", "claude"}, "claude", "codex")
+	want(t, e.ask(ownerDM, "!use claude"), "now uses claude")
+	want(t, e.ask(ownerDM, "CLAUDE_AUTH_REJECTED"), "claude failed")
+	inputs := fakeharness.Inputs(e.state)
+	if len(inputs) != 1 || inputs[0].Harness != "claude" {
+		t.Fatalf("interactive prompt recipients = %+v", inputs)
+	}
+	if _, err := os.Stat(filepath.Join(e.state, "claude-auth-status")); !os.IsNotExist(err) {
+		t.Fatalf("interactive turn checked auth status: %v", err)
 	}
 }

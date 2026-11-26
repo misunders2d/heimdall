@@ -682,6 +682,8 @@ type turn struct {
 	replyTo    string
 	started    time.Time
 
+	checkClaudeAuth bool
+
 	// loop-owned
 	harness string
 
@@ -1513,6 +1515,14 @@ func (c *conv) start(ctx context.Context) {
 		t.candidates, t.explicit = []string{job.Def.Harness}, true
 	case job != nil && sticky != "":
 		t.candidates, t.explicit = []string{sticky}, true
+		if sticky == "claude" && t.role == core.RoleOwner {
+			for _, h := range c.r.opt.Order {
+				if h != sticky {
+					t.candidates = append(t.candidates, h)
+				}
+			}
+			t.checkClaudeAuth = len(t.candidates) > 1
+		}
 	case job != nil:
 		t.candidates = c.r.opt.Order
 	case first.harness != "":
@@ -1689,7 +1699,11 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			refused = identity != nil
 		}
 	}
-	for _, h := range t.candidates {
+	authRejected := false
+	for i, h := range t.candidates {
+		if i > 0 && t.checkClaudeAuth && !authRejected {
+			break // An inherited choice remains binding unless its auth check rejected launch.
+		}
 		if ctx.Err() != nil || t.stopped.Load() || identity != nil {
 			break
 		}
@@ -1979,6 +1993,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			// scheduler re-verifies the run, creator and owner per call.
 			spec.ScheduledJob, spec.ScheduledRun = t.job.Job, t.job.Run
 			spec.OneShot, spec.Timeout = true, t.job.Timeout
+			spec.CheckClaudeAuth = i == 0 && t.checkClaudeAuth
 			if t.job.Def.RerunOnTimeout {
 				// All candidates share this execution's limit. A rerun additionally
 				// shares the slot's absolute recovery deadline.
@@ -2014,6 +2029,9 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 				break
 			}
 			notes = append(notes, err.Error())
+			if errors.Is(err, harness.ErrClaudeSignedOut) {
+				authRejected = true
+			}
 			continue
 		}
 		t.mu.Lock()

@@ -94,6 +94,20 @@ func Main() {
 	if name == "" {
 		return
 	}
+	if name == "claude" && len(os.Args) == 3 && os.Args[1] == "auth" && os.Args[2] == "status" {
+		_ = os.WriteFile(filepath.Join(os.Getenv(envState), "claude-auth-status"), nil, 0o600)
+		switch os.Getenv("FAKE_CLAUDE_AUTH_STATUS") {
+		case "signed-out":
+			fmt.Println(`{"loggedIn":false,"authMethod":"none"}`)
+			os.Exit(1)
+		case "unknown":
+			fmt.Println(`{"authMethod":"none"}`)
+			os.Exit(1)
+		default:
+			fmt.Println(`{"loggedIn":true,"authMethod":"claude.ai"}`)
+			os.Exit(0)
+		}
+	}
 	if len(os.Args) > 3 && os.Args[1] == "mcp" && os.Args[2] == "list" {
 		fmt.Println(`[{"name":"unexpected-owner-server"}]`)
 		os.Exit(0)
@@ -748,6 +762,16 @@ func (f *fake) claude() {
 			return
 		}
 		replay("u0", msg["content"])
+		if f.has("CLAUDE_AUTH_REJECTED") {
+			if f.has("CLAUDE_TOOL_BEFORE_AUTH") {
+				f.emit(map[string]any{"type": "assistant", "session_id": id, "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "t1", "name": "Bash"}}}})
+				_ = os.WriteFile(filepath.Join(f.state, "claude-tool-effect"), nil, 0o600)
+			}
+			expired := "this login reached its time limit and cannot be renewed"
+			f.emit(map[string]any{"type": "assistant", "session_id": id, "error": "authentication_failed", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": expired}}}})
+			f.emit(map[string]any{"type": "result", "subtype": "success", "session_id": id, "is_error": true, "result": expired})
+			os.Exit(1)
+		}
 		f.failPost()
 		f.t3Send(id)
 		if f.has("DENIAL_SYSTEM") {
