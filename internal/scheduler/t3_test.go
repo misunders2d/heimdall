@@ -437,6 +437,56 @@ func TestTrustedT3PathProtection(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	// T3's installer writes /root/.local/bin/t3 as a /bin/sh exec of the
+	// versioned binary; the running ancestor is that binary.
+	script := func(t *testing.T, r *rig, body string) {
+		t.Helper()
+		os.Remove(r.s.TrustedT3.Path)
+		if err := os.WriteFile(r.s.TrustedT3.Path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("hub layout: standard T3 shell launcher", func(t *testing.T) {
+		r, c, _, _ := t3Rig(t)
+		real, _ := filepath.EvalSymlinks(r.s.TrustedT3.Path)
+		script(t, r, "#!/bin/sh\nexec '"+real+"' \"$@\"\n")
+		foreignOwner(t, real)
+		if who, _, err := c.resolvePeer(t3Peer, alwaysAlive); err != nil || who.Registered != trustedT3 {
+			t.Fatal(who, err)
+		}
+	})
+	t.Run("shell launcher pointing elsewhere", func(t *testing.T) {
+		r, c, _, spoof := t3Rig(t)
+		script(t, r, "#!/bin/sh\nexec '"+spoof+"' \"$@\"\n")
+		if _, _, err := c.resolvePeer(t3Peer, alwaysAlive); !errors.Is(err, errNoT3Launcher) {
+			t.Fatal(err)
+		}
+	})
+	t.Run("non-standard script", func(t *testing.T) {
+		r, c, _, _ := t3Rig(t)
+		real, _ := filepath.EvalSymlinks(r.s.TrustedT3.Path)
+		script(t, r, "#!/bin/sh\nexport X=1\nexec '"+real+"' \"$@\"\n")
+		if _, _, err := c.resolvePeer(t3Peer, alwaysAlive); err == nil || !strings.Contains(err.Error(), "not the standard T3 launcher") {
+			t.Fatal(err)
+		}
+	})
+	t.Run("shell launcher target in a writable directory", func(t *testing.T) {
+		r, c, _, spoof := t3Rig(t)
+		os.Chmod(filepath.Dir(spoof), 0o777)
+		script(t, r, "#!/bin/sh\nexec '"+spoof+"' \"$@\"\n")
+		if _, _, err := c.resolvePeer(t3Peer, alwaysAlive); err == nil || !strings.Contains(err.Error(), "writable by group or others") {
+			t.Fatal(err)
+		}
+	})
+	t.Run("shell launcher chained to another script", func(t *testing.T) {
+		r, c, _, spoof := t3Rig(t)
+		real, _ := filepath.EvalSymlinks(r.s.TrustedT3.Path)
+		os.WriteFile(spoof, []byte("#!/bin/sh\nexec '"+real+"' \"$@\"\n"), 0o755)
+		script(t, r, "#!/bin/sh\nexec '"+spoof+"' \"$@\"\n")
+		if _, _, err := c.resolvePeer(t3Peer, alwaysAlive); err == nil || !strings.Contains(err.Error(), "itself a script") {
+			t.Fatal(err)
+		}
+	})
 	t.Run("missing launcher", func(t *testing.T) {
 		r, c, _, _ := t3Rig(t)
 		os.Remove(r.s.TrustedT3.Path)
