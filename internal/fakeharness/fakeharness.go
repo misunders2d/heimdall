@@ -96,6 +96,10 @@ func Main() {
 	}
 	if name == "claude" && len(os.Args) == 3 && os.Args[1] == "auth" && os.Args[2] == "status" {
 		_ = os.WriteFile(filepath.Join(os.Getenv(envState), "claude-auth-status"), nil, 0o600)
+		if status := os.Getenv("FAKE_CLAUDE_AUTH_JSON"); status != "" {
+			fmt.Println(status)
+			os.Exit(0)
+		}
 		switch os.Getenv("FAKE_CLAUDE_AUTH_STATUS") {
 		case "signed-out":
 			fmt.Println(`{"loggedIn":false,"authMethod":"none"}`)

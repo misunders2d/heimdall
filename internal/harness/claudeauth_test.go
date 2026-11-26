@@ -9,6 +9,29 @@ import (
 	"time"
 )
 
+func TestClaudeStatusExpiryBoundary(t *testing.T) {
+	expiry := time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		now     time.Time
+		waitErr error
+		want    error
+	}{
+		{name: "just before deadline", now: expiry.Add(-time.Nanosecond)},
+		{name: "at deadline", now: expiry, want: errClaudeLoginExpired},
+		{name: "just after deadline", now: expiry.Add(time.Nanosecond), want: errClaudeLoginExpired},
+		{name: "unsuccessful command", now: expiry, waitErr: errors.New("fixture status failure")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout := limitedBuffer{max: 4096}
+			_, _ = stdout.Write([]byte(`{"loggedIn":true,"authMethod":"claude.ai","loginExpiresAt":"2026-11-26T08:00:00.000Z"}`))
+			if got := claudeStatusRejection(tc.waitErr, &stdout, tc.now); got != tc.want {
+				t.Fatalf("status rejection = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClaudeAuthProbeFinishesSaveAfterCallerCancels(t *testing.T) {
 	dir := t.TempDir()
 	command := filepath.Join(dir, "claude")
@@ -34,8 +57,8 @@ exit 1
 	release := func() { _ = os.WriteFile(filepath.Join(dir, "release"), nil, 0o600) }
 	defer release()
 	launch := Launch{Path: command, Dir: dir}
-	probe := func(ctx context.Context, name string) (bool, error) {
-		return claudeSignedOut(ctx, launch, []string{"PATH=/usr/bin:/bin", "TEST_PROBE=" + name})
+	probe := func(ctx context.Context, name string) error {
+		return checkClaudeAuth(ctx, launch, []string{"PATH=/usr/bin:/bin", "TEST_PROBE=" + name})
 	}
 	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stop()
@@ -43,8 +66,7 @@ exit 1
 	defer cancel()
 	firstDone := make(chan error, 1)
 	go func() {
-		_, err := probe(first, "first")
-		firstDone <- err
+		firstDone <- probe(first, "first")
 	}()
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
@@ -65,16 +87,16 @@ exit 1
 
 	second, stopSecond := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer stopSecond()
-	if signedOut, err := probe(second, "second"); signedOut || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("overlapping probe = (%v, %v)", signedOut, err)
+	if err := probe(second, "second"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("overlapping probe = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "second.started")); !os.IsNotExist(err) {
 		t.Fatalf("second probe launched before first exited: %v", err)
 	}
 
 	release()
-	if signedOut, err := probe(ctx, "third"); !signedOut || err != nil {
-		t.Fatalf("probe after release = (%v, %v)", signedOut, err)
+	if err := probe(ctx, "third"); !errors.Is(err, ErrClaudeSignedOut) {
+		t.Fatalf("probe after release = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "first.saved")); err != nil {
 		t.Fatalf("first probe did not finish its save: %v", err)

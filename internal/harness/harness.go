@@ -133,7 +133,7 @@ type Spec struct {
 	ScheduledJob string
 	ScheduledRun int64
 	// CheckClaudeAuth is set for an owner scheduled Claude candidate with a
-	// successor. A signed-out status rejects launch before handing over input.
+	// successor. A rejected status prevents launch before handing over input.
 	CheckClaudeAuth   bool
 	authStatusContext context.Context
 	// BeforeLaunch records any durable fence needed before the process can act.
@@ -371,12 +371,11 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		if start == nil {
 			start = ctx
 		}
-		signedOut, err := claudeSignedOut(start, spec.Launch, env)
-		if err != nil {
+		switch err := checkClaudeAuth(start, spec.Launch, env); {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			return nil, fmt.Errorf("%w: %v", ErrClaudeAuthStatusPending, err)
-		}
-		if signedOut {
-			return nil, ErrClaudeSignedOut
+		case err != nil:
+			return nil, err
 		}
 	}
 	if spec.Harness == "pi" && spec.Caller.Role != core.RoleEmployee {

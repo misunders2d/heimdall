@@ -573,8 +573,14 @@ func TestScheduledWakeUsesCurrentSourceConversationHarness(t *testing.T) {
 }
 
 func TestOwnerScheduledFallback(t *testing.T) {
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	status := func(method, expiryJSON string) string {
+		return fmt.Sprintf(`{"loggedIn":true,"authMethod":%q,"loginExpiresAt":%s}`, method, expiryJSON)
+	}
 	for _, tc := range []struct {
 		name, status, selection, pin, extra, want string
+		statusJSON                                string
 		inputs                                    []string
 		probe, tool, hook, brokenExec             bool
 	}{
@@ -585,6 +591,28 @@ func TestOwnerScheduledFallback(t *testing.T) {
 		{
 			name: "selected Claude signed out", status: "signed-out", selection: "codex", pin: "claude",
 			want: "codex#1", inputs: []string{"codex"}, probe: true,
+		},
+		{
+			name: "stored Claude login past maximum expiry", selection: "claude",
+			statusJSON: status("claude.ai", fmt.Sprintf("%q", past)),
+			want:       "codex#1", inputs: []string{"codex"}, probe: true,
+		},
+		{
+			name:       "maximum expiry still in future",
+			statusJSON: status("claude.ai", fmt.Sprintf("%q", future)),
+			want:       "failed", inputs: []string{"claude"}, probe: true,
+		},
+		{
+			name: "null expiry", statusJSON: status("claude.ai", "null"),
+			want: "failed", inputs: []string{"claude"}, probe: true,
+		},
+		{
+			name: "malformed expiry", statusJSON: status("claude.ai", `"not-a-timestamp"`),
+			want: "failed", inputs: []string{"claude"}, probe: true,
+		},
+		{
+			name: "other authentication method", statusJSON: status("oauth_token", fmt.Sprintf("%q", past)),
+			want: "failed", inputs: []string{"claude"}, probe: true,
 		},
 		{
 			name: "default chain Claude after earlier engine unavailable", status: "signed-out",
@@ -609,6 +637,7 @@ func TestOwnerScheduledFallback(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("FAKE_CLAUDE_AUTH_STATUS", tc.status)
+			t.Setenv("FAKE_CLAUDE_AUTH_JSON", tc.statusJSON)
 			e := schedEnv(t, []string{"omp", "claude", "codex"}, "claude", "codex")
 			if tc.brokenExec {
 				if err := os.WriteFile(filepath.Join(e.bin, "omp"), []byte("#!/missing-test-interpreter\n"), 0o755); err != nil {
