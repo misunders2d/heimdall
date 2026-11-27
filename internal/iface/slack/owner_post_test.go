@@ -408,3 +408,34 @@ func TestSendReportsDeliveredTimestamps(t *testing.T) {
 		t.Fatal("delivered ts", refs)
 	}
 }
+
+// A hub clock ahead of Slack's never hides a landed post from the resend
+// check: the bound is the thread's own ts, or a day before the row's local
+// creation (review finding 6).
+func TestOwnerPostResendCheckToleratesAClockAhead(t *testing.T) {
+	slackNow := time.Now()
+	landed := fmt.Sprintf("%d.000001", slackNow.Unix()) // Slack's ts of the post
+	ahead := core.Outbound{Conv: core.ConvKey{Interface: "slack", Chat: "C1"}, CreatedAt: slackNow.Add(2 * time.Hour)}
+	if oldest := ownerPostOldest(ahead); !store.PlatformBefore(oldest, landed) {
+		t.Fatalf("bound %s excludes the landed post %s", oldest, landed)
+	}
+	if store.PlatformBefore(reconciliationOldest(ahead), landed) {
+		t.Fatal("the replies' 30 s bound tolerates this skew; the test no longer shows it")
+	}
+	threaded := ahead
+	threaded.Conv.Thread = "1700000000.000100"
+	if got := ownerPostOldest(threaded); got != threaded.Conv.Thread {
+		t.Fatal("thread post bound is not the thread ts", got)
+	}
+	// The retry's history check uses that bound.
+	r := newOwnerPostRig(t)
+	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C5"}, "after a restart", 0)
+	out.CreatedAt, out.Attempt = slackNow.Add(2*time.Hour), 1
+	if err := r.s.Send(context.Background(), out); err != nil {
+		t.Fatal(err)
+	}
+	h := r.f.all("conversations.history")
+	if len(h) == 0 || !store.PlatformBefore(str(h[0].Body["oldest"]), landed) {
+		t.Fatal("resend check bound excludes a post that landed", h)
+	}
+}

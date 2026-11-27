@@ -241,7 +241,7 @@ func (s *Slack) ownerPostParts(ctx context.Context, api *apiClient, out core.Out
 			id += fmt.Sprintf("#%d", index+1)
 		}
 		if out.Attempt > 0 {
-			ts, err := api.findDelivery(ctx, out.Conv, id, ownerPostEvent, reconciliationOldest(out))
+			ts, err := api.findDelivery(ctx, out.Conv, id, ownerPostEvent, ownerPostOldest(out))
 			if err != nil {
 				return err // never resend unchecked
 			}
@@ -273,7 +273,7 @@ func (s *Slack) ownerPostParts(ctx context.Context, api *apiClient, out core.Out
 			return err
 		}
 		found, checkErr := s.settle(ctx, api, func() (bool, error) {
-			ts, err := api.findDelivery(ctx, out.Conv, id, ownerPostEvent, reconciliationOldest(out))
+			ts, err := api.findDelivery(ctx, out.Conv, id, ownerPostEvent, ownerPostOldest(out))
 			return ts != "", err
 		})
 		if checkErr == nil && found {
@@ -387,7 +387,7 @@ func (s *Slack) ownerFilesShared(ctx context.Context, api *apiClient, out core.O
 	}
 	cursor := ""
 	for page := 0; page < 100; page++ {
-		args := map[string]any{"channel": out.Conv.Chat, "limit": 100, "cursor": cursor, "oldest": reconciliationOldest(out)}
+		args := map[string]any{"channel": out.Conv.Chat, "limit": 100, "cursor": cursor, "oldest": ownerPostOldest(out)}
 		method := "conversations.history"
 		if out.Conv.Thread != "" {
 			method, args["ts"] = "conversations.replies", out.Conv.Thread
@@ -426,6 +426,23 @@ func (s *Slack) ownerFilesShared(ctx context.Context, api *apiClient, out core.O
 		cursor = next
 	}
 	return false, errors.New("slack: reconciliation page limit reached")
+}
+
+// ownerPostSkew is how far the hub's clock may run ahead of Slack's before
+// a resend check could miss a post that landed.
+const ownerPostSkew = 24 * time.Hour
+
+// ownerPostOldest is the lower bound of a post's resend checks. In a
+// thread it is the thread's own ts, Slack's clock: the whole thread is
+// checked. Otherwise it is the row's local creation time less
+// ownerPostSkew, so a hub clock up to a day ahead still finds a post that
+// landed (the replies' 30 s margin would miss it and post twice). The
+// unique delivery tag and file IDs keep the wide window exact.
+func ownerPostOldest(out core.Outbound) string {
+	if out.Conv.Thread != "" || out.CreatedAt.IsZero() {
+		return out.Conv.Thread
+	}
+	return fmt.Sprintf("%.6f", float64(out.CreatedAt.Add(-ownerPostSkew).UnixMicro())/1e6)
 }
 
 // settle checks a few times, with growing pauses, whether an ambiguous
