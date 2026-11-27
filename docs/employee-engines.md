@@ -78,8 +78,9 @@ connected servers; `mcp logout <server>` removes one.
 
   The two stores are separate. With both kinds enabled, an employee who
   uses Pi also sends `!pi mcp login mellanni` once in the DM (Pi's native
-  sign-in, same caller check); `!pi mcp status` shows Pi's side and
-  `mcp status` the broker's. Without the broker (`employee_mcp` off),
+  sign-in, same caller check; its callback goes to Pi because only
+  broker-issued states start `hmc_`). `mcp status` lists the broker's side
+  only. Without the broker (`employee_mcp` off),
   non-Pi employee turns run with no business MCP. **Pi still uses its own native store**: moving Pi onto the broker
   handoff needs the pack's `native-mcp-compat.mjs` to accept a static
   bearer, a follow-up outside this repository.
