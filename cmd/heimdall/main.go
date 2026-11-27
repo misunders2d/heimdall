@@ -201,7 +201,7 @@ func run(args []string) error {
 			if o := cfg.Slack.OwnerPost; o.On() {
 				// Posts as the owner (docs/owner-post.md): the control action,
 				// with the owner's user token only.
-				jobs.OwnerPost = &scheduler.OwnerPosts{Poster: sl, Immediate: o.Approval == config.OwnerPostImmediate, Dir: filepath.Join(cfg.DataDir, "outbox"), Deny: []string{cfg.DataDir, filepath.Dir(absPath(flags.Lookup("config").Value.String()))}}
+				jobs.OwnerPost = &scheduler.OwnerPosts{Poster: sl, Immediate: o.Approval == config.OwnerPostImmediate, Dir: filepath.Join(cfg.DataDir, "outbox"), Deny: append([]string{cfg.DataDir}, configDirs(flags.Lookup("config").Value.String())...)}
 			}
 		}
 	}
@@ -547,6 +547,18 @@ func checkConfig(args []string) error {
 	}
 	fmt.Println("configuration valid (offline; credentials and interfaces not checked)")
 	return nil
+}
+
+// configDirs are the directories a post as the owner may never take files
+// from for the config file: where it is named and, when it is a symlink,
+// where it really is.
+func configDirs(path string) []string {
+	abs := absPath(path)
+	dirs := []string{filepath.Dir(abs)}
+	if real, err := filepath.EvalSymlinks(abs); err == nil && filepath.Dir(real) != dirs[0] {
+		dirs = append(dirs, filepath.Dir(real))
+	}
+	return dirs
 }
 
 // absPath is path made absolute against the working directory; path

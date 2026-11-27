@@ -314,3 +314,22 @@ func TestSchedTasksServiceDown(t *testing.T) {
 		t.Fatalf("refusal: %v %q", err, out.String())
 	}
 }
+
+// A symlinked -config file: its real directory is denied too (review
+// finding 5).
+func TestConfigDirsFollowASymlinkedConfig(t *testing.T) {
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "config.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	links := t.TempDir()
+	link := filepath.Join(links, "config.json")
+	if err := os.Symlink(filepath.Join(real, "config.json"), link); err != nil {
+		t.Fatal(err)
+	}
+	realDir, _ := filepath.EvalSymlinks(real)
+	dirs := configDirs(link)
+	if len(dirs) != 2 || dirs[0] != links || dirs[1] != realDir {
+		t.Fatalf("config dirs %v, want %s and %s", dirs, links, realDir)
+	}
+}
