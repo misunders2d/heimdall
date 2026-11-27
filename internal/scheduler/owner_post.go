@@ -249,17 +249,25 @@ func (s *Scheduler) ownerPosts(c Caller) []store.OwnerPost {
 }
 
 // answerPosts approves or declines every waiting post here; each approval
-// queues its delivery row with the reply, in one transaction.
+// queues its delivery row with the reply, in one transaction. With posting
+// as the owner turned off, any answer declines them: nothing is posted.
 func (s *Scheduler) answerPosts(c Caller, posts []store.OwnerPost, approve bool) (string, *store.JobChange) {
+	off := s.OwnerPost == nil
+	if off {
+		approve = false
+	}
 	var lines []string
 	all := &store.JobChange{}
 	for _, p := range posts {
 		d := &store.OwnerPostDecision{ID: p.ID, Creator: p.Creator, Approve: approve, At: s.now()}
-		if approve {
+		switch {
+		case off:
+			lines = append(lines, "Posting as you is turned off here; the post to "+literal(p.Label)+" was cancelled and nothing was posted.")
+		case approve:
 			out := ownerPostOut(p)
 			d.Out = &out
 			lines = append(lines, "📤 Posting as you to "+literal(p.Label)+" now.")
-		} else {
+		default:
 			// The copies age out with the outbox (7 days).
 			lines = append(lines, "Post to "+literal(p.Label)+" cancelled; nothing was posted.")
 		}

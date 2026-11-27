@@ -188,7 +188,7 @@ func run(args []string) error {
 		interfaces = append(interfaces, tg)
 	}
 	if c := cfg.Slack; c != nil {
-		sl, err := slack.New(slack.Options{Access: &access, OwnerSlackEnabled: cfg.OwnerSlack != nil && cfg.OwnerSlack.Enabled, Owners: cfg.Owners, BotToken: os.Getenv(slack.BotTokenEnv), AppToken: os.Getenv(slack.AppTokenEnv), TeamID: c.TeamID, ConversationWork: c.ConversationWork, WorkOwnerID: c.WorkOwnerID, WorkUserToken: os.Getenv(slack.WorkUserTokenEnv), DataDir: cfg.DataDir, Store: st, UnmentionedCommands: cfg.UnmentionedCommands(), MaxFileBytes: c.MaxFileBytes, EventDedupeHours: c.EventDedupeHours, DispatchConcurrency: c.DispatchConcurrency, IngressRetryWindow: time.Duration(c.IngressRetrySeconds) * time.Second, StatusName: c.StatusName, StatusUpdates: c.StatusUpdates, Log: logger})
+		sl, err := slack.New(slack.Options{Access: &access, OwnerSlackEnabled: cfg.OwnerSlack != nil && cfg.OwnerSlack.Enabled, OwnerPost: c.OwnerPost.On(), Owners: cfg.Owners, BotToken: os.Getenv(slack.BotTokenEnv), AppToken: os.Getenv(slack.AppTokenEnv), TeamID: c.TeamID, ConversationWork: c.ConversationWork, WorkOwnerID: c.WorkOwnerID, WorkUserToken: os.Getenv(slack.WorkUserTokenEnv), DataDir: cfg.DataDir, Store: st, UnmentionedCommands: cfg.UnmentionedCommands(), MaxFileBytes: c.MaxFileBytes, EventDedupeHours: c.EventDedupeHours, DispatchConcurrency: c.DispatchConcurrency, IngressRetryWindow: time.Duration(c.IngressRetrySeconds) * time.Second, StatusName: c.StatusName, StatusUpdates: c.StatusUpdates, Log: logger})
 		if err != nil {
 			return err
 		}

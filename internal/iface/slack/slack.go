@@ -36,14 +36,17 @@ type Options struct {
 	BotToken, AppToken, TeamID, DataDir, StatusName string
 	Store                                           *store.Store
 	OwnerSlackEnabled                               bool
-	Owners                                          []string
-	UnmentionedCommands                             []string
-	MaxFileBytes                                    int64
-	EventDedupeHours                                int
-	IngressRetryWindow                              time.Duration
-	DispatchConcurrency                             int
-	StatusUpdates                                   *bool
-	Log                                             *log.Logger
+	// OwnerPost: slack.owner_post is on. Off, no post as the owner is
+	// sent and no event is filtered as the echo of one (docs/owner-post.md).
+	OwnerPost           bool
+	Owners              []string
+	UnmentionedCommands []string
+	MaxFileBytes        int64
+	EventDedupeHours    int
+	IngressRetryWindow  time.Duration
+	DispatchConcurrency int
+	StatusUpdates       *bool
+	Log                 *log.Logger
 	// Test-only injection; never accepted from config.
 	APIBase    string
 	HTTPClient *http.Client

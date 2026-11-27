@@ -151,6 +151,9 @@ func (s *Slack) OwnerPostText(text string) (string, error) {
 // then its files in one completed upload without a comment. Nothing goes to the bot or to the target but the
 // post; every failure is the router's, which tells the owner privately.
 func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
+	if !s.opt.OwnerPost {
+		return router.PermanentError{Err: errors.New("slack: posting as the owner is turned off (slack.owner_post); nothing was sent")}
+	}
 	api := s.workClient("user")
 	if api == nil || s.opt.WorkOwnerID == "" {
 		return router.PermanentError{Err: errors.New("slack: the owner's user token is unavailable; posts as the owner never use the bot")}

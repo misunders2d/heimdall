@@ -254,3 +254,25 @@ func TestExternalOwnerAgentMayRequestAPost(t *testing.T) {
 		t.Fatal("agent's post not stored as pending", p, ok, err)
 	}
 }
+
+// Turned off, a pending post is never approved: any answer cancels it and
+// nothing is queued (review finding 1).
+func TestPostAsOwnerOffCancelsPendingPosts(t *testing.T) {
+	r, c, uid, _ := postRig(t, false)
+	got := c.executeBound(context.Background(), uid, ControlRequest{Action: postAsOwner, RequestID: "off-1", Target: "slack:C1", Text: "before off"})
+	if got.Error != "" {
+		t.Fatal(got)
+	}
+	r.sent()
+	r.s.OwnerPost = nil // slack.owner_post turned off, then restarted
+	reply, ok := r.answer(asBoss, "yes")
+	if !ok || !strings.Contains(reply, "turned off") || strings.Contains(reply, "Posting as you to") {
+		t.Fatal("yes while off:", reply, ok)
+	}
+	if rows := r.slackRows(); len(rows) != 0 {
+		t.Fatal("post queued while off", rows)
+	}
+	if p, _, _ := r.st.OwnerPostByID(got.PostID); p.State != store.OwnerPostDeclined {
+		t.Fatal("post left approvable while off:", p.State)
+	}
+}

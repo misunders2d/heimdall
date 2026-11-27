@@ -41,6 +41,7 @@ func newOwnerPostRig(t *testing.T) *ownerPostRig {
 	}
 	s, st := readySlack(t, f)
 	s.opt.WorkOwnerID = "UOWNER"
+	s.opt.OwnerPost = true
 	s.workUser = newAPI(f.srv.URL, "test-work-user", nil)
 	s.workUser.pause = s.bot.pause
 	s.ownerBotDM = "Dbot"
@@ -320,5 +321,25 @@ func TestOwnerPostFileEchoIsNotOwnerInput(t *testing.T) {
 	}
 	if ok, _, _ := r.s.eventAdmission(share("", "FOTHER")); !ok {
 		t.Fatal("the owner's own file share refused")
+	}
+}
+
+// Turned off: a queued post is refused without a call, and no event is
+// filtered as an echo (review finding 1).
+func TestOwnerPostOffSendsNothingAndFiltersNothing(t *testing.T) {
+	r := newOwnerPostRig(t)
+	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C1"}, "queued before off", 1)
+	r.s.opt.OwnerPost = false
+	before := len(r.f.calls)
+	err := r.s.Send(context.Background(), out)
+	var perm router.PermanentError
+	if !errors.As(err, &perm) || len(r.f.calls) != before {
+		t.Fatal("post sent while off", err, len(r.f.calls)-before)
+	}
+	m := map[string]any{"type": "message", "channel": "Dbot", "channel_type": "im", "user": "UOWNER", "text": "yes", "ts": "1000.1",
+		"metadata": map[string]any{"event_type": ownerPostEvent, "event_payload": map[string]string{"delivery_id": "post-1"}}}
+	raw, _ := json.Marshal(map[string]any{"event": m, "authorizations": []map[string]any{{"team_id": "Ttest", "user_id": "UOWNER", "is_bot": false}}})
+	if ok, _, _ := r.s.eventAdmission(raw); !ok {
+		t.Fatal("event filtered as an owner post echo while off")
 	}
 }
