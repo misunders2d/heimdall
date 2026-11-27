@@ -991,7 +991,8 @@ func (s *Scheduler) noticeChat(j store.Job) (core.ConvKey, bool) {
 }
 
 // notices sends fixed text to the creator's notice chat, and to the job's
-// target when toTarget, once per conversation.
+// target when toTarget and the target is private, once per conversation.
+// Operational notices never go to shared channels.
 func (s *Scheduler) notices(j store.Job, d Def, toTarget bool, text string) []core.Outbound {
 	var outs []core.Outbound
 	add := func(k core.ConvKey) {
@@ -1012,7 +1013,7 @@ func (s *Scheduler) notices(j store.Job, d Def, toTarget bool, text string) []co
 		}
 	}
 	if toTarget {
-		if t, err := s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate}); err == nil && t.AgentNet == "" {
+		if t, err := s.resolve(d.To, Caller{Principal: j.Creator, Conv: j.CreatedIn, Private: j.CreatedPrivate}); err == nil && t.AgentNet == "" && t.Private {
 			add(t.Conv)
 		}
 	}
