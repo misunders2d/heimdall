@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -155,27 +156,8 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 	if m.User != "" && m.User == s.opt.WorkOwnerID && strings.HasPrefix(m.Text, workAttribution(m.User)) {
 		return false, false, nil // our own attributed reply via the user token
 	}
-	if s.opt.OwnerPost && m.User != "" && m.User == s.opt.WorkOwnerID && m.Metadata.Type == ownerPostEvent {
-		return false, false, nil // a post as the owner that Heimdall made: never the owner's live input
-	}
-	if s.opt.OwnerPost && m.User != "" && m.User == s.opt.WorkOwnerID && (m.Subtype == "file_share" || m.Subtype == "") && m.Upload && len(m.Files) > 0 &&
-		strings.TrimSpace(m.Text) == "" && m.Channel != "" && m.Channel != s.ownerBotDM {
-		// The files of a post as the owner are completed without a comment
-		// and cannot carry metadata. Their echo (subtype file_share, or none
-		// as in Slack's documented upload example) is the upload-time share of
-		// exactly the recorded upload IDs at the post's own destination; a
-		// later share of the same files, anywhere, is the owner's own.
-		ids := make([]string, len(m.Files))
-		for i, f := range m.Files {
-			ids[i] = f.ID
-		}
-		ours, err := s.opt.Store.OwnerPostFiles(core.ConvKey{Interface: core.PlatformSlack, Chat: m.Channel, Thread: m.ThreadTS}, ids)
-		if err != nil {
-			return false, false, err
-		}
-		if ours {
-			return false, false, nil
-		}
+	if echo, err := s.ownerPostEcho(m); err != nil || echo {
+		return false, false, err // a post as the owner that Heimdall made: never the owner's live input
 	}
 	if len(p.Authorizations) == 0 {
 		return true, false, nil // legacy and bot-only envelopes without authorizations
@@ -208,6 +190,45 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 	return s.watchPost(m, command, w.Mode, m.ChannelType != "im" && s.mention().MatchString(m.Text)), true, nil
 }
 
+// ownerPostEcho reports a message of the owner as one Heimdall itself
+// posted as the owner (docs/owner-post.md), from state stored before the
+// write: a text part tagged with the delivery key of an approved post's
+// delivery row to this channel, or the upload-time share, without a
+// comment, of exactly the recorded uploads of one approved post at its own
+// channel and thread. Nothing else of the owner's is ever dropped. Off
+// (slack.owner_post), nothing is.
+func (s *Slack) ownerPostEcho(m eventMessage) (bool, error) {
+	if !s.opt.OwnerPost || m.User == "" || m.User != s.opt.WorkOwnerID || m.Channel == "" {
+		return false, nil
+	}
+	if m.Metadata.Type == ownerPostEvent {
+		row, _, _ := strings.Cut(strings.TrimPrefix(m.Metadata.Payload.ID, "post-"), "#")
+		id, err := strconv.ParseInt(row, 10, 64)
+		if err != nil || !strings.HasPrefix(m.Metadata.Payload.ID, "post-") {
+			return false, nil
+		}
+		return s.opt.Store.OwnerPostDelivery(id, m.Channel)
+	}
+	if (m.Subtype == "file_share" || m.Subtype == "") && m.Upload && len(m.Files) > 0 &&
+		strings.TrimSpace(m.Text) == "" && m.Channel != s.ownerBotDM {
+		// The files of a post as the owner are completed without a comment
+		// and cannot carry metadata. Their echo (subtype file_share, or none
+		// as in Slack's documented upload example) is the upload-time share of
+		// exactly the recorded upload IDs at the post's own destination; a
+		// later share of the same files, anywhere, is the owner's own.
+		ids := make([]string, len(m.Files))
+		for i, f := range m.Files {
+			ids[i] = f.ID
+		}
+		thread := m.ThreadTS
+		if thread == m.TS {
+			thread = "" // a top-level post that later got replies
+		}
+		return s.opt.Store.OwnerPostFiles(core.ConvKey{Interface: core.PlatformSlack, Chat: m.Channel, Thread: thread}, ids)
+	}
+	return false, nil
+}
+
 // watchPost keeps commands and sign-in on the normal path. Answer watches
 // cover the owner, leaving existing bot conversations on their normal path.
 func (s *Slack) watchPost(m eventMessage, commandText, mode string, addressedToBot bool) bool {
@@ -235,6 +256,9 @@ func (s *Slack) CheckSlackOwnerReply(ctx context.Context, route core.ConvKey, po
 	}
 	for _, method := range methods {
 		args := map[string]any{"channel": route.Chat, "oldest": posted, "limit": 200}
+		if s.opt.OwnerPost {
+			args["include_all_metadata"] = true // how a post as the owner is told apart
+		}
 		if method == "conversations.replies" {
 			args["ts"] = route.Thread
 		}
@@ -253,6 +277,16 @@ func (s *Slack) CheckSlackOwnerReply(ctx context.Context, route core.ConvKey, po
 			for _, m := range result.Messages {
 				if m.User == s.opt.WorkOwnerID && m.BotID == "" && compareTS(m.TS, posted) > 0 &&
 					!strings.HasPrefix(m.Text, workAttribution(m.User)) {
+					if m.Channel == "" {
+						m.Channel = route.Chat // history omits it
+					}
+					// A post as the owner that Heimdall made is not the
+					// owner's reply.
+					if echo, err := s.ownerPostEcho(m); err != nil {
+						return err
+					} else if echo {
+						continue
+					}
 					return core.ErrSlackOwnerReplied
 				}
 			}

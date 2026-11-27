@@ -44,8 +44,7 @@ func (api *apiClient) findDelivery(ctx context.Context, k core.ConvKey, id, even
 					} `json:"event_payload"`
 				} `json:"metadata"`
 			} `json:"messages"`
-			HasMore bool `json:"has_more"`
-			Meta    struct {
+			Meta struct {
 				Cursor string `json:"next_cursor"`
 			} `json:"response_metadata"`
 		}
@@ -64,11 +63,6 @@ func (api *apiClient) findDelivery(ctx context.Context, k core.ConvKey, id, even
 		}
 		next := strings.TrimSpace(result.Meta.Cursor)
 		if next == "" {
-			if result.HasMore && event == ownerPostEvent {
-				// More history but no way to read it: a post as the owner
-				// is never sent again unchecked (replies keep at-least-once).
-				return "", errOwnerHistoryIncomplete
-			}
 			return "", nil
 		}
 		if next == cursor {
@@ -144,6 +138,7 @@ func (s *Slack) Send(ctx context.Context, out core.Outbound) error {
 		warning.Reactions = nil
 		warning.Text = "Could not confirm Slack reaction delivery."
 		warning.Formatted = false
+		warning.Delivered = nil // a notice, never the reply's receipt
 		if err := s.sendText(ctx, warning); err != nil {
 			return err
 		}
@@ -208,10 +203,10 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 			return err
 		}
 		if ts != "" {
-			out.Report(ts)
-			return nil
+			return nil // one whole-row receipt: no part's ts, so no receipt
 		}
 	}
+	refs := make([]string, len(parts)) // each part's ts, reported at the end
 	for index, part := range parts {
 		id := strconv.FormatInt(out.ID, 10)
 		if len(parts) > 1 {
@@ -225,7 +220,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 				return err
 			}
 			if ts != "" {
-				out.Report(ts)
+				refs[index] = ts
 				continue
 			}
 		}
@@ -254,7 +249,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		}
 		err := api.call(ctx, "chat.postMessage", args, &response, before...)
 		if err == nil && response.TS != "" {
-			out.Report(response.TS)
+			refs[index] = response.TS
 			continue
 		}
 		if err == nil {
@@ -269,7 +264,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 				}
 				ts, _ := api.findDelivery(ctx, out.Conv, id, "heimdall_reply", reconciliationOldest(out))
 				if ts != "" {
-					out.Report(ts)
+					refs[index] = ts
 					found = true
 					break
 				}
@@ -295,6 +290,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		s.setDeliveryStatus(ctx, out, "could not complete this request. Final answer not sent.")
 		return err
 	}
+	out.Report(refs) // every part's ts, in order (store.CardReceipt)
 	return nil
 }
 

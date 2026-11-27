@@ -386,20 +386,22 @@ type Outbound struct {
 	// File is a file to send instead of text.
 	File *File
 	// Delivered, set by the router for one send and never stored, is called
-	// by the interface with the platform message ID (Telegram message_id,
-	// Slack ts) of the parts it delivered, the final part's last; Telegram
-	// reports only a valid final one. Report calls it.
-	Delivered func(ref string) `json:"-"`
+	// once by the interface after a successful send with the platform
+	// message ID (Telegram message_id, Slack ts) of every part it delivered,
+	// in order, "" for one it could not confirm. Report calls it. An
+	// interface that cannot name every part reports nothing: the reply then
+	// has no receipt (store.CardReceipt).
+	Delivered func(parts []string) `json:"-"`
 	// OwnerPost marks a post the owner approved to go out under the owner's
 	// own Slack user token (docs/owner-post.md): Text and Files form one post,
 	// never sent by the bot, and every notice about it goes to Notice.
 	OwnerPost *OwnerPost
 }
 
-// Report tells the router the platform message ID of a delivered part.
-func (o Outbound) Report(ref string) {
-	if o.Delivered != nil && ref != "" {
-		o.Delivered(ref)
+// Report tells the router the platform message IDs of the delivered parts.
+func (o Outbound) Report(parts []string) {
+	if o.Delivered != nil {
+		o.Delivered(parts)
 	}
 }
 

@@ -56,12 +56,11 @@ func TestFailedOwnerPostIsReportedPrivately(t *testing.T) {
 type reportsRefs struct{ *fakeIface }
 
 func (f reportsRefs) Send(ctx context.Context, out core.Outbound) error {
-	out.Report("41")
-	out.Report("42")
+	out.Report([]string{"41", "42"})
 	return f.fakeIface.Send(ctx, out)
 }
 
-// A sent card records the last delivered part's platform message ID.
+// A sent card records its last part's platform message ID when every part has one, in order.
 func TestSentCardRecordsItsPlatformMessageID(t *testing.T) {
 	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
 	e.stop()
@@ -120,5 +119,61 @@ func TestOwnerPostCopiesKeptUntilSentIsRecorded(t *testing.T) {
 			t.Fatalf("state %q, copy not removed after the sent record", state)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The failure notice is queued once per delivery row, even when the row
+// fails again after a crash before its outcome was recorded (I3: one
+// private notice).
+func TestOwnerPostFailureNoticeIsQueuedOnce(t *testing.T) {
+	e, db := answerEnv(t, 5)
+	notice := core.ConvKey{Interface: "fake", Chat: "owner-dm"}
+	out := core.Outbound{ID: 77, Conv: core.ConvKey{Interface: "slack", Chat: "C1"}, OwnerPost: &core.OwnerPost{ID: "ponce", Label: "#team", Notice: notice}}
+	e.r.ownerPostFailed(out)
+	e.r.ownerPostFailed(out)
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM outbound WHERE chat=? AND text LIKE '%was not sent%'`, notice.Chat).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("notices queued %d (%v), want 1", n, err)
+	}
+}
+
+// reportsTwice is the fake interface reporting a receipt twice for one send.
+type reportsTwice struct{ *fakeIface }
+
+func (f reportsTwice) Send(ctx context.Context, out core.Outbound) error {
+	out.Report([]string{"41"})
+	out.Report([]string{"42"})
+	return f.fakeIface.Send(ctx, out)
+}
+
+// An interface that reports more than once per send gives no receipt (I1):
+// the card is sent but can never be approved.
+func TestSentCardReportedTwiceHasNoReceipt(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.wrap = func(f *fakeIface) Interface { return reportsTwice{f} }
+	e.start()
+	card := core.ConvKey{Interface: "fake", Chat: "owner-dm"}
+	p := store.OwnerPost{ID: "ptwice", Creator: "fake:owner", Card: card, Target: core.ConvKey{Interface: "slack", Chat: "C1"}, Label: "#team", Text: "x", Origin: "test",
+		State: store.OwnerPostPending, Expires: time.Now().Add(time.Hour), CardMessage: &core.Outbound{Conv: card, Text: "card"}}
+	if err := e.st.AnswerCommand(0, core.ConvKey{}, store.CommandEnd{Detail: "job", Job: &store.JobChange{NewOwnerPost: &p}}); err != nil {
+		t.Fatal(err)
+	}
+	e.r.Wake("fake")
+	e.reply()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _, err := e.st.OwnerPostByID("ptwice")
+		if err == nil && got.CardMark >= 0 {
+			if got.CardRef != "" || !got.CardUnconfirmed() {
+				t.Fatalf("receipt %q from two reports", got.CardRef)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("card not recorded sent: %+v %v", got, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

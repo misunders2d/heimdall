@@ -35,7 +35,10 @@ type eventMessage struct {
 	// existing file (Slack's file_share event field notes).
 	Upload   bool `json:"upload"`
 	Metadata struct {
-		Type string `json:"event_type"`
+		Type    string `json:"event_type"`
+		Payload struct {
+			ID string `json:"delivery_id"`
+		} `json:"event_payload"`
 	} `json:"metadata"`
 }
 

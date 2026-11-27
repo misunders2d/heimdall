@@ -508,8 +508,13 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		}
 		row.Outbound.ID, row.Outbound.Attempt = row.ID, row.Attempts
 		var refMu sync.Mutex
-		ref := ""
-		row.Outbound.Delivered = func(got string) { refMu.Lock(); ref = got; refMu.Unlock() }
+		var refs []string
+		reports := 0
+		row.Outbound.Delivered = func(got []string) {
+			refMu.Lock()
+			refs, reports = append([]string(nil), got...), reports+1
+			refMu.Unlock()
+		}
 		err = r.sendSafely(ctx, i, row.Outbound)
 		var perm PermanentError
 		var record func() error
@@ -517,11 +522,14 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		switch {
 		case err == nil:
 			refMu.Lock()
-			last := ref
+			parts := refs
+			if reports != 1 {
+				parts = nil // reported never or more than once: no receipt
+			}
 			refMu.Unlock()
-			// The last part's platform message ID: a post as the owner's card
-			// is answered only by a reply after it on the platform.
-			record = func() error { return r.store.SentRef(row.ID, last) }
+			// Every part's platform message ID: a post as the owner's card
+			// is answered only by a reply after all of it on the platform.
+			record = func() error { return r.store.SentRef(row.ID, parts) }
 			removeFile(row.Outbound)
 			finished = true
 		case errors.As(err, &perm):
@@ -583,7 +591,9 @@ func removeOwnerPostFiles(out core.Outbound) {
 
 // ownerPostFailed tells the owner, in the owner's private chat with the bot
 // and never at the post's target, that a post as the owner was not sent.
-// A fixed notice; nothing is retried.
+// A fixed notice, queued once per delivery row (an effect key), even when
+// a crash before the row's outcome was recorded fails it again; nothing is
+// retried.
 func (r *Router) ownerPostFailed(out core.Outbound) {
 	p := out.OwnerPost
 	if p == nil || p.Notice.Interface == "" {
@@ -591,7 +601,7 @@ func (r *Router) ownerPostFailed(out core.Outbound) {
 	}
 	label := strings.Join(strings.Fields(p.Label), " ")
 	text := "⚠ Your post as you to " + label + " was not sent, or its delivery could not be confirmed. Check " + label + " before asking again; nothing more is retried. — heimdall"
-	if _, err := r.store.Enqueue(core.Outbound{Conv: p.Notice, Text: text}); err != nil {
+	if _, err := r.store.EnqueueEffect(fmt.Sprintf("owner-post-failed:%d", out.ID), core.Outbound{Conv: p.Notice, Text: text}); err != nil {
 		r.log.Printf("outbound %d: owner post failure notice not queued: %v", out.ID, err)
 		return
 	}

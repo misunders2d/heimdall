@@ -28,11 +28,11 @@ Off by default. Nothing here is deployed by this change.
     answers every waiting draft and post there; **Details** shows the cards
     again. A Yes approves a post only when its card was confirmed
     delivered before that reply, by the platform's own message order
-    (Telegram `message_id`, Slack `ts` of the card's last part) and by
-    Heimdall's receipt order; a post whose card was still queued, failed or
+    (Telegram `message_id`, Slack `ts`) and by Heimdall's receipt order
+    (invariant I1 below); a post whose card was still queued, failed or
     arrived after the reply keeps waiting, and the reply names it. A card
-    whose last part came back without a valid ID, after the earlier parts',
-    has no receipt and cannot be approved. A No
+    any part of which came back without a valid ID, or out of order, has
+    no receipt and can never be approved; the reply says so. A No
     cancels every waiting post, its card seen or not.
   - Off (`enabled` false or absent): nothing is sent as the owner. Rows
     queued earlier fail with the private notice, any Yes or No to a waiting
@@ -116,49 +116,95 @@ queued. Text or files alone are fine; at least one is required.
 
 ## Delivery
 
+### Invariants
+
+The whole approval and delivery path keeps these four; each has its own
+table-driven test (see Tests).
+
+- **I1 Approval.** A Yes approves a card only if every part of that card
+  has a confirmed, valid platform message ID (a positive Telegram
+  `message_id`, or a Slack `ts`), strictly increasing, and the Yes's own
+  platform ID is greater than the last part's (and the Yes was stored
+  after the card's receipt). Each interface reports every part's ID once
+  per send, `""` for one it could not confirm (`core.Outbound.Report`);
+  the store keeps a receipt only when all of them are valid and ordered
+  (`store.CardReceipt`). Any missing, zero or unordered ID, a report made
+  more than once, or none at all: the card has no receipt and no Yes
+  approves it. A No still cancels it.
+- **I2 At most one write per stage.** The stages are each text part and
+  the files' completed upload. Before a part is written the store records
+  that it may start; once Slack confirms it, the store records it done
+  with its `ts`, before the next part starts. The uploaded file IDs are
+  recorded only once every part is done, before
+  `files.completeUploadExternal`, and the completed upload is recorded
+  done after it. A retry never writes a stage recorded done; recorded
+  uploads prove the text finished (also for rows from before these
+  records existed). The part count is recorded with the first part: a
+  text that no longer splits the same way fails for good.
+- **I3 Ambiguous write: verify, never guess.** A stage that may have been
+  written (started but not done, or a write answered ambiguously: a
+  timeout, HTTP 5xx, a missing `ts`, a cancelled request) is written
+  again only after a **complete** check of Slack's history proves it
+  absent: every page read, with `include_all_metadata`, from the bound
+  below. Anything less is a permanent failure: an API error, more history
+  without a cursor, a repeated cursor, the page limit, or a message of the
+  owner with exactly the part's text but no delivery tag (Slack dropped
+  the metadata). It is returned as permanent through every caller, so the
+  router fails the row at once with one private notice (an effect key per
+  row, so a crash before the outcome is recorded never sends a second).
+  Only a cancelled context (a shutdown) during the check is retried; the
+  retry checks again before any write. A write Slack clearly refused did
+  not happen: the part is left unstarted, and the row fails as before.
+- **I4 Echo.** Only Heimdall's own posts as the owner are dropped as
+  echoes, decided from state stored before the write: a text part tagged
+  with the delivery key of an approved post's own delivery row in that
+  channel, or the upload-time share (no comment) of exactly the recorded
+  uploads of one approved post at its own channel and thread (`file_share`,
+  or no `subtype` as in Slack's documented upload example; never in the
+  owner's chat with the bot; a later re-share of the same files is the
+  owner's own). The same
+  test runs on Slack events and in the Slack watch's live owner-reply
+  check (`CheckSlackOwnerReply`, which then asks for metadata), so a post
+  Heimdall made never counts as the owner's own reply anywhere. Off
+  (`slack.owner_post`), nothing is dropped and the check is unchanged.
+
+### How it goes out
+
 - One post: the text (tagged messages, chunked like a reply), then all
   files completed as one message without a comment. The text is never an
   upload's untagged comment, so its echo is always recognizable.
 - The owner's user token posts and uploads (`chat.postMessage`,
   `files.getUploadURLExternal`, `files.completeUploadExternal`). Normal bot
   replies and their uploads are unchanged.
-- **Check before any resend.** Each text part carries metadata
-  (`heimdall_owner_post`, the row ID) and is looked up in Slack before a
-  later attempt or after an ambiguous answer, as replies are. The uploaded
-  file IDs are recorded before `files.completeUploadExternal`; a later
-  attempt first looks for an owner message carrying them and completes
-  again only when none is found. If the check itself fails, nothing is
-  resent; the router retries the check later. A check Slack answers with
-  more history but no cursor to read it fails the post for good, with the
-  private notice: it may have landed. Neither call is ever retried
-  blindly. The check covers the whole thread (from its own ts, Slack's
-  clock) or, outside a thread, from a day before the row's local creation:
-  it tolerates a hub clock up to 24 h ahead of Slack's (replies keep their
-  30 s margin). Beyond that skew a landed post could be sent again.
+- Each text part carries metadata (`heimdall_owner_post`, the row ID and
+  part number). The check covers the whole thread (from its own ts,
+  Slack's clock) or, outside a thread, from a day before the row's local
+  creation: it tolerates a hub clock up to 24 h ahead of Slack's (replies
+  keep their 30 s margin). Beyond that skew a landed post could be sent
+  again.
 - Delivery is still at-least-once, never exactly-once: Slack can make a
-  completed post visible to history after the check looked. Say so.
+  completed post visible to history only after a check looked, so a check
+  that proved absence can be wrong. Say so.
 - Nothing about a post is ever sent to its target but the post. A post that
   fails for good (or after the router's attempts) gets one fixed notice in
   the owner's private chat with the bot, naming the destination. The file
   copies are removed once the row's outcome is recorded, otherwise with the
   outbox's 7-day retention. A retry whose files were already uploaded
-  checks Slack by the recorded file IDs and needs no copy.
-- A post Heimdall made comes back from Slack as the owner's message. Events
-  from the owner carrying the post metadata are dropped before persistence,
-  so they never become the owner's live input. The files' message cannot
-  carry metadata: an owner `file_share` (or, as in Slack's documented
-  example, a message with no `subtype`) without a comment, made at upload
-  time (`upload` true), in the post's own channel and thread, whose files
-  are all recorded uploads of that one approved post, is dropped the same
-  way (the IDs are recorded before completing). Never in the owner's chat
-  with the bot; a later re-share of the same files is the owner's own.
-  Unverified live: that Slack includes the metadata, the file IDs,
-  `subtype` `file_share`, `upload` and `thread_ts` in those events.
-  Slack's `file_share` reference documents `upload`, but its example shows
-  no `subtype` (accepted too) or `thread_ts`, and the page both calls the event "no longer
-  served" and says Events API deliveries continue. If a field is missing
-  live, Heimdall's own file post would be read as the owner's input. The
-  target and mention refusals above do not depend on it.
+  needs only the recorded IDs, not the copies.
+- Unverified live: that Slack includes the metadata, the file IDs,
+  `subtype` `file_share`, `upload` and `thread_ts` in those events and in
+  history results (`upload` in history payloads especially). Slack's
+  `file_share` reference documents `upload`, but its example shows no
+  `subtype` (accepted too) or `thread_ts`, and the page both calls the
+  event "no longer served" and says Events API deliveries continue. If a
+  field is missing live, Heimdall's own file post would be read as the
+  owner's input. The target and mention refusals above do not depend on
+  it.
+- **Known residual (document only; verify live before enabling):** an
+  echo of a post made in a thread that arrives without `thread_ts` is
+  taken as a channel message, so it can reach that channel's ambient
+  context (never a turn as the owner: the mention refusal holds). Check
+  the live event shape in a live window before turning this on.
 
 ## How an agent calls it, per interface
 
@@ -190,18 +236,37 @@ queued. Text or files alone are fine; at least one is required.
 
 ## Tests
 
-Fakes only (`internal/scheduler/owner_post_test.go`,
+Fakes only. Per invariant, table-driven:
+
+- I1: `store.TestCardReceipt`, `store.TestSentRefRecordsOnlyAWholeReceipt`,
+  `telegram.TestSendReceiptNeedsEveryPartsValidOrderedID` (a zero,
+  missing, negative, non-numeric or out-of-order ID on the first, a
+  middle or the last part), `scheduler.TestPostAsOwnerCardReceiptPerPart`
+  (Yes and No per case), `router.TestSentCardReportedTwiceHasNoReceipt`.
+- I2/I3: `store.TestOwnerPostStagesKeepOrder`;
+  `slack.TestOwnerPostCrashAtEveryStageBoundary` (a crash at each of nine
+  boundaries, in a channel and a thread, under complete, metadata-less,
+  `has_more` without a cursor, erroring, repeated-cursor and endless
+  history; driven through the router's retry loop);
+  `slack.TestOwnerPostAmbiguousWriteAtEveryStage` (each part and the
+  completed upload answered ambiguously, landed or lost, once or twice);
+  `slack.TestOwnerPostRecordedUploadsProveTextDone` (also a legacy row);
+  `slack.TestOwnerPostCancelledCheckIsRetriedAndChecksAgain`;
+  `slack.TestOwnerPostClearRefusalIsPermanent`;
+  `router.TestOwnerPostFailureNoticeIsQueuedOnce`.
+- I4: `slack.TestOwnerPostEchoOnlyHeimdallsOwn` (events and the watch's
+  owner-reply check, on and off), `slack.TestOwnerPostFileEchoIsNotOwnerInput`.
+
+Also (`internal/scheduler/owner_post_test.go`,
 `internal/iface/slack/owner_post_test.go`,
 `internal/router/owner_post_test.go`, `internal/config`): admission per
 origin, owner-person binding, file checks and copies, card content and
 escaping, Yes/No in the card's chat only, expiry, replay, immediate mode,
-the owner token on every post and upload with zero bot posts (also after a
-store round trip), recorded file IDs, check-before-resend for text and
-files, no resend when the check fails, the private failure notice, the
-echo filter, off sending and filtering nothing, Yes bound to cards
+the owner token on every post and upload with zero bot posts, the private
+failure notice, off sending and filtering nothing, Yes bound to cards
 delivered before it (both orders), the recorded Slack account, changed
 file copies refused, a symlinked config's real directory, and resend
-checks with the hub clock ahead. They do not prove live Slack behavior: metadata in events and
-history visibility timing are unverified until a live window. The owner
-token's scopes, including the history and read scopes, were checked live
-on 2026-11-27.
+checks with the hub clock ahead. They do not prove live Slack behavior:
+metadata in events and history, and history visibility timing, are
+unverified until a live window. The owner token's scopes, including the
+history and read scopes, were checked live on 2026-11-27.

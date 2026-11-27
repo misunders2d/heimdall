@@ -159,77 +159,6 @@ func TestOwnerPostGoesOutWithTheOwnersTokenOnly(t *testing.T) {
 	}
 }
 
-func TestOwnerPostFilesAreCheckedBeforeAnyResend(t *testing.T) {
-	r := newOwnerPostRig(t)
-	ctx := context.Background()
-	// Ambiguous, but it landed: the settle check finds it; nothing again.
-	r.ambiguous = []string{"lands"}
-	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C2"}, "", 1)
-	if err := r.s.Send(ctx, out); err != nil || r.completes != 1 {
-		t.Fatalf("landed ambiguous upload: %v, completes %d", err, r.completes)
-	}
-	// Ambiguous and lost: the attempt fails; the retry checks, then
-	// completes the same recorded upload once (no new upload).
-	r2 := newOwnerPostRig(t)
-	r2.ambiguous = []string{"lost"}
-	out = r2.post(t, core.ConvKey{Interface: "slack", Chat: "C3"}, "", 1)
-	if err := r2.s.Send(ctx, out); err == nil {
-		t.Fatal("unconfirmed upload reported as sent")
-	}
-	ids, _ := r2.st.OwnerPostUploads(out.OwnerPost.ID)
-	if len(ids) != 1 {
-		t.Fatal("file IDs not recorded before completing", ids)
-	}
-	out.Attempt = 1
-	if err := r2.s.Send(ctx, out); err != nil || r2.completes != 2 || r2.uploads != 1 {
-		t.Fatalf("retry: %v, completes %d, uploads %d", err, r2.completes, r2.uploads)
-	}
-	if len(r2.f.all("conversations.history")) == 0 {
-		t.Fatal("retry completed without checking Slack first")
-	}
-	// When the check itself fails, nothing is completed again.
-	r2.f.setHook(func(w http.ResponseWriter, req *http.Request, _ map[string]any) bool {
-		if req.URL.Path == "/conversations.history" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "missing_scope"})
-			return true
-		}
-		if req.URL.Path == "/files.completeUploadExternal" {
-			t.Error("completed again without a successful check")
-		}
-		return false
-	})
-	if err := r2.s.Send(ctx, out); err == nil {
-		t.Fatal("failed check reported as sent")
-	}
-	if bot := r2.botPosts(); len(bot) != 0 {
-		t.Fatal("bot token used", bot)
-	}
-}
-
-func TestOwnerPostLongTextIsReconciledByItsParts(t *testing.T) {
-	r := newOwnerPostRig(t)
-	ctx := context.Background()
-	long := strings.Repeat("A long owner update line.\n", 200)
-	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C4"}, long, 1)
-	if err := r.s.Send(ctx, out); err != nil {
-		t.Fatal(err)
-	}
-	posts := r.f.all("chat.postMessage")
-	if len(posts) < 2 || r.completes != 1 {
-		t.Fatalf("long text: %d parts, %d completes", len(posts), r.completes)
-	}
-	for _, p := range posts {
-		meta, _ := p.Body["metadata"].(map[string]any)
-		if p.Token != "test-work-user" || meta["event_type"] != ownerPostEvent {
-			t.Fatal("part not posted as the owner with its delivery key", p)
-		}
-	}
-	out.Attempt = 1
-	if err := r.s.Send(ctx, out); err != nil || len(r.f.all("chat.postMessage")) != len(posts) || r.completes != 1 {
-		t.Fatal("parts or files resent after they were delivered", err)
-	}
-}
-
 func TestOwnerPostTargetsAndRefusals(t *testing.T) {
 	r := newOwnerPostRig(t)
 	ctx := context.Background()
@@ -272,25 +201,6 @@ func TestOwnerPostTargetsAndRefusals(t *testing.T) {
 	}
 }
 
-// A post Heimdall made as the owner never re-enters as the owner's input.
-func TestOwnerPostEchoIsNotOwnerInput(t *testing.T) {
-	r := newOwnerPostRig(t)
-	echo := func(meta string) json.RawMessage {
-		m := map[string]any{"type": "message", "channel": "Dbot", "channel_type": "im", "user": "UOWNER", "text": "yes", "ts": "1000.1"}
-		if meta != "" {
-			m["metadata"] = map[string]any{"event_type": meta, "event_payload": map[string]string{"delivery_id": "post-1"}}
-		}
-		raw, _ := json.Marshal(map[string]any{"event": m, "authorizations": []map[string]any{{"team_id": "Ttest", "user_id": "UOWNER", "is_bot": false}}})
-		return raw
-	}
-	if ok, _, _ := r.s.eventAdmission(echo(ownerPostEvent)); ok {
-		t.Fatal("owner post echo admitted as owner input")
-	}
-	if ok, _, _ := r.s.eventAdmission(echo("")); !ok {
-		t.Fatal("the owner's own message in the bot chat refused")
-	}
-}
-
 // The files of a post complete without a comment and carry no metadata;
 // their echo, seen through the bot in a channel it is in, is recognized by
 // the recorded upload IDs. The owner's own file shares still pass.
@@ -300,7 +210,8 @@ func TestOwnerPostFileEchoIsNotOwnerInput(t *testing.T) {
 	if err := r.s.Send(context.Background(), out); err != nil {
 		t.Fatal(err)
 	}
-	ids, _ := r.st.OwnerPostUploads(out.OwnerPost.ID)
+	g, _ := r.st.OwnerPostStage(out.OwnerPost.ID)
+	ids := g.Uploads
 	if len(ids) != 1 {
 		t.Fatal("uploads", ids)
 	}
@@ -345,7 +256,8 @@ func TestOwnerPostFileEchoIsNotOwnerInput(t *testing.T) {
 	if err := r.s.Send(context.Background(), flat); err != nil {
 		t.Fatal(err)
 	}
-	flatIDs, _ := r.st.OwnerPostUploads(flat.OwnerPost.ID)
+	fg, _ := r.st.OwnerPostStage(flat.OwnerPost.ID)
+	flatIDs := fg.Uploads
 	var doc map[string]map[string]any
 	_ = json.Unmarshal(shareIn("C3", "", true, "", flatIDs...), &doc)
 	delete(doc["event"], "subtype")
@@ -453,7 +365,7 @@ func TestOwnerPostRefusesAChangedFileCopy(t *testing.T) {
 func TestSendReportsDeliveredTimestamps(t *testing.T) {
 	r := newOwnerPostRig(t)
 	var refs []string
-	out := core.Outbound{ID: 3, Conv: core.ConvKey{Interface: "slack", Chat: "Dbot", Thread: "999.1"}, Text: "card", Delivered: func(ref string) { refs = append(refs, ref) }}
+	out := core.Outbound{ID: 3, Conv: core.ConvKey{Interface: "slack", Chat: "Dbot", Thread: "999.1"}, Text: "card", Delivered: func(parts []string) { refs = append(refs, store.CardReceipt(parts)) }}
 	if err := r.s.Send(context.Background(), out); err != nil {
 		t.Fatal(err)
 	}
@@ -479,92 +391,5 @@ func TestOwnerPostResendCheckToleratesAClockAhead(t *testing.T) {
 	threaded.Conv.Thread = "1700000000.000100"
 	if got := ownerPostOldest(threaded); got != threaded.Conv.Thread {
 		t.Fatal("thread post bound is not the thread ts", got)
-	}
-	// The retry's history check uses that bound.
-	r := newOwnerPostRig(t)
-	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C5"}, "after a restart", 0)
-	out.CreatedAt, out.Attempt = slackNow.Add(2*time.Hour), 1
-	if err := r.s.Send(context.Background(), out); err != nil {
-		t.Fatal(err)
-	}
-	h := r.f.all("conversations.history")
-	if len(h) == 0 || !store.PlatformBefore(str(h[0].Body["oldest"]), landed) {
-		t.Fatal("resend check bound excludes a post that landed", h)
-	}
-}
-
-// A resend check that Slack answers with more history but no cursor is
-// incomplete: the post may have landed, so it fails permanently (the owner
-// is told privately) and nothing of it is posted or completed again.
-func TestOwnerPostIncompleteHistoryRefusesResend(t *testing.T) {
-	incomplete := func(r *ownerPostRig) {
-		r.f.mu.Lock()
-		prev := r.f.hook
-		r.f.mu.Unlock()
-		r.f.setHook(func(w http.ResponseWriter, req *http.Request, args map[string]any) bool {
-			if req.URL.Path == "/conversations.history" || req.URL.Path == "/conversations.replies" {
-				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "messages": []any{}, "has_more": true})
-				return true
-			}
-			return prev(w, req, args)
-		})
-	}
-	ctx := context.Background()
-	var perm router.PermanentError
-
-	// Text: a later attempt must not post the part again.
-	r := newOwnerPostRig(t)
-	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C5", Thread: "1700000000.000100"}, "status update", 0)
-	incomplete(r)
-	out.Attempt = 1
-	if err := r.s.Send(ctx, out); !errors.As(err, &perm) || len(r.f.all("chat.postMessage")) != 0 {
-		t.Fatalf("text resent over incomplete history: %v, posts %d", err, len(r.f.all("chat.postMessage")))
-	}
-
-	// Files: recorded uploads are never completed again.
-	r2 := newOwnerPostRig(t)
-	r2.ambiguous = []string{"lost"}
-	out = r2.post(t, core.ConvKey{Interface: "slack", Chat: "C6"}, "", 1)
-	if err := r2.s.Send(ctx, out); err == nil {
-		t.Fatal("unconfirmed upload reported as sent")
-	}
-	incomplete(r2)
-	out.Attempt = 1
-	if err := r2.s.Send(ctx, out); !errors.As(err, &perm) || r2.completes != 1 || r2.uploads != 1 {
-		t.Fatalf("files completed over incomplete history: %v, completes %d, uploads %d", err, r2.completes, r2.uploads)
-	}
-}
-
-// A crash after a post went out but before its row was recorded sent may
-// leave its copies removed: the retry checks Slack by the recorded upload
-// IDs first and reports the post delivered, never failed for a copy it no
-// longer needs; recorded files not shared are completed from their IDs.
-func TestOwnerPostRetryAfterCopiesRemovedChecksSlackFirst(t *testing.T) {
-	ctx := context.Background()
-	r := newOwnerPostRig(t)
-	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C7", Thread: "1700000000.000100"}, "with a file", 1)
-	if err := r.s.Send(ctx, out); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(out.OwnerPost.Files[0].Path); err != nil {
-		t.Fatal(err)
-	}
-	out.Attempt = 1
-	if err := r.s.Send(ctx, out); err != nil || len(r.f.all("chat.postMessage")) != 1 || r.completes != 1 || r.uploads != 1 {
-		t.Fatalf("delivered post failed on retry: %v, posts %d, completes %d, uploads %d", err, len(r.f.all("chat.postMessage")), r.completes, r.uploads)
-	}
-
-	r2 := newOwnerPostRig(t)
-	r2.ambiguous = []string{"lost"}
-	out = r2.post(t, core.ConvKey{Interface: "slack", Chat: "C8"}, "", 1)
-	if err := r2.s.Send(ctx, out); err == nil {
-		t.Fatal("unconfirmed upload reported as sent")
-	}
-	if err := os.Remove(out.OwnerPost.Files[0].Path); err != nil {
-		t.Fatal(err)
-	}
-	out.Attempt = 1
-	if err := r2.s.Send(ctx, out); err != nil || r2.completes != 2 || r2.uploads != 1 {
-		t.Fatalf("recorded upload not completed: %v, completes %d, uploads %d", err, r2.completes, r2.uploads)
 	}
 }

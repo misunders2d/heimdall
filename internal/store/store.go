@@ -192,6 +192,9 @@ ALTER TABLE owner_posts ADD COLUMN slack_team TEXT NOT NULL DEFAULT '';`,
 	// The platform message ID of a post's card (its last part) as sent:
 	// only a reply after it on the platform answers the post.
 	`ALTER TABLE owner_posts ADD COLUMN card_ref TEXT NOT NULL DEFAULT '';`,
+	// How far a post's delivery got (store.OwnerPostStages): each step is
+	// recorded before the next starts, so a retry never writes one again.
+	`ALTER TABLE owner_posts ADD COLUMN stages TEXT NOT NULL DEFAULT '';`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -815,11 +818,12 @@ func (s *Store) Sending(id int64) error {
 	return err
 }
 
-func (s *Store) Sent(id int64) error { return s.SentRef(id, "") }
+func (s *Store) Sent(id int64) error { return s.SentRef(id, nil) }
 
-// SentRef records a reply sent, with the platform message ID of its last
-// part when the interface reported one.
-func (s *Store) SentRef(id int64, ref string) error {
+// SentRef records a reply sent, with the platform message IDs of its parts
+// as the interface reported them; its receipt is CardReceipt(parts).
+func (s *Store) SentRef(id int64, parts []string) error {
+	ref := CardReceipt(parts)
 	return s.tx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`UPDATE outbound SET state=?,sent_at=?,error='' WHERE id=?`, OutSent, now(), id); err != nil {
 			return err

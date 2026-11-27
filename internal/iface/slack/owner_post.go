@@ -19,6 +19,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/router"
+	"github.com/misunders2d/heimdall/internal/store"
 )
 
 // Posts as the owner (docs/owner-post.md): only the owner's verified user
@@ -151,9 +152,16 @@ func (s *Slack) OwnerPostText(text string) (string, error) {
 }
 
 // sendOwnerPost delivers an approved post with the owner's user token only:
-// its text (chunked like a reply, each part reconciled by its metadata),
-// then its files in one completed upload without a comment. Nothing goes to the bot or to the target but the
-// post; every failure is the router's, which tells the owner privately.
+// its text (chunked like a reply, each part tagged with its delivery key),
+// then its files in one completed upload without a comment. Nothing goes
+// to the bot or to the target but the post; every failure is the router's,
+// which tells the owner privately.
+//
+// Each visible write is a stage recorded in the store before the next one
+// starts (store.OwnerPostStages): a stage recorded done is never written
+// again, a stage that may have started is written again only when a
+// complete check of Slack's history proves it absent, and an incomplete
+// check fails the post for good (docs/owner-post.md, "Delivery").
 func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
 	if !s.opt.OwnerPost {
 		return router.PermanentError{Err: errors.New("slack: posting as the owner is turned off (slack.owner_post); nothing was sent")}
@@ -181,32 +189,144 @@ func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
 	if text != "" {
 		parts = splitReply(text)
 	}
-	// Recorded uploads mean the text went first and the verified bytes are
-	// already in Slack: the copies may be gone (removed once the row was
-	// sent, before a crash recorded it), and the checks below need only the
-	// recorded IDs. Otherwise every copy is checked before anything is sent.
-	var recorded []string
-	if len(out.OwnerPost.Files) > 0 {
-		ids, err := s.opt.Store.OwnerPostUploads(out.OwnerPost.ID)
-		if err != nil {
-			return err
-		}
-		recorded = ids
+	g, err := s.opt.Store.OwnerPostStage(out.OwnerPost.ID)
+	if err != nil {
+		return stageError(err)
 	}
-	if len(recorded) == 0 {
+	if g.Parts != 0 && g.Parts != len(parts) {
+		return router.PermanentError{Err: errors.New("slack: the post's text no longer splits as it was sent; nothing more was sent")}
+	}
+	// Recorded uploads mean the text is done and the verified bytes are
+	// already in Slack: the copies may be gone (removed once the row was
+	// sent, before a crash recorded it), and only the recorded IDs are
+	// needed. Otherwise every copy is checked before anything more is sent.
+	if len(g.Uploads) == 0 && len(out.OwnerPost.Files) > 0 {
 		if err := ownerFilesIntact(out.OwnerPost.Files); err != nil {
 			return err
 		}
 	}
 	// The text always goes as tagged messages, never as an upload's
-	// untagged comment: the tag is how its echo is known (eventAdmission).
-	if err := s.ownerPostParts(ctx, api, out, parts); err != nil {
-		return err
+	// untagged comment: the tag is how its echo is known (ownerPostEcho).
+	if !g.TextDone(len(parts)) {
+		for i := len(g.Done); i < len(parts); i++ {
+			if err := s.ownerPostPart(ctx, api, out, parts, i, g.Started > i); err != nil {
+				return err
+			}
+		}
 	}
-	if len(out.OwnerPost.Files) == 0 {
+	if len(out.OwnerPost.Files) == 0 || g.Files {
 		return nil
 	}
-	return s.ownerPostFiles(ctx, api, out)
+	return s.ownerPostFiles(ctx, api, out, len(parts), g.Uploads)
+}
+
+// stageError is a store refusal of a delivery step: out of order, or the
+// post no longer approved, is permanent; anything else (the database) is
+// retried, and nothing was written.
+func stageError(err error) error {
+	if errors.Is(err, store.ErrOwnerPostStage) || errors.Is(err, store.ErrOwnerPostNotApproved) {
+		return router.PermanentError{Err: fmt.Errorf("slack: %w; nothing more was sent", err)}
+	}
+	return err
+}
+
+// notSent reports a write Slack clearly refused: it did not happen. Any
+// other failure (a timeout, a lost answer, a cancelled request) may have.
+func notSent(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && !ae.Ambiguous
+}
+
+// ownerPartKey is a text part's delivery key, its metadata on Slack.
+func ownerPartKey(out core.Outbound, parts, index int) string {
+	id := "post-" + strconv.FormatInt(out.ID, 10)
+	if parts > 1 {
+		id += fmt.Sprintf("#%d", index+1)
+	}
+	return id
+}
+
+// ownerPostPart writes text part index once. started: an earlier attempt
+// may have written it, so Slack's history is checked first.
+func (s *Slack) ownerPostPart(ctx context.Context, api *apiClient, out core.Outbound, parts []string, index int, started bool) error {
+	id, key, part := out.OwnerPost.ID, ownerPartKey(out, len(parts), index), parts[index]
+	check := func() (string, error) { return s.ownerHistoryPart(ctx, api, out, key, part) }
+	done := func(ts string) error { return stageError(s.opt.Store.OwnerPostPartDone(id, index, ts)) }
+	if index > 0 {
+		if err := api.pause(ctx, s.partEvery); err != nil {
+			return err
+		}
+	}
+	if started {
+		ts, err := check()
+		if err != nil {
+			return err
+		}
+		if ts != "" {
+			return done(ts)
+		}
+		// Proven absent by a complete check: written once more.
+	} else if err := s.opt.Store.StartOwnerPostPart(id, len(parts), index); err != nil {
+		return stageError(err)
+	}
+	args := map[string]any{"channel": out.Conv.Chat, "thread_ts": out.Conv.Thread, "text": part, "unfurl_links": false, "unfurl_media": false, "metadata": metadata(key, ownerPostEvent)}
+	if out.Conv.Thread == "" {
+		delete(args, "thread_ts")
+	}
+	var response struct {
+		TS string `json:"ts"`
+	}
+	err := api.call(ctx, "chat.postMessage", args, &response)
+	if err == nil && response.TS != "" {
+		return done(response.TS)
+	}
+	if err == nil {
+		err = &apiError{Code: "missing_timestamp", Ambiguous: true}
+	}
+	if notSent(err) {
+		// Not written: a retry writes it without a check. If this record
+		// fails, the retry checks Slack first, which is only slower.
+		_ = s.opt.Store.OwnerPostPartNotSent(id, index)
+		return err
+	}
+	ts, checkErr := s.settle(ctx, api, check)
+	if checkErr != nil {
+		return checkErr // incomplete history: permanent; cancelled: retried, checked again
+	}
+	if ts != "" {
+		return done(ts)
+	}
+	return err // proven absent so far: the retry checks again before writing
+}
+
+// ownerPostFiles uploads the files with the owner's token and completes
+// them as one message. The file IDs are recorded before completing, only
+// once the text is done, so a later attempt checks Slack for them and
+// completes again only when a complete check proves they were not shared.
+func (s *Slack) ownerPostFiles(ctx context.Context, api *apiClient, out core.Outbound, parts int, ids []string) error {
+	upload := *api
+	upload.timeout = 60 * time.Second
+	if len(ids) > 0 {
+		shared, err := s.ownerFilesShared(ctx, api, out, ids)
+		if err != nil {
+			return err // never complete again unchecked
+		}
+		if shared {
+			return stageError(s.opt.Store.OwnerPostFilesDone(out.OwnerPost.ID))
+		}
+		return s.completeOwnerFiles(ctx, &upload, out, ids)
+	}
+	for _, f := range out.OwnerPost.Files {
+		id, err := s.ownerUpload(ctx, &upload, f)
+		if err != nil {
+			return err // nothing was completed: a retry uploads afresh
+		}
+		ids = append(ids, id)
+	}
+	if err := s.opt.Store.SetOwnerPostUploads(out.OwnerPost.ID, parts, ids); err != nil {
+		return stageError(err) // unrecorded uploads are never completed
+	}
+	return s.completeOwnerFiles(ctx, &upload, out, ids)
 }
 
 // errOwnerFileChanged refuses a file copy that is not what the owner
@@ -244,92 +364,6 @@ func ownerFilesIntact(files []core.File) error {
 		}
 	}
 	return nil
-}
-
-// ownerPostParts posts the text parts. Before any resend (a later attempt,
-// or an ambiguous post) Slack is checked for the part first, as replies are.
-func (s *Slack) ownerPostParts(ctx context.Context, api *apiClient, out core.Outbound, parts []string) error {
-	for index, part := range parts {
-		id := "post-" + strconv.FormatInt(out.ID, 10)
-		if len(parts) > 1 {
-			id += fmt.Sprintf("#%d", index+1)
-		}
-		if out.Attempt > 0 {
-			ts, err := api.findDelivery(ctx, out.Conv, id, ownerPostEvent, ownerPostOldest(out))
-			if err != nil {
-				return err // never resend unchecked
-			}
-			if ts != "" {
-				continue
-			}
-		}
-		if index > 0 {
-			if err := api.pause(ctx, s.partEvery); err != nil {
-				return err
-			}
-		}
-		args := map[string]any{"channel": out.Conv.Chat, "thread_ts": out.Conv.Thread, "text": part, "unfurl_links": false, "unfurl_media": false, "metadata": metadata(id, ownerPostEvent)}
-		if out.Conv.Thread == "" {
-			delete(args, "thread_ts")
-		}
-		var response struct {
-			TS string `json:"ts"`
-		}
-		err := api.call(ctx, "chat.postMessage", args, &response)
-		if err == nil && response.TS != "" {
-			continue
-		}
-		if err == nil {
-			err = &apiError{Code: "missing_timestamp", Ambiguous: true}
-		}
-		var ae *apiError
-		if !errors.As(err, &ae) || !ae.Ambiguous {
-			return err
-		}
-		found, checkErr := s.settle(ctx, api, func() (bool, error) {
-			ts, err := api.findDelivery(ctx, out.Conv, id, ownerPostEvent, ownerPostOldest(out))
-			return ts != "", err
-		})
-		if checkErr == nil && found {
-			continue
-		}
-		return err // the router's retry checks Slack again before any resend
-	}
-	return nil
-}
-
-// ownerPostFiles uploads the files with the owner's token and completes
-// them as one message. The file IDs are recorded before completing, so a
-// later attempt checks Slack for them and completes again only when they
-// were not shared.
-func (s *Slack) ownerPostFiles(ctx context.Context, api *apiClient, out core.Outbound) error {
-	ids, err := s.opt.Store.OwnerPostUploads(out.OwnerPost.ID)
-	if err != nil {
-		return err
-	}
-	if len(ids) > 0 {
-		shared, err := s.ownerFilesShared(ctx, api, out, ids)
-		if err != nil {
-			return err // never complete again unchecked
-		}
-		if shared {
-			return nil
-		}
-		return s.completeOwnerFiles(ctx, api, out, ids)
-	}
-	upload := *api
-	upload.timeout = 60 * time.Second
-	for _, f := range out.OwnerPost.Files {
-		id, err := s.ownerUpload(ctx, &upload, f)
-		if err != nil {
-			return err // nothing was completed: a retry uploads afresh
-		}
-		ids = append(ids, id)
-	}
-	if err := s.opt.Store.SetOwnerPostUploads(out.OwnerPost.ID, ids); err != nil {
-		return err // unrecorded uploads are never completed
-	}
-	return s.completeOwnerFiles(ctx, &upload, out, ids)
 }
 
 // ownerUpload uploads exactly the bytes it verified against the recorded
@@ -381,75 +415,154 @@ func (s *Slack) completeOwnerFiles(ctx context.Context, api *apiClient, out core
 	if out.Conv.Thread != "" {
 		args["thread_ts"] = out.Conv.Thread
 	}
+	done := func() error { return stageError(s.opt.Store.OwnerPostFilesDone(out.OwnerPost.ID)) }
 	err := api.call(ctx, "files.completeUploadExternal", args, nil)
-	var ae *apiError
-	if err == nil || !errors.As(err, &ae) || !ae.Ambiguous {
-		return err
+	if err == nil {
+		return done()
 	}
-	if found, checkErr := s.settle(ctx, api, func() (bool, error) { return s.ownerFilesShared(ctx, api, out, ids) }); checkErr == nil && found {
-		return nil
+	if notSent(err) {
+		return err // the retry checks Slack by the recorded IDs first
 	}
-	return err // the router's retry checks Slack again before completing
+	shared, checkErr := s.settle(ctx, api, func() (string, error) {
+		found, err := s.ownerFilesShared(ctx, api, out, ids)
+		if found {
+			return "shared", err
+		}
+		return "", err
+	})
+	if checkErr != nil {
+		return checkErr
+	}
+	if shared != "" {
+		return done()
+	}
+	return err // proven absent so far: the retry checks again before completing
 }
 
-// ownerFilesShared reports whether a message of the owner in the post's
-// conversation (its thread, when it has one) already carries any of ids.
-func (s *Slack) ownerFilesShared(ctx context.Context, api *apiClient, out core.Outbound, ids []string) (bool, error) {
-	want := map[string]bool{}
-	for _, id := range ids {
-		want[id] = true
-	}
+// ownerHistoryMessage is what a resend check reads of a message.
+type ownerHistoryMessage struct {
+	TS       string `json:"ts"`
+	User     string `json:"user"`
+	Text     string `json:"text"`
+	Metadata struct {
+		Type    string `json:"event_type"`
+		Payload struct {
+			ID string `json:"delivery_id"`
+		} `json:"event_payload"`
+	} `json:"metadata"`
+	Files []struct {
+		ID string `json:"id"`
+	} `json:"files"`
+}
+
+// errOwnerHistoryIncomplete refuses a resend over a check that could not
+// read all of the post's history: the post may have landed, so nothing of
+// it is sent again and the owner is told privately. It is permanent
+// through every caller.
+func errOwnerHistoryIncomplete(why string) error {
+	return router.PermanentError{Err: errors.New("slack: Slack's history could not be read completely (" + why + "), so a resend could post twice; nothing more was sent")}
+}
+
+// ownerHistory reads every message of the post's conversation (its thread,
+// when it has one) since ownerPostOldest, with metadata, and gives each to
+// visit until it returns true. Anything short of the complete history (an
+// API error, more history without a cursor, a repeated cursor, the page
+// limit) is errOwnerHistoryIncomplete; a cancelled context is returned as
+// it is, so the retry checks again.
+func (s *Slack) ownerHistory(ctx context.Context, api *apiClient, out core.Outbound, visit func(ownerHistoryMessage) bool) error {
 	cursor := ""
 	for page := 0; page < 100; page++ {
-		args := map[string]any{"channel": out.Conv.Chat, "limit": 100, "cursor": cursor, "oldest": ownerPostOldest(out)}
+		args := map[string]any{"channel": out.Conv.Chat, "limit": 100, "cursor": cursor, "oldest": ownerPostOldest(out), "include_all_metadata": true}
 		method := "conversations.history"
 		if out.Conv.Thread != "" {
 			method, args["ts"] = "conversations.replies", out.Conv.Thread
 		}
 		var result struct {
-			Messages []struct {
-				User  string `json:"user"`
-				Files []struct {
-					ID string `json:"id"`
-				} `json:"files"`
-			} `json:"messages"`
-			HasMore bool `json:"has_more"`
-			Meta    struct {
+			Messages []ownerHistoryMessage `json:"messages"`
+			HasMore  bool                  `json:"has_more"`
+			Meta     struct {
 				Cursor string `json:"next_cursor"`
 			} `json:"response_metadata"`
 		}
 		if err := api.call(ctx, method, args, &result); err != nil {
-			return false, err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			var ae *apiError
+			if errors.As(err, &ae) {
+				return errOwnerHistoryIncomplete(ae.Code)
+			}
+			return errOwnerHistoryIncomplete("request failed")
 		}
 		for _, m := range result.Messages {
-			if m.User != s.opt.WorkOwnerID {
-				continue
-			}
-			for _, f := range m.Files {
-				if want[f.ID] {
-					return true, nil
-				}
+			if visit(m) {
+				return nil
 			}
 		}
 		next := strings.TrimSpace(result.Meta.Cursor)
 		if next == "" {
 			if result.HasMore {
-				return false, errOwnerHistoryIncomplete
+				return errOwnerHistoryIncomplete("more history without a cursor")
 			}
-			return false, nil
+			return nil
 		}
 		if next == cursor {
-			return false, errors.New("slack: repeated history cursor")
+			return errOwnerHistoryIncomplete("repeated cursor")
 		}
 		cursor = next
 	}
-	return false, errors.New("slack: reconciliation page limit reached")
+	return errOwnerHistoryIncomplete("page limit")
 }
 
-// errOwnerHistoryIncomplete refuses a resend check that Slack answered with
-// more history and no cursor to read it: the post may have landed, so
-// nothing of it is sent again and the owner is told privately.
-var errOwnerHistoryIncomplete = router.PermanentError{Err: errors.New("slack: Slack's history came back incomplete, so a resend could post twice; nothing more was sent")}
+// ownerHistoryPart finds a text part by its delivery key and returns its
+// ts, or "" when the complete history proves it absent. A message of the
+// owner with exactly the part's text but no delivery tag means Slack left
+// the metadata out: absence is not proven, so the check is incomplete.
+func (s *Slack) ownerHistoryPart(ctx context.Context, api *apiClient, out core.Outbound, key, part string) (string, error) {
+	found, untagged := "", false
+	err := s.ownerHistory(ctx, api, out, func(m ownerHistoryMessage) bool {
+		if m.Metadata.Type == ownerPostEvent && m.Metadata.Payload.ID == key {
+			found = m.TS
+			return true
+		}
+		if m.User == s.opt.WorkOwnerID && m.Metadata.Type == "" && strings.TrimSpace(m.Text) == strings.TrimSpace(part) {
+			untagged = true
+		}
+		return false
+	})
+	switch {
+	case err != nil:
+		return "", err
+	case found != "":
+		return found, nil
+	case untagged:
+		return "", errOwnerHistoryIncomplete("a message with the part's text came back without its metadata")
+	}
+	return "", nil
+}
+
+// ownerFilesShared reports whether a message of the owner in the post's
+// conversation (its thread, when it has one) already carries any of ids;
+// false only when the complete history proves none does.
+func (s *Slack) ownerFilesShared(ctx context.Context, api *apiClient, out core.Outbound, ids []string) (bool, error) {
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	shared := false
+	err := s.ownerHistory(ctx, api, out, func(m ownerHistoryMessage) bool {
+		if m.User != s.opt.WorkOwnerID {
+			return false
+		}
+		for _, f := range m.Files {
+			if want[f.ID] {
+				shared = true
+			}
+		}
+		return shared
+	})
+	return shared && err == nil, err
+}
 
 // ownerPostSkew is how far the hub's clock may run ahead of Slack's before
 // a resend check could miss a post that landed.
@@ -469,18 +582,17 @@ func ownerPostOldest(out core.Outbound) string {
 }
 
 // settle checks a few times, with growing pauses, whether an ambiguous
-// call took effect after all.
-func (s *Slack) settle(ctx context.Context, api *apiClient, check func() (bool, error)) (bool, error) {
-	var last error
+// write took effect after all: what check found, or "" when each complete
+// check proved it absent. A check that fails ends it with that error.
+func (s *Slack) settle(ctx context.Context, api *apiClient, check func() (string, error)) (string, error) {
 	for _, delay := range []time.Duration{250 * time.Millisecond, 750 * time.Millisecond, 1500 * time.Millisecond} {
 		if err := api.pause(ctx, delay); err != nil {
-			return false, err
+			return "", err
 		}
 		found, err := check()
-		if err == nil && found {
-			return true, nil
+		if err != nil || found != "" {
+			return found, err
 		}
-		last = err
 	}
-	return false, last
+	return "", nil
 }

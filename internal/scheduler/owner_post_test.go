@@ -411,3 +411,61 @@ func TestPostAsOwnerNoCancelsAnUnseenCard(t *testing.T) {
 		t.Fatal("unseen card's post not cancelled by No:", p.State)
 	}
 }
+
+// Invariant I1 at the approval: a Yes approves a post only when every part
+// of its card has a confirmed, valid platform ID in order, and the Yes
+// follows the last. Any missing, zero or unordered part leaves the post
+// unapprovable by any Yes; a No still cancels it.
+func TestPostAsOwnerCardReceiptPerPart(t *testing.T) {
+	seq := func() string { return strconv.FormatInt(platformSeq.Add(1), 10) }
+	for _, c := range []struct {
+		name    string
+		parts   func() []string
+		approve bool
+	}{
+		{"one valid part", func() []string { return []string{seq()} }, true},
+		{"three ordered parts", func() []string { return []string{seq(), seq(), seq()} }, true},
+		{"first part zero", func() []string { return []string{"0", seq(), seq()} }, false},
+		{"first part missing", func() []string { return []string{"", seq(), seq()} }, false},
+		{"middle part missing", func() []string { return []string{seq(), "", seq()} }, false},
+		{"last part zero", func() []string { return []string{seq(), seq(), "0"} }, false},
+		{"unordered", func() []string { a, b := seq(), seq(); return []string{b, a} }, false},
+		{"repeated", func() []string { a := seq(); return []string{a, a} }, false},
+		{"not reported", func() []string { return nil }, false},
+	} {
+		for _, answer := range []string{"yes", "no"} {
+			t.Run(c.name+"/"+answer, func(t *testing.T) {
+				r, ctl, uid, _ := postRig(t, false)
+				got := ctl.executeBound(context.Background(), uid, ControlRequest{Action: postAsOwner, RequestID: "receipt", Target: "slack:C1", Text: "x"})
+				if got.Error != "" {
+					t.Fatal(got)
+				}
+				row, ok, err := r.st.NextOutbound(core.PlatformTelegram)
+				if err != nil || !ok {
+					t.Fatal("card not queued", err)
+				}
+				if err := r.st.SentRef(row.ID, c.parts()); err != nil {
+					t.Fatal(err)
+				}
+				reply, ok := r.answer(r.said(asBoss), answer)
+				p, _, _ := r.st.OwnerPostByID(got.PostID)
+				switch {
+				case !ok:
+					t.Fatal("answer not taken", reply)
+				case answer == "no":
+					if p.State != store.OwnerPostDeclined || len(r.slackRows()) != 0 {
+						t.Fatal("No did not cancel", p.State, reply)
+					}
+				case c.approve:
+					if p.State != store.OwnerPostApproved || len(r.slackRows()) != 1 {
+						t.Fatal("valid card not approved", p.State, reply)
+					}
+				default:
+					if p.State != store.OwnerPostPending || len(r.slackRows()) != 0 || !strings.Contains(reply, "cannot be approved") {
+						t.Fatal("unconfirmed card approved or not named", p.State, reply)
+					}
+				}
+			})
+		}
+	}
+}

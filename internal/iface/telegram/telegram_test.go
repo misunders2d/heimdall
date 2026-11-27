@@ -22,6 +22,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/router"
+	"github.com/misunders2d/heimdall/internal/store"
 )
 
 const (
@@ -1414,7 +1415,7 @@ func TestSendReportsDeliveredMessageIDs(t *testing.T) {
 		return true
 	})
 	var refs []string
-	out := core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: strings.Repeat("card line\n", 1000), Delivered: func(ref string) { refs = append(refs, ref) }}
+	out := core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: strings.Repeat("card line\n", 1000), Delivered: func(parts []string) { refs = append(refs, store.CardReceipt(parts)) }}
 	if err := i.Send(context.Background(), out); err != nil {
 		t.Fatal(err)
 	}
@@ -1423,36 +1424,60 @@ func TestSendReportsDeliveredMessageIDs(t *testing.T) {
 	}
 }
 
-// A final part without a valid message_id, or with one not after the
-// earlier parts', is no receipt: never the previous part's ID, which a Yes
-// sent before the final part was visible would follow.
-func TestSendFinalPartWithoutValidIDReportsNoReceipt(t *testing.T) {
-	for name, last := range map[string]any{"zero": 0, "missing": nil, "earlier": 5, "repeated": 41} {
-		t.Run(name, func(t *testing.T) {
+// Invariant I1 (docs/owner-post.md): a card has a receipt only when every
+// part came back with a valid message_id, each after the one before. A
+// missing, zero or out-of-order ID on ANY part (first, middle or last) is
+// no receipt, never another part's ID: a Yes sent before the whole card
+// was visible could follow it.
+func TestSendReceiptNeedsEveryPartsValidOrderedID(t *testing.T) {
+	text := strings.Repeat("card line\n", 2000)
+	parts := len(splitText(text, chunkText))
+	if parts < 3 {
+		t.Fatalf("need at least 3 parts, got %d", parts)
+	}
+	ok41 := func(n int) any { return 40 + n } // parts 1..: 41, 42, ...
+	for _, c := range []struct {
+		name string
+		id   func(n int) any // the message_id of part n (1-based); nil: absent
+		want string
+	}{
+		{"all valid", ok41, fmt.Sprint(40 + parts)},
+		{"first zero", func(n int) any { return map[bool]any{true: 0, false: 40 + n}[n == 1] }, ""},
+		{"first missing", func(n int) any { return map[bool]any{true: nil, false: 40 + n}[n == 1] }, ""},
+		{"middle zero", func(n int) any { return map[bool]any{true: 0, false: 40 + n}[n == 2] }, ""},
+		{"middle missing", func(n int) any { return map[bool]any{true: nil, false: 40 + n}[n == 2] }, ""},
+		{"last zero", func(n int) any { return map[bool]any{true: 0, false: 40 + n}[n == parts] }, ""},
+		{"last missing", func(n int) any { return map[bool]any{true: nil, false: 40 + n}[n == parts] }, ""},
+		{"last earlier", func(n int) any { return map[bool]any{true: 5, false: 40 + n}[n == parts] }, ""},
+		{"last repeated", func(n int) any { return map[bool]any{true: 40 + n - 1, false: 40 + n}[n == parts] }, ""},
+		{"middle out of order", func(n int) any { return map[bool]any{true: 99, false: 40 + n}[n == 2] }, ""},
+		{"negative", func(n int) any { return map[bool]any{true: -7, false: 40 + n}[n == 1] }, ""},
+		{"not a number", func(n int) any { return map[bool]any{true: "x", false: 40 + n}[n == 1] }, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
 			api := newFakeAPI(t)
 			var logs syncBuffer
 			i := newIface(t, api.srv.URL, botName, &logs)
-			parts := len(splitText(strings.Repeat("card line\n", 1000), chunkText))
 			n := 0
 			api.set("sendMessage", func(w http.ResponseWriter, _ map[string]any) bool {
 				n++
-				switch {
-				case n < parts:
-					ok(w, map[string]any{"message_id": 40 + n})
-				case last == nil:
+				if id := c.id(n); id == nil {
 					ok(w, map[string]any{"chat": map[string]any{"id": 42}})
-				default:
-					ok(w, map[string]any{"message_id": last})
+				} else {
+					ok(w, map[string]any{"message_id": id})
 				}
 				return true
 			})
-			var refs []string
-			out := core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: strings.Repeat("card line\n", 1000), Delivered: func(ref string) { refs = append(refs, ref) }}
+			var reports [][]string
+			out := core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: text, Delivered: func(p []string) { reports = append(reports, p) }}
 			if err := i.Send(context.Background(), out); err != nil {
-				t.Fatal(err)
+				t.Fatal(err) // a part without an ID is still delivered, once
 			}
-			if parts < 2 || n != parts || len(refs) != 0 {
-				t.Fatalf("parts %d, sent %d, receipts %v", parts, n, refs)
+			if n != parts || len(reports) != 1 || len(reports[0]) != parts {
+				t.Fatalf("parts %d, sent %d, reports %v", parts, n, reports)
+			}
+			if got := store.CardReceipt(reports[0]); got != c.want {
+				t.Fatalf("receipt %q, want %q (reported %v)", got, c.want, reports[0])
 			}
 		})
 	}
@@ -1472,11 +1497,11 @@ func TestSendWithoutResultIsDeliveredOnce(t *testing.T) {
 		return true
 	})
 	var refs []string
-	out := core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: "hello", Delivered: func(ref string) { refs = append(refs, ref) }}
+	out := core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: "hello", Delivered: func(parts []string) { refs = append(refs, store.CardReceipt(parts)) }}
 	if err := i.Send(context.Background(), out); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || len(refs) != 0 {
+	if calls != 1 || len(refs) != 1 || refs[0] != "" {
 		t.Fatalf("sendMessage calls %d, receipts %v", calls, refs)
 	}
 }
