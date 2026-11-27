@@ -26,6 +26,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/iface/local"
 	"github.com/misunders2d/heimdall/internal/iface/slack"
 	"github.com/misunders2d/heimdall/internal/iface/telegram"
+	"github.com/misunders2d/heimdall/internal/mcpoauth"
 	"github.com/misunders2d/heimdall/internal/router"
 	"github.com/misunders2d/heimdall/internal/scheduler"
 	"github.com/misunders2d/heimdall/internal/store"
@@ -207,6 +208,12 @@ func run(args []string) error {
 		logger.Printf("employee Google disabled: %v", err)
 		google = nil
 	}
+	mcp, err := mcpoauth.New(cfg.EmployeeMCP, cfg.DataDir)
+	if err != nil {
+		// Employee business MCP is optional: turns run without those tools.
+		logger.Printf("employee MCP sign-in disabled: %v", err)
+		mcp = nil
+	}
 	work, err := openDurable(cfg, st, logger)
 	if err != nil {
 		return err
@@ -231,7 +238,7 @@ func run(args []string) error {
 	if cfg.Slack != nil && cfg.Slack.WorkOwnerID != "" && work != nil && cfg.Durable.Assistant {
 		watchCommand = slackWatchCommand(flags.Lookup("config").Value.String())
 	}
-	r := router.New(router.Options{Work: work, Google: google, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), SlackWatchCommand: watchCommand, Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
+	r := router.New(router.Options{Work: work, Google: google, MCP: mcp, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), SlackWatchCommand: watchCommand, Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
 	if cfg.Scheduler.On() && cfg.Scheduler.Control != nil {
 		listener, err := func() (*net.UnixListener, error) {
 			u, err := user.Lookup(cfg.RunAs[core.RoleOwner].User)

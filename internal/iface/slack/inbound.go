@@ -33,7 +33,7 @@ type eventMessage struct {
 	Attachments    []any       `json:"attachments"`
 }
 
-const mcpNotice = "MCP sign-in requires a private DM using Pi. DM the bot `mcp login mellanni`. Do not paste OAuth codes elsewhere."
+const mcpNotice = "MCP sign-in requires a private DM. DM the bot `mcp login mellanni`. Do not paste OAuth codes elsewhere."
 
 var oauthURL = regexp.MustCompile(`(?i)https?://[^\s<>|]+`)
 var oauthAuthorize = regexp.MustCompile(`(?im)^.*Sign in to MCP server [^\n]*\n\s*<?https?://[^\s<>|]+>?`)

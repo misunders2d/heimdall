@@ -21,6 +21,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/durable"
 	"github.com/misunders2d/heimdall/internal/googleoauth"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/mcpoauth"
 	"github.com/misunders2d/heimdall/internal/scheduler"
 	"github.com/misunders2d/heimdall/internal/store"
 )
@@ -62,6 +63,7 @@ type Accounts interface {
 
 type Options struct {
 	Google            *googleoauth.Broker
+	MCP               *mcpoauth.Broker // employee Mellanni/Linear sign-in, independent of any harness
 	EmployeeHarnesses []string
 	Harness           harness.WarmConfig
 	OwnerSlack        *harness.OwnerSlack
@@ -1716,7 +1718,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			break
 		}
 		if t.role == core.RoleEmployee && !slices.Contains(c.r.opt.EmployeeHarnesses, h) {
-			gated = append(gated, h+": employee turns unavailable until native isolation and skill reading are validated")
+			gated = append(gated, h+": not enabled for employee turns (employee_harnesses)")
 			continue
 		}
 
@@ -1902,7 +1904,7 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 			}
 		}
 		progress, notify = guarded(c.r, "harness progress", progress), guarded(c.r, "harness notice", notify)
-		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive || t.job != nil && t.role == core.RoleOwner, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
+		spec := harness.Spec{SchedulerControl: t.job == nil && !batch[0].row.MCPControl && batch[0].row.Origin == core.OriginLive || t.job != nil && t.role == core.RoleOwner, StartContext: t.startCtx, LiveWorkerOnly: liveWorker, MCPNotify: notify, Google: c.r.opt.Google, MCP: c.r.opt.MCP, OwnerSlack: c.r.opt.OwnerSlack, Harness: h, Prompt: nativePrompt, Instructions: instructions, Context: turnContext, Images: images, Session: sess, Launch: launch, Caller: caller, Log: logf, Progress: progress}
 		spec.RecordClaudeTools = h == "claude" && ownerLive(batch[0])
 		if liveOwnerChat(t, batch[0].row) && (h == "codex" || h == "omp" || h == "claude") {
 			spec.SessionOpened = func(id string) error {

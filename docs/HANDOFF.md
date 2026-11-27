@@ -2,10 +2,10 @@
 > [native continuation evidence and proposed deployment](between-turn-delivery.md).
 > Isolated work clone only; no live bot, deployment or restart.
 
-> Employee Pi update: see [employee-pi.md](employee-pi.md). Caller-owned Mellanni/Linear
-> OAuth is the supported employee route; the older signed-token prerequisite
-> below is superseded for that route. Enable only Pi after its native probes.
-> Employees never sign into harnesses; business MCP uses their own sign-in.
+> Employee engines update (MEL-846, 2026-11-27): OMP, Codex, Claude and Pi all
+> have employee launches with the caller's own Mellanni/Linear MCP; see
+> [employee-engines.md](employee-engines.md). Enable each only after its hub
+> probe. Employees never sign into harnesses; business MCP uses their own sign-in.
 
 # ONE-assistant implementation handoff (2026-11-02)
 

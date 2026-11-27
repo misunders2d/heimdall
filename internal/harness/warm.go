@@ -414,7 +414,7 @@ func (p *Pool) Start(ctx context.Context, s Spec) (*Run, error) {
 		return nil, err
 	}
 	// Employee Pi gets a new access-only handoff and confined cwd every turn.
-	s.warm = s.Harness != "agy" && !(s.Harness == "pi" && s.Caller.Role == core.RoleEmployee)
+	s.warm = warmable(s)
 	r, err := Start(ctx, s)
 	if err == nil {
 		p.watch(r, key, fp, time.Now(), epoch, s.Timeout)
@@ -756,4 +756,15 @@ func (p *Pool) cleanEmployeeOMPRotation(e *warmEntry, s Spec, epoch uint64) bool
 	}
 	w.retiring = true
 	return true
+}
+
+// warmable: AGY has no multi-turn protocol; an employee process that holds
+// access-only leases (Pi always, every engine once Heimdall switches to the
+// employee uid) ends with its turn.
+func warmable(s Spec) bool {
+	return s.Harness != "agy" && !employeeLeased(s)
+}
+
+func employeeLeased(s Spec) bool {
+	return s.Caller.Role == core.RoleEmployee && (s.Harness == "pi" || s.Launch.Cred != nil)
 }

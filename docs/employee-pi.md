@@ -1,9 +1,11 @@
 # Employee Pi turns
 
 Employee Pi uses a separate non-root OS account on the existing Pi installation.
-Heimdall checks that account against root and the owner on every turn. Native
-Codex, Claude and AGY remain outside this rollout; enable only `pi` in
-`employee_harnesses`. Owner launches and OAuth stores are unchanged.
+Heimdall checks that account against root and the owner on every turn. OMP,
+Codex and Claude employee turns are described in
+[employee-engines.md](employee-engines.md); AGY stays refused. Enable each
+engine in `employee_harnesses` only after its hub probe. Owner launches and
+OAuth stores are unchanged.
 
 The root broker reads only the selected model/provider/thinking settings and
 hands over the current OpenAI Codex access token, account ID and an empty refresh

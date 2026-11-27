@@ -15,20 +15,57 @@ import (
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/mcpoauth"
 )
 
 const SharedRoot = "/opt/assistant"
 
+// EmployeeCapable reports the engines that have an employee launch boundary.
+// Listing one in employee_harnesses stays the owner's per-engine decision,
+// made after its hub probe (deploy/contabo/employee-probe.sh).
+func EmployeeCapable(name string) bool {
+	return slices.Contains([]string{"omp", "codex", "claude", "pi"}, name)
+}
+
+// employeeServer is one approved business MCP server with the caller's own
+// access-only token, handed to the engine's native MCP configuration.
+type employeeServer struct{ Name, URL, Token string }
+
+func serverNames(servers []employeeServer) []string {
+	names := make([]string, 0, len(servers))
+	for _, s := range servers {
+		names = append(names, s.Name)
+	}
+	return names
+}
+
+// Owner-only MCP namespaces: never reachable from an employee turn, even if
+// an ambient native configuration names them.
+var ownerMCP = []string{"t3", "memento", "slack", "workspace", "workspace-mcp", "workspace_cli"}
+
 // Employee tools are an allowlist. Ambient native MCP configuration is never trusted.
-// Pi business MCP uses a verified caller's own OAuth; other adapters stay scoped.
-func employeeArgs(name string, l Launch) ([]string, error) {
+// Business MCP is limited to the caller's approved servers (Mellanni, and Linear
+// with mcp.linear), each carrying the caller's own access-only token. Pi keeps its
+// native caller-scoped store; the other engines get the root broker's snapshot.
+// lease is the turn's disposable native config directory (empty for Pi).
+func employeeArgs(name string, l Launch, servers []employeeServer, lease string) ([]string, error) {
 	switch name {
 	case "agy":
 		return nil, errors.New("employee " + name + " turns are unavailable: native isolation has not been validated")
 	case "pi":
 		return []string{"--no-extensions", "--extension", "builtin:mcp", "--no-builtin-tools", "--tools", "read,google_*,employee_mcp_status,mcp__mellanni__*,mcp__linear__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource", "--no-prompt-templates", "--no-themes"}, nil
 	case "omp":
-		return []string{"--no-extensions", "--no-mcp", "--extension", SharedRoot + "/pi/extensions/privileged-tool-guard.ts", "--extension", SharedRoot + "/pi/extensions/admin-lifecycle-guard.ts", "--tools", "read", "--exclude-tools", "bash,powershell,edit,write,grep,find,ls,mcp__*", "--no-approve", "--extension", SharedRoot + "/heimdall/employee-guard.ts"}, nil
+		exclude := "bash,powershell,edit,write,grep,find,ls"
+		for _, o := range ownerMCP {
+			exclude += ",mcp__" + o + "_*"
+		}
+		args := []string{"--no-extensions"}
+		if len(servers) == 0 {
+			// Nothing approved and connected: no MCP at all.
+			args = append(args, "--no-mcp")
+			exclude += ",mcp__*"
+		}
+		return append(args, "--extension", SharedRoot+"/pi/extensions/privileged-tool-guard.ts", "--extension", SharedRoot+"/pi/extensions/admin-lifecycle-guard.ts", "--tools", "read", "--exclude-tools", exclude, "--no-approve", "--extension", SharedRoot+"/heimdall/employee-guard.ts"), nil
 	case "claude":
 		executable, err := os.Executable()
 		if err != nil {
@@ -40,9 +77,23 @@ func employeeArgs(name string, l Launch) ([]string, error) {
 			deny = append(deny, "Read(/"+filepath.Join(l.Home, d)+"/**)")
 		}
 		settings, _ := json.Marshal(map[string]any{"disableSkillShellExecution": true, "autoMemoryEnabled": false, "permissions": map[string]any{"deny": deny}, "hooks": map[string]any{"PreToolUse": []any{map[string]any{"matcher": ".*", "hooks": []any{map[string]any{"type": "command", "command": command, "onFailure": "block"}}}}}})
-		return []string{"--restricted", "--setting-sources", "", "--permission-mode", "dontAsk", "--tools", "Skill,Read,WebSearch", "--add-dir", SharedRoot, "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--disallowedTools", "Bash,PowerShell,Edit,Write,Glob,Grep,NotebookEdit,Agent,Task,mcp__*", "--settings", string(settings)}, nil
+		disallowed := "Bash,PowerShell,Edit,Write,Glob,Grep,NotebookEdit,Agent,Task"
+		for _, o := range ownerMCP {
+			disallowed += ",mcp__" + o
+		}
+		mcpConfig := `{"mcpServers":{}}`
+		if len(servers) == 0 {
+			disallowed += ",mcp__*"
+		} else {
+			if lease == "" {
+				return nil, errors.New("employee Claude MCP needs its disposable config directory")
+			}
+			// A file, never argv: /proc/PID/cmdline is world-readable.
+			mcpConfig = filepath.Join(lease, "mcp.json")
+		}
+		return []string{"--restricted", "--setting-sources", "", "--permission-mode", "dontAsk", "--tools", "Skill,Read,WebSearch", "--add-dir", SharedRoot, "--strict-mcp-config", "--mcp-config", mcpConfig, "--disallowedTools", disallowed, "--settings", string(settings)}, nil
 	case "codex":
-		args := []string{"--strict-config", "-c", `features.shell_tool=true`, "-c", `approval_policy="never"`, "-c", `default_permissions="employee"`}
+		args := []string{"--strict-config", "-c", `features.shell_tool=true`, "-c", `approval_policy="never"`, "-c", `default_permissions="employee"`, "-c", `cli_auth_credentials_store="file"`}
 		// One TOML table: quoted dotted CLI path keys are treated literally by
 		// Codex 0.166.0 and rejected as non-absolute paths.
 		fs := map[string]string{}
@@ -55,6 +106,9 @@ func employeeArgs(name string, l Launch) ([]string, error) {
 		for _, d := range []string{".codex", ".claude", ".pi", ".gemini"} {
 			fs[filepath.Join(l.Home, d)] = "deny"
 		}
+		if lease != "" {
+			fs[lease] = "deny"
+		}
 		keys := make([]string, 0, len(fs))
 		for p := range fs {
 			keys = append(keys, p)
@@ -66,17 +120,17 @@ func employeeArgs(name string, l Launch) ([]string, error) {
 		}
 		args = append(args, "-c", "permissions.employee={network={enabled=false},filesystem={"+strings.Join(entries, ",")+"}}")
 
-		for _, feature := range []string{"multi_agent", "apps", "plugins", "hooks", "memories", "computer_use", "browser_use", "skill_mcp_dependency_install"} {
+		// apps/plugins are ChatGPT connectors that ride the owner's account token.
+		for _, feature := range []string{"multi_agent", "apps", "plugins", "remote_plugin", "plugin_sharing", "tool_suggest", "hooks", "memories", "computer_use", "browser_use", "browser_use_external", "image_generation", "skill_mcp_dependency_install"} {
 			args = append(args, "--disable", feature)
 		}
-		// Empty the default map; native enumeration below also disables merged ambient entries.
-		args = append(args, "-c", "mcp_servers={}")
+		// The single mcp_servers table comes from employeeCodexMCPArgs.
 		return args, nil
 	}
 	return nil, errors.New("employee harness unsupported")
 }
 
-func employeeEnv(env []string, c Caller) []string {
+func employeeEnv(env []string, c Caller, servers []employeeServer) []string {
 	if c.Role != core.RoleEmployee {
 		return env
 	}
@@ -93,6 +147,11 @@ func employeeEnv(env []string, c Caller) []string {
 	for k, v := range map[string]string{"MEMENTO_PROCESSING": "1", "PI_RESTRICTED_EXTERNAL_USER": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_SKIP_MODEL_ACCESS_MEMORY": "1"} {
 		env = setEnv(env, k, v)
 	}
+	// claude.ai connectors ride the owner's subscription login: never load them.
+	env = setEnv(env, "ENABLE_CLAUDEAI_MCP_SERVERS", "false")
+	names, _ := json.Marshal(serverNames(servers))
+	// Read by the employee guards; set by Heimdall, outside model control.
+	env = setEnv(env, "HEIMDALL_EMPLOYEE_MCP", string(names))
 	caps, _ := json.Marshal(c.Capabilities)
 	return setEnv(env, "HEIMDALL_CALLER_CAPABILITIES", string(caps))
 }
@@ -133,7 +192,7 @@ func EmployeeGuard(r io.Reader, w io.Writer) error {
 	}
 	dec := json.NewDecoder(io.LimitReader(r, 1<<20))
 	valid := dec.Decode(&in) == nil && dec.Decode(new(any)) == io.EOF
-	allow := valid && (in.Tool == "WebSearch" || in.Tool == "Skill" || in.Tool == "Read" && ReadWithin(in.Input.Path, SharedRoot, os.Getenv("HEIMDALL_TURN_DIR")))
+	allow := valid && (in.Tool == "WebSearch" || in.Tool == "Skill" || in.Tool == "Read" && ReadWithin(in.Input.Path, SharedRoot, os.Getenv("HEIMDALL_TURN_DIR")) || approvedMCPTool(in.Tool, "__"))
 	decision := "deny"
 	if allow {
 		decision = "allow"
@@ -141,9 +200,27 @@ func EmployeeGuard(r io.Reader, w io.Writer) error {
 	return json.NewEncoder(w).Encode(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": "Employee tools and file roots are confined"}})
 }
 
+// approvedMCPTool admits only tools of the caller's approved business servers,
+// as Heimdall listed them in the turn environment (never model input).
+// sep is the engine's separator after the server name: "__" (Claude), "_" (OMP).
+func approvedMCPTool(tool, sep string) bool {
+	var approved []string
+	if json.Unmarshal([]byte(os.Getenv("HEIMDALL_EMPLOYEE_MCP")), &approved) != nil {
+		return false
+	}
+	for _, s := range approved {
+		if _, ok := mcpoauth.Servers[s]; ok && strings.HasPrefix(tool, "mcp__"+s+sep) && len(tool) > len("mcp__"+s+sep) {
+			return true
+		}
+	}
+	return false
+}
+
 // Inspect the native MCP catalog as the employee OS user, before any model runs.
 // Config table merge semantics must not leave an ambient/renamed server enabled.
-func employeeCodexMCPArgs(ctx context.Context, l Launch) ([]string, error) {
+// Approved servers are fully defined here, so an ambient entry of the same
+// name cannot supply their URL or credentials; every other one is disabled.
+func employeeCodexMCPArgs(ctx context.Context, l Launch, approved []employeeServer) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, l.Path, "mcp", "list", "--json")
@@ -169,6 +246,10 @@ func employeeCodexMCPArgs(ctx context.Context, l Launch) ([]string, error) {
 	slices.Sort(names)
 	names = slices.Compact(names)
 	var entries []string
+	for _, a := range approved {
+		names = slices.DeleteFunc(names, func(n string) bool { return n == a.Name })
+		entries = append(entries, strconv.Quote(a.Name)+"={enabled=true,url="+strconv.Quote(a.URL)+",bearer_token_env_var="+strconv.Quote(codexTokenEnv(a.Name))+"}")
+	}
 	for _, name := range names {
 		// Missing servers need a valid dummy transport; disabled entries never connect.
 		if !slices.ContainsFunc(servers, func(s struct {
@@ -182,4 +263,9 @@ func employeeCodexMCPArgs(ctx context.Context, l Launch) ([]string, error) {
 		}
 	}
 	return []string{"-c", "mcp_servers={" + strings.Join(entries, ",") + "}"}, nil
+}
+
+// codexTokenEnv names the variable carrying one server's access-only token.
+func codexTokenEnv(server string) string {
+	return "EMPLOYEE_MCP_TOKEN_" + strings.ToUpper(server)
 }

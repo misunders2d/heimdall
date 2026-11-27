@@ -30,6 +30,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/googleoauth"
+	"github.com/misunders2d/heimdall/internal/mcpoauth"
 )
 
 // SteerOutcome is a harness's answer to mid-turn input. Only Accepted means
@@ -142,6 +143,7 @@ type Spec struct {
 	WarmContext func(*Run, time.Time) (string, func())
 
 	Google     *googleoauth.Broker
+	MCP        *mcpoauth.Broker // employee Mellanni/Linear access-only snapshots
 	warm       bool
 	MCPNotify  func(string)
 	OwnerSlack *OwnerSlack
@@ -384,38 +386,64 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 		}
 	}
 	if spec.Caller.Role == core.RoleEmployee {
-		policy, e := employeeArgs(spec.Harness, spec.Launch)
+		if !EmployeeCapable(spec.Harness) {
+			_, e := employeeArgs(spec.Harness, spec.Launch, nil, "")
+			return nil, e
+		}
+		// No OS switch (Heimdall already runs as the employee account, never
+		// root or the owner): that account's own native logins, no lease.
+		// Production switches from root, so it always leases.
+		switched := spec.Launch.Cred != nil
+		if switched {
+			if e := employeeRuntimePreflight(spec.Harness, spec.Launch.Path); e != nil {
+				return nil, e
+			}
+		}
+		var servers []employeeServer
+		if spec.Harness != "pi" && switched {
+			// Pi keeps its native caller-scoped store; the others get the
+			// root broker's access-only snapshot of the caller's sign-in.
+			servers = employeeMCPAccess(ctx, spec)
+		}
+		env = employeeEnv(env, spec.Caller, servers)
+		env = setEnv(env, "HEIMDALL_TURN_DIR", spec.Launch.Dir)
+		var cleanup func()
+		lease := ""
+		if spec.Harness == "pi" {
+			env, cleanup, err = prepareEmployeePi(ctx, spec, env)
+		} else if switched {
+			var leaseArgs []string
+			env, leaseArgs, lease, cleanup, err = prepareEmployeeLease(ctx, spec, env, servers)
+			extra = append(extra, leaseArgs...)
+		}
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if cleanup != nil {
+				cleanup()
+			}
+		}()
+		// Credentials live only as long as the native process, including failed starts.
+		defer func() {
+			if cleanup != nil && employeeStarted != nil {
+				go func(release func()) { <-employeeStarted; release() }(cleanup)
+				cleanup = nil
+			}
+		}()
+		policy, e := employeeArgs(spec.Harness, spec.Launch, servers, lease)
 		if e != nil {
 			return nil, e
 		}
 		extra = append(extra, policy...)
 		if spec.Harness == "codex" {
-			disabled, e := employeeCodexMCPArgs(ctx, spec.Launch)
+			catalog := spec.Launch
+			catalog.Env = env
+			disabled, e := employeeCodexMCPArgs(ctx, catalog, servers)
 			if e != nil {
 				return nil, e
 			}
 			extra = append(extra, disabled...)
-		}
-		env = employeeEnv(env, spec.Caller)
-		env = setEnv(env, "HEIMDALL_TURN_DIR", spec.Launch.Dir)
-		if spec.Harness == "pi" {
-			var cleanup func()
-			env, cleanup, err = prepareEmployeePi(ctx, spec, env)
-			if err != nil {
-				return nil, err
-			}
-			defer func() {
-				if cleanup != nil {
-					cleanup()
-				}
-			}()
-			// Credentials live only as long as the native process, including failed starts.
-			defer func() {
-				if cleanup != nil && employeeStarted != nil {
-					go func(release func()) { <-employeeStarted; release() }(cleanup)
-					cleanup = nil
-				}
-			}()
 		}
 	}
 	if spec.SessionOpened != nil && spec.Harness != "codex" {
@@ -436,9 +464,10 @@ func Start(ctx context.Context, spec Spec) (*Run, error) {
 	extra = contextArgs
 	env = setEnv(env, "HD_CONTEXT_DIR", contextDir)
 	runCtx, cancel := context.WithCancel(ctx)
-	if spec.Harness == "pi" && spec.Caller.Role == core.RoleEmployee {
+	if employeeLeased(spec) {
+		// Every leased employee process ends inside its access-only leases.
 		cancel()
-		runCtx, cancel = context.WithTimeout(ctx, 25*time.Minute)
+		runCtx, cancel = context.WithTimeout(ctx, employeeLeaseLimit)
 	}
 	base := slices.Clone(d.args)
 	if spec.Caller.Role == core.RoleEmployee && spec.Harness == "claude" {

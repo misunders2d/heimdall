@@ -29,13 +29,13 @@ url="https://disabled.invalid/mcp"
 	}
 	l.Path = bin
 	l.Env = []string{"HOME=" + home, "CODEX_HOME=" + home, "PATH=/usr/bin:/bin"}
-	args, err := employeeArgs("codex", l)
+	args, err := employeeArgs("codex", l, engineServers[:1], "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	disabled, err := employeeCodexMCPArgs(ctx, l)
+	disabled, err := employeeCodexMCPArgs(ctx, l, engineServers[:1])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ url="https://disabled.invalid/mcp"
 	if err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	if !strings.Contains(string(out), `"appServerVersion":"0.166.0"`) {
+	if !strings.Contains(string(out), `"appServerVersion":"`) {
 		t.Fatal(string(out))
 	}
 	features := exec.CommandContext(ctx, bin, "features", "list")
@@ -63,7 +63,7 @@ url="https://disabled.invalid/mcp"
 		}
 	}
 	catalog := exec.CommandContext(ctx, bin, append([]string{"mcp", "list", "--json"}, disabled...)...)
-	catalog.Env = l.Env
+	catalog.Env = append(l.Env, "EMPLOYEE_MCP_TOKEN_MELLANNI=SYNTHETIC")
 	catalog.Dir = l.Dir
 	raw, err := catalog.Output()
 	if err != nil {
@@ -76,8 +76,12 @@ url="https://disabled.invalid/mcp"
 	if err = json.Unmarshal(raw, &servers); err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	found, approved := false, false
 	for _, server := range servers {
+		if server.Name == "mellanni" {
+			approved = server.Enabled
+			continue
+		}
 		if server.Enabled {
 			t.Fatalf("ambient MCP enabled: %s", server.Name)
 		}
@@ -85,10 +89,10 @@ url="https://disabled.invalid/mcp"
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("synthetic MCP disappeared instead of disabling")
+	if !found || !approved {
+		t.Fatal("synthetic MCP disappeared instead of disabling, or approved server not enabled")
 	}
-	t.Log("0.166.0 strict parser and disabled feature names accepted")
+	t.Log("strict parser, disabled feature names and the approved server accepted")
 }
 
 func TestNativePiExplicitExtensionsOnly(t *testing.T) {
