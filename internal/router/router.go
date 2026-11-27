@@ -507,12 +507,20 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 			continue
 		}
 		row.Outbound.ID, row.Outbound.Attempt = row.ID, row.Attempts
+		var refMu sync.Mutex
+		ref := ""
+		row.Outbound.Delivered = func(got string) { refMu.Lock(); ref = got; refMu.Unlock() }
 		err = r.sendSafely(ctx, i, row.Outbound)
 		var perm PermanentError
 		var record func() error
 		switch {
 		case err == nil:
-			record = func() error { return r.store.Sent(row.ID) }
+			refMu.Lock()
+			last := ref
+			refMu.Unlock()
+			// The last part's platform message ID: a post as the owner's card
+			// is answered only by a reply after it on the platform.
+			record = func() error { return r.store.SentRef(row.ID, last) }
 			removeSent(row.Outbound)
 		case errors.As(err, &perm):
 			r.log.Printf("reply %d to %s failed permanently: %v", row.ID, row.Conv, err)
@@ -2743,5 +2751,5 @@ func (r *Router) stopJob(job string) bool {
 
 // caller is a message's sender as the scheduler sees them.
 func (c *conv) caller(row store.InboundRow, role core.Role) scheduler.Caller {
-	return scheduler.Caller{Principal: row.From, Role: role, Conv: c.key, Private: row.Private, Inbound: row.ID}
+	return scheduler.Caller{Principal: row.From, Role: role, Conv: c.key, Private: row.Private, Inbound: row.ID, MsgID: row.MsgID}
 }

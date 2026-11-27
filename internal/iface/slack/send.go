@@ -202,6 +202,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 			return err
 		}
 		if ts != "" {
+			out.Report(ts)
 			return nil
 		}
 	}
@@ -218,6 +219,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 				return err
 			}
 			if ts != "" {
+				out.Report(ts)
 				continue
 			}
 		}
@@ -246,6 +248,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 		}
 		err := api.call(ctx, "chat.postMessage", args, &response, before...)
 		if err == nil && response.TS != "" {
+			out.Report(response.TS)
 			continue
 		}
 		if err == nil {
@@ -260,6 +263,7 @@ func (s *Slack) sendText(ctx context.Context, out core.Outbound) error {
 				}
 				ts, _ := api.findDelivery(ctx, out.Conv, id, "heimdall_reply", reconciliationOldest(out))
 				if ts != "" {
+					out.Report(ts)
 					found = true
 					break
 				}

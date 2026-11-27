@@ -5,13 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/store"
@@ -54,15 +54,25 @@ func postRig(t *testing.T, immediate bool) (*rig, *Control, uint32, string) {
 	return r, c, uid, src
 }
 
-// said is c answering with a newly stored inbound message, as the router
-// sets it.
+// platformSeq orders the fake platform's message IDs: sent cards (rig.sent)
+// and the owner's messages (rig.said) share one chat's sequence.
+var platformSeq atomic.Int64
+
+// said is c answering with a new platform message, stored now, as the
+// router sets it.
 func (r *rig) said(c Caller) Caller {
+	return r.saidAs(c, strconv.FormatInt(platformSeq.Add(1), 10))
+}
+
+// saidAs stores a message the platform numbered msg (it may have been sent
+// earlier than it is stored).
+func (r *rig) saidAs(c Caller, msg string) Caller {
 	r.t.Helper()
-	row, _, err := r.st.AddInbound(core.Inbound{Conv: c.Conv, From: c.Principal, Origin: core.OriginLive, Private: c.Private, MsgID: fmt.Sprint("m", time.Now().UnixNano()), Text: "synthetic"})
+	row, _, err := r.st.AddInbound(core.Inbound{Conv: c.Conv, From: c.Principal, Origin: core.OriginLive, Private: c.Private, MsgID: msg, Text: "synthetic"})
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	c.Inbound = row.ID
+	c.Inbound, c.MsgID = row.ID, msg
 	return c
 }
 
@@ -353,5 +363,34 @@ func TestPostAsOwnerYesBindsOnlyCardsSeenBeforeIt(t *testing.T) {
 	}
 	if p, _, _ := r.st.OwnerPostByID(third.PostID); p.State != store.OwnerPostPending {
 		t.Fatal("unsent card's post answered:", p.State)
+	}
+}
+
+// The other direction: the owner's Yes was sent on the platform before the
+// second card, but Heimdall stores it only after that card was recorded
+// sent (a restart, a held poll). Platform order keeps it pending.
+func TestPostAsOwnerYesSentBeforeACardNeverApprovesIt(t *testing.T) {
+	r, c, uid, _ := postRig(t, false)
+	ctx := context.Background()
+	if got := c.executeBound(ctx, uid, ControlRequest{Action: postAsOwner, RequestID: "one", Target: "slack:C1", Text: "one"}); got.Error != "" {
+		t.Fatal(got)
+	}
+	r.sent()
+	yesID := strconv.FormatInt(platformSeq.Add(1), 10) // the owner taps Yes now
+	second := c.executeBound(ctx, uid, ControlRequest{Action: postAsOwner, RequestID: "two", Target: "slack:C1", Text: "two"})
+	if second.Error != "" {
+		t.Fatal(second)
+	}
+	r.sent()                       // card two delivered, later on the platform
+	yes := r.saidAs(asBoss, yesID) // the earlier Yes is stored only now
+	reply, ok := r.answer(yes, "yes")
+	if !ok || !strings.Contains(reply, "still waits") {
+		t.Fatal(reply)
+	}
+	if rows := r.slackRows(); len(rows) != 1 || rows[0].Text != "one" {
+		t.Fatal("a Yes sent before the card approved it", rows)
+	}
+	if p, _, _ := r.st.OwnerPostByID(second.PostID); p.State != store.OwnerPostPending {
+		t.Fatal(p.State)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -112,7 +113,7 @@ func (r *rig) sent() []core.Outbound {
 		if err != nil || !ok {
 			return out
 		}
-		_ = r.st.Sent(row.ID)
+		_ = r.st.SentRef(row.ID, strconv.FormatInt(platformSeq.Add(1), 10))
 		out = append(out, row.Outbound)
 	}
 }

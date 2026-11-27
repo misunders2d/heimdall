@@ -189,6 +189,9 @@ CREATE INDEX owner_posts_card_out ON owner_posts(card_out) WHERE card_out != 0;`
 	// The Slack account verified when a post was requested: it alone sends it.
 	`ALTER TABLE owner_posts ADD COLUMN slack_user TEXT NOT NULL DEFAULT '';
 ALTER TABLE owner_posts ADD COLUMN slack_team TEXT NOT NULL DEFAULT '';`,
+	// The platform message ID of a post's card (its last part) as sent:
+	// only a reply after it on the platform answers the post.
+	`ALTER TABLE owner_posts ADD COLUMN card_ref TEXT NOT NULL DEFAULT '';`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -812,14 +815,19 @@ func (s *Store) Sending(id int64) error {
 	return err
 }
 
-func (s *Store) Sent(id int64) error {
+func (s *Store) Sent(id int64) error { return s.SentRef(id, "") }
+
+// SentRef records a reply sent, with the platform message ID of its last
+// part when the interface reported one.
+func (s *Store) SentRef(id int64, ref string) error {
 	return s.tx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`UPDATE outbound SET state=?,sent_at=?,error='' WHERE id=?`, OutSent, now(), id); err != nil {
 			return err
 		}
-		// A post as the owner's card is now confirmed delivered: only inbound
-		// rows stored after this point may answer it (docs/owner-post.md).
-		_, err := tx.Exec(`UPDATE owner_posts SET card_mark=(SELECT COALESCE(MAX(id),0) FROM inbound) WHERE card_out=? AND card_mark<0`, id)
+		// A post as the owner's card is now confirmed delivered: only a reply
+		// stored after this point and after ref on the platform answers it
+		// (docs/owner-post.md).
+		_, err := tx.Exec(`UPDATE owner_posts SET card_mark=(SELECT COALESCE(MAX(id),0) FROM inbound),card_ref=? WHERE card_out=? AND card_mark<0`, ref, id)
 		return err
 	})
 }

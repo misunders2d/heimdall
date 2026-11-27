@@ -268,7 +268,7 @@ func (s *Scheduler) answerPosts(c Caller, posts []store.OwnerPost, approve bool)
 	var lines []string
 	all := &store.JobChange{}
 	for _, p := range posts {
-		if !off && !p.CardSeenBefore(c.Inbound) {
+		if !off && !p.CardSeenBefore(c.Inbound, c.MsgID) {
 			lines = append(lines, "Post to "+literal(p.Label)+" still waits: its card had not reached you before this answer. Answer it after you see it.")
 			continue
 		}

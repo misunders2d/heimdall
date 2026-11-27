@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
+	"github.com/misunders2d/heimdall/internal/store"
 )
 
 // refusesOwnerPosts is the fake interface with Slack refusing every post
@@ -47,5 +49,42 @@ func TestFailedOwnerPostIsReportedPrivately(t *testing.T) {
 	}
 	if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
 		t.Fatal("file copy kept after a permanent failure")
+	}
+}
+
+// reportsRefs is the fake interface reporting a platform message ID.
+type reportsRefs struct{ *fakeIface }
+
+func (f reportsRefs) Send(ctx context.Context, out core.Outbound) error {
+	out.Report("41")
+	out.Report("42")
+	return f.fakeIface.Send(ctx, out)
+}
+
+// A sent card records the last delivered part's platform message ID.
+func TestSentCardRecordsItsPlatformMessageID(t *testing.T) {
+	e := setup(t, core.ModeCorporate, []string{"omp"}, "omp")
+	e.stop()
+	stopOnce.Delete(e.st)
+	e.wrap = func(f *fakeIface) Interface { return reportsRefs{f} }
+	e.start()
+	card := core.ConvKey{Interface: "fake", Chat: "owner-dm"}
+	p := store.OwnerPost{ID: "pref", Creator: "fake:owner", Card: card, Target: core.ConvKey{Interface: "slack", Chat: "C1"}, Label: "#team", Text: "x", Origin: "test",
+		State: store.OwnerPostPending, Expires: time.Now().Add(time.Hour), CardMessage: &core.Outbound{Conv: card, Text: "card"}}
+	if err := e.st.AnswerCommand(0, core.ConvKey{}, store.CommandEnd{Detail: "job", Job: &store.JobChange{NewOwnerPost: &p}}); err != nil {
+		t.Fatal(err)
+	}
+	e.r.Wake("fake")
+	e.reply()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _, err := e.st.OwnerPostByID("pref")
+		if err == nil && got.CardRef == "42" && got.CardMark >= 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("card ref not recorded: %+v %v", got, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

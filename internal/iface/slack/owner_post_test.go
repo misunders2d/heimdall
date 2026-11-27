@@ -394,3 +394,17 @@ func TestOwnerPostRefusesAChangedFileCopy(t *testing.T) {
 		t.Fatal("file without a checksum uploaded", err)
 	}
 }
+
+// A text reply reports each part's ts: a post as the owner's card is
+// answered only by a later message (docs/owner-post.md).
+func TestSendReportsDeliveredTimestamps(t *testing.T) {
+	r := newOwnerPostRig(t)
+	var refs []string
+	out := core.Outbound{ID: 3, Conv: core.ConvKey{Interface: "slack", Chat: "Dbot", Thread: "999.1"}, Text: "card", Delivered: func(ref string) { refs = append(refs, ref) }}
+	if err := r.s.Send(context.Background(), out); err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || !store.PlatformBefore("999.1", refs[0]) {
+		t.Fatal("delivered ts", refs)
+	}
+}

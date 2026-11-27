@@ -385,10 +385,21 @@ type Outbound struct {
 	Reactions []Reaction
 	// File is a file to send instead of text.
 	File *File
+	// Delivered, set by the router for one send and never stored, is called
+	// by the interface with the platform message ID (Telegram message_id,
+	// Slack ts) of each part it delivered, in order. Report calls it.
+	Delivered func(ref string) `json:"-"`
 	// OwnerPost marks a post the owner approved to go out under the owner's
 	// own Slack user token (docs/owner-post.md): Text and Files form one post,
 	// never sent by the bot, and every notice about it goes to Notice.
 	OwnerPost *OwnerPost
+}
+
+// Report tells the router the platform message ID of a delivered part.
+func (o Outbound) Report(ref string) {
+	if o.Delivered != nil && ref != "" {
+		o.Delivered(ref)
+	}
 }
 
 // OwnerPost is the delivery part of an owner-approved post as the owner.

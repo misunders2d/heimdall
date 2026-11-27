@@ -107,10 +107,12 @@ type Caller struct {
 	// tasks of its creator (Control.manages); set only by the control
 	// resolver.
 	Registered string
-	// Inbound: the stored inbound row of the message this caller answers
-	// with (set by the router). A post as the owner is answered only when
-	// its card was confirmed sent before this row was stored.
+	// Inbound and MsgID: the stored inbound row and platform message ID of
+	// the message this caller answers with (set by the router). A post as
+	// the owner is answered only when its card was confirmed sent before
+	// this row was stored and before this message on the platform.
 	Inbound int64
+	MsgID   string
 }
 
 // Target is where a job delivers.

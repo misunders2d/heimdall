@@ -691,7 +691,8 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 		case out.Formatted:
 			body["parse_mode"] = "Markdown"
 		}
-		send := func() error { return t.call(ctx, "sendMessage", body, nil, 30*time.Second) }
+		var sent json.RawMessage
+		send := func() error { return t.call(ctx, "sendMessage", body, &sent, 30*time.Second) }
 		err := t.sendRetrying(ctx, send)
 		var api *apiError
 		if out.Formatted && errors.As(err, &api) && api.status == http.StatusBadRequest {
@@ -706,6 +707,12 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 		}
 		if err != nil {
 			return t.sendError(err)
+		}
+		var m struct {
+			ID int64 `json:"message_id"`
+		}
+		if json.Unmarshal(sent, &m) == nil && m.ID > 0 {
+			out.Report(strconv.FormatInt(m.ID, 10))
 		}
 	}
 	return t.react(ctx, out)

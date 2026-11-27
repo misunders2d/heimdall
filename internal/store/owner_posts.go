@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,13 +40,49 @@ type OwnerPost struct {
 	// outbound row is linked so its confirmed delivery can be told.
 	CardMessage *core.Outbound
 	// CardMark is the newest inbound row stored when the card was confirmed
-	// sent; -1 while it was not. Only a reply stored later answers it.
+	// sent; -1 while it was not. CardRef is the card's (last part's)
+	// platform message ID as sent. Only a reply stored later and sent after
+	// CardRef on the platform answers it.
 	CardMark int64
+	CardRef  string
 }
 
-// CardSeenBefore reports the post's card confirmed sent before the inbound
-// row reply was stored.
-func (p OwnerPost) CardSeenBefore(reply int64) bool { return p.CardMark >= 0 && p.CardMark < reply }
+// CardSeenBefore reports the post's card confirmed delivered before the
+// reply: stored before the reply's inbound row, and earlier on the platform
+// than its message ID msg (same chat). An unknown or unordered ID never is.
+func (p OwnerPost) CardSeenBefore(reply int64, msg string) bool {
+	return p.CardMark >= 0 && p.CardMark < reply && PlatformBefore(p.CardRef, msg)
+}
+
+// PlatformBefore reports message ID a sent before b in one chat: Telegram
+// message IDs (integers) or Slack timestamps ("<seconds>.<micro>", compared
+// by their integer parts, never as floats). Anything else: false.
+func PlatformBefore(a, b string) bool {
+	parse := func(s string) (sec, frac int64, ok bool) {
+		whole, part, dotted := strings.Cut(s, ".")
+		if whole == "" || len(whole) > 18 || strings.Trim(whole, "0123456789") != "" {
+			return 0, 0, false
+		}
+		sec, err := strconv.ParseInt(whole, 10, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+		if !dotted {
+			return sec, -1, true
+		}
+		if part == "" || len(part) > 9 || strings.Trim(part, "0123456789") != "" {
+			return 0, 0, false
+		}
+		frac, _ = strconv.ParseInt(part+strings.Repeat("0", 9-len(part)), 10, 64)
+		return sec, frac, true
+	}
+	as, af, aok := parse(a)
+	bs, bf, bok := parse(b)
+	if !aok || !bok || (af < 0) != (bf < 0) {
+		return false
+	}
+	return as < bs || (as == bs && af < bf)
+}
 
 // OwnerPostDecision approves or declines a pending post. Approving queues
 // Out in the same transaction; a post no longer pending (answered, expired)
@@ -102,13 +139,13 @@ func decideOwnerPost(tx *sql.Tx, d OwnerPostDecision) error {
 	return err
 }
 
-const ownerPostCols = `id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at,card_mark,slack_user,slack_team`
+const ownerPostCols = `id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at,card_mark,slack_user,slack_team,card_ref`
 
 func scanOwnerPost(row interface{ Scan(...any) error }) (OwnerPost, error) {
 	var p OwnerPost
 	var files string
 	var expires, created int64
-	if err := row.Scan(&p.ID, &p.Creator, &p.Card.Interface, &p.Card.Chat, &p.Card.Thread, &p.Target.Chat, &p.Target.Thread, &p.Label, &p.Text, &files, &p.Origin, &p.State, &expires, &created, &p.CardMark, &p.SlackUser, &p.SlackTeam); err != nil {
+	if err := row.Scan(&p.ID, &p.Creator, &p.Card.Interface, &p.Card.Chat, &p.Card.Thread, &p.Target.Chat, &p.Target.Thread, &p.Label, &p.Text, &files, &p.Origin, &p.State, &expires, &created, &p.CardMark, &p.SlackUser, &p.SlackTeam, &p.CardRef); err != nil {
 		return p, err
 	}
 	p.Target.Interface = core.PlatformSlack
