@@ -112,8 +112,10 @@ the `heimdall-live` unit.
   - *Employee (non-root)*: admitted by Pi's existing user OR chat whitelist
     after blacklist denial. Unknown callers are ignored, metadata logged only.
     Employees run under a separate UID with confined skill readers, no owner
-    MCP, no Memento and no server administration. Native harness validation
-    is required before listing a harness in `employee_harnesses`.
+    MCP, no Memento and no server administration. Any of OMP, Codex, Claude
+    and Pi may be listed in `employee_harnesses`, each only after its hub
+    probe (`deploy/contabo/employee-probe.sh`) passes; Codex stays off until
+    its sandbox passes.
   - The employee OS account is checked by uid: never root's or the
     owner's, at startup and on every turn.
   - When Heimdall cannot switch to a turn's OS user (it is not root and the
@@ -351,7 +353,9 @@ thinking stream and live-session reply registration.
 - Anything the native automatic mode still escalates (an approval or input
   request) ends the turn as *needs human*. Exception: Pi native MCP sign-in
   UI is relayed for owners and enabled Pi employees in private chats; the
-  same verified caller supplies the callback, never Heimdall. Callback URLs/codes are ephemeral and never
+  same verified caller supplies the callback, never Heimdall. Other employee
+  engines sign in through Heimdall's root-side `employee_mcp` broker and get
+  access-only tokens per turn ([employee engines](docs/employee-engines.md)). Callback URLs/codes are ephemeral and never
   persisted, logged, echoed, or included in model context. Slack callback
   controls bypass raw-event staging; ordinary events retain persist-before-ack.
 - Sessions: Pi and OMP use a per-session `--session-dir` with `--continue`

@@ -21,6 +21,7 @@ import (
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/googleoauth"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/mcpoauth"
 	"github.com/misunders2d/heimdall/internal/schedule"
 )
 
@@ -29,7 +30,8 @@ var DefaultOrder = []string{"codex", "claude", "pi"}
 
 type Config struct {
 	EmployeeGoogle    *googleoauth.Config `json:"employee_google,omitempty"`
-	EmployeeHarnesses []string            `json:"employee_harnesses,omitempty"` // enable only after native isolation validation
+	EmployeeMCP       *mcpoauth.Config    `json:"employee_mcp,omitempty"`       // root-side Mellanni/Linear sign-in for employee turns
+	EmployeeHarnesses []string            `json:"employee_harnesses,omitempty"` // list an engine only after its hub employee probe passes
 	AccessDir         string              `json:"access_dir,omitempty"`
 	StandaloneAccess  bool                `json:"standalone_access,omitempty"` // non-hub installs only: legacy owners fallback
 	warnings          []string
@@ -269,9 +271,14 @@ func (c *Config) fill(staged bool) error {
 	if err := c.EmployeeGoogle.Validate(); err != nil {
 		return err
 	}
+	if err := c.EmployeeMCP.Validate(); err != nil {
+		return err
+	}
+	// Every engine with an employee launch boundary may be listed; which are
+	// enabled is the owner's per-engine decision after the hub probe.
 	for _, h := range c.EmployeeHarnesses {
-		if h != "codex" && h != "claude" && h != "pi" {
-			return errors.New("employee_harnesses supports only codex, claude, pi after native validation")
+		if !harness.EmployeeCapable(h) {
+			return fmt.Errorf("employee_harnesses: %q has no validated employee launch (omp, codex, claude, pi)", h)
 		}
 	}
 	if c.OwnerSlack != nil {

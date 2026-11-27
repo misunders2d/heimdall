@@ -2042,7 +2042,7 @@ func TestHubEmployeeValidationGateAndUnknownAdmission(t *testing.T) {
 	e.opt.EmployeeHarnesses = nil
 	e.start()
 	e.sendAs(core.Principal{Platform: "telegram", ID: "7"}, "c1", "synthetic")
-	want(t, e.reply(), "employee turns unavailable until native isolation")
+	want(t, e.reply(), "not enabled for employee turns")
 	// Unknown message never enters durable inbound/context state.
 	e.sendAs(core.Principal{Platform: "telegram", ID: "999"}, "c1", "UNKNOWN_SECRET_TEXT")
 	time.Sleep(50 * time.Millisecond)
@@ -2062,7 +2062,7 @@ func TestStandaloneEmployeeValidationGate(t *testing.T) {
 	e.opt.EmployeeHarnesses = nil
 	e.start()
 	e.send(employee, "c1", "synthetic")
-	want(t, e.reply(), "employee turns unavailable until native isolation")
+	want(t, e.reply(), "not enabled for employee turns")
 }
 
 func TestTurnRechecksRoleAndAdmissionBeforeLaunch(t *testing.T) {

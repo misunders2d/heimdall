@@ -1,7 +1,56 @@
-> Employee Pi update: see [employee-pi.md](employee-pi.md). Caller-owned Mellanni/Linear
-> OAuth is the supported employee route; the older signed-token prerequisite
-> below is superseded for that route. Enable only Pi after its native probes.
-> Employees never sign into harnesses; business MCP uses their own sign-in.
+> MEL-846 update (2026-11-27): every engine (OMP, Codex, Claude, Pi) has an
+> employee launch with the caller's own Mellanni/Linear MCP and access-only
+> model leases; see [employee-engines.md](employee-engines.md). Enable each
+> engine only after `deploy/contabo/employee-probe.sh <engine>` passes on the
+> hub; the probe and test plan are below. Codex stays off until its sandbox
+> passes. Employees never sign into harnesses; business MCP uses their own
+> sign-in. Earlier sections are history.
+
+## MEL-846 test plan, 2026-11-27
+
+Local (laptop, no model, no auth): `go vet ./...`, `go test -race ./...`,
+`node deploy/employee/employee-guard.test.mjs`. Unit tests cover, per engine:
+generated arguments and MCP config hold only the caller's approved servers
+(Linear only with `mcp.linear`), owner namespaces (T3, Memento, Slack,
+workspace) denied, tokens never on argv; Claude/Codex/OMP leases carry no
+refresh token and refuse an owner token near expiry; Codex emits one
+`mcp_servers` table; the Claude hook and the OMP guard admit only approved
+MCP tools; a runtime the employee cannot read fails with path and fix;
+leased employees are never warm; broker sign-in is one-use, caller- and
+chat-bound, refreshes as root and hands out access only.
+
+Installed-binary checks run on the laptop (versions differ from the hub):
+Codex 0.172.0 `TestNativeEmployeeCodexConfig` (strict parser accepts the
+employee config, every disabled feature exists, the approved server is the
+only enabled one); OMP 19.2.1 recognises an `agent.db` seeded the way
+`ompLease` seeds it (`omp models list` shows `openai-codex`; an unseeded
+directory shows none). No model ran.
+
+Review fixes (PR #38), also local and without a model:
+`TestCheckProbeAnswer` (the probe verdict on canned answers, the caller's
+own tools such as `edit_amazon_cogs` admitted, any other `mcp__` tool
+refused); `TestApprovedMCPTool` (exact server segment, `mellanni_x`
+refused); `TestOMPLeaseAccessOnly` (lease `config.yml` pins MCP
+discovery); `TestCodexShellExcludesMCPTokens`;
+`TestDiscoveryBindsResourceAndIssuer`, `TestMissingExpiryIsShortLived`,
+`TestRenewalWriteFailureFailsClosed`; `TestSweepLeases` (stale leases
+only, planted symlinks never followed). Evidence on laptop binaries:
+OMP 19.2.1 with marker MCP servers loaded only the agent-directory
+`mcp.json` under the lease settings (project `.mcp.json` and
+`.omp/mcp.json` loaded without them), and a seeded lease still listed
+`openai-codex (10)`; Codex 0.172.0 `codex sandbox -- env` dropped
+`EMPLOYEE_MCP_TOKEN_*` only with the exclusion, and
+`TestNativeEmployeeCodexConfig` passed with the full argument set; the
+`employee-layout.sh` `copy_engine`/`link_engine`/`NODE_ROOT` guards were
+exercised on scratch files (wrapper script, self copy, wrong owner,
+`..`/non-root paths refused). Live Mellanni and Linear metadata satisfy
+the exact resource and issuer checks.
+
+Hub, per engine, after `employee-layout.sh install`:
+`deploy/contabo/employee-probe.sh omp claude codex pi`, then once more with
+`PROBE_CALLER`/`PROBE_MCP_DATA` after a real employee's `mcp login mellanni`.
+It proves Memento absent, owner MCPs/connectors absent, `/root` and owner auth
+dirs unreadable, and Mellanni reachable only through the caller's own OAuth.
 
 # Employee launch validation, 2026-11-02
 

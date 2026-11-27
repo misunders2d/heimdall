@@ -14,9 +14,9 @@ func TestEmployeeLaunchPolicy(t *testing.T) {
 	for name, wants := range map[string][]string{
 		"pi":     {"--no-extensions", "builtin:mcp", "--no-builtin-tools", "--tools|read,google_*,employee_mcp_status,mcp__mellanni__*,mcp__linear__*"},
 		"claude": {"--restricted", "Read(//root/**)", `"onFailure":"block"`, "Skill,Read,WebSearch", "--strict-mcp-config", `"disableSkillShellExecution":true`, `"autoMemoryEnabled":false`, "--permission-mode|dontAsk"},
-		"codex":  {`default_permissions="employee"`, `approval_policy="never"`, `"/home/employee/.codex"="deny"`, "--disable|hooks", "--disable|memories", "mcp_servers={}"},
+		"codex":  {`default_permissions="employee"`, `approval_policy="never"`, `"/home/employee/.codex"="deny"`, "--disable|hooks", "--disable|memories", "--disable|apps"},
 	} {
-		args, e := employeeArgs(name, l)
+		args, e := employeeArgs(name, l, nil, "")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -27,15 +27,15 @@ func TestEmployeeLaunchPolicy(t *testing.T) {
 			}
 		}
 	}
-	if _, e := employeeArgs("agy", l); e == nil {
+	if _, e := employeeArgs("agy", l, nil, ""); e == nil {
 		t.Fatal("employee AGY enabled")
 	}
-	env := employeeEnv([]string{"MEMENTO_PROCESSING=0"}, Caller{Role: core.RoleEmployee, Capabilities: []string{"scheduler"}})
+	env := employeeEnv([]string{"MEMENTO_PROCESSING=0"}, Caller{Role: core.RoleEmployee, Capabilities: []string{"scheduler"}}, nil)
 	if envValue(env, "MEMENTO_PROCESSING") != "1" || envValue(env, "PI_RESTRICTED_EXTERNAL_USER") != "1" {
 		t.Fatal(env)
 	}
 	// Owner launch environment stays untouched.
-	if got := employeeEnv([]string{"MEMENTO_PROCESSING=0"}, Caller{Role: core.RoleOwner}); got[0] != "MEMENTO_PROCESSING=0" {
+	if got := employeeEnv([]string{"MEMENTO_PROCESSING=0"}, Caller{Role: core.RoleOwner}, nil); got[0] != "MEMENTO_PROCESSING=0" {
 		t.Fatal(got)
 	}
 }

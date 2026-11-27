@@ -67,6 +67,9 @@ type Caller struct {
 var actorRE = regexp.MustCompile(`^sl_user_[A-Za-z0-9]+$`)
 var numericRE = regexp.MustCompile(`^[0-9]+$`)
 
+// Key is the caller's store digest; other root brokers reuse the same rules.
+func (c Caller) Key() (string, error) { return c.key() }
+
 func (c Caller) key() (string, error) {
 	p := c.Principal
 	switch p.Platform {

@@ -1,11 +1,12 @@
 # Heimdall
 
 Employee turns run on Sergey's existing harness installs and logins. Employees
-never log in anywhere; there is no second login. Restriction and isolation are
-implementation work, not a user setup task. Employee identity reaches tools via
-Heimdall's verified platform identity and the Mellanni signed per-turn caller
-token (MEL-724, not built yet). Keep `employee_harnesses: []` until native
-isolation, skill reading, credential denial and caller-bound tools are validated.
+never log in to a harness; there is no second login. Any engine with an
+employee boundary (OMP, Codex, Claude, Pi) can serve them with the same
+capability set: the caller's own Mellanni (and entitled Linear) MCP, shared
+skills, no owner tools, Memento off ([employee engines](docs/employee-engines.md)).
+`employee_harnesses` defaults to `[]`; list an engine only after its hub probe
+passes. Codex stays off until its sandbox probe passes.
 
 A thin, reliable message router between chat interfaces and agent
 harnesses. Heimdall receives a message, attaches the caller identity its
@@ -62,7 +63,8 @@ Secrets never go in it; interfaces read their tokens from the environment.
 | `mode` | `corporate` or `personal`; Memento is owner-only in both |
 | `access_dir` | Pi access files; default `/root/.pi/agent/access`, read by Heimdall before UID drop |
 | `owners` | legacy fallback only when `standalone_access: true` on non-hub installs |
-| `employee_harnesses` | default `[]`; list only Codex/Claude/Pi after native isolation validation |
+| `employee_harnesses` | default `[]`; any of `omp`, `codex`, `claude`, `pi`, each only after its hub probe (`deploy/contabo/employee-probe.sh`) passes |
+| `employee_mcp` | optional `{"enabled":true}`: Heimdall's own employee Mellanni/Linear sign-in (`mcp login <server>` in a DM), access-only tokens per turn ([docs](docs/employee-engines.md)) |
 | `harness_order` | default order, `codex, claude, pi` |
 | `max_parallel` | conversations running a turn at once |
 | `run_as.owner`, `run_as.employee` | OS `user`, optional working `dir` and `path` for each role |
@@ -101,9 +103,16 @@ refused at startup and on every turn. No employee login or credential copy is
 required or permitted; implementing restricted execution on existing installs
 and logins remains the integrator's responsibility.
 Employee native readers are confined to shared instructions/skills and their
-own turn files. All employee Memento hooks/tools are disabled; owner MCPs are
-absent. AGY employee turns are refused. Business MCP remains excluded pending
-a safe per-caller credential connector; see [deployment gates](deploy/contabo/INSTALL.md).
+own turn files. All employee Memento hooks/tools are disabled; owner MCPs and
+claude.ai/ChatGPT connectors are absent. AGY employee turns are refused. Each
+employee turn gets access-only leases of the owner's model login (never a
+refresh token) and of the caller's own business MCP sign-in, in a disposable
+directory removed at process exit. Pi keeps its native caller-scoped store;
+the other engines use the `employee_mcp` broker. Rerun
+`deploy/contabo/employee-layout.sh install` after every harness upgrade; a
+runtime the employee account cannot read fails the turn with the path and fix.
+See [employee engines](docs/employee-engines.md) and
+[deployment gates](deploy/contabo/INSTALL.md).
 
 `heimdall harnesses -config FILE` shows which harnesses each role's OS user
 can launch.

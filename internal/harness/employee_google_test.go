@@ -41,7 +41,7 @@ func TestEmployeeGoogleHandoffHasNoRenewalMaterial(t *testing.T) {
 		t.Fatal("unsafe handoff mode", err)
 	}
 	// Rebuilt employee env strips both legacy Google and dedicated root names.
-	env := employeeEnv([]string{"GOOGLE_OAUTH_CLIENT_SECRET=SYNTHETIC_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_ID=SYNTHETIC_ID", "HEIMDALL_GOOGLE_CLIENT_SECRET=SYNTHETIC_CLIENT_SECRET", "HEIMDALL_GOOGLE_ACCESS_FILE=/other/caller", "PI_GOOGLE_OAUTH_DB=/owner/store", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=SYNTHETIC_INFISICAL", "MEMENTO_PROCESSING=0", "SAFE=kept"}, Caller{Role: core.RoleEmployee})
+	env := employeeEnv([]string{"GOOGLE_OAUTH_CLIENT_SECRET=SYNTHETIC_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_ID=SYNTHETIC_ID", "HEIMDALL_GOOGLE_CLIENT_SECRET=SYNTHETIC_CLIENT_SECRET", "HEIMDALL_GOOGLE_ACCESS_FILE=/other/caller", "PI_GOOGLE_OAUTH_DB=/owner/store", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=SYNTHETIC_INFISICAL", "MEMENTO_PROCESSING=0", "SAFE=kept"}, Caller{Role: core.RoleEmployee}, nil)
 	for _, kv := range env {
 		if strings.Contains(kv, "SYNTHETIC") || strings.Contains(kv, "GOOGLE_") {
 			t.Fatal("Google/Infisical credentials in employee env")
