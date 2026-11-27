@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
@@ -155,4 +156,27 @@ func (s *Store) SetOwnerPostUploads(id string, ids []string) error {
 		return errors.New("owner post is not approved")
 	}
 	return nil
+}
+
+// OwnerPostFiles reports whether every given Slack file ID was recorded as
+// an upload of a post as the owner, so its file-share echo is Heimdall's.
+func (s *Store) OwnerPostFiles(ids []string) (bool, error) {
+	want := map[string]bool{}
+	for _, id := range ids {
+		if id == "" {
+			return false, nil
+		}
+		want[id] = true
+	}
+	if len(want) == 0 {
+		return false, nil
+	}
+	args := make([]any, 0, len(want))
+	for id := range want {
+		args = append(args, id)
+	}
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(DISTINCT j.value) FROM owner_posts p, json_each(p.uploads) j
+		WHERE p.uploads != '' AND j.value IN (?`+strings.Repeat(",?", len(args)-1)+`)`, args...).Scan(&n)
+	return err == nil && n == len(want), err
 }

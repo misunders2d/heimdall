@@ -285,3 +285,40 @@ func TestOwnerPostEchoIsNotOwnerInput(t *testing.T) {
 		t.Fatal("the owner's own message in the bot chat refused")
 	}
 }
+
+// The files of a post complete without a comment and carry no metadata;
+// their echo, seen through the bot in a channel it is in, is recognized by
+// the recorded upload IDs. The owner's own file shares still pass.
+func TestOwnerPostFileEchoIsNotOwnerInput(t *testing.T) {
+	r := newOwnerPostRig(t)
+	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C2", Thread: "1000.1"}, "", 1)
+	if err := r.s.Send(context.Background(), out); err != nil {
+		t.Fatal(err)
+	}
+	ids, _ := r.st.OwnerPostUploads(out.OwnerPost.ID)
+	if len(ids) != 1 {
+		t.Fatal("uploads", ids)
+	}
+	share := func(text string, files ...string) json.RawMessage {
+		fs := []map[string]string{}
+		for _, id := range files {
+			fs = append(fs, map[string]string{"id": id})
+		}
+		m := map[string]any{"type": "message", "subtype": "file_share", "channel": "C2", "channel_type": "channel",
+			"user": "UOWNER", "text": text, "ts": "1000.5", "thread_ts": "1000.1", "files": fs}
+		raw, _ := json.Marshal(map[string]any{"event": m, "authorizations": []map[string]any{{"team_id": "Ttest", "user_id": r.s.botID, "is_bot": true}}})
+		return raw
+	}
+	if ok, _, err := r.s.eventAdmission(share("", ids...)); ok || err != nil {
+		t.Fatal("owner post file echo admitted", ok, err)
+	}
+	if ok, _, _ := r.s.eventAdmission(share("", ids[0], "FOTHER")); !ok {
+		t.Fatal("a share with another file refused")
+	}
+	if ok, _, _ := r.s.eventAdmission(share("look", ids...)); !ok {
+		t.Fatal("the owner's own commented share refused")
+	}
+	if ok, _, _ := r.s.eventAdmission(share("", "FOTHER")); !ok {
+		t.Fatal("the owner's own file share refused")
+	}
+}

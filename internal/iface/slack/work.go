@@ -158,6 +158,21 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 	if m.User != "" && m.User == s.opt.WorkOwnerID && m.Metadata.Type == ownerPostEvent {
 		return false, false, nil // a post as the owner that Heimdall made: never the owner's live input
 	}
+	if m.User != "" && m.User == s.opt.WorkOwnerID && m.Subtype == "file_share" && len(m.Files) > 0 && strings.TrimSpace(m.Text) == "" {
+		// The files of a post as the owner are completed without a comment
+		// and cannot carry metadata; their recorded upload IDs identify them.
+		ids := make([]string, len(m.Files))
+		for i, f := range m.Files {
+			ids[i] = f.ID
+		}
+		ours, err := s.opt.Store.OwnerPostFiles(ids)
+		if err != nil {
+			return false, false, err
+		}
+		if ours {
+			return false, false, nil
+		}
+	}
 	if len(p.Authorizations) == 0 {
 		return true, false, nil // legacy and bot-only envelopes without authorizations
 	}

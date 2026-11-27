@@ -123,9 +123,12 @@ queued. Text or files alone are fine; at least one is required.
   7-day retention.
 - A post Heimdall made comes back from Slack as the owner's message. Events
   from the owner carrying the post metadata are dropped before persistence,
-  so they never become the owner's live input. Unverified: that Slack
-  includes the metadata in those events; the target and mention refusals
-  above do not depend on it.
+  so they never become the owner's live input. The files' message cannot
+  carry metadata: an owner `file_share` without a comment whose files are
+  all recorded uploads of a post is dropped the same way (the IDs are
+  recorded before completing). Unverified: that Slack includes the metadata
+  and the file IDs in those events; the target and mention refusals above
+  do not depend on it.
 
 ## How an agent calls it, per interface
 
