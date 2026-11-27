@@ -92,6 +92,22 @@ func TestEmployeeCodexMCPTable(t *testing.T) {
 	}
 }
 
+// The caller's MCP bearer tokens never reach Codex shell-tool children.
+func TestCodexShellExcludesMCPTokens(t *testing.T) {
+	args, err := employeeArgs("codex", Launch{Home: t.TempDir(), Dir: t.TempDir()}, engineServers, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(args, `shell_environment_policy.exclude=["EMPLOYEE_MCP_TOKEN_*"]`) {
+		t.Fatal("no shell environment exclusion", args)
+	}
+	for _, s := range engineServers {
+		if !strings.HasPrefix(codexTokenEnv(s.Name), codexTokenPrefix) {
+			t.Fatal("token variable outside the excluded prefix", codexTokenEnv(s.Name))
+		}
+	}
+}
+
 func TestApprovedMCPTool(t *testing.T) {
 	t.Setenv("HEIMDALL_EMPLOYEE_MCP", `["mellanni"]`)
 	for tool, want := range map[string]bool{"mcp__mellanni__search": true, "mcp__mellanni__": false, "mcp__linear__list": false, "mcp__t3__launch": false, "mcp__mellannix__a": false, "mcp__memento__recall": false,

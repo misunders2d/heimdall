@@ -124,6 +124,9 @@ func employeeArgs(name string, l Launch, servers []employeeServer, lease string)
 		for _, feature := range []string{"multi_agent", "apps", "plugins", "remote_plugin", "plugin_sharing", "tool_suggest", "hooks", "memories", "computer_use", "browser_use", "browser_use_external", "image_generation", "skill_mcp_dependency_install"} {
 			args = append(args, "--disable", feature)
 		}
+		// The caller's MCP bearer tokens reach Codex itself, never its shell
+		// children (checked on 0.172.0 with `codex sandbox -- env`).
+		args = append(args, "-c", `shell_environment_policy.exclude=["`+codexTokenPrefix+`*"]`)
 		// The single mcp_servers table comes from employeeCodexMCPArgs.
 		return args, nil
 	}
@@ -284,6 +287,8 @@ func employeeCodexMCPArgs(ctx context.Context, l Launch, approved []employeeServ
 }
 
 // codexTokenEnv names the variable carrying one server's access-only token.
+const codexTokenPrefix = "EMPLOYEE_MCP_TOKEN_"
+
 func codexTokenEnv(server string) string {
-	return "EMPLOYEE_MCP_TOKEN_" + strings.ToUpper(server)
+	return codexTokenPrefix + strings.ToUpper(server)
 }
