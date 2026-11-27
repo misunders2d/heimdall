@@ -61,6 +61,12 @@ connected servers; `mcp logout <server>` removes one.
     `mcp.json` loading; without the settings, project `.mcp.json` and
     `.omp/mcp.json` also loaded. The probe fails on any `mcp__` tool that is
     not the caller's own server.
+    `disabledProviders` switches those providers off for every capability,
+    so their context files, skills and rules are not discovered either;
+    employee OMP reads `AGENTS.md` and `skills` from the lease (linked to
+    `/opt/assistant`). The same key also lists disabled model providers;
+    none of the names above is one, and a seeded lease still lists
+    `openai-codex` models (checked on 19.2.1).
 - Guards admit only tools of the approved servers. Claude/Codex names
   (`mcp__<server>__<tool>`) are matched on the exact server. OMP names
   (`mcp__<server>_<tool>`) cannot tell `mellanni_x` from `mellanni`, and its
