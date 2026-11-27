@@ -1,9 +1,13 @@
 package slack
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -177,6 +181,9 @@ func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
 	if text != "" {
 		parts = splitReply(text)
 	}
+	if err := ownerFilesIntact(out.OwnerPost.Files); err != nil {
+		return err
+	}
 	// The text always goes as tagged messages, never as an upload's
 	// untagged comment: the tag is how its echo is known (eventAdmission).
 	if err := s.ownerPostParts(ctx, api, out, parts); err != nil {
@@ -186,6 +193,43 @@ func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
 		return nil
 	}
 	return s.ownerPostFiles(ctx, api, out)
+}
+
+// errOwnerFileChanged refuses a file copy that is not what the owner
+// approved; it is never uploaded.
+var errOwnerFileChanged = router.PermanentError{Err: errors.New("slack: a file of the post changed after it was checked; nothing more was sent")}
+
+// ownerFileBytes reads a post's file copy and returns its bytes only when
+// they are exactly the size and SHA-256 recorded when it was checked.
+func ownerFileBytes(f core.File) ([]byte, error) {
+	if f.Size <= 0 || f.Size > 50<<20 || len(f.SHA256) != 64 {
+		return nil, errOwnerFileChanged
+	}
+	in, err := os.Open(f.Path)
+	if err != nil {
+		return nil, router.PermanentError{Err: errors.New("slack: the post's file copy is unavailable")}
+	}
+	defer in.Close()
+	b, err := io.ReadAll(io.LimitReader(in, f.Size+1))
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(b)
+	if int64(len(b)) != f.Size || hex.EncodeToString(sum[:]) != f.SHA256 {
+		return nil, errOwnerFileChanged
+	}
+	return b, nil
+}
+
+// ownerFilesIntact checks every file copy before anything of the post is
+// sent, so a changed file never leaves a text-only post behind.
+func ownerFilesIntact(files []core.File) error {
+	for _, f := range files {
+		if _, err := ownerFileBytes(f); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ownerPostParts posts the text parts. Before any resend (a later attempt,
@@ -274,13 +318,10 @@ func (s *Slack) ownerPostFiles(ctx context.Context, api *apiClient, out core.Out
 	return s.completeOwnerFiles(ctx, &upload, out, ids)
 }
 
+// ownerUpload uploads exactly the bytes it verified against the recorded
+// size and SHA-256, never a reopened file.
 func (s *Slack) ownerUpload(ctx context.Context, api *apiClient, f core.File) (string, error) {
-	in, err := os.Open(f.Path)
-	if err != nil {
-		return "", router.PermanentError{Err: errors.New("slack: the post's file copy is unavailable")}
-	}
-	defer in.Close()
-	stat, err := in.Stat()
+	data, err := ownerFileBytes(f)
 	if err != nil {
 		return "", err
 	}
@@ -288,7 +329,7 @@ func (s *Slack) ownerUpload(ctx context.Context, api *apiClient, f core.File) (s
 		URL string `json:"upload_url"`
 		ID  string `json:"file_id"`
 	}
-	if err := api.call(ctx, "files.getUploadURLExternal", map[string]any{"filename": f.Name, "length": stat.Size()}, &grant); err != nil {
+	if err := api.call(ctx, "files.getUploadURLExternal", map[string]any{"filename": f.Name, "length": f.Size}, &grant); err != nil {
 		return "", err
 	}
 	if !s.fileHost(grant.URL) || grant.ID == "" {
@@ -296,11 +337,11 @@ func (s *Slack) ownerUpload(ctx context.Context, api *apiClient, f core.File) (s
 	}
 	uploadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, grant.URL, in)
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, grant.URL, bytes.NewReader(data))
 	if err != nil {
 		return "", errors.New("slack: invalid file upload endpoint")
 	}
-	req.ContentLength = stat.Size()
+	req.ContentLength = f.Size
 	req.Header.Set("Content-Type", first(f.MIME, mime.TypeByExtension(filepath.Ext(f.Name)), "application/octet-stream"))
 	response, err := api.http.Do(req)
 	if err != nil {

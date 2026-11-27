@@ -2,6 +2,8 @@ package slack
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,10 +100,12 @@ func (r *ownerPostRig) post(t *testing.T, conv core.ConvKey, text string, files 
 	var list []core.File
 	for i := range files {
 		path := filepath.Join(t.TempDir(), fmt.Sprintf("copy-%d", i))
-		if err := os.WriteFile(path, []byte(fmt.Sprintf("synthetic file %d", i)), 0o600); err != nil {
+		body := []byte(fmt.Sprintf("synthetic file %d", i))
+		if err := os.WriteFile(path, body, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		list = append(list, core.File{Path: path, Name: fmt.Sprintf("report-%d.pdf", i), MIME: "application/pdf", Size: 16})
+		sum := sha256.Sum256(body)
+		list = append(list, core.File{Path: path, Name: fmt.Sprintf("report-%d.pdf", i), MIME: "application/pdf", Size: int64(len(body)), SHA256: hex.EncodeToString(sum[:])})
 	}
 	id := fmt.Sprintf("p%d", time.Now().UnixNano())
 	p := store.OwnerPost{ID: id, Creator: "slack:uowner@example.test", Card: core.ConvKey{Interface: "slack", Chat: "Dbot", Thread: "1.1"}, Target: conv, Label: conv.Chat, Text: text, Files: list, Origin: "test", State: store.OwnerPostApproved, Expires: time.Now().Add(time.Hour), SlackUser: "UOWNER", SlackTeam: "Ttest"}
@@ -363,5 +367,30 @@ func TestOwnerPostRefusesAnotherSlackAccount(t *testing.T) {
 	unbound.OwnerPost = &op
 	if err := r.s.Send(context.Background(), unbound); !errors.As(err, &perm) || len(r.f.calls) != before {
 		t.Fatal("post without a recorded Slack account sent", err)
+	}
+}
+
+// A file copy changed after the owner approved it is never uploaded, and
+// nothing of the post is sent (review finding 4).
+func TestOwnerPostRefusesAChangedFileCopy(t *testing.T) {
+	r := newOwnerPostRig(t)
+	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C1"}, "with a file", 2)
+	// Same size, other bytes: only the checksum tells.
+	if err := os.WriteFile(out.OwnerPost.Files[1].Path, []byte("tampered file 1!"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := r.s.Send(context.Background(), out)
+	var perm router.PermanentError
+	if !errors.As(err, &perm) {
+		t.Fatal("changed copy not refused", err)
+	}
+	if r.uploads != 0 || len(r.f.uploads) != 0 || len(r.f.all("chat.postMessage")) != 0 || r.completes != 0 {
+		t.Fatal("something of the post went out with a changed file", r.uploads, r.completes)
+	}
+	// No recorded checksum: refused too.
+	out = r.post(t, core.ConvKey{Interface: "slack", Chat: "C1"}, "", 1)
+	out.OwnerPost.Files[0].SHA256 = ""
+	if err := r.s.Send(context.Background(), out); !errors.As(err, &perm) || r.uploads != 0 {
+		t.Fatal("file without a checksum uploaded", err)
 	}
 }

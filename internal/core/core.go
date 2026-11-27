@@ -413,8 +413,10 @@ type File struct {
 	// reply markup (as a Formatted reply), sent with the file as one
 	// message. Scrubbed like the reply.
 	Caption string `json:"caption,omitempty"`
-	// Size in bytes, when Heimdall checked it (posts as the owner).
-	Size int64 `json:"size,omitempty"`
+	// Size in bytes and SHA256 (hex) of the copy, when Heimdall checked it
+	// (posts as the owner): what the owner approved, verified at upload.
+	Size   int64  `json:"size,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // Reaction is an emoji reaction on one interface message.

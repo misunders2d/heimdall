@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -132,6 +134,9 @@ func TestPostAsOwnerWaitsForTheOwnersYes(t *testing.T) {
 	}
 	if b, err := os.ReadFile(p.OwnerPost.Files[0].Path); err != nil || string(b) != "synthetic report" {
 		t.Fatal("approved copy is not the checked file", string(b), err)
+	}
+	if sum := sha256.Sum256([]byte("synthetic report")); p.OwnerPost.Files[0].SHA256 != hex.EncodeToString(sum[:]) || p.OwnerPost.Files[0].Size != 16 {
+		t.Fatal("copy's checksum not recorded", p.OwnerPost.Files[0])
 	}
 	if _, ok := r.answer(r.said(asBoss), "yes"); ok {
 		t.Fatal("an answered post was answered again")

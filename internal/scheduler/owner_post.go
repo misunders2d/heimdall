@@ -366,7 +366,8 @@ func copyOwnerFile(path string, uid uint32, dir string, deny []string) (core.Fil
 	if err != nil {
 		return core.File{}, err
 	}
-	n, err := io.Copy(out, io.LimitReader(in, maxOwnerPostFile+1))
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(in, maxOwnerPostFile+1))
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}
@@ -389,7 +390,7 @@ func copyOwnerFile(path string, uid uint32, dir string, deny []string) (core.Fil
 	if m == "" {
 		m = "application/octet-stream"
 	}
-	return core.File{Path: copyPath, Name: name, MIME: m, Size: n}, nil
+	return core.File{Path: copyPath, Name: name, MIME: m, Size: n, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
 // denied reports path inside one of dirs, comparing lexically and with
