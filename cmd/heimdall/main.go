@@ -201,7 +201,7 @@ func run(args []string) error {
 			if o := cfg.Slack.OwnerPost; o.On() {
 				// Posts as the owner (docs/owner-post.md): the control action,
 				// with the owner's user token only.
-				jobs.OwnerPost = &scheduler.OwnerPosts{Poster: sl, Immediate: o.Approval == config.OwnerPostImmediate, Dir: filepath.Join(cfg.DataDir, "outbox"), DataDir: cfg.DataDir}
+				jobs.OwnerPost = &scheduler.OwnerPosts{Poster: sl, Immediate: o.Approval == config.OwnerPostImmediate, Dir: filepath.Join(cfg.DataDir, "outbox"), Deny: []string{cfg.DataDir, filepath.Dir(absPath(flags.Lookup("config").Value.String()))}}
 			}
 		}
 	}
@@ -547,4 +547,13 @@ func checkConfig(args []string) error {
 	}
 	fmt.Println("configuration valid (offline; credentials and interfaces not checked)")
 	return nil
+}
+
+// absPath is path made absolute against the working directory; path
+// itself when that fails.
+func absPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }

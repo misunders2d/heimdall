@@ -147,9 +147,8 @@ func (s *Slack) OwnerPostText(text string) (string, error) {
 }
 
 // sendOwnerPost delivers an approved post with the owner's user token only:
-// its text (chunked like a reply, each part reconciled by its metadata) and
-// its files in one completed upload, with the text as that upload's comment
-// when it fits one part. Nothing goes to the bot or to the target but the
+// its text (chunked like a reply, each part reconciled by its metadata),
+// then its files in one completed upload without a comment. Nothing goes to the bot or to the target but the
 // post; every failure is the router's, which tells the owner privately.
 func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
 	api := s.workClient("user")
@@ -170,17 +169,15 @@ func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
 	if text != "" {
 		parts = splitReply(text)
 	}
-	comment := ""
-	if len(out.OwnerPost.Files) > 0 && len(parts) == 1 {
-		comment, parts = parts[0], nil
-	}
+	// The text always goes as tagged messages, never as an upload's
+	// untagged comment: the tag is how its echo is known (eventAdmission).
 	if err := s.ownerPostParts(ctx, api, out, parts); err != nil {
 		return err
 	}
 	if len(out.OwnerPost.Files) == 0 {
 		return nil
 	}
-	return s.ownerPostFiles(ctx, api, out, comment)
+	return s.ownerPostFiles(ctx, api, out)
 }
 
 // ownerPostParts posts the text parts. Before any resend (a later attempt,
@@ -239,7 +236,7 @@ func (s *Slack) ownerPostParts(ctx context.Context, api *apiClient, out core.Out
 // them as one message. The file IDs are recorded before completing, so a
 // later attempt checks Slack for them and completes again only when they
 // were not shared.
-func (s *Slack) ownerPostFiles(ctx context.Context, api *apiClient, out core.Outbound, comment string) error {
+func (s *Slack) ownerPostFiles(ctx context.Context, api *apiClient, out core.Outbound) error {
 	ids, err := s.opt.Store.OwnerPostUploads(out.OwnerPost.ID)
 	if err != nil {
 		return err
@@ -252,7 +249,7 @@ func (s *Slack) ownerPostFiles(ctx context.Context, api *apiClient, out core.Out
 		if shared {
 			return nil
 		}
-		return s.completeOwnerFiles(ctx, api, out, ids, comment)
+		return s.completeOwnerFiles(ctx, api, out, ids)
 	}
 	upload := *api
 	upload.timeout = 60 * time.Second
@@ -266,7 +263,7 @@ func (s *Slack) ownerPostFiles(ctx context.Context, api *apiClient, out core.Out
 	if err := s.opt.Store.SetOwnerPostUploads(out.OwnerPost.ID, ids); err != nil {
 		return err // unrecorded uploads are never completed
 	}
-	return s.completeOwnerFiles(ctx, &upload, out, ids, comment)
+	return s.completeOwnerFiles(ctx, &upload, out, ids)
 }
 
 func (s *Slack) ownerUpload(ctx context.Context, api *apiClient, f core.File) (string, error) {
@@ -308,7 +305,7 @@ func (s *Slack) ownerUpload(ctx context.Context, api *apiClient, f core.File) (s
 	return grant.ID, nil
 }
 
-func (s *Slack) completeOwnerFiles(ctx context.Context, api *apiClient, out core.Outbound, ids []string, comment string) error {
+func (s *Slack) completeOwnerFiles(ctx context.Context, api *apiClient, out core.Outbound, ids []string) error {
 	var files []map[string]string
 	for i, id := range ids {
 		title := id
@@ -320,9 +317,6 @@ func (s *Slack) completeOwnerFiles(ctx context.Context, api *apiClient, out core
 	args := map[string]any{"files": files, "channel_id": out.Conv.Chat}
 	if out.Conv.Thread != "" {
 		args["thread_ts"] = out.Conv.Thread
-	}
-	if comment != "" {
-		args["initial_comment"] = comment
 	}
 	err := api.call(ctx, "files.completeUploadExternal", args, nil)
 	var ae *apiError

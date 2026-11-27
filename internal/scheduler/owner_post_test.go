@@ -39,7 +39,7 @@ func postRig(t *testing.T, immediate bool) (*rig, *Control, uint32, string) {
 	uid := uint32(os.Getuid())
 	c.uid = uid
 	data := t.TempDir()
-	r.s.OwnerPost = &OwnerPosts{Poster: fakePoster{owner: boss}, Immediate: immediate, Dir: filepath.Join(data, "outbox"), DataDir: data}
+	r.s.OwnerPost = &OwnerPosts{Poster: fakePoster{owner: boss}, Immediate: immediate, Dir: filepath.Join(data, "outbox"), Deny: []string{data}}
 	src := filepath.Join(t.TempDir(), "report.pdf")
 	if err := os.WriteFile(src, []byte("synthetic report"), 0o600); err != nil {
 		t.Fatal(err)
@@ -167,8 +167,11 @@ func TestPostAsOwnerRefusals(t *testing.T) {
 	hard := filepath.Join(dir, "hard.pdf")
 	_ = os.Link(src, filepath.Join(dir, "other-name.pdf"))
 	_ = os.Link(src, hard)
-	inside := filepath.Join(r.s.OwnerPost.DataDir, "heimdall.db")
+	inside := filepath.Join(r.s.OwnerPost.Deny[0], "heimdall.db")
 	_ = os.WriteFile(inside, []byte("db"), 0o600)
+	via := filepath.Join(t.TempDir(), "via")
+	_ = os.Symlink(r.s.OwnerPost.Deny[0], via) // a symlinked directory into the data
+	throughLink := filepath.Join(via, "heimdall.db")
 	single := filepath.Join(t.TempDir(), "one.txt")
 	_ = os.WriteFile(single, []byte("x"), 0o600)
 	cases := map[string]ControlRequest{
@@ -183,6 +186,7 @@ func TestPostAsOwnerRefusals(t *testing.T) {
 		"fifo":               {Action: postAsOwner, RequestID: "8", Target: "slack:C1", Files: []string{fifo}},
 		"hard link":          {Action: postAsOwner, RequestID: "9", Target: "slack:C1", Files: []string{hard}},
 		"heimdall data":      {Action: postAsOwner, RequestID: "10", Target: "slack:C1", Files: []string{inside}},
+		"data via symlink":   {Action: postAsOwner, RequestID: "10b", Target: "slack:C1", Files: []string{throughLink}},
 		"six files":          {Action: postAsOwner, RequestID: "11", Target: "slack:C1", Files: []string{single, single, single, single, single, single}},
 		"job fields":         {Action: postAsOwner, RequestID: "12", Target: "slack:C1", Text: "x", ID: "jabcdef"},
 		"post fields on job": {Action: "list", Target: "slack:C1"},

@@ -60,9 +60,11 @@ type OwnerPosts struct {
 	// Immediate is approval mode A: queue at once. False (mode B, the
 	// default) asks the owner first.
 	Immediate bool
-	// Dir holds Heimdall's own checked copies of the files (0700); DataDir
-	// is refused as a file source.
-	Dir, DataDir string
+	// Dir holds Heimdall's own checked copies of the files (0700). Files
+	// under Deny (the data directory, the config file's directory) are
+	// refused, by their resolved path.
+	Dir  string
+	Deny []string
 }
 
 // postAsOwner handles the post_as_owner control action for a bound owner
@@ -132,7 +134,7 @@ func (c *Control) postAsOwner(ctx context.Context, uid uint32, req ControlReques
 	if err != nil {
 		return fail("text refused: " + err.Error())
 	}
-	files, err := copyOwnerFiles(req.Files, uid, cfg.Dir, cfg.DataDir)
+	files, err := copyOwnerFiles(req.Files, uid, cfg.Dir, cfg.Deny)
 	if err != nil {
 		return fail(err.Error())
 	}
@@ -277,10 +279,10 @@ var postFileName = regexp.MustCompile(`[^A-Za-z0-9._ -]`)
 // not empty, at most 50 MB; never a symlink or FIFO) and copies it into
 // Heimdall's own directory. The copies, not the originals, are shown and
 // sent, so a file cannot change after the owner saw it.
-func copyOwnerFiles(paths []string, uid uint32, dir, dataDir string) ([]core.File, error) {
+func copyOwnerFiles(paths []string, uid uint32, dir string, deny []string) ([]core.File, error) {
 	var files []core.File
 	for _, path := range paths {
-		f, err := copyOwnerFile(path, uid, dir, dataDir)
+		f, err := copyOwnerFile(path, uid, dir, deny)
 		if err != nil {
 			removeOwnerFiles(files)
 			return nil, fmt.Errorf("file %q refused: %w", filepath.Base(path), err)
@@ -290,19 +292,24 @@ func copyOwnerFiles(paths []string, uid uint32, dir, dataDir string) ([]core.Fil
 	return files, nil
 }
 
-func copyOwnerFile(path string, uid uint32, dir, dataDir string) (core.File, error) {
+func copyOwnerFile(path string, uid uint32, dir string, deny []string) (core.File, error) {
 	if len(path) > 4096 || !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.ContainsRune(path, 0) {
 		return core.File{}, errors.New("must be an absolute, clean path on the hub")
 	}
-	if dataDir != "" {
-		if rel, err := filepath.Rel(filepath.Clean(dataDir), path); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
-			return core.File{}, errors.New("Heimdall's own data is never posted")
-		}
+	if denied(path, deny) {
+		return core.File{}, errors.New("Heimdall's own data and configuration are never posted")
 	}
 	// O_NOFOLLOW: never a symlink; O_NONBLOCK: a FIFO cannot hang the call.
 	in, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return core.File{}, errors.New("cannot be opened")
+	}
+	// A symlinked directory on the way must not reach a denied directory:
+	// check where the opened file really is.
+	real, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", in.Fd()))
+	if err != nil || !filepath.IsAbs(real) || denied(real, deny) {
+		in.Close()
+		return core.File{}, errors.New("Heimdall's own data and configuration are never posted")
 	}
 	defer in.Close()
 	info, err := in.Stat()
@@ -359,6 +366,26 @@ func copyOwnerFile(path string, uid uint32, dir, dataDir string) (core.File, err
 		m = "application/octet-stream"
 	}
 	return core.File{Path: copyPath, Name: name, MIME: m, Size: n}, nil
+}
+
+// denied reports path inside one of dirs, comparing lexically and with
+// each directory's symlinks resolved.
+func denied(path string, dirs []string) bool {
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		roots := []string{filepath.Clean(d)}
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			roots = append(roots, r)
+		}
+		for _, root := range roots {
+			if rel, err := filepath.Rel(root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func removeOwnerFiles(files []core.File) {

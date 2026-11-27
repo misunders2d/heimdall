@@ -460,7 +460,7 @@ func TestExternalOriginEndToEndOverControlSocket(t *testing.T) {
 		}
 		return got
 	}
-	if got := helper("agent"); got.Error != "external owner agents may only add tasks" {
+	if got := helper("agent"); got.Error != "external owner agents may only add tasks and request posts as the owner" {
 		t.Fatal("agent allowed to create a schedule", got)
 	}
 	got := helper("human")

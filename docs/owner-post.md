@@ -83,8 +83,11 @@ tool (MCP) or `heimdall sched control` (one JSON object):
   mention of the bot is refused: it would start a turn as the owner.
 - `files`: at most 5 absolute paths **on the hub**, each at most 50 MB,
   checked like outbox files: a regular file with one link, not empty, not a
-  symlink or FIFO, owned by the control peer's kernel UID, outside
-  Heimdall's data directory. Heimdall copies them into its own 0700 outbox
+  symlink or FIFO, owned by the control peer's kernel UID, and, by the
+  opened file's resolved path, outside Heimdall's data directory and the
+  config file's directory. The peer is root or the owner's UID, who can
+  already read these files; with the default approval the owner sees each
+  file's name and size before anything is sent. Heimdall copies them into its own 0700 outbox
   directory at once; the copies are what the card describes and what is
   sent, so a file cannot change after the owner saw it. This is the one
   place a caller names a path; the model never does, and identity is still
@@ -97,9 +100,9 @@ queued. Text or files alone are fine; at least one is required.
 
 ## Delivery
 
-- One post: the text, then all files completed as one message. When the
-  text fits one Slack message and there are files, the text is the upload's
-  comment, so it is a single message.
+- One post: the text (tagged messages, chunked like a reply), then all
+  files completed as one message without a comment. The text is never an
+  upload's untagged comment, so its echo is always recognizable.
 - The owner's user token posts and uploads (`chat.postMessage`,
   `files.getUploadURLExternal`, `files.completeUploadExternal`). Normal bot
   replies and their uploads are unchanged.

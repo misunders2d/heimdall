@@ -137,15 +137,19 @@ func TestOwnerPostGoesOutWithTheOwnersTokenOnly(t *testing.T) {
 		t.Fatalf("want 2 uploads in one completed message, got %d/%d/%d", r.uploads, r.completes, len(r.f.uploads))
 	}
 	complete := r.f.all("files.completeUploadExternal")[0].Body
-	if complete["channel_id"] != "C1" || complete["thread_ts"] != "1700000000.000100" || !strings.Contains(str(complete["initial_comment"]), "Q3 numbers attached") {
-		t.Fatal("post not one message with its text", complete)
+	if complete["channel_id"] != "C1" || complete["thread_ts"] != "1700000000.000100" || complete["initial_comment"] != nil {
+		t.Fatal("files not completed in the thread without an untagged comment", complete)
 	}
-	if len(r.f.all("chat.postMessage")) != 0 {
-		t.Fatal("a fitting text went as a separate message")
+	posts := r.f.all("chat.postMessage")
+	if len(posts) != 1 || !strings.Contains(str(posts[0].Body["text"]), "Q3 numbers attached") {
+		t.Fatal("text not posted as one tagged message", posts)
+	}
+	if meta, _ := posts[0].Body["metadata"].(map[string]any); meta["event_type"] != ownerPostEvent {
+		t.Fatal("text part without its delivery tag", posts[0].Body)
 	}
 	// A later attempt (a crash after Slack shared it) checks Slack first.
 	out.Attempt = 1
-	if err := r.s.Send(ctx, out); err != nil || r.completes != 1 || r.uploads != 2 {
+	if err := r.s.Send(ctx, out); err != nil || r.completes != 1 || r.uploads != 2 || len(r.f.all("chat.postMessage")) != 1 {
 		t.Fatalf("resent after the post was shared: %v %d %d", err, r.completes, r.uploads)
 	}
 }
@@ -214,9 +218,6 @@ func TestOwnerPostLongTextIsReconciledByItsParts(t *testing.T) {
 		if p.Token != "test-work-user" || meta["event_type"] != ownerPostEvent {
 			t.Fatal("part not posted as the owner with its delivery key", p)
 		}
-	}
-	if complete := r.f.all("files.completeUploadExternal")[0].Body; complete["initial_comment"] != nil {
-		t.Fatal("text repeated as the upload's comment", complete)
 	}
 	out.Attempt = 1
 	if err := r.s.Send(ctx, out); err != nil || len(r.f.all("chat.postMessage")) != len(posts) || r.completes != 1 {

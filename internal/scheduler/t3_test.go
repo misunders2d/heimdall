@@ -633,7 +633,7 @@ func TestTrustedT3Management(t *testing.T) {
 		{Action: "confirm", ID: mine, RequestID: "c1"},
 		{Action: "discover"},
 	} {
-		refused(req, "may only task_add, task_list and task_show; with manage: list, show, history, create, edit, run, pause, resume, stop of the owner's jobs and task_pause, task_resume, task_close (never remove, checkpoint or acknowledge)")
+		refused(req, "may only task_add, task_list and task_show; with manage: list, show, history, create, edit, run, pause, resume, stop of the owner's jobs, task_pause, task_resume, task_close and post_as_owner (never remove, checkpoint or acknowledge)")
 	}
 	if jobs, _ := r.st.Jobs(store.JobFilter{States: []string{store.JobActive}}); len(jobs) != 3 || r.job(mine).State != store.JobActive {
 		t.Fatal("management removed a job", jobs)
