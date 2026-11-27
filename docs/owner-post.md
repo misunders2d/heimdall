@@ -26,11 +26,12 @@ Off by default. Nothing here is deployed by this change.
     expires after 24 hours. Same Yes/No rules as job drafts: a whole reply,
     from the same person in that same chat, live human input only; one Yes
     answers every waiting draft and post there; **Details** shows the cards
-    again. A Yes or No answers a post only when its card was confirmed
+    again. A Yes approves a post only when its card was confirmed
     delivered before that reply, by the platform's own message order
     (Telegram `message_id`, Slack `ts` of the card's last part) and by
     Heimdall's receipt order; a post whose card was still queued, failed or
-    arrived after the reply keeps waiting, and the reply names it.
+    arrived after the reply keeps waiting, and the reply names it. A No
+    cancels every waiting post, its card seen or not.
   - Off (`enabled` false or absent): nothing is sent as the owner. Rows
     queued earlier fail with the private notice, any Yes or No to a waiting
     card cancels it, and no Slack event is filtered as a post's echo.
@@ -145,10 +146,13 @@ queued. Text or files alone are fine; at least one is required.
   are all recorded uploads of that one approved post, is dropped the same
   way (the IDs are recorded before completing). Never in the owner's chat
   with the bot; a later re-share of the same files is the owner's own.
-  Unverified live: that Slack includes the metadata, the file IDs and
-  `upload` in those events (`upload` is documented in Slack's `file_share`
-  event reference); the target and mention refusals above do not depend
-  on it.
+  Unverified live: that Slack includes the metadata, the file IDs,
+  `subtype` `file_share`, `upload` and `thread_ts` in those events.
+  Slack's `file_share` reference documents `upload`, but its example shows
+  no `subtype` or `thread_ts`, and the page both calls the event "no longer
+  served" and says Events API deliveries continue. If a field is missing
+  live, Heimdall's own file post would be read as the owner's input. The
+  target and mention refusals above do not depend on it.
 
 ## How an agent calls it, per interface
 

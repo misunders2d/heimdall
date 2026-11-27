@@ -255,11 +255,12 @@ func (s *Scheduler) ownerPosts(c Caller) []store.OwnerPost {
 	return posts
 }
 
-// answerPosts approves or declines every waiting post here whose card was
-// confirmed sent before the answer; each approval queues its delivery row
-// with the reply, in one transaction. A post whose card had not reached the
-// owner yet is left waiting and named. With posting as the owner turned
-// off, any answer declines them all: nothing is posted.
+// answerPosts approves every waiting post here whose card was confirmed
+// sent before the answer, or declines every waiting post; each approval
+// queues its delivery row with the reply, in one transaction. A Yes leaves
+// a post whose card had not reached the owner yet waiting and names it; a
+// No cancels it too (cancelling is always safe). With posting as the owner
+// turned off, any answer declines them all: nothing is posted.
 func (s *Scheduler) answerPosts(c Caller, posts []store.OwnerPost, approve bool) (string, *store.JobChange) {
 	off := s.OwnerPost == nil
 	if off {
@@ -268,7 +269,7 @@ func (s *Scheduler) answerPosts(c Caller, posts []store.OwnerPost, approve bool)
 	var lines []string
 	all := &store.JobChange{}
 	for _, p := range posts {
-		if !off && !p.CardSeenBefore(c.Inbound, c.MsgID) {
+		if approve && !p.CardSeenBefore(c.Inbound, c.MsgID) {
 			lines = append(lines, "Post to "+literal(p.Label)+" still waits: its card had not reached you before this answer. Answer it after you see it.")
 			continue
 		}

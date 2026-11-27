@@ -394,3 +394,20 @@ func TestPostAsOwnerYesSentBeforeACardNeverApprovesIt(t *testing.T) {
 		t.Fatal(p.State)
 	}
 }
+
+// A No cancels a post even when its card never reached the owner (queued
+// or failed): only approval waits for the card.
+func TestPostAsOwnerNoCancelsAnUnseenCard(t *testing.T) {
+	r, c, uid, _ := postRig(t, false)
+	got := c.executeBound(context.Background(), uid, ControlRequest{Action: postAsOwner, RequestID: "lost-card", Target: "slack:C1", Text: "x"})
+	if got.Error != "" {
+		t.Fatal(got)
+	}
+	reply, ok := r.answer(r.said(asBoss), "no")
+	if !ok || strings.Contains(reply, "still waits") {
+		t.Fatal(reply)
+	}
+	if p, _, _ := r.st.OwnerPostByID(got.PostID); p.State != store.OwnerPostDeclined {
+		t.Fatal("unseen card's post not cancelled by No:", p.State)
+	}
+}
