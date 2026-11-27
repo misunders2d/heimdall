@@ -501,3 +501,37 @@ func TestOwnerPostIncompleteHistoryRefusesResend(t *testing.T) {
 		t.Fatalf("files completed over incomplete history: %v, completes %d, uploads %d", err, r2.completes, r2.uploads)
 	}
 }
+
+// A crash after a post went out but before its row was recorded sent may
+// leave its copies removed: the retry checks Slack by the recorded upload
+// IDs first and reports the post delivered, never failed for a copy it no
+// longer needs; recorded files not shared are completed from their IDs.
+func TestOwnerPostRetryAfterCopiesRemovedChecksSlackFirst(t *testing.T) {
+	ctx := context.Background()
+	r := newOwnerPostRig(t)
+	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C7", Thread: "1700000000.000100"}, "with a file", 1)
+	if err := r.s.Send(ctx, out); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(out.OwnerPost.Files[0].Path); err != nil {
+		t.Fatal(err)
+	}
+	out.Attempt = 1
+	if err := r.s.Send(ctx, out); err != nil || len(r.f.all("chat.postMessage")) != 1 || r.completes != 1 || r.uploads != 1 {
+		t.Fatalf("delivered post failed on retry: %v, posts %d, completes %d, uploads %d", err, len(r.f.all("chat.postMessage")), r.completes, r.uploads)
+	}
+
+	r2 := newOwnerPostRig(t)
+	r2.ambiguous = []string{"lost"}
+	out = r2.post(t, core.ConvKey{Interface: "slack", Chat: "C8"}, "", 1)
+	if err := r2.s.Send(ctx, out); err == nil {
+		t.Fatal("unconfirmed upload reported as sent")
+	}
+	if err := os.Remove(out.OwnerPost.Files[0].Path); err != nil {
+		t.Fatal(err)
+	}
+	out.Attempt = 1
+	if err := r2.s.Send(ctx, out); err != nil || r2.completes != 2 || r2.uploads != 1 {
+		t.Fatalf("recorded upload not completed: %v, completes %d, uploads %d", err, r2.completes, r2.uploads)
+	}
+}

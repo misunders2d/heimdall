@@ -88,3 +88,37 @@ func TestSentCardRecordsItsPlatformMessageID(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A post's file copies stay until its outcome is recorded: a crash before
+// that resends the row, whose retry may still need them.
+func TestOwnerPostCopiesKeptUntilSentIsRecorded(t *testing.T) {
+	e, db := answerEnv(t, 5)
+	copyPath := filepath.Join(t.TempDir(), "copy")
+	if err := os.WriteFile(copyPath, []byte("synthetic"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exec(t, db, `CREATE TRIGGER no_sent BEFORE UPDATE OF state ON outbound WHEN NEW.state='sent' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`)
+	id, err := e.st.Enqueue(core.Outbound{Conv: core.ConvKey{Interface: "fake", Chat: "team"}, Text: "the post", OwnerPost: &core.OwnerPost{ID: "pkeep", Label: "#team", Files: []core.File{{Path: copyPath, Name: "a.pdf"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.r.Wake("fake")
+	e.reply()
+	time.Sleep(300 * time.Millisecond) // the sent record keeps failing
+	if _, err := os.Stat(copyPath); err != nil {
+		t.Fatal("file copy removed before the post was recorded sent", err)
+	}
+	exec(t, db, `DROP TRIGGER no_sent`)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var state string
+		_ = db.QueryRow(`SELECT state FROM outbound WHERE id=?`, id).Scan(&state)
+		if _, err := os.Stat(copyPath); state == store.OutSent && os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state %q, copy not removed after the sent record", state)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

@@ -181,8 +181,22 @@ func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
 	if text != "" {
 		parts = splitReply(text)
 	}
-	if err := ownerFilesIntact(out.OwnerPost.Files); err != nil {
-		return err
+	// Recorded uploads mean the text went first and the verified bytes are
+	// already in Slack: the copies may be gone (removed once the row was
+	// sent, before a crash recorded it), and the checks below need only the
+	// recorded IDs. Otherwise every copy is checked before anything is sent.
+	var recorded []string
+	if len(out.OwnerPost.Files) > 0 {
+		ids, err := s.opt.Store.OwnerPostUploads(out.OwnerPost.ID)
+		if err != nil {
+			return err
+		}
+		recorded = ids
+	}
+	if len(recorded) == 0 {
+		if err := ownerFilesIntact(out.OwnerPost.Files); err != nil {
+			return err
+		}
 	}
 	// The text always goes as tagged messages, never as an upload's
 	// untagged comment: the tag is how its echo is known (eventAdmission).

@@ -513,6 +513,7 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		err = r.sendSafely(ctx, i, row.Outbound)
 		var perm PermanentError
 		var record func() error
+		finished := false // the row is done: a post's file copies go once that is recorded
 		switch {
 		case err == nil:
 			refMu.Lock()
@@ -521,18 +522,21 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 			// The last part's platform message ID: a post as the owner's card
 			// is answered only by a reply after it on the platform.
 			record = func() error { return r.store.SentRef(row.ID, last) }
-			removeSent(row.Outbound)
+			removeFile(row.Outbound)
+			finished = true
 		case errors.As(err, &perm):
 			r.log.Printf("reply %d to %s failed permanently: %v", row.ID, row.Conv, err)
 			msg := err.Error()
 			record = func() error { return r.store.Failed(row.ID, msg) }
-			removeSent(row.Outbound)
+			removeFile(row.Outbound)
+			finished = true
 			r.ownerPostFailed(row.Outbound)
 		case row.Attempts+1 >= r.opt.MaxAttempts:
 			r.log.Printf("reply %d to %s failed after %d attempts: %v", row.ID, row.Conv, row.Attempts+1, err)
 			msg := fmt.Sprintf("gave up after %d attempts: %v", row.Attempts+1, err)
 			record = func() error { return r.store.Failed(row.ID, msg) }
-			removeSent(row.Outbound)
+			removeFile(row.Outbound)
+			finished = true
 			r.ownerPostFailed(row.Outbound)
 		default:
 			backoff := min(time.Second<<min(row.Attempts, 9), 5*time.Minute)
@@ -543,10 +547,15 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		// The outcome is recorded before the next reply: a row left as
 		// sending would block its chat until a restart, which resends it.
 		// The first write happens even once stopping began: the send may
-		// have reached the chat, so only retries stop with ctx.
+		// have reached the chat, so only retries stop with ctx. A post as the
+		// owner's file copies are removed only after the outcome is recorded:
+		// a crash before it resends the row, which may still need them.
 		for attempt := 0; attempt == 0 || ctx.Err() == nil; attempt++ {
 			err := record()
 			if err == nil {
+				if finished {
+					removeOwnerPostFiles(row.Outbound)
+				}
 				break
 			}
 			r.log.Printf("outbound %d: outcome not recorded, retrying: %v", row.ID, err)
@@ -555,11 +564,16 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 	}
 }
 
-// removeSent removes Heimdall's own file copies of a finished row.
-func removeSent(out core.Outbound) {
+// removeFile removes a finished reply's file copy, before its outcome is
+// recorded, as before posts as the owner: a resend then finds it gone.
+func removeFile(out core.Outbound) {
 	if out.File != nil {
 		os.Remove(out.File.Path)
 	}
+}
+
+// removeOwnerPostFiles removes a finished post as the owner's file copies.
+func removeOwnerPostFiles(out core.Outbound) {
 	if out.OwnerPost != nil {
 		for _, f := range out.OwnerPost.Files {
 			os.Remove(f.Path)

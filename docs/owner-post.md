@@ -140,8 +140,9 @@ queued. Text or files alone are fine; at least one is required.
 - Nothing about a post is ever sent to its target but the post. A post that
   fails for good (or after the router's attempts) gets one fixed notice in
   the owner's private chat with the bot, naming the destination. The file
-  copies are removed when the row finishes, otherwise with the outbox's
-  7-day retention.
+  copies are removed once the row's outcome is recorded, otherwise with the
+  outbox's 7-day retention. A retry whose files were already uploaded
+  checks Slack by the recorded file IDs and needs no copy.
 - A post Heimdall made comes back from Slack as the owner's message. Events
   from the owner carrying the post metadata are dropped before persistence,
   so they never become the owner's live input. The files' message cannot
