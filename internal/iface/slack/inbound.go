@@ -31,6 +31,9 @@ type eventMessage struct {
 	Files          []slackFile `json:"files"`
 	Blocks         []any       `json:"blocks"`
 	Attachments    []any       `json:"attachments"`
+	Metadata       struct {
+		Type string `json:"event_type"`
+	} `json:"metadata"`
 }
 
 const mcpNotice = "MCP sign-in requires a private DM. DM the bot `mcp login mellanni`. Do not paste OAuth codes elsewhere."

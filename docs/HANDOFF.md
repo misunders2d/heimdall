@@ -1,3 +1,8 @@
+> Posts as the owner (2026-11-27): see [owner-post.md](owner-post.md). Opt-in
+> `slack.owner_post`, approval `confirm` by default. Fake tests only; not
+> deployed. Live checks still open: owner token history scopes for the
+> check-before-resend, metadata in echoed events, history visibility timing.
+
 > Between-turn delivery update (2026-11-07): see
 > [native continuation evidence and proposed deployment](between-turn-delivery.md).
 > Isolated work clone only; no live bot, deployment or restart.

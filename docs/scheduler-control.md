@@ -81,6 +81,12 @@ with the same arguments:
 {"action":"discover|list|show|history|checkpoint|create|edit|run|pause|resume|stop|remove|acknowledge","id":"optional job id","definition":{},"request_id":"stable unique mutation id"}
 ```
 
+`post_as_owner` (with `target`, `text`, `files` and `request_id`; opt-in
+`slack.owner_post`) posts to Slack as the owner, under the owner's user
+token, after the owner's own Yes unless approval is immediate:
+[owner-post.md](owner-post.md). Admission is this control's; scheduled
+runs are refused, and standalone CLI calls stay refused.
+
 Two more actions, `task_intake` and `task_intake_done`, exist only for the T3
 intake hooks (`deploy/t3-intake`, [durable.md](durable.md)): accepted from the
 trusted T3 launcher only, with `request_id` `prompt_submit` or `stop`; they
@@ -259,7 +265,9 @@ completion evidence. Fakes do not prove actual Slack/recall access, edited-messa
 coverage or delivery. Those remain the separately approved acceptance below.
 
 Only the captured owner private Bezos DM receives Heimdall bot output. The model
-never posts, reacts, edits or sends as the owner via Slack connector tools. Root
+never posts, reacts, edits or sends as the owner via Slack connector tools.
+(A post as the owner goes only through `post_as_owner`, with its own approval,
+[owner-post.md](owner-post.md); it is not part of this workflow.) Root
 must verify the configured binding really is that owner's bot DM before staging.
 
 ## Bounded native hub probe — prepared, not executed

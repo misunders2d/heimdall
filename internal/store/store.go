@@ -170,6 +170,17 @@ ALTER TABLE turns ADD COLUMN no_resume INTEGER NOT NULL DEFAULT 0;`,
 		rule TEXT NOT NULL, revision INTEGER NOT NULL,
 		changed INTEGER NOT NULL, PRIMARY KEY(chat, thread));`,
 	`ALTER TABLE slack_watches ADD COLUMN delay_seconds INTEGER NOT NULL DEFAULT 0;`,
+	// Posts as the owner (docs/owner-post.md): the checked request, its card
+	// conversation and decision, and the Slack file IDs recorded before the
+	// upload is completed, so a retry checks Slack before completing again.
+	`CREATE TABLE owner_posts(
+		id TEXT PRIMARY KEY, creator TEXT NOT NULL,
+		card_iface TEXT NOT NULL, card_chat TEXT NOT NULL, card_thread TEXT NOT NULL,
+		target_chat TEXT NOT NULL, target_thread TEXT NOT NULL, label TEXT NOT NULL,
+		text TEXT NOT NULL, files TEXT NOT NULL, origin TEXT NOT NULL,
+		state TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
+		decided_at INTEGER NOT NULL DEFAULT 0, uploads TEXT NOT NULL DEFAULT '');
+CREATE INDEX owner_posts_card ON owner_posts(creator, card_iface, card_chat, card_thread, state);`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -214,12 +225,13 @@ type outExtra struct {
 	Formatted         bool                 `json:"formatted,omitempty"`
 	Reactions         []core.Reaction      `json:"reactions,omitempty"`
 	File              *core.File           `json:"file,omitempty"`
+	OwnerPost         *core.OwnerPost      `json:"owner_post,omitempty"`
 	Effect            string               `json:"effect,omitempty"` // EnqueueEffect's idempotency key
 }
 
 func outExtraOf(out core.Outbound) (string, error) {
-	x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File, SlackOwnerMention: out.SlackOwnerMention, SlackWatch: out.SlackWatch}
-	if x.Window == nil && x.TurnID == 0 && !x.Formatted && len(x.Reactions) == 0 && x.File == nil && x.SlackOwnerMention == "" {
+	x := outExtra{Window: out.Window, TurnID: out.TurnID, Formatted: out.Formatted, Reactions: out.Reactions, File: out.File, SlackOwnerMention: out.SlackOwnerMention, SlackWatch: out.SlackWatch, OwnerPost: out.OwnerPost}
+	if x.Window == nil && x.TurnID == 0 && !x.Formatted && len(x.Reactions) == 0 && x.File == nil && x.SlackOwnerMention == "" && x.OwnerPost == nil {
 		return "", nil
 	}
 	b, err := json.Marshal(x)
@@ -231,6 +243,7 @@ func (x outExtra) apply(out *core.Outbound) {
 	out.SlackOwnerMention = x.SlackOwnerMention
 	out.SlackWatch = x.SlackWatch
 	out.Formatted, out.Reactions, out.File, out.TurnID = x.Formatted, x.Reactions, x.File, x.TurnID
+	out.OwnerPost = x.OwnerPost
 }
 
 type Store struct{ db *sql.DB }

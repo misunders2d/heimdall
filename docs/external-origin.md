@@ -60,8 +60,11 @@ Heimdall never reads launcher environment variables (`AGENTNET_REQUESTER`,
 
 ### What the origin may do
 
-An `agent` origin may only submit `task_add` under the verified owner.
-The following controls apply to `human` origins.
+An `agent` origin may only submit `task_add` under the verified owner and,
+owner decision 2026-11-27, `post_as_owner` (a post to Slack as the owner;
+with the default approval it waits for the owner's own Yes,
+[owner-post.md](owner-post.md)). The following controls apply to `human`
+origins, which may also use `post_as_owner`.
 
 - `create` and `edit`: applied at once (as direct owner chat requests are since
   f967daa). A job with `rerun_on_timeout` still becomes a draft that asks.
@@ -88,7 +91,8 @@ The following controls apply to `human` origins.
 Refusals name what is missing, for example: no Heimdall turn and no
 configured launcher started this process; the launcher does not vouch for this
 process; person `X` has no Heimdall identity mapping; the mapped identity is
-not a current owner; external owner agents may only add tasks.
+not a current owner; external owner agents may only add tasks and request
+posts as the owner.
 
 ## Contract a launcher must provide (AgentNet side)
 
@@ -173,8 +177,9 @@ tree, a stale turn or a launcher that refused never falls through to this.
 
 `"manage":true` in `trusted_t3` (owner opt-in, default off) also lets that
 same bound owner `create` jobs and `edit`, `list`, `show`, `history`, `run`,
-`pause`, `resume` and `stop` their own jobs (exact creator) and
-`task_pause`, `task_resume`, `task_close` their own tasks, with the same
+`pause`, `resume` and `stop` their own jobs (exact creator),
+`task_pause`, `task_resume`, `task_close` their own tasks and
+`post_as_owner` ([owner-post.md](owner-post.md)), with the same
 binding, lineage recheck and `request_id` record. Owner, 2026-11-11: "T3 is
 a trusted source of scheduling". Create and edit apply at once, as for an
 external owner origin (no chat to confirm in), through the same validation

@@ -513,23 +513,19 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 		switch {
 		case err == nil:
 			record = func() error { return r.store.Sent(row.ID) }
-			if row.File != nil {
-				os.Remove(row.File.Path)
-			}
+			removeSent(row.Outbound)
 		case errors.As(err, &perm):
 			r.log.Printf("reply %d to %s failed permanently: %v", row.ID, row.Conv, err)
 			msg := err.Error()
 			record = func() error { return r.store.Failed(row.ID, msg) }
-			if row.File != nil {
-				os.Remove(row.File.Path)
-			}
+			removeSent(row.Outbound)
+			r.ownerPostFailed(row.Outbound)
 		case row.Attempts+1 >= r.opt.MaxAttempts:
 			r.log.Printf("reply %d to %s failed after %d attempts: %v", row.ID, row.Conv, row.Attempts+1, err)
 			msg := fmt.Sprintf("gave up after %d attempts: %v", row.Attempts+1, err)
 			record = func() error { return r.store.Failed(row.ID, msg) }
-			if row.File != nil {
-				os.Remove(row.File.Path)
-			}
+			removeSent(row.Outbound)
+			r.ownerPostFailed(row.Outbound)
 		default:
 			backoff := min(time.Second<<min(row.Attempts, 9), 5*time.Minute)
 			r.log.Printf("reply %d to %s: retry in %s: %v", row.ID, row.Conv, backoff, err)
@@ -549,6 +545,35 @@ func (r *Router) deliver(ctx context.Context, i Interface) {
 			sleep(ctx, min(100*time.Millisecond<<min(attempt, 6), 5*time.Second))
 		}
 	}
+}
+
+// removeSent removes Heimdall's own file copies of a finished row.
+func removeSent(out core.Outbound) {
+	if out.File != nil {
+		os.Remove(out.File.Path)
+	}
+	if out.OwnerPost != nil {
+		for _, f := range out.OwnerPost.Files {
+			os.Remove(f.Path)
+		}
+	}
+}
+
+// ownerPostFailed tells the owner, in the owner's private chat with the bot
+// and never at the post's target, that a post as the owner was not sent.
+// A fixed notice; nothing is retried.
+func (r *Router) ownerPostFailed(out core.Outbound) {
+	p := out.OwnerPost
+	if p == nil || p.Notice.Interface == "" {
+		return
+	}
+	label := strings.Join(strings.Fields(p.Label), " ")
+	text := "⚠ Your post as you to " + label + " was not sent, or its delivery could not be confirmed. Check " + label + " before asking again; nothing more is retried. — heimdall"
+	if _, err := r.store.Enqueue(core.Outbound{Conv: p.Notice, Text: text}); err != nil {
+		r.log.Printf("outbound %d: owner post failure notice not queued: %v", out.ID, err)
+		return
+	}
+	r.wake(p.Notice.Interface)
 }
 
 func sleep(ctx context.Context, d time.Duration) {
@@ -980,6 +1005,11 @@ func (c *conv) answer(row store.InboundRow, e store.CommandEnd, text string) {
 	c.r.release(row.Inbound)
 	c.r.wake(c.key.Interface)
 	if e.Job != nil {
+		// A change may queue rows for another interface (an approved post
+		// as the owner goes to Slack from any private chat).
+		for name := range c.r.ifaces {
+			c.r.wake(name)
+		}
 		for _, id := range e.Job.StopJobs() {
 			c.r.stopJob(id)
 		}

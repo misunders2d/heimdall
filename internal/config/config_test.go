@@ -303,3 +303,27 @@ func TestRetentionDays(t *testing.T) {
 		t.Fatal("negative retention_days accepted")
 	}
 }
+
+// Posts as the owner: approval mode is config only, "confirm" by default.
+func TestSlackOwnerPostApproval(t *testing.T) {
+	base := `"data_dir":"/tmp/h","mode":"corporate","owners":["telegram:1"],"max_parallel":3,"run_as":{"owner":{"user":"root"},"employee":{"user":"worker"}},"durable":{"enabled":true,"assistant_work":true}`
+	control := `,"scheduler":{"enabled":true,"default_tz":"UTC","control":{"owner":"telegram:1"}}`
+	doc := func(post, sched string) string {
+		return `{` + base + sched + `,"slack":{"team_id":"T1","work_owner_id":"UOWNER","owner_post":` + post + `}}`
+	}
+	c, err := Parse([]byte(doc(`{"enabled":true}`, control)))
+	if err != nil || !c.Slack.OwnerPost.On() || c.Slack.OwnerPost.Approval != OwnerPostConfirm {
+		t.Fatal(c, err)
+	}
+	if c, err = Parse([]byte(doc(`{"enabled":true,"approval":"immediate"}`, control))); err != nil || c.Slack.OwnerPost.Approval != OwnerPostImmediate {
+		t.Fatal(c, err)
+	}
+	for _, bad := range []string{doc(`{"enabled":true,"approval":"A"}`, control), doc(`{"enabled":true}`, ""), doc(`{"enabled":true,"mode":"confirm"}`, control)} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+	if c, err = Parse([]byte(`{` + base + control + `,"slack":{"team_id":"T1"}}`)); err != nil || c.Slack.OwnerPost.On() {
+		t.Fatal("owner posts on without opt-in", err)
+	}
+}

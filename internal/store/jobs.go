@@ -113,6 +113,10 @@ type JobChange struct {
 	CancelRetries        string // timeout retry fence, stored with command answer
 	CancelPendingRetries string // pause/edit: pending replay only
 	StopJob              string // router callback after command commit, not persisted
+	// NewOwnerPost stores a post-as-owner request (pending, or approved with
+	// its delivery row queued beside it); OwnerPost answers a pending one.
+	NewOwnerPost *OwnerPost
+	OwnerPost    *OwnerPostDecision
 	// More: further changes stored in the same transaction, in order (a bare
 	// yes or no answering several drafts at once).
 	More []*JobChange
@@ -158,6 +162,16 @@ func (ch *JobChange) applyOne(tx *sql.Tx) error {
 	}
 	if ch != nil && ch.CancelPendingRetries != "" {
 		if err := cancelPendingTimeoutRetries(tx, ch.CancelPendingRetries); err != nil {
+			return err
+		}
+	}
+	if ch != nil && ch.NewOwnerPost != nil {
+		if err := insertOwnerPost(tx, *ch.NewOwnerPost); err != nil {
+			return err
+		}
+	}
+	if ch != nil && ch.OwnerPost != nil {
+		if err := decideOwnerPost(tx, *ch.OwnerPost); err != nil {
 			return err
 		}
 	}

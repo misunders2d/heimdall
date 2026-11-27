@@ -198,6 +198,11 @@ func run(args []string) error {
 	for _, i := range interfaces {
 		if sl, ok := i.(*slack.Slack); ok && jobs != nil {
 			jobs.Reverify = sl.Reverify // Slack creators are verified live at every fire
+			if o := cfg.Slack.OwnerPost; o.On() {
+				// Posts as the owner (docs/owner-post.md): the control action,
+				// with the owner's user token only.
+				jobs.OwnerPost = &scheduler.OwnerPosts{Poster: sl, Immediate: o.Approval == config.OwnerPostImmediate, Dir: filepath.Join(cfg.DataDir, "outbox"), DataDir: cfg.DataDir}
+			}
 		}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

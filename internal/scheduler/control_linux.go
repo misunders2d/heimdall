@@ -36,12 +36,18 @@ type ControlRequest struct {
 	Definition json.RawMessage `json:"definition,omitempty"`
 	RequestID  string          `json:"request_id,omitempty"`
 	Title      string          `json:"title,omitempty"` // task_add only: the task's plain title
+	// post_as_owner only (docs/owner-post.md): where, what, and files on the
+	// hub that the requesting process's user owns.
+	Target string   `json:"target,omitempty"`
+	Text   string   `json:"text,omitempty"`
+	Files  []string `json:"files,omitempty"`
 }
 
 type ControlResult struct {
 	Reply   string `json:"reply,omitempty"`
 	DraftID string `json:"draft_id,omitempty"`
-	JobID   string `json:"job_id,omitempty"` // a job applied at once (external owner origin)
+	JobID   string `json:"job_id,omitempty"`  // a job applied at once (external owner origin)
+	PostID  string `json:"post_id,omitempty"` // a post as the owner, waiting or queued
 	Changed bool   `json:"changed"`
 	Error   string `json:"error,omitempty"`
 }
@@ -248,7 +254,7 @@ func (c *Control) caller(ctx context.Context, origin []Caller) (Caller, error) {
 	if !ok || r != core.RoleOwner {
 		return Caller{}, errors.New("bound caller is not a current owner")
 	}
-	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: actor, OAuthInstallation: installation, External: who.External, Registered: who.Registered}, nil
+	return Caller{Principal: p, Role: r, Conv: k, Private: who.Private, OAuthActor: actor, OAuthInstallation: installation, External: who.External, externalAgent: who.externalAgent, Registered: who.Registered}, nil
 }
 
 // scheduledCaller binds a router-started scheduled run. The router already
@@ -352,8 +358,10 @@ func (c *Control) resolvePeer(pid int, alive func() bool) (Caller, func() bool, 
 // Capture an eligible native input before waiting; never upgrade a queued idle
 // request to a later turn. Recheck that same generation after live verification.
 func (c *Control) executePeer(ctx context.Context, cred *syscall.Ucred, req ControlRequest, who Caller, valid func() bool) ControlResult {
-	if who.externalAgent && req.Action != "task_add" {
-		return ControlResult{Error: "external owner agents may only add tasks"}
+	// Owner, 2026-11-27: the owner's verified agents may also ask to post
+	// as the owner (docs/owner-post.md); nothing else.
+	if who.externalAgent && req.Action != "task_add" && req.Action != postAsOwner {
+		return ControlResult{Error: "external owner agents may only add tasks and request posts as the owner"}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -387,6 +395,12 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 	}
 	if len(valid) > 0 && !valid[0]() {
 		return fail(errors.New("request origin expired during verification"))
+	}
+	if req.Action == postAsOwner {
+		return c.postAsOwner(ctx, uid, req, who, valid)
+	}
+	if req.Target != "" || req.Text != "" || len(req.Files) > 0 {
+		return fail(errors.New("target, text and files are only valid for post_as_owner"))
 	}
 	if strings.HasPrefix(req.Action, "task_") {
 		return c.task(uid, req, who, valid)
@@ -428,7 +442,7 @@ func (c *Control) executeLocked(ctx context.Context, uid uint32, req ControlRequ
 		return fail(errors.New("receipt fields require acknowledge"))
 	}
 	if req.Action == "discover" {
-		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show, task_wake, task_pause, task_resume, task_close for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step; task_wake: id + request_id, wakes it now). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there (an external or trusted T3 owner origin's create/edit apply at once; removal and rerun_on_timeout still ask). Other operations use existing job commands. Identity is bound by OS peer credentials and the active verified ingress turn."}
+		return ControlResult{Reply: "list, show, history, checkpoint, create, edit, run, pause, resume, stop, remove, acknowledge; task_add, task_list, task_show, task_wake, task_pause, task_resume, task_close for durable tasks (task_add: id = Linear issue, title, request_id; worked by your own assistant until verified; no worker, resource, gate or next step; task_wake: id + request_id, wakes it now). acknowledge requires the exact failed receipt key/revision/outbound_id, retains history and never replays. create/edit/remove prepare a draft in the originating conversation; only its real human can confirm there (an external or trusted T3 owner origin's create/edit apply at once; removal and rerun_on_timeout still ask). Other operations use existing job commands. post_as_owner (target, text, files, request_id; when enabled) posts to Slack as the owner: the owner approves the exact post in their private chat first unless approval is immediate. Identity is bound by OS peer credentials and the active verified ingress turn."}
 	}
 	var job store.Job
 	if req.ID != "" {
@@ -565,7 +579,7 @@ func (c *Control) manages(who Caller, action string) bool {
 		return false
 	}
 	switch action {
-	case "list", "show", "history", "create", "edit", "run", "pause", "resume", "stop", "task_pause", "task_resume", "task_close":
+	case "list", "show", "history", "create", "edit", "run", "pause", "resume", "stop", "task_pause", "task_resume", "task_close", postAsOwner:
 		return true
 	}
 	return false
@@ -573,7 +587,7 @@ func (c *Control) manages(who Caller, action string) bool {
 
 func (c *Control) managed() string {
 	if c.s.TrustedT3 != nil && c.s.TrustedT3.Manage {
-		return "; with manage: list, show, history, create, edit, run, pause, resume, stop of the owner's jobs and task_pause, task_resume, task_close (never remove, checkpoint or acknowledge)"
+		return "; with manage: list, show, history, create, edit, run, pause, resume, stop of the owner's jobs, task_pause, task_resume, task_close and post_as_owner (never remove, checkpoint or acknowledge)"
 	}
 	return ""
 }

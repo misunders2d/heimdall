@@ -83,6 +83,35 @@ func (s *Scheduler) Answer(c Caller, text string) (reply string, change *store.J
 		return "", nil, false
 	}
 	drafts := s.drafts(c)
+	if posts := s.ownerPosts(c); len(posts) > 0 {
+		// Posts as the owner wait here too: one Yes or No answers them with
+		// any drafts.
+		if details {
+			var cards []string
+			for _, p := range posts {
+				cards = append(cards, postCard(c.Conv, p))
+			}
+			if len(drafts) > 0 {
+				cards = append(cards, s.waiting(c, drafts))
+			}
+			return strings.Join(cards, "\n\n"), nil, true
+		}
+		reply, change = s.answerPosts(c, posts, confirm)
+		if len(drafts) > 0 {
+			var r string
+			var ch *store.JobChange
+			switch {
+			case len(drafts) > 1:
+				r, ch = s.answerAll(c, drafts, confirm)
+			case confirm:
+				r, ch = s.confirm(c, drafts[0].ID)
+			default:
+				r, ch = s.discard(c, drafts[0].ID)
+			}
+			reply, change = r+"\n\n"+reply, &store.JobChange{More: []*store.JobChange{ch, change}}
+		}
+		return reply, change, true
+	}
 	switch {
 	case len(drafts) == 0:
 		return "", nil, false

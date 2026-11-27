@@ -103,7 +103,8 @@ the `heimdall-live` unit.
   The launcher-verified requester must map explicitly to a current owner.
   Environment variables are never identity. A verified external human owner
   may add, list and show durable tasks. That owner's verified agents may
-  only add tasks. Slack task admission requires a live-verified OAuth actor.
+  only add tasks and, owner exception 2026-11-27, request posts as the owner
+  (below). Slack task admission requires a live-verified OAuth actor.
   External human owner job creates and edits apply at once. Removal and
   `rerun_on_timeout` require human confirmation.
 - **Roles.**
@@ -189,7 +190,9 @@ the `heimdall-live` unit.
   own queued work while someone else runs, never that other turn or queue.
 - **Slack**: Socket Mode only; `auth.test` must match `slack.team_id` before
   connecting. Tokens only from `HEIMDALL_SLACK_BOT_TOKEN` and
-  `HEIMDALL_SLACK_APP_TOKEN`. One data-directory lock; no live connection
+  `HEIMDALL_SLACK_APP_TOKEN`, plus the owner's verified user token
+  `HEIMDALL_SLACK_WORK_USER_TOKEN` for conversation work and posts as the
+  owner. One data-directory lock; no live connection
   during development. Every reply uses the root thread, DMs included. A
   shared message needs a bot mention unless the shared command policy
   admits it; replying in a bot thread alone does not count. Persist the raw
@@ -210,6 +213,25 @@ the `heimdall-live` unit.
   deletion fails, and recovered after restart. Files out use checked outboxes
   and the supported external-upload flow, a `.caption` sidecar as the
   initial comment; reactions use Slack names.
+- **Posts as the owner** (owner, 2026-11-27; opt-in `slack.owner_post`;
+  [docs/owner-post.md](docs/owner-post.md)): the control action
+  `post_as_owner` posts to a Slack channel, group or DM as the owner, with
+  files, under the owner's user token (`HEIMDALL_SLACK_WORK_USER_TOKEN`),
+  never the bot's. Owner only, and only the person whose token posts. Same
+  admission as scheduler control: live owner turns, external launcher runs
+  (the owner's verified AgentNet agents included, the dated exception
+  above) and trusted T3 with `manage`; never scheduled runs, employees or
+  standalone terminal calls (terminal agents go through AgentNet or T3).
+  `approval` `"confirm"` (default, mode B) shows the owner the exact post
+  in the owner's private chat with the bot and sends it only after the
+  owner's own Yes there; `"immediate"` (mode A) sends at once; switching is
+  config only. Files are the one place a caller names a path: absolute hub
+  paths owned by the control peer's UID, checked like outbox files (5 files,
+  50 MB each) and copied by Heimdall at request time. The owner's chat with
+  the bot and bot mentions are refused targets/text. Nothing about a post
+  goes to its target but the post; notices go to the owner's private chat.
+  Slack is checked before any resend of a text part or upload completion;
+  delivery stays at-least-once.
 - **Slack watches** (opt-in): `heimdall slack-watch` changes durable channel,
   thread or DM rules on the running service. An owner sponsors the run and the
   verified requester stays recorded. Work uses the owner's normal tools and

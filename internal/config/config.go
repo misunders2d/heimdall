@@ -209,7 +209,28 @@ type Slack struct {
 	MaxFileBytes  int64  `json:"max_file_bytes,omitempty"`
 	StatusName    string `json:"status_name,omitempty"`
 	StatusUpdates *bool  `json:"status_updates,omitempty"`
+	// OwnerPost: the owner's agents may ask to post to Slack as the owner,
+	// under the owner's user token (docs/owner-post.md). Off when absent.
+	OwnerPost *OwnerPost `json:"owner_post,omitempty"`
 }
+
+// OwnerPost configures posts as the owner. Approval "confirm" (mode B, the
+// default) shows the owner the exact post first and sends it only after the
+// owner's Yes; "immediate" (mode A) sends at once. Switching is this config
+// value only.
+type OwnerPost struct {
+	Enabled  bool   `json:"enabled"`
+	Approval string `json:"approval,omitempty"`
+}
+
+// Approval modes of posts as the owner.
+const (
+	OwnerPostConfirm   = "confirm"
+	OwnerPostImmediate = "immediate"
+)
+
+// On reports posts as the owner enabled.
+func (o *OwnerPost) On() bool { return o != nil && o.Enabled }
 
 // Load reads and validates the config at path.
 func Load(path string) (*Config, error) {
@@ -337,6 +358,20 @@ func (c *Config) fill(staged bool) error {
 		}
 		if c.Slack.WorkOwnerID != "" && (!c.Durable.On() || !c.Durable.Assistant) {
 			return errors.New("slack.work_owner_id requires durable.assistant_work")
+		}
+		if o := c.Slack.OwnerPost; o != nil {
+			if o.Approval == "" {
+				o.Approval = OwnerPostConfirm
+			}
+			if o.Approval != OwnerPostConfirm && o.Approval != OwnerPostImmediate {
+				return errors.New(`slack.owner_post.approval must be "confirm" or "immediate"`)
+			}
+			if o.Enabled && c.Slack.WorkOwnerID == "" {
+				return errors.New("slack.owner_post requires a Slack work_owner_id (the owner whose user token posts)")
+			}
+			if o.Enabled && (!c.Scheduler.On() || c.Scheduler.Control == nil) {
+				return errors.New("slack.owner_post requires scheduler.control (its only entry point)")
+			}
 		}
 		if len(c.Slack.ConversationWork) > 0 {
 			if c.Slack.WorkOwnerID == "" {

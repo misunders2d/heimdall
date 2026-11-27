@@ -219,6 +219,15 @@ connect an additional Socket Mode client during normal hub operation and
 never touch `heimdall-live`. Live checks (including token scopes and metadata
 visibility) remain unverified until that window. See [parity evidence](docs/slack-parity.md).
 
+### Posts as the owner
+
+Opt-in `"owner_post":{"enabled":true,"approval":"confirm"}` in the `slack`
+block lets the owner's agents ask, through the scheduler control, to post to
+a Slack channel, group or DM as the owner, with files, under
+`HEIMDALL_SLACK_WORK_USER_TOKEN`. With `confirm` (the default) the owner
+approves the exact post in their private chat with the bot first;
+`immediate` sends at once. See [owner-post.md](docs/owner-post.md).
+
 ### Slack watches
 
 Set the owner’s Slack member ID in the existing `slack` config block:

@@ -155,6 +155,9 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 	if m.User != "" && m.User == s.opt.WorkOwnerID && strings.HasPrefix(m.Text, workAttribution(m.User)) {
 		return false, false, nil // our own attributed reply via the user token
 	}
+	if m.User != "" && m.User == s.opt.WorkOwnerID && m.Metadata.Type == ownerPostEvent {
+		return false, false, nil // a post as the owner that Heimdall made: never the owner's live input
+	}
 	if len(p.Authorizations) == 0 {
 		return true, false, nil // legacy and bot-only envelopes without authorizations
 	}

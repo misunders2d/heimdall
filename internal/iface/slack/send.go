@@ -76,6 +76,9 @@ func (s *Slack) Send(ctx context.Context, out core.Outbound) error {
 	if err := s.await(ctx); err != nil {
 		return err
 	}
+	if out.OwnerPost != nil {
+		return s.sendOwnerPost(ctx, out) // the owner's token only; no notice here
+	}
 	if out.File != nil {
 		err := s.upload(ctx, out)
 		if err != nil {

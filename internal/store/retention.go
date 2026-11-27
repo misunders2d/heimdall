@@ -18,6 +18,7 @@ import (
 //     (unretired) workflow alerts, whose content hash is checkpoint state;
 //   - turns that ended: detail, except durable review turns, whose detail
 //     is the result the durable workflow reads back (pruned with durable.db);
+//   - posts as the owner that were answered or expired: text;
 //   - ambient group context: the whole row.
 //
 // Pending, running, steering, held and sending rows are never touched.
@@ -42,6 +43,8 @@ var pruneSteps = []struct {
 	{"outbound", `UPDATE outbound SET text=''
  WHERE id IN (SELECT o.id FROM outbound o WHERE o.created_at<? AND o.state IN ('sent','failed') AND o.text!=''
  AND NOT EXISTS(SELECT 1 FROM job_alerts a WHERE a.outbound_id=o.id AND a.retired=0) LIMIT ?)`},
+	{"outbound", `UPDATE owner_posts SET text=''
+ WHERE id IN (SELECT id FROM owner_posts WHERE created_at<? AND text!='' LIMIT ?)`},
 	{"turns", `UPDATE turns SET detail=''
  WHERE id IN (SELECT t.id FROM turns t WHERE t.state!='running' AND t.ended_at IS NOT NULL AND t.ended_at<? AND t.detail!=''
  AND NOT EXISTS(SELECT 1 FROM inbound i WHERE i.turn_id=t.id AND CASE WHEN json_valid(i.extra) THEN json_type(i.extra,'$.review') IS NOT NULL ELSE 0 END) LIMIT ?)`},

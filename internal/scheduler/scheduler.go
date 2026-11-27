@@ -93,6 +93,9 @@ type Scheduler struct {
 	// are worked by assistant wakes, so a live owner turn is told to admit
 	// accepted follow-through work itself (TaskNote).
 	TaskIntake bool
+	// OwnerPost enables the post_as_owner control action
+	// (docs/owner-post.md); nil: off.
+	OwnerPost *OwnerPosts
 
 	cfg    Config
 	st     *store.Store

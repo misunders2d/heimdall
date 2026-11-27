@@ -27,6 +27,7 @@ func TestMain(m *testing.M) { fakeharness.Main(); os.Exit(m.Run()) }
 type apiCall struct {
 	Method string
 	Body   map[string]any
+	Token  string // the Authorization header's bearer
 }
 type slackFake struct {
 	t             *testing.T
@@ -157,7 +158,7 @@ func (f *slackFake) serve(w http.ResponseWriter, r *http.Request) {
 		f.t.Error("wrong API token")
 	}
 	f.mu.Lock()
-	f.calls = append(f.calls, apiCall{method, args})
+	f.calls = append(f.calls, apiCall{method, args, strings.TrimPrefix(authorization, "Bearer ")})
 	hook := f.hook
 	f.mu.Unlock()
 	if hook != nil && hook(w, r, args) {

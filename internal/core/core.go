@@ -385,6 +385,18 @@ type Outbound struct {
 	Reactions []Reaction
 	// File is a file to send instead of text.
 	File *File
+	// OwnerPost marks a post the owner approved to go out under the owner's
+	// own Slack user token (docs/owner-post.md): Text and Files form one post,
+	// never sent by the bot, and every notice about it goes to Notice.
+	OwnerPost *OwnerPost
+}
+
+// OwnerPost is the delivery part of an owner-approved post as the owner.
+type OwnerPost struct {
+	ID     string  `json:"id"`              // the stored request (store.OwnerPost)
+	Label  string  `json:"label,omitempty"` // destination as shown on its card
+	Files  []File  `json:"files,omitempty"` // Heimdall's own checked copies
+	Notice ConvKey `json:"notice"`          // the owner's private chat with the bot
 }
 
 // File is a file a harness left for the chat: Heimdall's own copy, which
@@ -397,6 +409,8 @@ type File struct {
 	// reply markup (as a Formatted reply), sent with the file as one
 	// message. Scrubbed like the reply.
 	Caption string `json:"caption,omitempty"`
+	// Size in bytes, when Heimdall checked it (posts as the owner).
+	Size int64 `json:"size,omitempty"`
 }
 
 // Reaction is an emoji reaction on one interface message.
