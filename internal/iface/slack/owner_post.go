@@ -521,11 +521,14 @@ func (s *Slack) ownerHistory(ctx context.Context, api *apiClient, out core.Outbo
 func (s *Slack) ownerHistoryPart(ctx context.Context, api *apiClient, out core.Outbound, key, part string) (string, error) {
 	found, untagged := "", false
 	err := s.ownerHistory(ctx, api, out, func(m ownerHistoryMessage) bool {
+		if m.User != s.opt.WorkOwnerID {
+			return false // only the owner's own messages: a tag another app set is not the post
+		}
 		if m.Metadata.Type == ownerPostEvent && m.Metadata.Payload.ID == key {
 			found = m.TS
 			return true
 		}
-		if m.User == s.opt.WorkOwnerID && m.Metadata.Type == "" && strings.TrimSpace(m.Text) == strings.TrimSpace(part) {
+		if m.Metadata.Type == "" && strings.TrimSpace(m.Text) == strings.TrimSpace(part) {
 			untagged = true
 		}
 		return false

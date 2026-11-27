@@ -632,3 +632,21 @@ func TestOwnerPostEchoOnlyHeimdallsOwn(t *testing.T) {
 		}
 	}
 }
+
+// A delivery tag on someone else's message (another app can set any
+// metadata) never counts as the post: the retry still writes it.
+func TestOwnerPostTagOnlyCountsOnTheOwnersMessage(t *testing.T) {
+	r := newInvRig(t)
+	out := r.invPost(t, invConvs[0].conv)
+	parts, keys := ownerParts(out)
+	mustStage(t, r.st.StartOwnerPostPart(out.OwnerPost.ID, len(parts), 0))
+	r.f.mu.Lock()
+	r.f.messages = append(r.f.messages, map[string]any{"channel": out.Conv.Chat, "ts": "1000.999999", "user": "UCOL", "text": "forged", "metadata": metadata(keys[0], ownerPostEvent)})
+	r.f.mu.Unlock()
+	if err, _ := r.deliver(out); err != nil {
+		t.Fatal(err)
+	}
+	if r.posts[keys[0]] != 1 {
+		t.Fatalf("part behind a forged tag posted %d times, want once", r.posts[keys[0]])
+	}
+}
