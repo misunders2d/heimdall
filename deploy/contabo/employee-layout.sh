@@ -26,6 +26,8 @@ if [[ $mode == undo ]]; then
   exit
 fi
 [[ $mode == install && $(id -u) == 0 && $(id -u heimdall-employee) == 997 && -n $node_root ]]
+# Only a root nvm Node directory may be chmodded (NODE_ROOT is operator input).
+[[ $node_root =~ ^/root/\.nvm/versions/node/v[0-9][0-9A-Za-z.+-]*$ && -d $node_root && ! -L $node_root && $(readlink -f "$node_root") == "$node_root" ]] || { echo "refuse NODE_ROOT $node_root: not /root/.nvm/versions/node/v*" >&2; exit 1; }
 [[ ! -L $root ]]
 install -d -m 0755 "$root" "$root/pi" "$root/pi/scripts" "$root/runtime" "$root/heimdall" "$root/bin"
 # MEL-846: an npm upgrade can leave the Pi package 0700 ("Cannot find module
@@ -72,19 +74,33 @@ bind_ro "$node_root/lib/node_modules/@earendil-works/pi-coding-agent" runtime/pi
 # source file; do not chmod the live checkout or expose the .secrets subtree.
 install -m 0644 "$repo/deploy/employee/employee-guard.ts" "$repo/deploy/employee/pi-employee-cli.mjs" "$repo/deploy/employee/google-runtime.mjs" "$repo/deploy/employee/google-tools.mjs" "$repo/deploy/employee/google-workspace.py" "$root/heimdall/"
 install -m 0755 "$repo/deploy/employee/pi" "$root/bin/pi"
-# Claude, Codex and OMP are single binaries: copy them (root 0755) instead of
+# Claude and Codex are single ELF binaries: copy them (root 0755) instead of
 # binding owner homes. Codex lives under /root/.codex, an owner auth directory
 # that is never bound. Rerun after every harness upgrade.
 copy_engine() {
- local name=$1 src
+ local name=$1 src target
+ target=$root/runtime/$name/$name
  src=$(readlink -f "$2") || return 0
  [[ -f $src ]] || { echo "skip $name: $2 not installed"; return 0; }
- install -D -o root -g root -m 0755 "$src" "$root/runtime/$name/$name"
+ # Never a wrapper script, and never the managed copy itself.
+ head -c4 "$src" | cmp -s - <(printf '\177ELF') || { echo "refuse $name: $src is not an ELF executable" >&2; exit 1; }
+ [[ ! -e $target || ! $src -ef $target ]] || { echo "refuse $name: $src is already $target" >&2; exit 1; }
+ install -D -o root -g root -m 0755 "$src" "$target"
  ln -sfn "../runtime/$name/$name" "$root/bin/$name"
 }
 copy_engine claude /root/.local/bin/claude
 copy_engine codex /root/.local/bin/codex
-copy_engine omp /root/.bun/bin/omp
+# OMP is not copied: /root/.bun/bin/omp is the pack's owner-only wrapper, and
+# runtime/omp/omp is already the managed root 0755 ELF that owner OMP runs.
+link_engine() {
+ local name=$1 target
+ target=$root/runtime/$name/$name
+ [[ -f $target ]] || { echo "skip $name: $target not installed"; return 0; }
+ head -c4 "$target" | cmp -s - <(printf '\177ELF') || { echo "refuse $name: $target is not an ELF executable" >&2; exit 1; }
+ [[ $(stat -c '%u %a' "$target") == "0 755" ]] || { echo "refuse $name: $target is not root 0755" >&2; exit 1; }
+ ln -sfn "../runtime/$name/$name" "$root/bin/$name"
+}
+link_engine omp
 # Existing account was provisioned with nobody ownership; account stays uid 997.
 chown heimdall-employee:heimdall-employee "$emp_home"
 chmod 0700 "$emp_home"

@@ -1,7 +1,8 @@
 > Employee engines (MEL-846): after **every** harness upgrade (npm Pi, Claude,
 > Codex, OMP), as root rerun `deploy/contabo/employee-layout.sh install`: it
 > re-applies `a+rX` to the node binary and Pi package, refreshes the copied
-> Claude/Codex/OMP binaries under `/opt/assistant/runtime/` and checks them as
+> Claude/Codex ELF binaries under `/opt/assistant/runtime/`, links `bin/omp`
+> to the managed `runtime/omp/omp` (OMP is never copied) and checks them as
 > the employee account. Then `deploy/contabo/employee-probe.sh <engine>` before
 > listing an engine in `employee_harnesses` ([docs](../../docs/employee-engines.md)).
 

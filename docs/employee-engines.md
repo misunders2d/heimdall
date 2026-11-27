@@ -90,10 +90,13 @@ If not, the turn fails with the path and the fix, instead of a native crash
 such as "Cannot find module 'jiti'". Heimdall never changes permissions at
 runtime. The fix: as root, rerun `deploy/contabo/employee-layout.sh install`
 after **every** harness upgrade. It applies `a+rX` to the node binary and the
-Pi package only, copies the Claude, Codex and OMP binaries to
+Pi package only (`NODE_ROOT` must be a `/root/.nvm/versions/node/v*`
+directory), copies the Claude and Codex ELF binaries to
 `/opt/assistant/runtime/<engine>/` (Codex lives under `/root/.codex`, an owner
-auth directory that is never bound), and checks every runtime as the
-employee account.
+auth directory that is never bound), links `bin/omp` to the already managed
+`runtime/omp/omp` (never copied: `/root/.bun/bin/omp` is the pack's owner-only
+wrapper), and checks every runtime as the employee account. A copy source
+that is not an ELF executable, or is the managed copy itself, is refused.
 
 ## Hub probe
 
