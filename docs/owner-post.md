@@ -168,5 +168,7 @@ escaping, Yes/No in the card's chat only, expiry, replay, immediate mode,
 the owner token on every post and upload with zero bot posts (also after a
 store round trip), recorded file IDs, check-before-resend for text and
 files, no resend when the check fails, the private failure notice, and the
-echo filter. They do not prove live Slack behavior: token scopes, metadata
-in events and history visibility timing are unverified until a live window.
+echo filter. They do not prove live Slack behavior: metadata in events and
+history visibility timing are unverified until a live window. The owner
+token's scopes, including the history and read scopes, were checked live
+on 2026-11-27.
