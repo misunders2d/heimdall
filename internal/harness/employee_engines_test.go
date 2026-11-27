@@ -180,6 +180,21 @@ func TestClaudeLeaseAccessOnly(t *testing.T) {
 	if target, _ := os.Readlink(filepath.Join(dir, "CLAUDE.md")); target != SharedRoot+"/AGENTS.md" {
 		t.Fatal(target)
 	}
+	// No owner settings, hooks, plugins or skills: every lease entry is a
+	// fresh file or a link outside the owner's home.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if target, err := os.Readlink(p); err == nil && strings.HasPrefix(target, ownerHome) {
+			t.Fatal("lease links into the owner home", e.Name(), target)
+		}
+		if e.Name() == "settings.json" || e.Name() == "plugins" || e.Name() == "hooks" {
+			t.Fatal("owner-style config in lease", e.Name())
+		}
+	}
+	if target, _ := os.Readlink(filepath.Join(dir, "skills")); target != SharedRoot+"/skills" {
+		t.Fatal("skills link", target)
+	}
 	link := filepath.Join(dir, "projects", claudeProjectSlug(l.Dir))
 	if target, _ := os.Readlink(link); target != filepath.Join(l.Home, ".claude", "heimdall-sessions", sess.ID) {
 		t.Fatal("session store link", target)

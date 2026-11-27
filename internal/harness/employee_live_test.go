@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -88,25 +89,54 @@ func TestEmployeeEngineLive(t *testing.T) {
 	if !strings.Contains(answer, "PROBE_DONE") {
 		t.Fatal("model did not finish the probe")
 	}
-	// Owner-only and connector tools are never present.
-	owner := regexp.MustCompile(`(?i)TOOL:\S*(memento|mcp__t3|t3_|slack|claude_ai|workspace|gmail|google_drive|calendar|bash|shell|exec_command|write|edit|apply_patch)`)
-	if m := owner.FindAllString(answer, -1); len(m) > 0 {
-		t.Fatalf("owner/connector/shell tools exposed: %v", m)
+	hasMellanni, err := checkProbeAnswer(engine, answer, signedIn && spec.MCP != nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("engine=%s tools observed=%d signed_in=%t mellanni=%t", engine, len(tools), signedIn, hasMellanni)
+}
+
+var (
+	probeTool = regexp.MustCompile(`(?m)^\s*TOOL:\s*(\S+)`)
+	// The caller's own business tools, in each engine's naming.
+	probeBusiness = regexp.MustCompile(`(?i)^(mcp__)?(mellanni|linear)(__|_|\.)`)
+	probeShell    = regexp.MustCompile(`(?i)^(bash|shell|exec_command|write|edit|multiedit|notebookedit|apply_patch|write_stdin|powershell|unified_exec)$`)
+	probeOwner    = regexp.MustCompile(`(?i)^(mcp__)?(t3|t3-code|memento|slack|workspace|workspace-mcp|workspace_cli|gmail|google\w*|calendar|drive)(__|_|\.|-|$)`)
+)
+
+// checkProbeAnswer judges the live probe's answer: no owner, connector or
+// shell tools; owner credentials unreadable; shared instructions readable;
+// Mellanni present only for a caller who signed in through the broker.
+func checkProbeAnswer(engine, answer string, brokerSignedIn bool) (bool, error) {
+	hasMellanni := false
+	for _, m := range probeTool.FindAllStringSubmatch(answer, -1) {
+		name := strings.Trim(m[1], "`*,.;")
+		lower := strings.ToLower(name)
+		if strings.Contains(lower, "claude_ai") || strings.Contains(lower, "memento") {
+			return false, fmt.Errorf("connector or memory tool exposed: %s", name)
+		}
+		if probeBusiness.MatchString(name) {
+			hasMellanni = hasMellanni || strings.Contains(lower, "mellanni")
+			continue
+		}
+		if probeShell.MatchString(name) || probeOwner.MatchString(name) {
+			return false, fmt.Errorf("owner or shell tool exposed: %s", name)
+		}
 	}
 	for _, p := range []string{"/root/.claude/.credentials.json", "/root/.codex/auth.json", "/root/.pi/agent/auth.json", "/root/.omp/agent/agent.db"} {
 		if strings.Contains(answer, "READ_OK:"+p) {
-			t.Fatalf("owner credential readable: %s", p)
+			return false, fmt.Errorf("owner credential readable: %s", p)
 		}
 	}
 	if !strings.Contains(answer, "READ_OK:/opt/assistant/AGENTS.md") {
-		t.Fatal("shared instructions unreadable")
+		return false, fmt.Errorf("shared instructions unreadable")
 	}
-	hasMellanni := regexp.MustCompile(`TOOL:\S*mellanni`).MatchString(answer)
 	switch {
-	case signedIn && spec.MCP != nil && engine != "pi" && (!hasMellanni || !strings.Contains(answer, "MELLANNI_OK")):
-		t.Fatal("signed-in caller's own Mellanni MCP did not work")
-	case !signedIn && hasMellanni && engine != "pi":
-		t.Fatal("Mellanni tools present for a caller who never signed in (foreign token?)")
+	case engine == "pi":
+	case brokerSignedIn && (!hasMellanni || !strings.Contains(answer, "MELLANNI_OK")):
+		return false, fmt.Errorf("signed-in caller's own Mellanni MCP did not work")
+	case !brokerSignedIn && hasMellanni:
+		return false, fmt.Errorf("Mellanni tools present for a caller who never signed in (foreign token?)")
 	}
-	t.Logf("engine=%s tools observed=%d signed_in=%t mellanni=%t", engine, len(tools), signedIn, hasMellanni)
+	return hasMellanni, nil
 }

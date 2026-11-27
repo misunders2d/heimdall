@@ -44,7 +44,8 @@ done
 for path in .claude/.credentials.json .codex/auth.json .pi/agent/auth.json .omp/agent/agent.db .claude/settings.json .codex/config.toml .claude.json; do
   [[ -e $home/$path ]] && fail "$home/$path exists (owner login or ambient config in the employee home)"
 done
-if grep -rqsi memento "$home/.claude" "$home/.codex" "$home/.pi/agent" "$home/.omp" 2>/dev/null; then fail "memento referenced in employee native config"; fi
+# Config only: session stores may quote shared instructions that name Memento.
+if grep -rqsi --exclude-dir=sessions --exclude-dir=heimdall-sessions --exclude-dir=projects --exclude='*.jsonl' memento "$home/.claude" "$home/.codex" "$home/.pi/agent" "$home/.omp" 2>/dev/null; then fail "memento referenced in employee native config"; fi
 leftover=$(find "$home/.heimdall/turn-agents" "$home/.pi/turn-agents" -mindepth 1 -maxdepth 1 -mmin +30 2>/dev/null | wc -l)
 [[ $leftover == 0 ]] || fail "$leftover stale employee lease directories older than 30 min (crash leftovers; inspect and remove)"
 echo "static checks passed"
