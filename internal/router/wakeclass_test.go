@@ -54,6 +54,7 @@ func TestWakeClassFromOutcome(t *testing.T) {
 		{store.InboundOutcome{State: store.InCancelled, Turn: 1, TurnState: store.TurnCancelled, TurnDetail: heldStopped}, durable.WakeStopped},
 		{store.InboundOutcome{State: store.InNeedsHuman, Turn: 1, TurnState: store.TurnNeedsHuman, TurnDetail: heldApproval}, durable.WakeApproval},
 		{store.InboundOutcome{State: store.InFailed, Turn: 1, TurnState: store.TurnFailed, TurnDetail: heldRefused}, durable.WakeRefused},
+		{store.InboundOutcome{State: store.InCancelled, Turn: 1, TurnState: store.TurnCancelled, TurnDetail: heldOwnerReplied}, durable.WakeOwnerReplied},
 		{store.InboundOutcome{State: store.InRejected, Detail: "caller not authorized"}, durable.WakeRefused},
 		{store.InboundOutcome{State: store.InDone, Turn: 1, TurnState: store.TurnDone, TurnDetail: "malformed answer: no report or next action"}, durable.WakeMalformed},
 		{store.InboundOutcome{State: store.InDone, Turn: 1, TurnState: store.TurnDone, TurnDetail: heldStale + "work report: x"}, durable.WakeCutOff},

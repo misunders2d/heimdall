@@ -632,11 +632,14 @@ func reviewOutcome(o store.InboundOutcome) (durable.ReviewResult, bool) {
 // with the store's typed turn states, to the wake classes the durable
 // runtime acts on, so it never reads error text.
 const (
-	heldRefused  = reviewHeld + "creator admission or role changed; review refused"
-	heldStopped  = reviewHeld + "review stopped"
-	heldApproval = reviewHeld + "the harness asked for a native approval or input; nothing was approved"
-	heldStale    = reviewHeld + "the commitment was no longer current when the review ended (paused, cancelled or moved on); outcome not applied: "
-	noHarness    = "no harness could start: "
+	heldRefused = reviewHeld + "creator admission or role changed; review refused"
+	// heldOwnerReplied: the owner answered the watched Slack message before
+	// the work launched; the turn was skipped, nothing failed or was refused.
+	heldOwnerReplied = reviewHeld + "owner replied; skipped"
+	heldStopped      = reviewHeld + "review stopped"
+	heldApproval     = reviewHeld + "the harness asked for a native approval or input; nothing was approved"
+	heldStale        = reviewHeld + "the commitment was no longer current when the review ended (paused, cancelled or moved on); outcome not applied: "
+	noHarness        = "no harness could start: "
 )
 
 // turnClass classifies a commitment turn that gave no outcome. Only a turn
@@ -653,6 +656,8 @@ func turnClass(o store.InboundOutcome) string {
 		return durable.WakeRefused
 	case strings.HasPrefix(d, heldStale):
 		return durable.WakeCutOff
+	case strings.HasPrefix(d, heldOwnerReplied):
+		return durable.WakeOwnerReplied
 	case strings.HasPrefix(d, heldRefused):
 		return durable.WakeRefused
 	case strings.HasPrefix(d, heldStopped):
@@ -679,6 +684,8 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 	e := store.TurnEnd{Harness: d.harness, Session: res.SessionID}
 	live := c.r.opt.Work != nil && current(c.r.opt.Work, t.review)
 	switch {
+	case t.review.SlackWork != nil && errors.Is(d.identity, core.ErrSlackOwnerReplied):
+		e.State, e.ItemState, e.Detail = store.TurnCancelled, store.InCancelled, heldOwnerReplied
 	case d.refused:
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, heldRefused
 	case res.Cancelled && t.stopped.Load():

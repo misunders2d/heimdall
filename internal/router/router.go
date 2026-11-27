@@ -1688,7 +1688,12 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		if t.review.SlackWork != nil {
 			identity = c.r.checkSlackWork(t.startCtx, t.review, from)
-			refused = identity != nil
+			// The owner replying first is a skip, not a refusal (reviewEnd
+			// labels it); a genuine refusal logs its real reason.
+			refused = identity != nil && !errors.Is(identity, core.ErrSlackOwnerReplied)
+			if refused {
+				c.r.log.Printf("turn %d in %s: Slack work %s refused: %v", t.id, c.key, t.review.Key, identity)
+			}
 		}
 	}
 	for _, h := range t.candidates {
