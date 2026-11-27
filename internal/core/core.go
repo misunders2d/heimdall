@@ -387,7 +387,8 @@ type Outbound struct {
 	File *File
 	// Delivered, set by the router for one send and never stored, is called
 	// by the interface with the platform message ID (Telegram message_id,
-	// Slack ts) of each part it delivered, in order. Report calls it.
+	// Slack ts) of the parts it delivered, the final part's last; Telegram
+	// reports only a valid final one. Report calls it.
 	Delivered func(ref string) `json:"-"`
 	// OwnerPost marks a post the owner approved to go out under the owner's
 	// own Slack user token (docs/owner-post.md): Text and Files form one post,

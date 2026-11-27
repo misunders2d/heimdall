@@ -30,7 +30,9 @@ Off by default. Nothing here is deployed by this change.
     delivered before that reply, by the platform's own message order
     (Telegram `message_id`, Slack `ts` of the card's last part) and by
     Heimdall's receipt order; a post whose card was still queued, failed or
-    arrived after the reply keeps waiting, and the reply names it. A No
+    arrived after the reply keeps waiting, and the reply names it. A card
+    whose last part came back without a valid ID, after the earlier parts',
+    has no receipt and cannot be approved. A No
     cancels every waiting post, its card seen or not.
   - Off (`enabled` false or absent): nothing is sent as the owner. Rows
     queued earlier fail with the private notice, any Yes or No to a waiting

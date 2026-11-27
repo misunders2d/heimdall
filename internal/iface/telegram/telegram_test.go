@@ -1401,8 +1401,8 @@ func TestForwardWindowIsPerTopicAndAnchored(t *testing.T) {
 	}
 }
 
-// Send reports each delivered part's message_id, the last one last: a post
-// as the owner's card is answered only by a later message (docs/owner-post.md).
+// Send reports the final part's message_id: a post as the owner's card is
+// answered only by a later message (docs/owner-post.md).
 func TestSendReportsDeliveredMessageIDs(t *testing.T) {
 	api := newFakeAPI(t)
 	var logs syncBuffer
@@ -1418,8 +1418,43 @@ func TestSendReportsDeliveredMessageIDs(t *testing.T) {
 	if err := i.Send(context.Background(), out); err != nil {
 		t.Fatal(err)
 	}
-	if len(refs) < 2 || refs[len(refs)-1] != strconv.Itoa(n) {
+	if n < 42 || !slices.Equal(refs, []string{strconv.Itoa(n)}) {
 		t.Fatalf("delivered IDs %v, last sent %d", refs, n)
+	}
+}
+
+// A final part without a valid message_id, or with one not after the
+// earlier parts', is no receipt: never the previous part's ID, which a Yes
+// sent before the final part was visible would follow.
+func TestSendFinalPartWithoutValidIDReportsNoReceipt(t *testing.T) {
+	for name, last := range map[string]any{"zero": 0, "missing": nil, "earlier": 5, "repeated": 41} {
+		t.Run(name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			var logs syncBuffer
+			i := newIface(t, api.srv.URL, botName, &logs)
+			parts := len(splitText(strings.Repeat("card line\n", 1000), chunkText))
+			n := 0
+			api.set("sendMessage", func(w http.ResponseWriter, _ map[string]any) bool {
+				n++
+				switch {
+				case n < parts:
+					ok(w, map[string]any{"message_id": 40 + n})
+				case last == nil:
+					ok(w, map[string]any{"chat": map[string]any{"id": 42}})
+				default:
+					ok(w, map[string]any{"message_id": last})
+				}
+				return true
+			})
+			var refs []string
+			out := core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: strings.Repeat("card line\n", 1000), Delivered: func(ref string) { refs = append(refs, ref) }}
+			if err := i.Send(context.Background(), out); err != nil {
+				t.Fatal(err)
+			}
+			if parts < 2 || n != parts || len(refs) != 0 {
+				t.Fatalf("parts %d, sent %d, receipts %v", parts, n, refs)
+			}
+		})
 	}
 }
 

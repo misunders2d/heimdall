@@ -675,6 +675,7 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 		return t.sendFile(ctx, out)
 	}
 	parts := splitText(out.Text, chunkText) // none for a reaction-only answer
+	var earlier int64                       // the highest message_id of the parts before
 	for i, part := range parts {
 		if len(parts) > 1 {
 			part += fmt.Sprintf("\n\n(%d/%d)", i+1, len(parts))
@@ -715,9 +716,17 @@ func (t *Interface) Send(ctx context.Context, out core.Outbound) error {
 		var m struct {
 			ID int64 `json:"message_id"`
 		}
-		if json.Unmarshal(sent, &m) == nil && m.ID > 0 {
+		if json.Unmarshal(sent, &m) != nil {
+			m.ID = 0
+		}
+		// Only the final part's ID is the receipt, and only when it follows
+		// every earlier part's: a missing or out-of-order one is no receipt,
+		// never an earlier part's (a post as the owner's card stays
+		// unanswerable rather than answerable before it is all visible).
+		if i == len(parts)-1 && m.ID > earlier {
 			out.Report(strconv.FormatInt(m.ID, 10))
 		}
+		earlier = max(earlier, m.ID)
 	}
 	return t.react(ctx, out)
 }
