@@ -459,3 +459,45 @@ func TestOwnerPostResendCheckToleratesAClockAhead(t *testing.T) {
 		t.Fatal("resend check bound excludes a post that landed", h)
 	}
 }
+
+// A resend check that Slack answers with more history but no cursor is
+// incomplete: the post may have landed, so it fails permanently (the owner
+// is told privately) and nothing of it is posted or completed again.
+func TestOwnerPostIncompleteHistoryRefusesResend(t *testing.T) {
+	incomplete := func(r *ownerPostRig) {
+		r.f.mu.Lock()
+		prev := r.f.hook
+		r.f.mu.Unlock()
+		r.f.setHook(func(w http.ResponseWriter, req *http.Request, args map[string]any) bool {
+			if req.URL.Path == "/conversations.history" || req.URL.Path == "/conversations.replies" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "messages": []any{}, "has_more": true})
+				return true
+			}
+			return prev(w, req, args)
+		})
+	}
+	ctx := context.Background()
+	var perm router.PermanentError
+
+	// Text: a later attempt must not post the part again.
+	r := newOwnerPostRig(t)
+	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C5", Thread: "1700000000.000100"}, "status update", 0)
+	incomplete(r)
+	out.Attempt = 1
+	if err := r.s.Send(ctx, out); !errors.As(err, &perm) || len(r.f.all("chat.postMessage")) != 0 {
+		t.Fatalf("text resent over incomplete history: %v, posts %d", err, len(r.f.all("chat.postMessage")))
+	}
+
+	// Files: recorded uploads are never completed again.
+	r2 := newOwnerPostRig(t)
+	r2.ambiguous = []string{"lost"}
+	out = r2.post(t, core.ConvKey{Interface: "slack", Chat: "C6"}, "", 1)
+	if err := r2.s.Send(ctx, out); err == nil {
+		t.Fatal("unconfirmed upload reported as sent")
+	}
+	incomplete(r2)
+	out.Attempt = 1
+	if err := r2.s.Send(ctx, out); !errors.As(err, &perm) || r2.completes != 1 || r2.uploads != 1 {
+		t.Fatalf("files completed over incomplete history: %v, completes %d, uploads %d", err, r2.completes, r2.uploads)
+	}
+}

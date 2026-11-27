@@ -128,7 +128,9 @@ queued. Text or files alone are fine; at least one is required.
   file IDs are recorded before `files.completeUploadExternal`; a later
   attempt first looks for an owner message carrying them and completes
   again only when none is found. If the check itself fails, nothing is
-  resent; the router retries the check later. Neither call is ever retried
+  resent; the router retries the check later. A check Slack answers with
+  more history but no cursor to read it fails the post for good, with the
+  private notice: it may have landed. Neither call is ever retried
   blindly. The check covers the whole thread (from its own ts, Slack's
   clock) or, outside a thread, from a day before the row's local creation:
   it tolerates a hub clock up to 24 h ahead of Slack's (replies keep their

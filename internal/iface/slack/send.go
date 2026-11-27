@@ -44,7 +44,8 @@ func (api *apiClient) findDelivery(ctx context.Context, k core.ConvKey, id, even
 					} `json:"event_payload"`
 				} `json:"metadata"`
 			} `json:"messages"`
-			Meta struct {
+			HasMore bool `json:"has_more"`
+			Meta    struct {
 				Cursor string `json:"next_cursor"`
 			} `json:"response_metadata"`
 		}
@@ -63,6 +64,11 @@ func (api *apiClient) findDelivery(ctx context.Context, k core.ConvKey, id, even
 		}
 		next := strings.TrimSpace(result.Meta.Cursor)
 		if next == "" {
+			if result.HasMore && event == ownerPostEvent {
+				// More history but no way to read it: a post as the owner
+				// is never sent again unchecked (replies keep at-least-once).
+				return "", errOwnerHistoryIncomplete
+			}
 			return "", nil
 		}
 		if next == cursor {

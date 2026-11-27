@@ -399,7 +399,8 @@ func (s *Slack) ownerFilesShared(ctx context.Context, api *apiClient, out core.O
 					ID string `json:"id"`
 				} `json:"files"`
 			} `json:"messages"`
-			Meta struct {
+			HasMore bool `json:"has_more"`
+			Meta    struct {
 				Cursor string `json:"next_cursor"`
 			} `json:"response_metadata"`
 		}
@@ -418,6 +419,9 @@ func (s *Slack) ownerFilesShared(ctx context.Context, api *apiClient, out core.O
 		}
 		next := strings.TrimSpace(result.Meta.Cursor)
 		if next == "" {
+			if result.HasMore {
+				return false, errOwnerHistoryIncomplete
+			}
 			return false, nil
 		}
 		if next == cursor {
@@ -427,6 +431,11 @@ func (s *Slack) ownerFilesShared(ctx context.Context, api *apiClient, out core.O
 	}
 	return false, errors.New("slack: reconciliation page limit reached")
 }
+
+// errOwnerHistoryIncomplete refuses a resend check that Slack answered with
+// more history and no cursor to read it: the post may have landed, so
+// nothing of it is sent again and the owner is told privately.
+var errOwnerHistoryIncomplete = router.PermanentError{Err: errors.New("slack: Slack's history came back incomplete, so a resend could post twice; nothing more was sent")}
 
 // ownerPostSkew is how far the hub's clock may run ahead of Slack's before
 // a resend check could miss a post that landed.
