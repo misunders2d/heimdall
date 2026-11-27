@@ -397,6 +397,10 @@ type OwnerPost struct {
 	Label  string  `json:"label,omitempty"` // destination as shown on its card
 	Files  []File  `json:"files,omitempty"` // Heimdall's own checked copies
 	Notice ConvKey `json:"notice"`          // the owner's private chat with the bot
+	// SlackUser and SlackTeam: the Slack account verified live when the post
+	// was requested. Delivery refuses any other user token.
+	SlackUser string `json:"slack_user"`
+	SlackTeam string `json:"slack_team"`
 }
 
 // File is a file a harness left for the chat: Heimdall's own copy, which

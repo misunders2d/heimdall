@@ -158,6 +158,11 @@ func (s *Slack) sendOwnerPost(ctx context.Context, out core.Outbound) error {
 	if api == nil || s.opt.WorkOwnerID == "" {
 		return router.PermanentError{Err: errors.New("slack: the owner's user token is unavailable; posts as the owner never use the bot")}
 	}
+	// Only the Slack account verified when the post was requested sends it:
+	// a token configured for someone else since never does.
+	if p := out.OwnerPost; p.SlackUser == "" || p.SlackUser != s.opt.WorkOwnerID || p.SlackTeam != s.opt.TeamID {
+		return router.PermanentError{Err: errors.New("slack: the post was approved for another Slack account than the configured owner's; nothing was sent")}
+	}
 	if err := s.ownerPostAllowed(out.Conv); err != nil {
 		return router.PermanentError{Err: err}
 	}

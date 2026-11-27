@@ -29,9 +29,12 @@ type OwnerPost struct {
 	Text    string
 	Files   []core.File
 	Origin  string // who asked, for the card: this chat, an external launcher run, trusted T3
-	State   string
-	Expires time.Time
-	Created time.Time
+	// SlackUser and SlackTeam: the owner's Slack account verified live at
+	// the request; only that account's token ever sends the post.
+	SlackUser, SlackTeam string
+	State                string
+	Expires              time.Time
+	Created              time.Time
 	// CardMessage is the card, queued with the post (not stored here); its
 	// outbound row is linked so its confirmed delivery can be told.
 	CardMessage *core.Outbound
@@ -67,8 +70,8 @@ func insertOwnerPost(tx *sql.Tx, p OwnerPost) error {
 	if p.State != OwnerPostPending {
 		decided = created
 	}
-	_, err = tx.Exec(`INSERT INTO owner_posts(id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.Creator, p.Card.Interface, p.Card.Chat, p.Card.Thread, p.Target.Chat, p.Target.Thread, p.Label, p.Text, string(files), p.Origin, p.State, unix(p.Expires), created, decided)
+	_, err = tx.Exec(`INSERT INTO owner_posts(id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at,decided_at,slack_user,slack_team) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Creator, p.Card.Interface, p.Card.Chat, p.Card.Thread, p.Target.Chat, p.Target.Thread, p.Label, p.Text, string(files), p.Origin, p.State, unix(p.Expires), created, decided, p.SlackUser, p.SlackTeam)
 	if err != nil || p.CardMessage == nil {
 		return err
 	}
@@ -99,13 +102,13 @@ func decideOwnerPost(tx *sql.Tx, d OwnerPostDecision) error {
 	return err
 }
 
-const ownerPostCols = `id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at,card_mark`
+const ownerPostCols = `id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at,card_mark,slack_user,slack_team`
 
 func scanOwnerPost(row interface{ Scan(...any) error }) (OwnerPost, error) {
 	var p OwnerPost
 	var files string
 	var expires, created int64
-	if err := row.Scan(&p.ID, &p.Creator, &p.Card.Interface, &p.Card.Chat, &p.Card.Thread, &p.Target.Chat, &p.Target.Thread, &p.Label, &p.Text, &files, &p.Origin, &p.State, &expires, &created, &p.CardMark); err != nil {
+	if err := row.Scan(&p.ID, &p.Creator, &p.Card.Interface, &p.Card.Chat, &p.Card.Thread, &p.Target.Chat, &p.Target.Thread, &p.Label, &p.Text, &files, &p.Origin, &p.State, &expires, &created, &p.CardMark, &p.SlackUser, &p.SlackTeam); err != nil {
 		return p, err
 	}
 	p.Target.Interface = core.PlatformSlack

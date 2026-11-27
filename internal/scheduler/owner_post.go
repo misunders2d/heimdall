@@ -104,6 +104,9 @@ func (c *Control) postAsOwner(ctx context.Context, uid uint32, req ControlReques
 	if owner.Key() != who.Principal.Key() && !c.s.access.SamePerson(owner, who.Principal) {
 		return fail("only the owner whose Slack account posts may request posts as the owner")
 	}
+	if owner.SlackUserID == "" || owner.Team == "" {
+		return fail("the owner's Slack account is unavailable: no verified Slack member")
+	}
 	// The card and every notice go to the owner's private chat with the bot.
 	card := who.Conv
 	if !who.Private {
@@ -146,7 +149,7 @@ func (c *Control) postAsOwner(ctx context.Context, uid uint32, req ControlReques
 	}()
 	now := c.s.now()
 	p := store.OwnerPost{ID: newPostID(), Creator: who.Principal.Key(), Card: card, Target: target, Label: label, Text: text, Files: files,
-		Origin: postOrigin(who), State: store.OwnerPostPending, Expires: now.Add(ownerPostTTL), Created: now}
+		SlackUser: owner.SlackUserID, SlackTeam: owner.Team, Origin: postOrigin(who), State: store.OwnerPostPending, Expires: now.Add(ownerPostTTL), Created: now}
 	var outs, wake []core.Outbound
 	result := ControlResult{PostID: p.ID, Changed: true}
 	if cfg.Immediate {
@@ -178,7 +181,7 @@ func (c *Control) postAsOwner(ctx context.Context, uid uint32, req ControlReques
 // under the owner's user token only.
 func ownerPostOut(p store.OwnerPost) core.Outbound {
 	return core.Outbound{Conv: p.Target, Text: p.Text, Formatted: true,
-		OwnerPost: &core.OwnerPost{ID: p.ID, Label: p.Label, Files: p.Files, Notice: p.Card}}
+		OwnerPost: &core.OwnerPost{ID: p.ID, Label: p.Label, Files: p.Files, Notice: p.Card, SlackUser: p.SlackUser, SlackTeam: p.SlackTeam}}
 }
 
 func postOrigin(who Caller) string {

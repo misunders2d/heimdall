@@ -15,6 +15,9 @@ import (
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
+// bossSlack is boss as the Slack side verifies the token owner.
+var bossSlack = func() core.Principal { p := boss; p.SlackUserID, p.Team = "UOWNER", "Ttest"; return p }()
+
 // fakePoster stands in for the Slack side: the token owner is boss.
 type fakePoster struct {
 	owner core.Principal
@@ -41,7 +44,7 @@ func postRig(t *testing.T, immediate bool) (*rig, *Control, uint32, string) {
 	uid := uint32(os.Getuid())
 	c.uid = uid
 	data := t.TempDir()
-	r.s.OwnerPost = &OwnerPosts{Poster: fakePoster{owner: boss}, Immediate: immediate, Dir: filepath.Join(data, "outbox"), Deny: []string{data}}
+	r.s.OwnerPost = &OwnerPosts{Poster: fakePoster{owner: bossSlack}, Immediate: immediate, Dir: filepath.Join(data, "outbox"), Deny: []string{data}}
 	src := filepath.Join(t.TempDir(), "report.pdf")
 	if err := os.WriteFile(src, []byte("synthetic report"), 0o600); err != nil {
 		t.Fatal(err)
@@ -121,6 +124,9 @@ func TestPostAsOwnerWaitsForTheOwnersYes(t *testing.T) {
 		t.Fatal(rows)
 	}
 	p := rows[0]
+	if p.OwnerPost == nil || p.OwnerPost.SlackUser != "UOWNER" || p.OwnerPost.SlackTeam != "Ttest" {
+		t.Fatal("approved post lost the Slack account verified at the request", p.OwnerPost)
+	}
 	if p.OwnerPost == nil || p.Conv.Chat != "C1" || p.Conv.Thread != "1700000000.000100" || p.Text != req.Text || p.OwnerPost.Notice != bossDM || len(p.OwnerPost.Files) != 1 {
 		t.Fatalf("delivery row lost its owner marker after the store: %+v", p)
 	}
@@ -221,7 +227,7 @@ func TestPostAsOwnerRefusals(t *testing.T) {
 	if got := c.executeBound(ctx, uid, ControlRequest{Action: postAsOwner, RequestID: "14", Target: "slack:C1", Text: "x"}); !strings.Contains(got.Error, "only the owner") {
 		t.Errorf("other owner admitted: %+v", got)
 	}
-	r.s.OwnerPost.Poster = fakePoster{owner: boss}
+	r.s.OwnerPost.Poster = fakePoster{owner: bossSlack}
 	// Scheduled runs and trusted T3 without manage never post.
 	k := bossDM
 	if got := c.execute(ctx, uid, ControlRequest{Action: postAsOwner, RequestID: "15", Target: "slack:C1", Text: "x"}, Caller{Principal: boss, Role: core.RoleOwner, Conv: k, Private: true, Registered: trustedT3, External: "x"}); got.Error == "" {

@@ -104,11 +104,11 @@ func (r *ownerPostRig) post(t *testing.T, conv core.ConvKey, text string, files 
 		list = append(list, core.File{Path: path, Name: fmt.Sprintf("report-%d.pdf", i), MIME: "application/pdf", Size: 16})
 	}
 	id := fmt.Sprintf("p%d", time.Now().UnixNano())
-	p := store.OwnerPost{ID: id, Creator: "slack:uowner@example.test", Card: core.ConvKey{Interface: "slack", Chat: "Dbot", Thread: "1.1"}, Target: conv, Label: conv.Chat, Text: text, Files: list, Origin: "test", State: store.OwnerPostApproved, Expires: time.Now().Add(time.Hour)}
+	p := store.OwnerPost{ID: id, Creator: "slack:uowner@example.test", Card: core.ConvKey{Interface: "slack", Chat: "Dbot", Thread: "1.1"}, Target: conv, Label: conv.Chat, Text: text, Files: list, Origin: "test", State: store.OwnerPostApproved, Expires: time.Now().Add(time.Hour), SlackUser: "UOWNER", SlackTeam: "Ttest"}
 	if err := r.st.AnswerCommand(0, core.ConvKey{}, store.CommandEnd{Detail: "job", Job: &store.JobChange{NewOwnerPost: &p}}); err != nil {
 		t.Fatal(err)
 	}
-	return core.Outbound{ID: 7, Conv: conv, Text: text, Formatted: true, CreatedAt: time.Now(), OwnerPost: &core.OwnerPost{ID: id, Label: conv.Chat, Files: list, Notice: p.Card}}
+	return core.Outbound{ID: 7, Conv: conv, Text: text, Formatted: true, CreatedAt: time.Now(), OwnerPost: &core.OwnerPost{ID: id, Label: conv.Chat, Files: list, Notice: p.Card, SlackUser: "UOWNER", SlackTeam: "Ttest"}}
 }
 
 // botPosts are calls that would put something in Slack as the bot.
@@ -341,5 +341,27 @@ func TestOwnerPostOffSendsNothingAndFiltersNothing(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"event": m, "authorizations": []map[string]any{{"team_id": "Ttest", "user_id": "UOWNER", "is_bot": false}}})
 	if ok, _, _ := r.s.eventAdmission(raw); !ok {
 		t.Fatal("event filtered as an owner post echo while off")
+	}
+}
+
+// A post approved for one Slack account never goes out under another's
+// token: the owner configured since is refused (review finding 3).
+func TestOwnerPostRefusesAnotherSlackAccount(t *testing.T) {
+	r := newOwnerPostRig(t)
+	out := r.post(t, core.ConvKey{Interface: "slack", Chat: "C1"}, "for UOWNER", 0)
+	r.s.opt.WorkOwnerID = "UNEW" // config changed before restart
+	before := len(r.f.calls)
+	err := r.s.Send(context.Background(), out)
+	var perm router.PermanentError
+	if !errors.As(err, &perm) || len(r.f.calls) != before {
+		t.Fatal("post sent under another owner's token", err)
+	}
+	r.s.opt.WorkOwnerID = "UOWNER"
+	unbound := out
+	op := *out.OwnerPost
+	op.SlackUser = ""
+	unbound.OwnerPost = &op
+	if err := r.s.Send(context.Background(), unbound); !errors.As(err, &perm) || len(r.f.calls) != before {
+		t.Fatal("post without a recorded Slack account sent", err)
 	}
 }

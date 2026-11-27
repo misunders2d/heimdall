@@ -186,6 +186,9 @@ CREATE INDEX owner_posts_card ON owner_posts(creator, card_iface, card_chat, car
 	`ALTER TABLE owner_posts ADD COLUMN card_out INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE owner_posts ADD COLUMN card_mark INTEGER NOT NULL DEFAULT -1;
 CREATE INDEX owner_posts_card_out ON owner_posts(card_out) WHERE card_out != 0;`,
+	// The Slack account verified when a post was requested: it alone sends it.
+	`ALTER TABLE owner_posts ADD COLUMN slack_user TEXT NOT NULL DEFAULT '';
+ALTER TABLE owner_posts ADD COLUMN slack_team TEXT NOT NULL DEFAULT '';`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
