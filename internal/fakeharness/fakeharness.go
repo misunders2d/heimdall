@@ -680,6 +680,11 @@ func (f *fake) piRPC() {
 		})
 		f.emit(map[string]any{"type": "message_start", "messageId": "a1", "message": map[string]any{"role": "assistant", "content": []any{}}})
 		f.emit(map[string]any{"type": "message_end", "messageId": "a1", "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": f.answer()}}}})
+		if f.has("ADVISOR") {
+			// OMP's advisor reviews the final answer; the model answers again.
+			f.emit(map[string]any{"type": "message_start", "messageId": "a2", "message": map[string]any{"role": "assistant", "content": []any{}}})
+			f.emit(map[string]any{"type": "message_end", "messageId": "a2", "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": "advisor follow-up"}}}})
+		}
 		f.emit(map[string]any{"type": "agent_end"})
 		if omp && f.has("UNSETTLED") {
 			f.emit(map[string]any{"type": "prompt_result", "id": id, "status": "completed", "sessionSettled": false})

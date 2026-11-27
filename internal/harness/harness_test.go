@@ -166,6 +166,23 @@ func TestOMPUnsettledPromptWaitsForSettle(t *testing.T) {
 	}
 }
 
+// OMP's advisor makes the model answer again after its final answer; both
+// reach the user (live 2026-11-27: the security report itself was dropped).
+func TestOMPSecondFinalAnswerKeepsFirst(t *testing.T) {
+	bin, _ := fakeharness.Install(t, "omp")
+	l := launch(t, bin, "omp", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	r, err := harness.Start(ctx, harness.Spec{Harness: "omp", Prompt: "work ADVISOR", Session: harness.Session{ID: harness.NewSessionID("omp")}, Launch: l, Caller: protocolCaller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := r.Result()
+	if res.Failure != "" || len(res.Answers) != 2 || res.Answers[1] != "advisor follow-up" || !strings.Contains(res.Answer, "advisor follow-up") || res.Answers[0] == "" {
+		t.Fatalf("answers %q answer %q failure %q", res.Answers, res.Answer, res.Failure)
+	}
+}
+
 // A steer Codex accepts after it completed a final answer, before the turn
 // completed, gets its own answer; the earlier one is kept (review of
 // 5b3c62f, finding 3: the last final answer replaced it).

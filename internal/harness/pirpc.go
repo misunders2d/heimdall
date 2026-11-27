@@ -376,6 +376,14 @@ func (b *piRPCBridge) event(raw []byte) {
 			if len(text) > maxAnswer+1 {
 				text = text[:maxAnswer+1]
 			}
+			if strings.TrimSpace(text) == "" {
+				break
+			}
+			// A second final message for the same input (OMP's advisor
+			// reviews the answer and the model replies again) adds to the
+			// answer, never replaces it (live 2026-11-27: the 09:00 security
+			// report was dropped and only its follow-up "correction" sent).
+			b.answers = keepAnswer(b.answers, b.answer)
 			b.answer = core.RedactMCPCallbacks(text)
 		}
 	case "extension_ui_request":
