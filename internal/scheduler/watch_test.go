@@ -152,8 +152,8 @@ func TestWatchResults(t *testing.T) {
 		t.Fatalf("not paused after 3 failures: %+v", j)
 	}
 	out := r.sent()
-	if len(out) != 2 {
-		t.Fatalf("want one notice in the target and one in the notice chat: %s", texts(out))
+	if len(out) != 1 || out[0].Conv != bossDM {
+		t.Fatalf("want one notice, in the private notice chat only: %s", texts(out))
 	}
 	for _, o := range out {
 		if !strings.Contains(o.Text, "was paused") || !strings.Contains(o.Text, "checker exited with status 4") {

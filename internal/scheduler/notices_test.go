@@ -112,7 +112,10 @@ func TestFailureDetailsStayPrivateInNoticesAndHistory(t *testing.T) {
 			r.tick()
 			r.sent()
 			e := r.finish("", Outcome{Harness: "codex", Result: harness.Result{Failure: capacityError}})
-			if len(e.Notices) != map[bool]int{true: 2, false: 1}[caller.Private] {
+			// Shared targets get no notice; a creator without a known private
+			// chat still gets it where the job was created.
+			want := map[bool]core.ConvKey{true: bossDM, false: team}[caller.Private]
+			if len(e.Notices) != 1 || e.Notices[0].Conv != want {
 				t.Fatalf("audience changed: %+v", e.Notices)
 			}
 			for _, o := range e.Notices {
