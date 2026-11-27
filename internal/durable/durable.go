@@ -204,12 +204,13 @@ type WorkResult struct {
 
 // Wake classes (WorkResult.Class, ReviewResult.Class).
 const (
-	WakeNotStarted = "not_started" // no harness took the turn: nothing could have happened
-	WakeCutOff     = "cut_off"     // started and was cut off (time limit, provider error, restart, not current)
-	WakeMalformed  = "malformed"   // finished with neither REPORT nor a valid WAIT
-	WakeApproval   = "approval"    // asked for a native approval or input
-	WakeRefused    = "refused"     // the creator was refused
-	WakeStopped    = "stopped"     // the owner stopped it
+	WakeNotStarted   = "not_started"   // no harness took the turn: nothing could have happened
+	WakeCutOff       = "cut_off"       // started and was cut off (time limit, provider error, restart, not current)
+	WakeMalformed    = "malformed"     // finished with neither REPORT nor a valid WAIT
+	WakeApproval     = "approval"      // asked for a native approval or input
+	WakeRefused      = "refused"       // the creator was refused
+	WakeStopped      = "stopped"       // the owner stopped it
+	WakeOwnerReplied = "owner_replied" // Slack watch skipped because the owner replied
 )
 
 // reviewRetries bounds automatic re-reviews after technical failures; the
@@ -598,6 +599,9 @@ func (r *Runtime) commitment(ctx dbos.Context, c Commitment) (State, error) {
 		}
 	}
 	err := r.supervise(ctx, w)
+	if c.SlackWork != nil && errors.Is(err, core.ErrSlackOwnerReplied) {
+		err = r.publish(ctx, w, PhaseClosed, "none: the Slack owner replied")
+	}
 	var cl closed
 	if errors.As(err, &cl) {
 		return r.close(ctx, w, cl.ev)
@@ -730,8 +734,6 @@ func (r *Runtime) supervise(ctx dbos.Context, w *run) error {
 		}
 		if err := r.deliver(ctx, w, fmt.Sprintf("accepted/%d", w.st.Attempt), result, true); errors.Is(err, core.ErrSlackWatchRevoked) {
 			return r.publish(ctx, w, PhaseClosed, "none: Slack watch no longer authorized")
-		} else if errors.Is(err, core.ErrSlackOwnerReplied) {
-			return r.publish(ctx, w, PhaseClosed, "none: the Slack owner replied")
 		} else if err != nil {
 			return err
 		}
@@ -1085,9 +1087,14 @@ func (r *Runtime) work(ctx dbos.Context, w *run) (Event, error) {
 		if err != nil {
 			return Event{}, err
 		}
-		if c.SlackWork != nil && (res.Silent || res.Class == WakeRefused ||
-			c.SlackWork.Watch.Mode == core.SlackWatchAnswer && strings.TrimSpace(res.Report) == "" && res.Wait == 0) {
-			return Event{Kind: "silent"}, nil
+		if c.SlackWork != nil {
+			if res.Class == WakeOwnerReplied {
+				return Event{}, core.ErrSlackOwnerReplied
+			}
+			if res.Silent || res.Class == WakeRefused ||
+				c.SlackWork.Watch.Mode == core.SlackWatchAnswer && strings.TrimSpace(res.Report) == "" && res.Wait == 0 {
+				return Event{Kind: "silent"}, nil
+			}
 		}
 		if strings.TrimSpace(res.Report) != "" && res.Held == "" && res.Failure == "" {
 			w.st.Note = ""
@@ -1324,8 +1331,13 @@ func (r *Runtime) review(ctx dbos.Context, w *run) (Event, error) {
 			}
 			return Event{Kind: res.Verdict, Attempt: w.st.Attempt, By: fmt.Sprintf("supervisor (turn %d)", res.Turn), Note: clip(res.Reason, 500), auto: true}, nil
 		}
-		if c.SlackWork != nil && res.Class == WakeRefused {
-			return Event{Kind: "silent"}, nil
+		if c.SlackWork != nil {
+			switch res.Class {
+			case WakeOwnerReplied:
+				return Event{}, core.ErrSlackOwnerReplied
+			case WakeRefused:
+				return Event{Kind: "silent"}, nil
+			}
 		}
 		if res.Held == "" {
 			if failed++; failed > reviewRetries {

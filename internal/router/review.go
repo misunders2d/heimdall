@@ -73,6 +73,8 @@ func (r *Router) Work(ctx context.Context, q durable.WorkRequest) (durable.WorkR
 	}
 	res := durable.WorkResult{Turn: o.Turn}
 	switch d := o.TurnDetail; {
+	case o.TurnState == store.TurnDone && d == ownerReplied:
+		return durable.WorkResult{Turn: o.Turn, Class: durable.WakeOwnerReplied}, nil
 	case o.TurnState == store.TurnDone && d == workSilent:
 		res.Silent = true
 	case o.TurnState == store.TurnDone && strings.HasPrefix(d, workReport):
@@ -611,6 +613,8 @@ func reviewOutcome(o store.InboundOutcome) (durable.ReviewResult, bool) {
 	}
 	res := durable.ReviewResult{Turn: o.Turn}
 	switch {
+	case o.TurnState == store.TurnDone && o.TurnDetail == ownerReplied:
+		return durable.ReviewResult{Turn: o.Turn, Class: durable.WakeOwnerReplied}, true
 	case o.TurnState == store.TurnDone && strings.HasPrefix(o.TurnDetail, verdictAccept):
 		res.Verdict, res.Reason = "accept", strings.TrimPrefix(o.TurnDetail, verdictAccept)
 	case o.TurnState == store.TurnDone && strings.HasPrefix(o.TurnDetail, verdictReject):
@@ -628,10 +632,10 @@ func reviewOutcome(o store.InboundOutcome) (durable.ReviewResult, bool) {
 	return res, true
 }
 
-// Held details the router records itself (reviewEnd); turnClass maps them,
-// with the store's typed turn states, to the wake classes the durable
-// runtime acts on, so it never reads error text.
+// Details recorded by reviewEnd. Outcome readers use these labels and
+// the stored turn states to classify wakes without reading error text.
 const (
+	ownerReplied = "owner replied; skipped"
 	heldRefused  = reviewHeld + "creator admission or role changed; review refused"
 	heldStopped  = reviewHeld + "review stopped"
 	heldApproval = reviewHeld + "the harness asked for a native approval or input; nothing was approved"
@@ -679,6 +683,8 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 	e := store.TurnEnd{Harness: d.harness, Session: res.SessionID}
 	live := c.r.opt.Work != nil && current(c.r.opt.Work, t.review)
 	switch {
+	case errors.Is(d.identity, core.ErrSlackOwnerReplied):
+		e.State, e.ItemState, e.Detail = store.TurnDone, store.InDone, ownerReplied
 	case d.refused:
 		e.State, e.ItemState, e.Detail = store.TurnFailed, store.InFailed, heldRefused
 	case res.Cancelled && t.stopped.Load():

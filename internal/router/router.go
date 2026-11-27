@@ -1688,7 +1688,10 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 		}
 		if t.review.SlackWork != nil {
 			identity = c.r.checkSlackWork(t.startCtx, t.review, from)
-			refused = identity != nil
+			refused = identity != nil && !errors.Is(identity, core.ErrSlackOwnerReplied)
+			if refused {
+				c.r.log.Printf("turn %d in %s: Slack work refused: %q", t.id, c.key, c.r.scrub(identity.Error()))
+			}
 		}
 	}
 	for _, h := range t.candidates {

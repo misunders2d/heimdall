@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -14,12 +15,18 @@ import (
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/durable"
 	"github.com/misunders2d/heimdall/internal/harness"
+	"github.com/misunders2d/heimdall/internal/scheduler"
 	"github.com/misunders2d/heimdall/internal/store"
 )
 
 // workEnv is the router with durable commitments and supervisor review on.
 // flags: [0] T3 dispatch, [1] assistant wakes, [2] T3 tracking.
 func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
+	t.Helper()
+	return workEnvWithInterface(t, nil, dispatch...)
+}
+
+func workEnvWithInterface(t *testing.T, wrap func(*fakeIface) Interface, dispatch ...bool) (*env, *durable.Runtime) {
 	t.Helper()
 	e := setup(t, core.ModeCorporate, []string{"claude"}, "claude")
 	e.stop()
@@ -33,7 +40,11 @@ func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 	}
 	e.st, e.f = st, newFakeIface()
 	e.opt.Work = rt
-	r := New(e.opt, st, e.f)
+	var iface Interface = e.f
+	if wrap != nil {
+		iface = wrap(e.f)
+	}
+	r := New(e.opt, st, iface)
 	e.r = r
 	rt.SetWake(r.Wake)
 	rt.SetReviewer(r)
@@ -57,6 +68,79 @@ func workEnv(t *testing.T, dispatch ...bool) (*env, *durable.Runtime) {
 		st.Close()
 	})
 	return e, rt
+}
+
+type slackWatchTestIface struct {
+	namedFakeIface
+	owner         core.Principal
+	watch         core.SlackWatch
+	replyCheckErr error
+}
+
+func (f slackWatchTestIface) ConversationWork(context.Context, core.ConvKey, core.Principal, string) (core.Principal, core.SlackWatch, error) {
+	return f.owner, f.watch, nil
+}
+
+func (f slackWatchTestIface) Reverify(_ context.Context, p core.Principal) (scheduler.Verified, bool, error) {
+	return scheduler.Verified{Principal: p}, true, nil
+}
+
+func (f slackWatchTestIface) CheckSlackOwnerReply(context.Context, core.ConvKey, string, string) error {
+	return f.replyCheckErr
+}
+
+func TestSlackWatchLaunchOutcome(t *testing.T) {
+	owner := core.SlackPrincipal("boss@example.com", "T1", "Boss")
+	owner.SlackUserID = "U1"
+	requester := core.SlackPrincipal("requester@example.test", "T1", "Requester")
+	route := core.ConvKey{Interface: "slack", Chat: "C1", Thread: "1.000001"}
+	watch := core.SlackWatch{Mode: core.SlackWatchWork, Rule: "Answer questions", Revision: 1}
+	refusal := errors.New("slack: owner reply check could not read complete history")
+	for _, tc := range []struct {
+		name, turnState, itemState, detail, next string
+		checkErr                                 error
+	}{
+		{
+			name: "owner replied", checkErr: fmt.Errorf("checking thread: %w", core.ErrSlackOwnerReplied),
+			turnState: store.TurnDone, itemState: store.InDone, detail: "owner replied; skipped",
+			next: "none: the Slack owner replied",
+		},
+		{
+			name: "genuine refusal", checkErr: refusal,
+			turnState: store.TurnFailed, itemState: store.InFailed, detail: heldRefused,
+			next: "none: conversation work stayed silent",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, rt := workEnvWithInterface(t, func(f *fakeIface) Interface {
+				return slackWatchTestIface{namedFakeIface{f, "slack"}, owner, watch, tc.checkErr}
+			}, false, true)
+			const issue = "SLACK-WATCH-TEST"
+			if _, err := rt.Admit(durable.Commitment{
+				Issue: issue, Title: "Slack watch test", Brief: say("REPORT\nUnexpected harness run"),
+				Owner: owner, Creator: owner.Key(), Route: route, Resource: "default",
+				SlackWork: &core.SlackWork{Requester: requester, Watch: watch, Rule: watch.Rule, MessageTS: route.Thread},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			state := phase(t, rt, issue, durable.PhaseClosed)
+			conv := core.ConvKey{Interface: route.Interface, Chat: core.ReviewChat(issue)}
+			outcome, ok, err := e.st.InboundOutcome(conv, issue+"/1/work/1")
+			if err != nil || !ok || outcome.Turn == 0 {
+				t.Fatalf("missing stored turn: %+v, found %t, error %v", outcome, ok, err)
+			}
+			if outcome.TurnState != tc.turnState || outcome.State != tc.itemState || outcome.TurnDetail != tc.detail {
+				t.Errorf("turn state %q, inbound state %q, detail %q; want %q, %q, %q",
+					outcome.TurnState, outcome.State, outcome.TurnDetail, tc.turnState, tc.itemState, tc.detail)
+			}
+			if state.Next != tc.next {
+				t.Errorf("closed with %q; want %q", state.Next, tc.next)
+			}
+			if tc.checkErr == refusal && !strings.Contains(e.logs.String(), refusal.Error()) {
+				t.Errorf("missing Slack refusal reason in service log: %q", refusal)
+			}
+		})
+	}
 }
 
 func count(t *testing.T, path, q string, args ...any) int {
