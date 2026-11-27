@@ -152,6 +152,7 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 		return false, false, nil
 	}
 	m := p.Event
+	m.Text = sentUsing.ReplaceAllString(m.Text, "")
 	if m.User != "" && m.User == s.opt.WorkOwnerID && strings.HasPrefix(m.Text, workAttribution(m.User)) {
 		return false, false, nil // our own attributed reply via the user token
 	}
