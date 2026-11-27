@@ -238,6 +238,12 @@ func run(args []string) error {
 	if cfg.Slack != nil && cfg.Slack.WorkOwnerID != "" && work != nil && cfg.Durable.Assistant {
 		watchCommand = slackWatchCommand(flags.Lookup("config").Value.String())
 	}
+	// Crash leftovers only: leases older than any leased process can live.
+	if n, err := (harness.Accounts{RunAs: cfg.RunAs, Log: logger}).SweepEmployeeLeases(time.Now()); err != nil {
+		logger.Printf("employee lease sweep: %v (removed=%d)", err, n)
+	} else if n > 0 {
+		logger.Printf("employee lease sweep: removed=%d stale", n)
+	}
 	r := router.New(router.Options{Work: work, Google: google, MCP: mcp, EmployeeHarnesses: cfg.EmployeeHarnesses, Harness: cfg.Harness, OwnerSlack: cfg.OwnerSlack, SlackTeam: slackTeam(cfg), SlackWatchCommand: watchCommand, Access: cfg.Access(), Order: cfg.HarnessOrder, MaxParallel: cfg.MaxParallel, Accounts: harness.Accounts{RunAs: cfg.RunAs, Log: logger}, Log: logger, OutboxDir: filepath.Join(cfg.DataDir, "outbox"), GuardLog: guardLog(cfg), GuardLogMax: cfg.GuardLogMax(), Jobs: jobs}, st, interfaces...)
 	if cfg.Scheduler.On() && cfg.Scheduler.Control != nil {
 		listener, err := func() (*net.UnixListener, error) {

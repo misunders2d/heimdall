@@ -79,7 +79,9 @@ connected servers; `mcp logout <server>` removes one.
 
 Employees never log in. Like employee Pi, each turn gets a disposable 0700
 directory (`~/.heimdall/turn-agents/<engine>-*`, removed when the process
-exits) holding an access-only lease of the owner's existing login, never a
+exits; `heimdall run` also removes, at startup and as root through the
+employee home only, any lease directory older than 30 minutes a crash left
+behind) holding an access-only lease of the owner's existing login, never a
 refresh token:
 
 | Engine | Source (root) | Lease |

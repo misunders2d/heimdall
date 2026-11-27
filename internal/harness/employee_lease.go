@@ -17,6 +17,7 @@ import (
 
 	"github.com/misunders2d/heimdall/internal/mcpoauth"
 
+	"github.com/misunders2d/heimdall/internal/core"
 	_ "modernc.org/sqlite" // OMP keeps logins in its agent.db
 )
 
@@ -357,4 +358,71 @@ func worldReadable(path string) error {
 func ownedOnce(st os.FileInfo, uid uint32) bool {
 	stat, ok := st.Sys().(*syscall.Stat_t)
 	return ok && stat.Uid == uid && stat.Nlink == 1
+}
+
+// employeeLeaseStale: older than any leased process can live (25 min limit),
+// so another instance's running lease is never touched.
+const employeeLeaseStale = employeeLeaseLimit + 5*time.Minute
+
+// SweepEmployeeLeases removes lease directories a crash left behind under the
+// employee home (~/.heimdall/turn-agents, ~/.pi/turn-agents). Root only, at
+// startup. Removal goes through os.Root on the employee home, so a planted
+// symlink can never lead outside it. It returns how many were removed.
+func (a Accounts) SweepEmployeeLeases(now time.Time) (int, error) {
+	if os.Getuid() != 0 {
+		return 0, nil
+	}
+	r, acct, err := a.account(core.RoleEmployee)
+	if err != nil {
+		return 0, nil // no employee account configured
+	}
+	_, owner, err := a.account(core.RoleOwner)
+	if err != nil {
+		return 0, err
+	}
+	if err = checkEmployee(r.User, acct, owner); err != nil {
+		return 0, err
+	}
+	return sweepLeases(acct.u.HomeDir, now)
+}
+
+func sweepLeases(home string, now time.Time) (int, error) {
+	if home == "" || home == "/" || home == "/root" || home == ownerHome {
+		return 0, errors.New("employee home unsafe for lease sweep")
+	}
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		return 0, nil // no employee home yet
+	}
+	defer root.Close()
+	removed := 0
+	var failed error
+	for _, parent := range []string{".heimdall/turn-agents", ".pi/turn-agents"} {
+		st, err := root.Lstat(parent)
+		if err != nil || !st.IsDir() {
+			continue // absent, or a planted symlink: never followed
+		}
+		dir, err := root.Open(parent)
+		if err != nil {
+			continue
+		}
+		entries, err := dir.ReadDir(-1)
+		dir.Close()
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := parent + "/" + e.Name()
+			info, err := root.Lstat(name)
+			if err != nil || !info.ModTime().Before(now.Add(-employeeLeaseStale)) {
+				continue
+			}
+			if err = root.RemoveAll(name); err != nil {
+				failed = errors.New("employee lease sweep incomplete")
+				continue
+			}
+			removed++
+		}
+	}
+	return removed, failed
 }
