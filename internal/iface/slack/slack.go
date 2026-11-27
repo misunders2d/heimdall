@@ -670,6 +670,9 @@ func (s *Slack) pruneEvents() error {
 var mentions sync.Map
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9 _.-]`)
 
+// Slack MCP appends "*Sent using* <@app-bot>" to posts it makes; that is attribution, not a mention.
+var sentUsing = regexp.MustCompile(`\s*\*Sent using\* <@[A-Z0-9]+(?:\|[^>]*)?>`)
+
 func (s *Slack) mention() *regexp.Regexp {
 	if v, ok := mentions.Load(s.botID); ok {
 		return v.(*regexp.Regexp)

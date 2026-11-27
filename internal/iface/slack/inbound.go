@@ -102,6 +102,7 @@ func (s *Slack) process(ctx context.Context, e store.InterfaceEvent, accept func
 		return s.opt.Store.CompleteEvent(e.ID)
 	}
 	m := payload.Event
+	m.Text = sentUsing.ReplaceAllString(m.Text, "")
 	finish := func() error { return s.opt.Store.CompleteEvent(e.ID) }
 	if m.Type != "message" || m.BotID != "" || m.User == "" || m.User == s.botID || m.Channel == "" || m.TS == "" || !slices.Contains([]string{"", "file_share", "thread_broadcast"}, m.Subtype) {
 		s.opt.Log.Print("slack: ignored non-person or unsupported message event")
