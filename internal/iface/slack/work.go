@@ -158,14 +158,17 @@ func (s *Slack) eventAdmission(raw json.RawMessage) (ok, ownerOnly bool, err err
 	if s.opt.OwnerPost && m.User != "" && m.User == s.opt.WorkOwnerID && m.Metadata.Type == ownerPostEvent {
 		return false, false, nil // a post as the owner that Heimdall made: never the owner's live input
 	}
-	if s.opt.OwnerPost && m.User != "" && m.User == s.opt.WorkOwnerID && m.Subtype == "file_share" && len(m.Files) > 0 && strings.TrimSpace(m.Text) == "" {
+	if s.opt.OwnerPost && m.User != "" && m.User == s.opt.WorkOwnerID && m.Subtype == "file_share" && m.Upload && len(m.Files) > 0 &&
+		strings.TrimSpace(m.Text) == "" && m.Channel != "" && m.Channel != s.ownerBotDM {
 		// The files of a post as the owner are completed without a comment
-		// and cannot carry metadata; their recorded upload IDs identify them.
+		// and cannot carry metadata. Their echo is the upload-time share of
+		// exactly the recorded upload IDs at the post's own destination; a
+		// later share of the same files, anywhere, is the owner's own.
 		ids := make([]string, len(m.Files))
 		for i, f := range m.Files {
 			ids[i] = f.ID
 		}
-		ours, err := s.opt.Store.OwnerPostFiles(ids)
+		ours, err := s.opt.Store.OwnerPostFiles(core.ConvKey{Interface: core.PlatformSlack, Chat: m.Channel, Thread: m.ThreadTS}, ids)
 		if err != nil {
 			return false, false, err
 		}

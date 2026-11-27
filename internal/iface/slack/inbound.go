@@ -31,7 +31,10 @@ type eventMessage struct {
 	Files          []slackFile `json:"files"`
 	Blocks         []any       `json:"blocks"`
 	Attachments    []any       `json:"attachments"`
-	Metadata       struct {
+	// Upload: a file_share made at upload time, not a later share of an
+	// existing file (Slack's file_share event field notes).
+	Upload   bool `json:"upload"`
+	Metadata struct {
 		Type string `json:"event_type"`
 	} `json:"metadata"`
 }

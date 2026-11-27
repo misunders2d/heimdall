@@ -218,8 +218,9 @@ func (s *Store) SetOwnerPostUploads(id string, ids []string) error {
 }
 
 // OwnerPostFiles reports whether every given Slack file ID was recorded as
-// an upload of a post as the owner, so its file-share echo is Heimdall's.
-func (s *Store) OwnerPostFiles(ids []string) (bool, error) {
+// an upload of one approved post as the owner to dest (its channel and
+// thread), so a file-share echo there is Heimdall's.
+func (s *Store) OwnerPostFiles(dest core.ConvKey, ids []string) (bool, error) {
 	want := map[string]bool{}
 	for _, id := range ids {
 		if id == "" {
@@ -230,12 +231,16 @@ func (s *Store) OwnerPostFiles(ids []string) (bool, error) {
 	if len(want) == 0 {
 		return false, nil
 	}
-	args := make([]any, 0, len(want))
+	if dest.Chat == "" {
+		return false, nil
+	}
+	args := []any{OwnerPostApproved, dest.Chat, dest.Thread}
 	for id := range want {
 		args = append(args, id)
 	}
+	// One post holds them all: the echo is one completed upload.
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(DISTINCT j.value) FROM owner_posts p, json_each(p.uploads) j
-		WHERE p.uploads != '' AND j.value IN (?`+strings.Repeat(",?", len(args)-1)+`)`, args...).Scan(&n)
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(c),0) FROM (SELECT COUNT(DISTINCT j.value) c FROM owner_posts p, json_each(p.uploads) j
+		WHERE p.uploads != '' AND p.state=? AND p.target_chat=? AND p.target_thread=? AND j.value IN (?`+strings.Repeat(",?", len(want)-1)+`) GROUP BY p.id)`, args...).Scan(&n)
 	return err == nil && n == len(want), err
 }

@@ -304,15 +304,21 @@ func TestOwnerPostFileEchoIsNotOwnerInput(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatal("uploads", ids)
 	}
-	share := func(text string, files ...string) json.RawMessage {
+	shareIn := func(channel, thread string, upload bool, text string, files ...string) json.RawMessage {
 		fs := []map[string]string{}
 		for _, id := range files {
 			fs = append(fs, map[string]string{"id": id})
 		}
-		m := map[string]any{"type": "message", "subtype": "file_share", "channel": "C2", "channel_type": "channel",
-			"user": "UOWNER", "text": text, "ts": "1000.5", "thread_ts": "1000.1", "files": fs}
+		m := map[string]any{"type": "message", "subtype": "file_share", "channel": channel, "channel_type": "channel",
+			"user": "UOWNER", "text": text, "ts": "1000.5", "files": fs, "upload": upload}
+		if thread != "" {
+			m["thread_ts"] = thread
+		}
 		raw, _ := json.Marshal(map[string]any{"event": m, "authorizations": []map[string]any{{"team_id": "Ttest", "user_id": r.s.botID, "is_bot": true}}})
 		return raw
+	}
+	share := func(text string, files ...string) json.RawMessage {
+		return shareIn("C2", "1000.1", true, text, files...)
 	}
 	if ok, _, err := r.s.eventAdmission(share("", ids...)); ok || err != nil {
 		t.Fatal("owner post file echo admitted", ok, err)
@@ -325,6 +331,20 @@ func TestOwnerPostFileEchoIsNotOwnerInput(t *testing.T) {
 	}
 	if ok, _, _ := r.s.eventAdmission(share("", "FOTHER")); !ok {
 		t.Fatal("the owner's own file share refused")
+	}
+	// The owner's own later, commentless re-share of those files is theirs:
+	// not at upload time, another destination, or the bot DM (review
+	// finding 7).
+	for name, raw := range map[string]json.RawMessage{
+		"re-share later":   shareIn("C2", "1000.1", false, "", ids...),
+		"other channel":    shareIn("C9", "1000.1", true, "", ids...),
+		"other thread":     shareIn("C2", "", true, "", ids...),
+		"bot DM re-share":  shareIn("Dbot", "", false, "", ids...),
+		"bot DM at upload": shareIn("Dbot", "", true, "", ids...),
+	} {
+		if ok, _, err := r.s.eventAdmission(raw); !ok || err != nil {
+			t.Errorf("%s dropped as an owner post echo (%v)", name, err)
+		}
 	}
 }
 
