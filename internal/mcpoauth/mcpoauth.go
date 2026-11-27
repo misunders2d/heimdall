@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -207,6 +208,9 @@ func (b *Broker) read(path string, v any) error {
 	return json.Unmarshal(raw, v)
 }
 
+// renewalWrite stores a renewed credential (replaceable in tests).
+var renewalWrite = write
+
 func write(path string, v any) error {
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -271,19 +275,26 @@ func (b *Broker) discover(ctx context.Context, resource string) (asMeta, []strin
 	u, _ := url.Parse(resource)
 	origin := u.Scheme + "://" + u.Host
 	path := strings.TrimRight(u.Path, "/")
-	var prm struct {
-		Servers []string `json:"authorization_servers"`
-		Scopes  []string `json:"scopes_supported"`
+	type prmDoc struct {
+		Resource string   `json:"resource"`
+		Servers  []string `json:"authorization_servers"`
+		Scopes   []string `json:"scopes_supported"`
 	}
-	issuer := origin
+	// The metadata must name exactly this resource (RFC 9728 §3.3), so a
+	// document for another resource on the same host is never used.
+	var prm prmDoc
+	found := false
 	for _, candidate := range []string{origin + "/.well-known/oauth-protected-resource" + path, origin + "/.well-known/oauth-protected-resource"} {
-		if b.getJSON(ctx, candidate, &prm) {
-			if len(prm.Servers) > 0 {
-				issuer = prm.Servers[0]
-			}
+		var doc prmDoc
+		if b.getJSON(ctx, candidate, &doc) && doc.Resource == resource && len(doc.Servers) > 0 {
+			prm, found = doc, true
 			break
 		}
 	}
+	if !found {
+		return asMeta{}, nil, errors.New("MCP protected-resource metadata for this server unavailable")
+	}
+	issuer := prm.Servers[0]
 	if !secureURL(issuer) {
 		return asMeta{}, nil, errors.New("MCP authorization server is not HTTPS")
 	}
@@ -299,6 +310,10 @@ func (b *Broker) discover(ctx context.Context, resource string) (asMeta, []strin
 		if b.getJSON(ctx, candidate, &meta) {
 			break
 		}
+	}
+	// The issuer must be the one the resource named (RFC 8414 §3.3).
+	if meta.Issuer != issuer {
+		return asMeta{}, nil, errors.New("MCP authorization server issuer does not match")
 	}
 	if !secureURL(meta.Authorize) || !secureURL(meta.Token) {
 		return asMeta{}, nil, errors.New("MCP authorization server metadata unavailable")
@@ -419,11 +434,13 @@ func (b *Broker) exchange(ctx context.Context, cl client, values url.Values) (to
 	return t, nil
 }
 
-func (b *Broker) expiry(t tokenReply) time.Time {
+// expiry: a token without expires_in counts as short-lived (renewed before
+// every turn), never as valid forever.
+func (b *Broker) expiry(t tokenReply) (time.Time, bool) {
 	if t.Expires <= 0 {
-		return time.Time{}
+		return b.now(), false
 	}
-	return b.now().Add(time.Duration(t.Expires) * time.Second)
+	return b.now().Add(time.Duration(t.Expires) * time.Second), true
 }
 
 // Complete consumes the caller's pending sign-in exactly once and stores the
@@ -462,7 +479,8 @@ func (b *Broker) Complete(ctx context.Context, c Caller, conv core.ConvKey, call
 	if err != nil {
 		return "", err
 	}
-	cred := credential{Client: p.Client, Refresh: t.Refresh, Access: t.Access, Expires: b.expiry(t)}
+	expires, _ := b.expiry(t)
+	cred := credential{Client: p.Client, Refresh: t.Refresh, Access: t.Access, Expires: expires}
 	if err = write(credPath(dir, p.Server), cred); err != nil {
 		return "", err
 	}
@@ -536,7 +554,8 @@ func (b *Broker) Snapshot(ctx context.Context, c Caller, servers []string) (map[
 			failed[server] = errors.New("MCP credentials unavailable")
 			continue
 		}
-		if !cred.Expires.IsZero() && cred.Expires.Before(b.now().Add(MinLifetime)) {
+		// A zero expiry (older store) is treated as unknown: renew.
+		if cred.Expires.Before(b.now().Add(MinLifetime)) {
 			if cred.Refresh == "" {
 				failed[server] = errors.New("MCP access expired; send `mcp login " + server + "` in a DM")
 				continue
@@ -546,15 +565,21 @@ func (b *Broker) Snapshot(ctx context.Context, c Caller, servers []string) (map[
 				failed[server] = errors.New("MCP renewal failed; send `mcp login " + server + "` in a DM")
 				continue
 			}
-			cred.Access, cred.Expires = t.Access, b.expiry(t)
+			expires, known := b.expiry(t)
+			cred.Access, cred.Expires = t.Access, expires
+			rotated := t.Refresh != "" && t.Refresh != cred.Refresh
 			if t.Refresh != "" {
 				cred.Refresh = t.Refresh
 			}
-			if err = write(path, cred); err != nil {
-				failed[server] = err
+			if err = renewalWrite(path, cred); err != nil {
+				// A rotated refresh token that cannot be stored is lost: the
+				// old one may already be revoked. Fail closed and say so.
+				log.Printf("employee MCP: renewed %s credentials could not be stored (rotated=%t); caller must sign in again", server, rotated)
+				failed[server] = errors.New("MCP renewal could not be saved; send `mcp login " + server + "` in a DM")
 				continue
 			}
-			if !cred.Expires.IsZero() && cred.Expires.Before(b.now().Add(MinLifetime)) {
+			// Unknown lifetime: this fresh token serves this turn only.
+			if known && cred.Expires.Before(b.now().Add(MinLifetime)) {
 				failed[server] = errors.New("MCP access lifetime too short")
 				continue
 			}

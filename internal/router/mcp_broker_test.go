@@ -46,6 +46,8 @@ func fakeMCPAS(t *testing.T) *httptest.Server {
 	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := srv.URL
 		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource/mcp":
+			json.NewEncoder(w).Encode(map[string]any{"resource": base + "/mcp", "authorization_servers": []string{base}})
 		case "/.well-known/oauth-authorization-server":
 			json.NewEncoder(w).Encode(map[string]any{"issuer": base, "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token", "registration_endpoint": base + "/register"})
 		case "/register":

@@ -37,7 +37,13 @@ connected servers; `mcp logout <server>` removes one.
 
 - Discovery follows the MCP authorization spec (protected-resource metadata,
   then authorization-server metadata), dynamic client registration, PKCE
-  S256 and the `resource` parameter. Every endpoint must be HTTPS.
+  S256 and the `resource` parameter. Every endpoint must be HTTPS. The
+  protected-resource metadata must name exactly the configured server URL,
+  and the authorization server's `issuer` must equal the one it names.
+- A token without `expires_in` counts as short-lived and is renewed before
+  every turn. A renewal that cannot be stored (its rotated refresh token
+  would be lost) fails that server for the turn, is logged, and the caller
+  is asked to sign in again.
 - Refresh tokens and client registrations stay root-only:
   `<data_dir>/mcp-employees/<caller-digest>/` (0700 directories, 0600
   files, no symlinks). The digest rules are `employee_google`'s.

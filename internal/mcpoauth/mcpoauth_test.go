@@ -1,8 +1,10 @@
 package mcpoauth
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,7 +21,9 @@ import (
 type fakeAS struct {
 	srv       *httptest.Server
 	refreshes atomic.Int32
-	expires   int
+	expires   int    // 0: expires_in omitted
+	resource  string // "" : the real resource
+	issuer    string // "" : the real issuer
 }
 
 func newFakeAS(t *testing.T) *fakeAS {
@@ -29,9 +33,10 @@ func newFakeAS(t *testing.T) *fakeAS {
 		base := f.srv.URL
 		switch r.URL.Path {
 		case "/.well-known/oauth-protected-resource/mcp":
-			json.NewEncoder(w).Encode(map[string]any{"resource": base + "/mcp", "authorization_servers": []string{base}, "scopes_supported": []string{"read"}})
+			resource := cmp.Or(f.resource, base+"/mcp")
+			json.NewEncoder(w).Encode(map[string]any{"resource": resource, "authorization_servers": []string{base}, "scopes_supported": []string{"read"}})
 		case "/.well-known/oauth-authorization-server":
-			json.NewEncoder(w).Encode(map[string]any{"issuer": base, "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token", "registration_endpoint": base + "/register", "code_challenge_methods_supported": []string{"S256"}})
+			json.NewEncoder(w).Encode(map[string]any{"issuer": cmp.Or(f.issuer, base), "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token", "registration_endpoint": base + "/register", "code_challenge_methods_supported": []string{"S256"}})
 		case "/register":
 			var reg map[string]any
 			json.NewDecoder(r.Body).Decode(&reg)
@@ -56,7 +61,11 @@ func newFakeAS(t *testing.T) *fakeAS {
 					t.Error("wrong refresh")
 				}
 			}
-			json.NewEncoder(w).Encode(map[string]any{"access_token": "SYNTHETIC_ACCESS", "refresh_token": "SYNTHETIC_REFRESH", "expires_in": f.expires, "token_type": "bearer"})
+			reply := map[string]any{"access_token": "SYNTHETIC_ACCESS", "refresh_token": "SYNTHETIC_REFRESH", "token_type": "bearer"}
+			if f.expires != 0 {
+				reply["expires_in"] = f.expires
+			}
+			json.NewEncoder(w).Encode(reply)
 		default:
 			http.NotFound(w, r)
 		}
@@ -196,5 +205,48 @@ func TestConfigValidate(t *testing.T) {
 	}
 	if (&Config{Enabled: true}).Validate() != nil || (&Config{Enabled: true, RedirectURI: "http://localhost:4000/cb"}).Validate() != nil {
 		t.Fatal("rejected loopback")
+	}
+}
+
+// Metadata must name exactly this resource and issuer.
+func TestDiscoveryBindsResourceAndIssuer(t *testing.T) {
+	b, f, c, conv := fixture(t)
+	f.resource = "https://elsewhere.example/mcp"
+	if _, err := b.Login(context.Background(), c, conv, "mellanni"); err == nil {
+		t.Fatal("protected-resource metadata for another resource accepted")
+	}
+	f.resource, f.issuer = "", "https://evil.example"
+	if _, err := b.Login(context.Background(), c, conv, "mellanni"); err == nil {
+		t.Fatal("authorization server with another issuer accepted")
+	}
+	f.issuer = ""
+	if _, err := b.Login(context.Background(), c, conv, "mellanni"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A token without expires_in is short-lived: renewed before every turn.
+func TestMissingExpiryIsShortLived(t *testing.T) {
+	b, f, c, conv := fixture(t)
+	f.expires = 0
+	signIn(t, b, c, conv)
+	for turn := 1; turn <= 2; turn++ {
+		got, failed := b.Snapshot(context.Background(), c, []string{"mellanni"})
+		if len(failed) != 0 || got["mellanni"].Token == "" || f.refreshes.Load() != int32(turn) {
+			t.Fatal(turn, got, failed, f.refreshes.Load())
+		}
+	}
+}
+
+// A renewal that cannot be stored fails closed with a clear message.
+func TestRenewalWriteFailureFailsClosed(t *testing.T) {
+	b, f, c, conv := fixture(t)
+	f.expires = 600
+	signIn(t, b, c, conv)
+	renewalWrite = func(string, any) error { return errors.New("disk full") }
+	defer func() { renewalWrite = write }()
+	got, failed := b.Snapshot(context.Background(), c, []string{"mellanni"})
+	if len(got) != 0 || failed["mellanni"] == nil || !strings.Contains(failed["mellanni"].Error(), "could not be saved") {
+		t.Fatal(got, failed)
 	}
 }
