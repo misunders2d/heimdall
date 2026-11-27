@@ -4,7 +4,10 @@ import { resolve, relative, isAbsolute } from "node:path";
 
 // OMP loads this guard directly (no authorizer passed). Business MCP tools are
 // admitted only for the servers Heimdall listed in HEIMDALL_EMPLOYEE_MCP (set
-// outside model control); OMP names them mcp__<server>_<tool>.
+// outside model control); OMP names them mcp__<server>_<tool>. That naming
+// cannot tell a server "mellanni_x" from "mellanni", and the event carries no
+// server field, so Heimdall pins OMP's MCP discovery to the lease's mcp.json,
+// which names only approved servers (internal/harness ompEmployeeSettings).
 const businessServers = ["mellanni", "linear"];
 export function approvedMCP(event: any): boolean {
   let approved: unknown;

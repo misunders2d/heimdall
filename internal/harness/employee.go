@@ -208,8 +208,26 @@ func approvedMCPTool(tool, sep string) bool {
 	if json.Unmarshal([]byte(os.Getenv("HEIMDALL_EMPLOYEE_MCP")), &approved) != nil {
 		return false
 	}
+	rest, ok := strings.CutPrefix(tool, "mcp__")
+	if !ok {
+		return false
+	}
 	for _, s := range approved {
-		if _, ok := mcpoauth.Servers[s]; ok && strings.HasPrefix(tool, "mcp__"+s+sep) && len(tool) > len("mcp__"+s+sep) {
+		if _, ok := mcpoauth.Servers[s]; !ok {
+			continue
+		}
+		if sep == "__" {
+			// Claude/Codex name tools mcp__<server>__<tool>: the server
+			// segment must equal the approved name exactly.
+			if server, name, cut := strings.Cut(rest, "__"); cut && server == s && name != "" {
+				return true
+			}
+			continue
+		}
+		// mcp__<server>_<tool> (OMP) cannot separate a server named
+		// mellanni_x from mellanni; OMP loads only the lease's mcp.json
+		// (ompEmployeeSettings), which names approved servers only.
+		if name, cut := strings.CutPrefix(rest, s+sep); cut && name != "" {
 			return true
 		}
 	}

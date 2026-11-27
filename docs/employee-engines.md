@@ -47,7 +47,19 @@ connected servers; `mcp logout <server>` removes one.
     server with an `Authorization` header). A file, never argv.
   - Codex: one `mcp_servers` table; approved servers fully defined with
     `bearer_token_env_var`, every other one disabled.
-  - OMP: `mcp.json` in the disposable agent directory.
+  - OMP: `mcp.json` in the disposable agent directory, and the only MCP
+    source: the lease's `config.yml` sets `mcp.enableProjectConfig: false`
+    and disables the Claude, Codex, Cursor, Gemini, OpenCode, VS Code,
+    Windsurf, plugin and project `mcp.json` discovery providers. On OMP
+    19.2.1 a test with marker servers showed only the agent-directory
+    `mcp.json` loading; without the settings, project `.mcp.json` and
+    `.omp/mcp.json` also loaded. The probe fails on any `mcp__` tool that is
+    not the caller's own server.
+- Guards admit only tools of the approved servers. Claude/Codex names
+  (`mcp__<server>__<tool>`) are matched on the exact server. OMP names
+  (`mcp__<server>_<tool>`) cannot tell `mellanni_x` from `mellanni`, and its
+  tool event has no server field, so pinning OMP discovery to the lease is
+  what excludes a look-alike server.
 - Callbacks never enter a queue, session, log or model prompt. Slack
   callbacks bypass raw-event staging, as before.
 - With only Pi enabled, `mcp login` keeps Pi's native sign-in and store

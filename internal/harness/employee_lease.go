@@ -251,12 +251,23 @@ func codexLease(dir string, l Launch, env []string, servers []employeeServer, no
 // ompLease seeds a disposable OMP agent directory. OMP creates its own
 // agent.db schema (as the employee uid); Heimdall then adds the one
 // access-only openai-codex login, the same lease employee Pi gets.
+// ompEmployeeSettings is the lease's OMP config.yml (JSON is valid YAML).
+var ompEmployeeSettings = map[string]any{
+	"disabledProviders": []string{"claude", "claude-plugins", "codex", "cursor", "gemini", "opencode", "mcp-json", "vscode", "windsurf"},
+	"mcp":               map[string]any{"enableProjectConfig": false},
+}
+
 func ompLease(ctx context.Context, dir string, l Launch, env []string, servers []employeeServer, now time.Time) ([]string, []string, error) {
 	auth, settings, err := employeePiSnapshot(filepath.Join(ownerHome, ".pi", "agent"), now)
 	if err != nil {
 		return nil, nil, errors.New(strings.Replace(err.Error(), "employee Pi", "employee OMP", 1))
 	}
 	env = setEnv(env, "PI_CODING_AGENT_DIR", dir)
+	// MCP comes only from this lease's mcp.json: no project .mcp.json or
+	// .omp/mcp.json and no other tool's config (checked on OMP 19.2.1).
+	if err = writeEmployeeJSON(dir, "config.yml", ompEmployeeSettings, l); err != nil {
+		return nil, nil, err
+	}
 	initCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(initCtx, l.Path, "config", "list")

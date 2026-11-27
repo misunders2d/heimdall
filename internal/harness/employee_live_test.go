@@ -119,6 +119,10 @@ func checkProbeAnswer(engine, answer string, brokerSignedIn bool) (bool, error) 
 			hasMellanni = hasMellanni || strings.Contains(lower, "mellanni")
 			continue
 		}
+		if strings.HasPrefix(lower, "mcp__") {
+			// Any other loaded MCP server (ambient or project config) fails.
+			return false, fmt.Errorf("unapproved MCP server tool exposed: %s", name)
+		}
 		if probeShell.MatchString(name) || probeOwner.MatchString(name) {
 			return false, fmt.Errorf("owner or shell tool exposed: %s", name)
 		}

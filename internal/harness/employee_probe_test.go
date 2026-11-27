@@ -22,6 +22,7 @@ func TestCheckProbeAnswer(t *testing.T) {
 		{"codex shell", "codex", "TOOL:exec_command\n" + ok, false, true},
 		{"credential read", "claude", "TOOL:Read\nREAD_OK:/root/.codex/auth.json\n" + ok, false, true},
 		{"shared unreadable", "claude", "TOOL:Read\nPROBE_DONE", false, true},
+		{"ambient mcp server", "omp", "TOOL:read\nTOOL:mcp__github_search\n" + ok, false, true},
 		{"pi native store", "pi", "TOOL:mellanni_skills_list\nTOOL:edit_amazon_cogs\n" + ok, false, false},
 	}
 	for _, c := range cases {

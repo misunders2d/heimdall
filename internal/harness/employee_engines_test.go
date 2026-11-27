@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -93,7 +94,9 @@ func TestEmployeeCodexMCPTable(t *testing.T) {
 
 func TestApprovedMCPTool(t *testing.T) {
 	t.Setenv("HEIMDALL_EMPLOYEE_MCP", `["mellanni"]`)
-	for tool, want := range map[string]bool{"mcp__mellanni__search": true, "mcp__mellanni__": false, "mcp__linear__list": false, "mcp__t3__launch": false, "mcp__mellannix__a": false, "mcp__memento__recall": false} {
+	for tool, want := range map[string]bool{"mcp__mellanni__search": true, "mcp__mellanni__": false, "mcp__linear__list": false, "mcp__t3__launch": false, "mcp__mellannix__a": false, "mcp__memento__recall": false,
+		// A server that merely shares the approved prefix is not approved.
+		"mcp__mellanni_x__search": false, "mellanni__search": false} {
 		if approvedMCPTool(tool, "__") != want {
 			t.Errorf("%s: want %t", tool, want)
 		}
@@ -275,6 +278,21 @@ func TestOMPLeaseAccessOnly(t *testing.T) {
 	}
 	if mcp := readJSONFile(t, filepath.Join(dir, "mcp.json")); !strings.Contains(mcp, "Bearer CALLER_ACCESS_M") {
 		t.Fatal(mcp)
+	}
+	// MCP discovery is pinned to the lease's mcp.json.
+	var cfg struct {
+		Disabled []string `json:"disabledProviders"`
+		MCP      struct {
+			Project *bool `json:"enableProjectConfig"`
+		} `json:"mcp"`
+	}
+	if json.Unmarshal([]byte(readJSONFile(t, filepath.Join(dir, "config.yml"))), &cfg) != nil || cfg.MCP.Project == nil || *cfg.MCP.Project {
+		t.Fatal("OMP project MCP config not disabled")
+	}
+	for _, p := range []string{"claude", "codex", "cursor", "gemini", "mcp-json", "vscode", "windsurf", "opencode", "claude-plugins"} {
+		if !slices.Contains(cfg.Disabled, p) {
+			t.Fatal("OMP MCP discovery provider left on:", p)
+		}
 	}
 	// A planted agent.db symlink is refused.
 	dir2 := filepath.Join(l.Home, "lease2")

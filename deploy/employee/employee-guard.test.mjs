@@ -7,7 +7,7 @@ let handler;
 guard({ on: (_e, h) => { handler = h; } });
 const decide = async name => (await handler({ toolName: name, input: {} })) ? 'block' : 'allow';
 assert.equal(await decide('mcp__mellanni_search_keywords'), 'allow');
-for (const name of ['mcp__linear_list_issues', 'mcp__t3_launch', 'mcp__memento_recall', 'mcp__slack_search', 'mcp__mellanni_', 'bash', 'write'])
+for (const name of ['mcp__linear_list_issues', 'mcp__t3_launch', 'mcp__memento_recall', 'mcp__slack_search', 'mcp__mellanni_', 'mcp__mellannix_a', 'mcp__xmellanni_a', 'mellanni_search', 'bash', 'write'])
   assert.equal(await decide(name), 'block', name);
 process.env.HEIMDALL_EMPLOYEE_MCP = '["t3"]';
 assert.equal(approvedMCP({ toolName: 'mcp__t3_launch' }), false);
