@@ -323,6 +323,39 @@ func TestOwnerPostFileEchoIsNotOwnerInput(t *testing.T) {
 	if ok, _, err := r.s.eventAdmission(share("", ids...)); ok || err != nil {
 		t.Fatal("owner post file echo admitted", ok, err)
 	}
+	// Slack's documented upload example carries upload: true and no
+	// subtype: the same echo. Without upload it is a share: the owner's.
+	noSubtype := func(upload bool) json.RawMessage {
+		var p map[string]map[string]any
+		_ = json.Unmarshal(share("", ids...), &p)
+		delete(p["event"], "subtype")
+		p["event"]["upload"] = upload
+		raw, _ := json.Marshal(p)
+		return raw
+	}
+	if ok, _, err := r.s.eventAdmission(noSubtype(true)); ok || err != nil {
+		t.Fatal("owner post file echo without a subtype admitted", ok, err)
+	}
+	if ok, _, err := r.s.eventAdmission(noSubtype(false)); !ok || err != nil {
+		t.Fatal("the owner's own share without a subtype refused", ok, err)
+	}
+	// The documented shape exactly (no subtype, no thread_ts), for a post
+	// outside a thread.
+	flat := r.post(t, core.ConvKey{Interface: "slack", Chat: "C3"}, "", 1)
+	if err := r.s.Send(context.Background(), flat); err != nil {
+		t.Fatal(err)
+	}
+	flatIDs, _ := r.st.OwnerPostUploads(flat.OwnerPost.ID)
+	var doc map[string]map[string]any
+	_ = json.Unmarshal(shareIn("C3", "", true, "", flatIDs...), &doc)
+	delete(doc["event"], "subtype")
+	documented, _ := json.Marshal(doc)
+	if len(flatIDs) != 1 {
+		t.Fatal("uploads", flatIDs)
+	}
+	if ok, _, err := r.s.eventAdmission(documented); ok || err != nil {
+		t.Fatal("documented-shape file echo admitted", ok, err)
+	}
 	if ok, _, _ := r.s.eventAdmission(share("", ids[0], "FOTHER")); !ok {
 		t.Fatal("a share with another file refused")
 	}

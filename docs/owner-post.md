@@ -146,7 +146,8 @@ queued. Text or files alone are fine; at least one is required.
 - A post Heimdall made comes back from Slack as the owner's message. Events
   from the owner carrying the post metadata are dropped before persistence,
   so they never become the owner's live input. The files' message cannot
-  carry metadata: an owner `file_share` without a comment, made at upload
+  carry metadata: an owner `file_share` (or, as in Slack's documented
+  example, a message with no `subtype`) without a comment, made at upload
   time (`upload` true), in the post's own channel and thread, whose files
   are all recorded uploads of that one approved post, is dropped the same
   way (the IDs are recorded before completing). Never in the owner's chat
@@ -154,7 +155,7 @@ queued. Text or files alone are fine; at least one is required.
   Unverified live: that Slack includes the metadata, the file IDs,
   `subtype` `file_share`, `upload` and `thread_ts` in those events.
   Slack's `file_share` reference documents `upload`, but its example shows
-  no `subtype` or `thread_ts`, and the page both calls the event "no longer
+  no `subtype` (accepted too) or `thread_ts`, and the page both calls the event "no longer
   served" and says Events API deliveries continue. If a field is missing
   live, Heimdall's own file post would be read as the owner's input. The
   target and mention refusals above do not depend on it.
