@@ -147,14 +147,18 @@ func (c *Control) postAsOwner(ctx context.Context, uid uint32, req ControlReques
 	now := c.s.now()
 	p := store.OwnerPost{ID: newPostID(), Creator: who.Principal.Key(), Card: card, Target: target, Label: label, Text: text, Files: files,
 		Origin: postOrigin(who), State: store.OwnerPostPending, Expires: now.Add(ownerPostTTL), Created: now}
-	var outs []core.Outbound
+	var outs, wake []core.Outbound
 	result := ControlResult{PostID: p.ID, Changed: true}
 	if cfg.Immediate {
 		p.State = store.OwnerPostApproved
 		outs = []core.Outbound{ownerPostOut(p), {Conv: card, Text: fmt.Sprintf("📤 Posting as you to %s (%s, %s). — heimdall", plainLabel(label), postOrigin(who), fileCount(len(files)))}}
+		wake = outs
 		result.Reply = "Queued: posting as the owner to " + plainLabel(label) + " now (approval mode immediate). — heimdall"
 	} else {
-		outs = []core.Outbound{{Conv: card, Text: postCard(card, p), Formatted: true}}
+		// The card is queued linked to the post: only a reply after its
+		// confirmed delivery answers it.
+		p.CardMessage = &core.Outbound{Conv: card, Text: postCard(card, p), Formatted: true}
+		wake = []core.Outbound{*p.CardMessage}
 		result.Reply = "Waiting for the owner's Yes in their private chat with Heimdall; nothing is posted until then (expires in 24 h). — heimdall"
 	}
 	response, _ := json.Marshal(result)
@@ -165,7 +169,7 @@ func (c *Control) postAsOwner(ctx context.Context, uid uint32, req ControlReques
 		return fail(err.Error())
 	}
 	keep = true
-	c.s.notify(outs...)
+	c.s.notify(wake...)
 	c.s.log.Printf("scheduler control: operator uid %d, action %s, post %s, files %d, immediate %t", uid, postAsOwner, p.ID, len(files), cfg.Immediate)
 	return result
 }
@@ -248,9 +252,11 @@ func (s *Scheduler) ownerPosts(c Caller) []store.OwnerPost {
 	return posts
 }
 
-// answerPosts approves or declines every waiting post here; each approval
-// queues its delivery row with the reply, in one transaction. With posting
-// as the owner turned off, any answer declines them: nothing is posted.
+// answerPosts approves or declines every waiting post here whose card was
+// confirmed sent before the answer; each approval queues its delivery row
+// with the reply, in one transaction. A post whose card had not reached the
+// owner yet is left waiting and named. With posting as the owner turned
+// off, any answer declines them all: nothing is posted.
 func (s *Scheduler) answerPosts(c Caller, posts []store.OwnerPost, approve bool) (string, *store.JobChange) {
 	off := s.OwnerPost == nil
 	if off {
@@ -259,6 +265,10 @@ func (s *Scheduler) answerPosts(c Caller, posts []store.OwnerPost, approve bool)
 	var lines []string
 	all := &store.JobChange{}
 	for _, p := range posts {
+		if !off && !p.CardSeenBefore(c.Inbound) {
+			lines = append(lines, "Post to "+literal(p.Label)+" still waits: its card had not reached you before this answer. Answer it after you see it.")
+			continue
+		}
 		d := &store.OwnerPostDecision{ID: p.ID, Creator: p.Creator, Approve: approve, At: s.now()}
 		switch {
 		case off:
@@ -274,7 +284,10 @@ func (s *Scheduler) answerPosts(c Caller, posts []store.OwnerPost, approve bool)
 		all.More = append(all.More, &store.JobChange{OwnerPost: d})
 	}
 	title := "📤 Posts as you approved"
-	if !approve {
+	switch {
+	case len(all.More) == 0:
+		title = "📤 Posts as you"
+	case !approve:
 		title = "📤 Posts as you cancelled"
 	}
 	return s.heading(c, title) + "\n" + strings.Join(lines, "\n"), all

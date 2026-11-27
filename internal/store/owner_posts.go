@@ -32,7 +32,17 @@ type OwnerPost struct {
 	State   string
 	Expires time.Time
 	Created time.Time
+	// CardMessage is the card, queued with the post (not stored here); its
+	// outbound row is linked so its confirmed delivery can be told.
+	CardMessage *core.Outbound
+	// CardMark is the newest inbound row stored when the card was confirmed
+	// sent; -1 while it was not. Only a reply stored later answers it.
+	CardMark int64
 }
+
+// CardSeenBefore reports the post's card confirmed sent before the inbound
+// row reply was stored.
+func (p OwnerPost) CardSeenBefore(reply int64) bool { return p.CardMark >= 0 && p.CardMark < reply }
 
 // OwnerPostDecision approves or declines a pending post. Approving queues
 // Out in the same transaction; a post no longer pending (answered, expired)
@@ -59,6 +69,14 @@ func insertOwnerPost(tx *sql.Tx, p OwnerPost) error {
 	}
 	_, err = tx.Exec(`INSERT INTO owner_posts(id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Creator, p.Card.Interface, p.Card.Chat, p.Card.Thread, p.Target.Chat, p.Target.Thread, p.Label, p.Text, string(files), p.Origin, p.State, unix(p.Expires), created, decided)
+	if err != nil || p.CardMessage == nil {
+		return err
+	}
+	card, err := enqueue(tx, *p.CardMessage)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE owner_posts SET card_out=? WHERE id=?`, card, p.ID)
 	return err
 }
 
@@ -81,13 +99,13 @@ func decideOwnerPost(tx *sql.Tx, d OwnerPostDecision) error {
 	return err
 }
 
-const ownerPostCols = `id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at`
+const ownerPostCols = `id,creator,card_iface,card_chat,card_thread,target_chat,target_thread,label,text,files,origin,state,expires_at,created_at,card_mark`
 
 func scanOwnerPost(row interface{ Scan(...any) error }) (OwnerPost, error) {
 	var p OwnerPost
 	var files string
 	var expires, created int64
-	if err := row.Scan(&p.ID, &p.Creator, &p.Card.Interface, &p.Card.Chat, &p.Card.Thread, &p.Target.Chat, &p.Target.Thread, &p.Label, &p.Text, &files, &p.Origin, &p.State, &expires, &created); err != nil {
+	if err := row.Scan(&p.ID, &p.Creator, &p.Card.Interface, &p.Card.Chat, &p.Card.Thread, &p.Target.Chat, &p.Target.Thread, &p.Label, &p.Text, &files, &p.Origin, &p.State, &expires, &created, &p.CardMark); err != nil {
 		return p, err
 	}
 	p.Target.Interface = core.PlatformSlack
@@ -99,7 +117,8 @@ func scanOwnerPost(row interface{ Scan(...any) error }) (OwnerPost, error) {
 }
 
 // PendingOwnerPosts are creator's posts waiting for an answer in card,
-// oldest first; expired ones are left out.
+// oldest first; expired ones are left out. Whether a reply may answer one
+// is CardSeenBefore.
 func (s *Store) PendingOwnerPosts(creator string, card core.ConvKey, at time.Time) ([]OwnerPost, error) {
 	rows, err := s.db.Query(`SELECT `+ownerPostCols+` FROM owner_posts WHERE creator=? AND card_iface=? AND card_chat=? AND card_thread=? AND state=? AND expires_at>? ORDER BY created_at, id`,
 		creator, card.Interface, card.Chat, card.Thread, OwnerPostPending, at.UnixMilli())

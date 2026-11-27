@@ -3,11 +3,13 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/misunders2d/heimdall/internal/core"
 	"github.com/misunders2d/heimdall/internal/store"
@@ -45,6 +47,18 @@ func postRig(t *testing.T, immediate bool) (*rig, *Control, uint32, string) {
 		t.Fatal(err)
 	}
 	return r, c, uid, src
+}
+
+// said is c answering with a newly stored inbound message, as the router
+// sets it.
+func (r *rig) said(c Caller) Caller {
+	r.t.Helper()
+	row, _, err := r.st.AddInbound(core.Inbound{Conv: c.Conv, From: c.Principal, Origin: core.OriginLive, Private: c.Private, MsgID: fmt.Sprint("m", time.Now().UnixNano()), Text: "synthetic"})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	c.Inbound = row.ID
+	return c
 }
 
 // slackRows drains the queued Slack rows (posts as the owner).
@@ -87,18 +101,18 @@ func TestPostAsOwnerWaitsForTheOwnersYes(t *testing.T) {
 	}
 	// The original may change now: the copy was checked and is what posts.
 	_ = os.WriteFile(src, []byte("changed after the card"), 0o600)
-	if _, ok := r.answer(asWork, "yes"); ok {
+	if _, ok := r.answer(r.said(asWork), "yes"); ok {
 		t.Fatal("another person approved")
 	}
-	if _, ok := r.answer(asBoss, "yes?"); ok {
+	if _, ok := r.answer(r.said(asBoss), "yes?"); ok {
 		t.Fatal("a question approved")
 	}
 	elsewhere := asBoss
 	elsewhere.Conv = team
-	if _, ok := r.answer(elsewhere, "yes"); ok {
+	if _, ok := r.answer(r.said(elsewhere), "yes"); ok {
 		t.Fatal("approved outside the card's chat")
 	}
-	reply, ok := r.answer(asBoss, "Yes!")
+	reply, ok := r.answer(r.said(asBoss), "Yes!")
 	if !ok || !strings.Contains(reply, "Posting as you") || !Formatted(reply) {
 		t.Fatal(reply)
 	}
@@ -113,7 +127,7 @@ func TestPostAsOwnerWaitsForTheOwnersYes(t *testing.T) {
 	if b, err := os.ReadFile(p.OwnerPost.Files[0].Path); err != nil || string(b) != "synthetic report" {
 		t.Fatal("approved copy is not the checked file", string(b), err)
 	}
-	if _, ok := r.answer(asBoss, "yes"); ok {
+	if _, ok := r.answer(r.said(asBoss), "yes"); ok {
 		t.Fatal("an answered post was answered again")
 	}
 }
@@ -124,7 +138,8 @@ func TestPostAsOwnerDeclineExpiryAndImmediate(t *testing.T) {
 	if got := c.executeBound(ctx, uid, ControlRequest{Action: postAsOwner, RequestID: "a", Target: "slack:C1", Text: "one"}); got.Error != "" {
 		t.Fatal(got)
 	}
-	if _, ok := r.answer(asBoss, "no"); !ok {
+	r.sent()
+	if _, ok := r.answer(r.said(asBoss), "no"); !ok {
 		t.Fatal("no not handled")
 	}
 	if rows := r.slackRows(); len(rows) != 0 {
@@ -134,7 +149,7 @@ func TestPostAsOwnerDeclineExpiryAndImmediate(t *testing.T) {
 		t.Fatal(got)
 	}
 	r.now = r.now.Add(ownerPostTTL + 1)
-	if _, ok := r.answer(asBoss, "yes"); ok {
+	if _, ok := r.answer(r.said(asBoss), "yes"); ok {
 		t.Fatal("expired post approved")
 	}
 
@@ -149,7 +164,7 @@ func TestPostAsOwnerDeclineExpiryAndImmediate(t *testing.T) {
 	if notes := r.sent(); len(notes) != 1 || notes[0].Conv != bossDM || !strings.Contains(notes[0].Text, "Posting as you") {
 		t.Fatal("immediate post left no private audit line", notes)
 	}
-	if _, ok := r.answer(asBoss, "yes"); ok {
+	if _, ok := r.answer(r.said(asBoss), "yes"); ok {
 		t.Fatal("immediate post waited for an answer")
 	}
 }
@@ -265,7 +280,7 @@ func TestPostAsOwnerOffCancelsPendingPosts(t *testing.T) {
 	}
 	r.sent()
 	r.s.OwnerPost = nil // slack.owner_post turned off, then restarted
-	reply, ok := r.answer(asBoss, "yes")
+	reply, ok := r.answer(r.said(asBoss), "yes")
 	if !ok || !strings.Contains(reply, "turned off") || strings.Contains(reply, "Posting as you to") {
 		t.Fatal("yes while off:", reply, ok)
 	}
@@ -274,5 +289,58 @@ func TestPostAsOwnerOffCancelsPendingPosts(t *testing.T) {
 	}
 	if p, _, _ := r.st.OwnerPostByID(got.PostID); p.State != store.OwnerPostDeclined {
 		t.Fatal("post left approvable while off:", p.State)
+	}
+}
+
+// A Yes answers only posts whose card was confirmed delivered before that
+// Yes was stored: a second request arriving meanwhile, its card queued or
+// failed, waits (review finding 2).
+func TestPostAsOwnerYesBindsOnlyCardsSeenBeforeIt(t *testing.T) {
+	r, c, uid, _ := postRig(t, false)
+	ctx := context.Background()
+	first := c.executeBound(ctx, uid, ControlRequest{Action: postAsOwner, RequestID: "seen", Target: "slack:C1", Text: "first"})
+	if first.Error != "" {
+		t.Fatal(first)
+	}
+	if cards := r.sent(); len(cards) != 1 {
+		t.Fatal(cards)
+	}
+	// The owner's Yes to the first card is stored; then a second request
+	// lands and its card is delivered before the Yes is handled.
+	yes := r.said(asBoss)
+	second := c.executeBound(ctx, uid, ControlRequest{Action: postAsOwner, RequestID: "unseen", Target: "slack:C1", Text: "second"})
+	if second.Error != "" {
+		t.Fatal(second)
+	}
+	if cards := r.sent(); len(cards) != 1 {
+		t.Fatal(cards)
+	}
+	reply, ok := r.answer(yes, "yes")
+	if !ok || !strings.Contains(reply, "Posting as you") || !strings.Contains(reply, "still waits") {
+		t.Fatal(reply)
+	}
+	rows := r.slackRows()
+	if len(rows) != 1 || rows[0].Text != "first" {
+		t.Fatal("approved a post whose card the owner had not seen", rows)
+	}
+	if p, _, _ := r.st.OwnerPostByID(second.PostID); p.State != store.OwnerPostPending {
+		t.Fatal(p.State)
+	}
+	// A third request whose card is still queued (or failed) is never
+	// answered, even by a later reply.
+	third := c.executeBound(ctx, uid, ControlRequest{Action: postAsOwner, RequestID: "queued", Target: "slack:C1", Text: "third"})
+	if third.Error != "" {
+		t.Fatal(third)
+	}
+	reply, ok = r.answer(r.said(asBoss), "yes")
+	if !ok || !strings.Contains(reply, "still waits") {
+		t.Fatal(reply)
+	}
+	rows = r.slackRows()
+	if len(rows) != 1 || rows[0].Text != "second" {
+		t.Fatal("want only the second post, its card seen before this Yes", rows)
+	}
+	if p, _, _ := r.st.OwnerPostByID(third.PostID); p.State != store.OwnerPostPending {
+		t.Fatal("unsent card's post answered:", p.State)
 	}
 }

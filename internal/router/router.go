@@ -2743,5 +2743,5 @@ func (r *Router) stopJob(job string) bool {
 
 // caller is a message's sender as the scheduler sees them.
 func (c *conv) caller(row store.InboundRow, role core.Role) scheduler.Caller {
-	return scheduler.Caller{Principal: row.From, Role: role, Conv: c.key, Private: row.Private}
+	return scheduler.Caller{Principal: row.From, Role: role, Conv: c.key, Private: row.Private, Inbound: row.ID}
 }

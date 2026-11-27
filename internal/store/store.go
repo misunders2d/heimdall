@@ -181,6 +181,11 @@ ALTER TABLE turns ADD COLUMN no_resume INTEGER NOT NULL DEFAULT 0;`,
 		state TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
 		decided_at INTEGER NOT NULL DEFAULT 0, uploads TEXT NOT NULL DEFAULT '');
 CREATE INDEX owner_posts_card ON owner_posts(creator, card_iface, card_chat, card_thread, state);`,
+	// A post's card row, and the newest stored inbound row when that card was
+	// confirmed sent (-1: not yet): only a later reply answers it.
+	`ALTER TABLE owner_posts ADD COLUMN card_out INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE owner_posts ADD COLUMN card_mark INTEGER NOT NULL DEFAULT -1;
+CREATE INDEX owner_posts_card_out ON owner_posts(card_out) WHERE card_out != 0;`,
 }
 
 // inExtra is the inbound extra column: what the interface added beyond the
@@ -805,8 +810,15 @@ func (s *Store) Sending(id int64) error {
 }
 
 func (s *Store) Sent(id int64) error {
-	_, err := s.db.Exec(`UPDATE outbound SET state=?,sent_at=?,error='' WHERE id=?`, OutSent, now(), id)
-	return err
+	return s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE outbound SET state=?,sent_at=?,error='' WHERE id=?`, OutSent, now(), id); err != nil {
+			return err
+		}
+		// A post as the owner's card is now confirmed delivered: only inbound
+		// rows stored after this point may answer it (docs/owner-post.md).
+		_, err := tx.Exec(`UPDATE owner_posts SET card_mark=(SELECT COALESCE(MAX(id),0) FROM inbound) WHERE card_out=? AND card_mark<0`, id)
+		return err
+	})
 }
 
 // Retry returns a reply to the queue, due at next.
