@@ -1422,3 +1422,26 @@ func TestSendReportsDeliveredMessageIDs(t *testing.T) {
 		t.Fatalf("delivered IDs %v, last sent %d", refs, n)
 	}
 }
+
+// A sendMessage answered {"ok":true} without a result is delivered, as on
+// main: the message_id is only an optional receipt, so the reply is never
+// sent twice for want of one, and no receipt is reported.
+func TestSendWithoutResultIsDeliveredOnce(t *testing.T) {
+	api := newFakeAPI(t)
+	var logs syncBuffer
+	i := newIface(t, api.srv.URL, botName, &logs)
+	calls := 0
+	api.set("sendMessage", func(w http.ResponseWriter, _ map[string]any) bool {
+		calls++
+		reply(w, http.StatusOK, map[string]any{"ok": true})
+		return true
+	})
+	var refs []string
+	out := core.Outbound{Conv: core.ConvKey{Interface: "telegram", Chat: "42"}, Text: "hello", Delivered: func(ref string) { refs = append(refs, ref) }}
+	if err := i.Send(context.Background(), out); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(refs) != 0 {
+		t.Fatalf("sendMessage calls %d, receipts %v", calls, refs)
+	}
+}

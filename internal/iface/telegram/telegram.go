@@ -245,7 +245,11 @@ func (t *Interface) post(ctx context.Context, method, contentType string, raw []
 		}
 		return &apiError{method: method, status: status, desc: t.scrub(env.Description), retryAfter: env.Parameters.RetryAfter}
 	}
-	if result != nil {
+	if raw, ok := result.(*json.RawMessage); ok {
+		// Kept as sent, even absent: a caller reading an optional part of a
+		// result (sendMessage's message_id) never fails a done request.
+		*raw = env.Result
+	} else if result != nil {
 		if err := json.Unmarshal(env.Result, result); err != nil {
 			return fmt.Errorf("telegram %s: unreadable result: %v", method, err)
 		}
