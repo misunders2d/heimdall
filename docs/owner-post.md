@@ -26,12 +26,22 @@ Off by default. Nothing here is deployed by this change.
     expires after 24 hours. Same Yes/No rules as job drafts: a whole reply,
     from the same person in that same chat, live human input only; one Yes
     answers every waiting draft and post there; **Details** shows the cards
-    again.
+    again. A Yes or No answers a post only when its card was confirmed
+    delivered before that reply, by the platform's own message order
+    (Telegram `message_id`, Slack `ts` of the card's last part) and by
+    Heimdall's receipt order; a post whose card was still queued, failed or
+    arrived after the reply keeps waiting, and the reply names it.
+  - Off (`enabled` false or absent): nothing is sent as the owner. Rows
+    queued earlier fail with the private notice, any Yes or No to a waiting
+    card cancels it, and no Slack event is filtered as a post's echo.
   - `"immediate"` (**mode A**): the post is queued at once. A one-line audit
     note goes to the owner's private chat.
 - Requires `slack.work_owner_id` and a verified owner user token (the
   existing conversation-work token; startup checks it with `auth.test`), and
   `scheduler.control`, the only entry point.
+- The owner's Slack member and team verified when a post is requested are
+  stored with it. Delivery refuses it when the configured owner is someone
+  else by then, so a queued post never switches sender.
 - Owner token scopes this uses: `chat:write` (text), `files:write` (files),
   `im:write` (open a DM by member ID). Checking Slack before a resend reads
   history with the same token: `channels:history`, `groups:history`,
@@ -88,8 +98,11 @@ tool (MCP) or `heimdall sched control` (one JSON object):
   config file's directory. The peer is root or the owner's UID, who can
   already read these files; with the default approval the owner sees each
   file's name and size before anything is sent. Heimdall copies them into its own 0700 outbox
-  directory at once; the copies are what the card describes and what is
-  sent, so a file cannot change after the owner saw it. This is the one
+  directory at once, recording each copy's size and SHA-256; the copies are
+  what the card describes and what is sent. Before anything of a post is
+  sent every copy is verified, and each upload sends the exact bytes it
+  verified, so a copy changed after the owner saw it is refused, never
+  uploaded. A symlinked config file denies its real directory too. This is the one
   place a caller names a path; the model never does, and identity is still
   kernel credentials, never the request.
 - `request_id`: required. Reuse the same complete request after a lost
@@ -113,7 +126,10 @@ queued. Text or files alone are fine; at least one is required.
   attempt first looks for an owner message carrying them and completes
   again only when none is found. If the check itself fails, nothing is
   resent; the router retries the check later. Neither call is ever retried
-  blindly.
+  blindly. The check covers the whole thread (from its own ts, Slack's
+  clock) or, outside a thread, from a day before the row's local creation:
+  it tolerates a hub clock up to 24 h ahead of Slack's (replies keep their
+  30 s margin). Beyond that skew a landed post could be sent again.
 - Delivery is still at-least-once, never exactly-once: Slack can make a
   completed post visible to history after the check looked. Say so.
 - Nothing about a post is ever sent to its target but the post. A post that
@@ -124,11 +140,15 @@ queued. Text or files alone are fine; at least one is required.
 - A post Heimdall made comes back from Slack as the owner's message. Events
   from the owner carrying the post metadata are dropped before persistence,
   so they never become the owner's live input. The files' message cannot
-  carry metadata: an owner `file_share` without a comment whose files are
-  all recorded uploads of a post is dropped the same way (the IDs are
-  recorded before completing). Unverified: that Slack includes the metadata
-  and the file IDs in those events; the target and mention refusals above
-  do not depend on it.
+  carry metadata: an owner `file_share` without a comment, made at upload
+  time (`upload` true), in the post's own channel and thread, whose files
+  are all recorded uploads of that one approved post, is dropped the same
+  way (the IDs are recorded before completing). Never in the owner's chat
+  with the bot; a later re-share of the same files is the owner's own.
+  Unverified live: that Slack includes the metadata, the file IDs and
+  `upload` in those events (`upload` is documented in Slack's `file_share`
+  event reference); the target and mention refusals above do not depend
+  on it.
 
 ## How an agent calls it, per interface
 
@@ -167,8 +187,11 @@ origin, owner-person binding, file checks and copies, card content and
 escaping, Yes/No in the card's chat only, expiry, replay, immediate mode,
 the owner token on every post and upload with zero bot posts (also after a
 store round trip), recorded file IDs, check-before-resend for text and
-files, no resend when the check fails, the private failure notice, and the
-echo filter. They do not prove live Slack behavior: metadata in events and
+files, no resend when the check fails, the private failure notice, the
+echo filter, off sending and filtering nothing, Yes bound to cards
+delivered before it (both orders), the recorded Slack account, changed
+file copies refused, a symlinked config's real directory, and resend
+checks with the hub clock ahead. They do not prove live Slack behavior: metadata in events and
 history visibility timing are unverified until a live window. The owner
 token's scopes, including the history and read scopes, were checked live
 on 2026-11-27.

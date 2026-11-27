@@ -230,6 +230,10 @@ the `heimdall-live` unit.
   50 MB each) and copied by Heimdall at request time. The owner's chat with
   the bot and bot mentions are refused targets/text. Nothing about a post
   goes to its target but the post; notices go to the owner's private chat.
+  Off sends nothing as the owner and filters nothing; waiting cards are then
+  cancelled by any answer. A Yes answers only cards delivered before it, by
+  platform message order. The approved Slack account and each copy's
+  SHA-256 are recorded and checked at send.
   Slack is checked before any resend of a text part or upload completion;
   delivery stays at-least-once.
 - **Slack watches** (opt-in): `heimdall slack-watch` changes durable channel,
