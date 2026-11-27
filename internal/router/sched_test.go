@@ -256,16 +256,18 @@ func TestScheduledNeedsHumanFailsFast(t *testing.T) {
 
 func TestScheduledFailureAndUnverifiedNotices(t *testing.T) {
 	e := schedEnv(t, []string{"omp"}, "omp")
-	// An unmet check on a shared target withholds the answer: the target
-	// gets the fixed notice, the creator's private chat the answer.
+	// An unmet check on a shared target withholds the answer: the shared
+	// target gets nothing (operational notices stay private), the creator's
+	// private chat the answer.
 	id := e.addJob(`{"name":"checked","schedule":{"every":"1h"},"to":"tg:-100","prompt":"` + say("secret result") + `","expect":{"prefix":"OK:"}}`)
 	e.ask(ownerDM, "!job run "+id)
 	got := map[core.ConvKey]string{}
-	for range 3 {
+	for range 2 {
 		out := e.reply()
 		got[out.Conv] += out.Text + "\n"
 	}
-	if strings.Contains(got[group], "secret result") || !strings.Contains(got[group], "unverified") || !strings.Contains(got[group], "— heimdall") {
+	e.noReply(500 * time.Millisecond)
+	if got[group] != "" {
 		t.Fatalf("group got %q", got[group])
 	}
 	if !strings.Contains(got[ownerDM], "secret result") || !strings.Contains(got[ownerDM], "⚠ Result unverified") {
