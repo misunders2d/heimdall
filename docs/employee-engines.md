@@ -68,10 +68,19 @@ connected servers; `mcp logout <server>` removes one.
   what excludes a look-alike server.
 - Callbacks never enter a queue, session, log or model prompt. Slack
   callbacks bypass raw-event staging, as before.
-- With only Pi enabled, `mcp login` keeps Pi's native sign-in and store
-  ([employee-pi.md](employee-pi.md)). With a non-Pi engine enabled, plain
-  `mcp login` uses the broker and `!pi mcp login …` reaches Pi's native
-  sign-in. **Pi still uses its own native store**: moving Pi onto the broker
+- Which store a sign-in reaches:
+
+  | Enabled employee engines | `mcp login <server>` | Pi turns read | Other engines read |
+  |---|---|---|---|
+  | only `pi` | Pi's native sign-in | Pi's native store | — |
+  | `pi` and any of `omp`/`codex`/`claude` (broker on) | Heimdall broker | Pi's native store | broker store |
+  | only non-Pi engines (broker on) | Heimdall broker | — | broker store |
+
+  The two stores are separate. With both kinds enabled, an employee who
+  uses Pi also sends `!pi mcp login mellanni` once in the DM (Pi's native
+  sign-in, same caller check); `!pi mcp status` shows Pi's side and
+  `mcp status` the broker's. Without the broker (`employee_mcp` off),
+  non-Pi employee turns run with no business MCP. **Pi still uses its own native store**: moving Pi onto the broker
   handoff needs the pack's `native-mcp-compat.mjs` to accept a static
   bearer, a follow-up outside this repository.
 
@@ -101,6 +110,18 @@ could read the lease: that is the owner's subscription access token, valid
 for the lease window (up to the token's own expiry). Employee Pi has carried
 this risk since its rollout. Readers stay confined to `/opt/assistant` and the
 turn directory, and credential file names are denied.
+
+**Residual risk: one employee uid.** Every employee runs as the same
+`heimdall-employee` account (uid 997), so the leases of concurrent turns
+(the owner's model access token and each caller's business MCP access
+token) are files of that one uid under `~/.heimdall/turn-agents`. What keeps
+one caller's turn from reading another caller's lease is only each engine's
+tool restriction and sandbox: readers confined to `/opt/assistant` and the
+turn directory, credential file names denied, Codex's filesystem policy.
+Follow-up hardening options: a uid per caller (or a small pool, assigned
+per turn), or a per-turn mount namespace that hides other turns'
+`turn-agents` directories. Enabling each engine remains the owner's
+decision with this risk in view.
 
 ## Runtime preflight
 
