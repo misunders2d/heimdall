@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
+
+	"github.com/misunders2d/heimdall/internal/core"
 )
 
 // Hub T3 tracking (durable.t3_tracking, off by default; docs/durable.md).
@@ -20,8 +22,12 @@ import (
 // by its own workflow (heimdall.t3child, one per row), which ends the
 // task's wait once (the task_wake signal) when the child's run ends. Every
 // active row is watched again at startup, so a crash between recording a
-// child and starting its watcher loses nothing. Children in another
-// environment are recorded but not watched here.
+// child and starting its watcher loses nothing. A child in another
+// environment cannot be read by the host CLI (it has no environment
+// argument), so its watcher checks it through short keyed turns of the
+// creator's harness (ChildWaiter: one native t3_thread_wait with the
+// child's environmentId, decided from the engine's own result); without a
+// ChildWaiter it is recorded but not watched here.
 
 const childName = "heimdall.t3child"
 
@@ -30,7 +36,7 @@ const childName = "heimdall.t3child"
 type Child struct {
 	Kind   string `json:"kind"`             // launch | delegate | send
 	Thread string `json:"thread"`           // "" when the result named no thread (unbound)
-	Env    string `json:"env,omitempty"`    // another environment: not watched here
+	Env    string `json:"env,omitempty"`    // another environment: checked through ChildWaiter
 	Run    string `json:"run,omitempty"`    // the run it started, when the result named one
 	Task   string `json:"task,omitempty"`   // delegate_task's taskId
 	Status string `json:"status,omitempty"` // a terminal native status already in the result
@@ -53,6 +59,48 @@ const (
 	childTaskGone = "not watched: the task closed"
 	childNoRun    = "not watched: the send result named no run"
 )
+
+// notHere is the status of a child in another environment with no
+// ChildWaiter to check it.
+func notHere(env string) string { return "in environment " + env + ": not watched here" }
+
+// ChildWaiter checks one child in another environment: one keyed,
+// read-only turn of the task creator's harness calls its native
+// t3_thread_wait for the child (with environmentId and a short timeout),
+// so no harness is held while the child works. Only the engine's decoded
+// tool result counts, never the model's answer.
+type ChildWaiter interface {
+	WaitChild(ctx context.Context, q ChildCheck) (ChildWait, error)
+}
+
+// ChildCheck is one remote child check, built from the admitted commitment.
+type ChildCheck struct {
+	Key               string // ISSUE/attempt/child/<row>/wait/N: the turn's identity
+	Issue             string
+	Attempt           int
+	Owner             core.Principal
+	Route             core.ConvKey
+	Private           bool
+	OAuthActor        string
+	OAuthInstallation string
+	Thread, Env       string
+	Run               string // "" until a check names one (a new thread's first run)
+}
+
+// ChildWait is a check's native result: the run it named, its status, and
+// whether that run has ended.
+type ChildWait struct {
+	Run      string `json:"run,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Finished bool   `json:"finished,omitempty"`
+}
+
+// Remote child checks: the delay doubles from Options.Observe to
+// remoteCeiling; after remoteChecks checks that found the run still going
+// the watcher stops with a visible status and wakes the task once.
+var remoteChecks = 48
+
+const remoteCeiling = time.Hour
 
 // RecordChild records a child of issue's wake key (ISSUE/attempt/work/N)
 // and starts its watcher. A child with a thread and a run is one row per
@@ -82,9 +130,9 @@ func (r *Runtime) RecordChild(issue, key string, c Child) error {
 		status = "unbound: the " + c.Kind + " result named no thread"
 	case terminalRun(c.Status):
 		status = "finished (" + c.Status + ")"
-	case c.Env != "":
-		status = "in environment " + c.Env + ": not watched here"
-	case r.opt.Observer == nil || !r.opt.Observer.Observable("t3:"+c.Thread):
+	case c.Env != "" && r.opt.ChildWaiter == nil:
+		status = notHere(c.Env)
+	case c.Env == "" && (r.opt.Observer == nil || !r.opt.Observer.Observable("t3:"+c.Thread)):
 		status = childNoCLI
 	case c.Run == "" && c.Kind == "send":
 		// An existing thread's current run may be another's: only a new
@@ -102,7 +150,7 @@ func (r *Runtime) RecordChild(issue, key string, c Child) error {
 	if status != "active" {
 		return nil
 	}
-	return r.watch(childWatch{ID: id, Issue: issue, Thread: c.Thread, Run: c.Run})
+	return r.watch(childWatch{ID: id, Issue: issue, Thread: c.Thread, Env: c.Env, Run: c.Run})
 }
 
 // watch starts (or finds) the watcher of one child row.
@@ -118,7 +166,7 @@ func (r *Runtime) rearmChildren() {
 	if !r.opt.T3Tracking {
 		return
 	}
-	rows, err := r.db.Query(`SELECT id,issue,thread,run FROM heimdall_t3_children WHERE status='active' AND thread<>'' AND env=''`)
+	rows, err := r.db.Query(`SELECT id,issue,thread,env,run FROM heimdall_t3_children WHERE status='active' AND thread<>''`)
 	if err != nil {
 		r.opt.Log.Printf("durable: T3 children not re-armed: %v", err)
 		return
@@ -126,7 +174,7 @@ func (r *Runtime) rearmChildren() {
 	var ws []childWatch
 	for rows.Next() {
 		var w childWatch
-		if rows.Scan(&w.ID, &w.Issue, &w.Thread, &w.Run) == nil {
+		if rows.Scan(&w.ID, &w.Issue, &w.Thread, &w.Env, &w.Run) == nil {
 			ws = append(ws, w)
 		}
 	}
@@ -221,13 +269,14 @@ func (r *Runtime) childNote(issue string) string {
 		return ""
 	}
 	return "\nT3 work you started for this task (recorded by Heimdall from your native tool results, not from your text):\n" + strings.Join(ls, "\n") +
-		"\nRead a finished child with t3_thread_read before acting on it; never start the same work again."
+		"\nRead a finished child with t3_thread_read before acting on it (for t3:<thread>@<environment>, pass that environmentId); never start the same work again."
 }
 
 type childWatch struct {
 	ID     int64  `json:"id"` // the row
 	Issue  string `json:"issue"`
 	Thread string `json:"thread"`
+	Env    string `json:"env,omitempty"` // another environment: checked through ChildWaiter
 	Run    string `json:"run,omitempty"` // "" until the first read shows one
 }
 
@@ -259,6 +308,9 @@ type childRead struct {
 // watching. It stops when the task closes, or where no T3 CLI is
 // configured (any more).
 func (r *Runtime) watchChild(ctx dbos.Context, in childWatch) (string, error) {
+	if in.Env != "" {
+		return r.watchRemote(ctx, in)
+	}
 	poll := r.opt.Observe
 	run, seen, seenAt := in.Run, false, 0
 	for {
@@ -321,6 +373,96 @@ func (r *Runtime) watchChild(ctx dbos.Context, in childWatch) (string, error) {
 		}
 		return r.childWake(ctx, in.Issue, "observer:t3:"+in.Thread)
 	}
+}
+
+// remoteCheck is one recorded remote child check.
+type remoteCheck struct {
+	Ran  bool      `json:"ran,omitempty"` // a check turn ran (counted)
+	Wait ChildWait `json:"wait"`
+	Err  string    `json:"err,omitempty"`
+	Stop string    `json:"stop,omitempty"` // stop watching: the row's status
+}
+
+// watchRemote follows one child in another environment through ChildWaiter
+// checks, backing off from Options.Observe to remoteCeiling. A task that
+// cannot take a check now (paused, held, not in its working phase) is
+// asked again later, uncounted. A check that fails counts and keeps
+// watching; it never stops or holds the task. When a check finds the run
+// ended it marks the row and ends the task's wait once (childWake). After
+// remoteChecks counted checks it stops with a visible status and wakes the
+// task once, so the wake reads the child itself.
+func (r *Runtime) watchRemote(ctx dbos.Context, in childWatch) (string, error) {
+	poll, run, n := r.opt.Observe, in.Run, 0
+	by := "observer:t3:" + in.Thread + "@" + in.Env
+	for {
+		if _, err := dbos.Sleep(ctx, poll); err != nil {
+			return "", err
+		}
+		poll = min(poll*2, remoteCeiling)
+		got, err := dbos.RunAsStep(ctx, func(sctx context.Context) (remoteCheck, error) { return r.checkRemote(sctx, in, run, n+1) }, dbos.WithStepName("child-remote-check"))
+		if err != nil {
+			return "", err
+		}
+		if got.Stop != "" {
+			return got.Stop, nil
+		}
+		if !got.Ran {
+			continue
+		}
+		n++
+		if got.Err == "" && got.Wait.Run != "" {
+			run = got.Wait.Run // the first run a new thread shows, or a restart continuation of the child's
+		}
+		status := ""
+		switch {
+		case got.Err == "" && got.Wait.Finished && run != "":
+			status = "finished (" + got.Wait.Status + ")"
+		case n >= remoteChecks:
+			status = fmt.Sprintf("not watched: still not finished after %d checks; read it yourself", n)
+		default:
+			continue
+		}
+		if _, err := dbos.RunAsStep(ctx, func(context.Context) (string, error) {
+			_, err := r.db.Exec(`UPDATE heimdall_t3_children SET status=?, run=? WHERE id=?`, status, run, in.ID)
+			return "", err
+		}, dbos.WithStepName("child-ended")); err != nil {
+			return "", err
+		}
+		return r.childWake(ctx, in.Issue, by)
+	}
+}
+
+// checkRemote runs check n of a remote child, when its task takes one now.
+// Only ids and statuses are kept (step outputs are stored).
+func (r *Runtime) checkRemote(ctx context.Context, in childWatch, run string, n int) (remoteCheck, error) {
+	stop := ""
+	switch {
+	case !r.open(in.Issue):
+		stop = childTaskGone
+	case r.opt.ChildWaiter == nil:
+		stop = notHere(in.Env)
+	}
+	if stop != "" {
+		_, err := r.db.Exec(`UPDATE heimdall_t3_children SET status=? WHERE id=? AND status='active'`, stop, in.ID)
+		return remoteCheck{Stop: stop}, err
+	}
+	ws, err := dbos.ListWorkflows(r.ctx, dbos.WithFilterWorkflowIDs(in.Issue), dbos.WithFilterName(workflowName), dbos.WithFilterLoadInput(true))
+	if err != nil || len(ws) != 1 {
+		return remoteCheck{}, nil // a read error is not a close: asked again
+	}
+	cm, ok := decodeInput(ws[0].Input)
+	st, serr := r.State(in.Issue)
+	if !ok || serr != nil || !r.current(in.Issue, st.Attempt, PhaseWorking) {
+		return remoteCheck{}, nil // paused, held or between phases: not now
+	}
+	q := ChildCheck{Key: effectKey(in.Issue, st.Attempt, fmt.Sprintf("child/%d/wait/%d", in.ID, n)), Issue: in.Issue, Attempt: st.Attempt,
+		Owner: cm.Owner, Route: cm.Route, Private: cm.Private, OAuthActor: cm.OAuthActor, OAuthInstallation: cm.OAuthInstallation,
+		Thread: in.Thread, Env: in.Env, Run: run}
+	res, err := r.opt.ChildWaiter.WaitChild(ctx, q)
+	if err != nil {
+		return remoteCheck{Ran: true, Err: clip(err.Error(), 200)}, nil
+	}
+	return remoteCheck{Ran: true, Wait: res}, nil
 }
 
 // wakePlan is one recorded decision to wake a task: the key to send with,

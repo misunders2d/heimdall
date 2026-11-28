@@ -303,6 +303,10 @@ type Review struct {
 	// Work is an assistant wake: the creator's own assistant does the
 	// commitment's next step with its normal tools and reports or waits.
 	Work bool `json:"work,omitempty"`
+	// Child (with Worker t3:<thread>@<environment>) is a remote T3 child
+	// check: the harness waits briefly for the child's run (Run, or the
+	// first run the wait names when empty) with its native t3_thread_wait.
+	Child bool `json:"child,omitempty"`
 }
 
 // ReviewChat is the chat of issue's own review conversation.
