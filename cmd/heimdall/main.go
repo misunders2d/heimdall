@@ -305,6 +305,11 @@ func run(args []string) error {
 		work.SetWake(r.Wake)
 		if cfg.Durable.Assistant {
 			work.SetAssistant(r)
+			if cfg.Durable.T3Tracking {
+				// T3 children of wakes in another environment are checked
+				// by short native wait turns (docs/durable.md).
+				work.SetChildWaiter(r)
+			}
 		}
 		if cfg.Durable.Review {
 			work.SetReviewer(r)

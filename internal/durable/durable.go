@@ -283,6 +283,9 @@ type Options struct {
 	// T3Owner reads the trusted T3 launcher's owner binding now (the
 	// scheduler control's); nil: missed T3 requests are never reconciled.
 	T3Owner T3OwnerFunc
+	// ChildWaiter checks T3 children in another environment (T3 tracking);
+	// nil: they are recorded but not watched here.
+	ChildWaiter ChildWaiter
 }
 
 type Runtime struct {
@@ -395,6 +398,10 @@ func (r *Runtime) SetDispatcher(d Dispatcher, authorize Authorizer) {
 // SetT3Owner connects the trusted T3 owner binding that the startup
 // reconcile admits missed T3 requests under; call before Launch.
 func (r *Runtime) SetT3Owner(f T3OwnerFunc) { r.opt.T3Owner = f }
+
+// SetChildWaiter connects remote T3 child checks (T3 tracking) to the
+// router; call before Launch.
+func (r *Runtime) SetChildWaiter(w ChildWaiter) { r.opt.ChildWaiter = w }
 
 // SetAssistant connects assistant wakes to the router; call before Launch.
 func (r *Runtime) SetAssistant(a Assistant) { r.opt.Assistant = a }

@@ -1938,6 +1938,11 @@ func (c *conv) runTurn(ctx context.Context, t *turn, batch []item) {
 					t.native = append(t.native, n)
 					t.mu.Unlock()
 				})}
+				if t.review.Child {
+					// A remote child check: T3's MCP alias differs between
+					// installs, so the wait is matched by its own name.
+					spec.NativeCalls.Tools, spec.NativeCalls.Match = nil, isT3Wait
+				}
 			}
 			if b := t.review; b.Work && c.r.opt.Work != nil && c.r.opt.Work.TracksChildren() {
 				// A wake: its native T3 launches, delegations and sends are

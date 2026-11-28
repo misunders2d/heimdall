@@ -71,7 +71,8 @@ the `heimdall-live` unit.
   `durable.t3_tracking` (off by default): a wake's native T3
   launch/delegate/send results (never model text; ids and statuses only)
   are the task's recorded children, shown in wakes and `!work show`, and a
-  read-only watcher wakes the task once when a local child's run ends; T3
+  read-only watcher wakes the task once when a child's run ends (a child in
+  a linked environment through short native `t3_thread_wait` turns); T3
   intakes follow later runs and children, an active one yields to a newer
   request with one line, and requests missed while Heimdall was down are
   reconciled at startup, only under the trusted T3 owner as bound now.

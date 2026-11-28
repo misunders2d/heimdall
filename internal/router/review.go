@@ -171,7 +171,7 @@ var errNoTurn = errors.New("commitment turn not stored")
 // current applies a commitment turn's fence: a review needs its attempt
 // reported, a dispatch its attempt dispatching, in a running workflow.
 func current(w *durable.Runtime, b *core.Review) bool {
-	if b.Run != "" || b.Work {
+	if b.Run != "" || b.Work || b.Child {
 		return w.Waitable(b.Issue, b.Attempt)
 	}
 	if b.Worker != "" {
@@ -295,6 +295,103 @@ func (r *Router) dispatchInbound(ctx context.Context, q durable.DispatchRequest,
 		in.Review.Read, in.Text = true, readPrompt(q, thread, env, run)
 	}
 	return in, thread, nil
+}
+
+// WaitChild is durable.ChildWaiter: one server-initiated turn of the
+// creator's harness, in the task's own conversation and under the wait
+// fence (the task working its current attempt), waits read-only for a T3
+// child in another environment with its native t3_thread_wait, a 5 s
+// check. Only the engine's decoded tool result counts; anything else is a
+// failed check.
+func (r *Router) WaitChild(ctx context.Context, q durable.ChildCheck) (durable.ChildWait, error) {
+	select {
+	case <-r.ready:
+	case <-ctx.Done():
+		return durable.ChildWait{}, ctx.Err()
+	}
+	if _, ok := r.ifaces[q.Route.Interface]; !ok || q.Owner.Platform == "" || q.Owner.ID == "" || q.Thread == "" || q.Env == "" || strings.ContainsAny(q.Thread+q.Env+q.Run, " \t\r\n@") {
+		return durable.ChildWait{}, fmt.Errorf("child check %s: no verified creator, route interface or remote t3 child", q.Key)
+	}
+	in := core.Inbound{Conv: core.ConvKey{Interface: q.Route.Interface, Chat: core.ReviewChat(q.Issue)}, MsgID: q.Key, From: q.Owner,
+		Origin: core.OriginCommitment, Text: childWaitPrompt(q), At: time.Now(), OAuthActor: q.OAuthActor, OAuthInstallation: q.OAuthInstallation,
+		Review: &core.Review{Issue: q.Issue, Attempt: q.Attempt, Key: q.Key, Target: q.Route, Private: q.Private, Worker: "t3:" + q.Thread + "@" + q.Env, Run: q.Run, Child: true}}
+	o, err := r.commitmentTurn(ctx, in, true)
+	if err != nil {
+		return durable.ChildWait{}, err
+	}
+	var v durable.ChildWait
+	if o.TurnState == store.TurnDone && strings.HasPrefix(o.TurnDetail, waitResult) && json.Unmarshal([]byte(strings.TrimPrefix(o.TurnDetail, waitResult)), &v) == nil {
+		return v, nil
+	}
+	return durable.ChildWait{}, fmt.Errorf("child check turn %d %s: %s", o.Turn, o.State, or(strings.TrimPrefix(or(o.TurnDetail, o.Detail), reviewHeld), "no result"))
+}
+
+// childWaitPrompt asks for exactly one native, read-only wait.
+func childWaitPrompt(q durable.ChildCheck) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Check on T3 work for %s. Call your native T3 tool t3_thread_wait exactly once with:\nthreadId: %s\nenvironmentId: %s\n", q.Issue, q.Thread, q.Env)
+	if q.Run != "" {
+		fmt.Fprintf(&b, "runId: %s\n", q.Run)
+	}
+	fmt.Fprintf(&b, "timeoutMs: %d\n", waitMs)
+	b.WriteString("Do nothing else: no other tool call or message. Then answer in one line. Heimdall reads the tool's own result, not your answer.")
+	return b.String()
+}
+
+// isT3Wait matches the native t3_thread_wait under any MCP alias.
+func isT3Wait(name string) bool {
+	if i := strings.LastIndex(name, "__"); i >= 0 {
+		name = name[i+2:]
+	}
+	return name == "t3_thread_wait"
+}
+
+// nativeChildWait reads a remote child check's native t3_thread_wait: bound
+// to the child's thread, environment and run (no runId while the run is
+// unknown: T3 then waits for the thread's latest run), naming a run when
+// one is known, and one of T3's own statuses. For a runId T3 answers with
+// that run or its restart continuation (latestRestartContinuation, app
+// 0.1.13), which may carry a new id: it is taken as the child's run. Only
+// T3's terminal run statuses, not timed out, end the run.
+func nativeChildWait(calls []harness.NativeCall, b *core.Review) string {
+	ref, _ := strings.CutPrefix(b.Worker, "t3:")
+	thread, env, _ := strings.Cut(ref, "@")
+	if len(calls) == 0 {
+		return reviewHeld + "no native t3_thread_wait call in the check turn (its answer is not evidence)"
+	}
+	n := calls[0]
+	var a struct {
+		ThreadID      string `json:"threadId"`
+		EnvironmentID string `json:"environmentId"`
+		RunID         string `json:"runId"`
+	}
+	if json.Unmarshal(n.Args, &a) != nil || a.ThreadID != thread || a.EnvironmentID != env || a.RunID != b.Run {
+		return reviewHeld + "the native t3_thread_wait call was not bound to this child"
+	}
+	if n.Error {
+		return reviewHeld + "the native t3_thread_wait call failed or was denied"
+	}
+	var v struct {
+		RunID    *string `json:"runId"`
+		Status   string  `json:"status"`
+		TimedOut bool    `json:"timedOut"`
+	}
+	if json.Unmarshal(toolJSON(n.Result), &v) != nil || v.Status == "" {
+		return reviewHeld + "the native t3_thread_wait result is not a wait result"
+	}
+	run := ""
+	if v.RunID != nil {
+		run = *v.RunID
+	}
+	if b.Run != "" && run == "" || strings.ContainsAny(run, " \t\r\n") || len(run) > 512 {
+		return reviewHeld + "the native t3_thread_wait result does not name the child's run"
+	}
+	terminal := slices.Contains([]string{"completed", "failed", "cancelled", "interrupted", "rolled_back"}, v.Status)
+	if !terminal && !slices.Contains([]string{"idle", "preparing", "queued", "starting", "running", "waiting"}, v.Status) {
+		return reviewHeld + "the native t3_thread_wait result has an unknown status " + strconv.Quote(v.Status)
+	}
+	out, _ := json.Marshal(durable.ChildWait{Run: run, Status: v.Status, Finished: terminal && !v.TimedOut && run != ""})
+	return waitResult + string(out)
 }
 
 // dispatchPrompt asks for exactly one native send and its receipt.
@@ -710,7 +807,9 @@ func (c *conv) reviewEnd(t *turn, d *doneEvent, res harness.Result) store.TurnEn
 			t.mu.Lock()
 			calls := slices.Clone(t.native)
 			t.mu.Unlock()
-			if t.review.Read {
+			if t.review.Child {
+				e.Detail = nativeChildWait(calls, t.review)
+			} else if t.review.Read {
 				e.Detail = nativeRead(calls, t.review)
 			} else if t.review.Run != "" {
 				e.Detail = nativeWait(calls, t.review)

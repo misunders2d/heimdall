@@ -355,10 +355,35 @@ live only in model text. With `durable.t3_tracking`:
   watching; the watcher ends when the task closes. Every active row is
   watched again at startup (the watcher's id is the row's, so a recorded
   watcher is never run twice and one whose start was lost starts). A
-  child in another environment, or with no T3 CLI here (also when
-  `t3_command` is removed later: the watcher then ends cleanly), is
-  recorded but not watched (the wake timer stays the backup; remote
-  watching is later work). Unverified live: whether T3 returns a queued
+  child with no T3 CLI here (also when `t3_command` is removed later: the
+  watcher then ends cleanly) is recorded but not watched (the wake timer
+  stays the backup).
+- **Remote children (MEL-857).** The host CLI's `thread show` has no
+  environment argument and T3's `/mcp` takes only its own CLI's sessions,
+  so a child in a linked environment (`environmentId`) is checked by
+  short keyed turns of the task creator's harness instead
+  (`ISSUE/attempt/child/<row>/wait/N`, in the task's own conversation,
+  under the wait fence: the task working its current attempt). Each asks
+  for one native `t3_thread_wait` with the child's `threadId`,
+  `environmentId`, its run (none while unknown: a new thread takes the run
+  the first result names) and a 5 s timeout; only the engine's decoded
+  result counts, matched by the tool's own name under any MCP alias. The
+  delay doubles from `observe_seconds` to 1 h. A task that cannot take a
+  check now (paused, held, between phases) is asked again later,
+  uncounted; a failed check counts and keeps watching, and never stops or
+  holds the task. When T3's terminal status (not timed out) shows the run
+  ended, the child is marked and the task's wait ends once, as for a local
+  child. After 48 counted checks the child is marked "not watched: still
+  not finished after 48 checks; read it yourself" and the task is woken
+  once. Wake prompts say to pass the environmentId when reading such a
+  child. On with `t3_tracking` and `assistant_work`; without them a remote
+  child stays "in environment …: not watched here". A restart
+  continuation T3 names for the child's run is followed as its run. Each
+  check is a fresh owner harness turn, queued alone behind the task's other
+  turns (commitment turns never batch or steer); an environment that is
+  offline fails its checks, so about 42 hours of wall time reaches the cap.
+  Rows recorded before this change are not re-armed. Fake-harness tested
+  only. Unverified live: whether T3 returns a queued
   send's run before it starts, and a run that ended between two reads
   with no reply of its own and no later run is not seen to end (the wake
   timer covers it).
@@ -491,7 +516,10 @@ version.
   their own workflows (`heimdall.t3child`, `heimdall.t3reconcile`). Rollback
   limit: an older binary does not know those workflows (DBOS cannot recover
   them) and replays a following intake differently (it may be marked
-  failed).
+  failed). Remote child watchers (MEL-857) record
+  steps the local path does not have: a binary without them recovers such a
+  watcher on the local path, which no longer matches its recorded steps,
+  and its re-arm skips remote rows, which stay `active` without a watcher.
 - `wake-rules-v2` is such a patch: workflows started before it keep the old
   hold-until-retry path until `!work retry` moves them onto the wake rules.
 
